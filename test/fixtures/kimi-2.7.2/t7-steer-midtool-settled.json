@@ -1,0 +1,203 @@
+{
+ "turns": {
+  "http": 200,
+  "json": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "turns": [
+     {
+      "turn_id": "t_df690e108aa9",
+      "ordinal": 0,
+      "kind": "agent",
+      "status": "ended",
+      "turn_number": 0,
+      "started_at": "2026-11-21T00:57:54.364Z",
+      "steps": [
+       {
+        "index": 1,
+        "outcome": "completed",
+        "started_at": "2026-11-21T00:57:54.380Z",
+        "ended_at": "2026-11-21T00:58:18.793Z",
+        "finish_reason": "tool_use",
+        "usage": {
+         "input_other": 4518,
+         "output": 117,
+         "input_cache_read": 12288,
+         "input_cache_creation": 0
+        }
+       }
+      ],
+      "items": [
+       {
+        "type": "user_message",
+        "item_id": "msg_01M7XSR6WV7TCX8C7TAVT3KP4J",
+        "status": "ended",
+        "outcome": "completed",
+        "created_at": "2026-11-21T00:57:54.364Z",
+        "prompt_ids": [
+         "msg_01M7XSR6WV7TCX8C7TAVT3KP4J"
+        ],
+        "placement": "opener",
+        "origin": {
+         "kind": "user"
+        },
+        "text": "Use your shell tool to run `ping -n 20 127.0.0.1` and then tell me how many replies came back.",
+        "attachments": [],
+        "skills": []
+       },
+       {
+        "type": "reasoning",
+        "item_id": "5c132c79-b6e0-4816-84c7-423ea89a52ef:0",
+        "step_index": 1,
+        "status": "ended",
+        "outcome": "completed",
+        "created_at": "2026-11-21T00:57:57.493Z",
+        "text": "Kimi needs to use the bash command ping -n 20 127.0.0.1, Windows Git Bash. Should count replies. Straight. Run timeout perhaps 30.",
+        "started_at": "2026-11-21T00:57:57.493Z",
+        "duration_ms": 2008
+       },
+       {
+        "type": "tool_call",
+        "item_id": "tool_QWJ7No2y7wXSOBiVVk8W6lUN",
+        "step_index": 1,
+        "status": "ended",
+        "created_at": "2026-11-21T00:57:59.519Z",
+        "name": "Bash",
+        "input": {
+         "command": "ping -n 20 127.0.0.1",
+         "timeout": 30
+        },
+        "display": {
+         "kind": "command",
+         "command": "ping -n 20 127.0.0.1",
+         "cwd": "C:\\wao-probe\\cwd",
+         "language": "bash"
+        },
+        "started_at": "2026-11-21T00:57:59.519Z",
+        "outcome": "completed",
+        "output": "\r\n���� Ping 127.0.0.1 ���� 32 �ֽڵ�����:\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128\r\n\r\n127.0.0.1 �� Ping ͳ����Ϣ:\r\n    ���ݰ�: �ѷ��� = 20���ѽ��� = 20����ʧ = 0 (0% ��ʧ)��\r\n�����г̵Ĺ���ʱ��(�Ժ���Ϊ��λ):\r\n    ��� = 0ms��� = 0ms��ƽ�� = 0ms\r\n",
+        "ended_at": "2026-11-21T00:58:18.792Z"
+       }
+      ],
+      "usage": {
+       "input_other": 4518,
+       "output": 117,
+       "input_cache_read": 12288,
+       "input_cache_creation": 0
+      },
+      "outcome": "completed",
+      "ended_at": "2026-11-21T00:58:18.794Z",
+      "duration_ms": 24428
+     },
+     {
+      "turn_id": "t_72b268dc2e5f",
+      "ordinal": 1,
+      "kind": "agent",
+      "status": "ended",
+      "turn_number": 1,
+      "started_at": "2026-11-21T00:58:18.796Z",
+      "steps": [
+       {
+        "index": 1,
+        "outcome": "completed",
+        "started_at": "2026-11-21T00:58:18.801Z",
+        "ended_at": "2026-11-21T00:58:22.899Z",
+        "finish_reason": "end_turn",
+        "usage": {
+         "input_other": 1108,
+         "output": 100,
+         "input_cache_read": 16640,
+         "input_cache_creation": 0
+        }
+       }
+      ],
+      "items": [
+       {
+        "type": "user_message",
+        "item_id": "msg_01M7XSRC47HN38RNYTTBQJH96T",
+        "status": "ended",
+        "outcome": "completed",
+        "created_at": "2026-11-21T00:58:18.796Z",
+        "prompt_ids": [
+         "msg_01M7XSRC47HN38RNYTTBQJH96T"
+        ],
+        "placement": "opener",
+        "origin": {
+         "kind": "user"
+        },
+        "text": "Also, at the end of your answer, add the line STEERED-OK.",
+        "attachments": [],
+        "skills": []
+       },
+       {
+        "type": "reasoning",
+        "item_id": "0302775e-a95b-43d8-9626-fc4bb955af66:0",
+        "step_index": 1,
+        "status": "ended",
+        "outcome": "completed",
+        "created_at": "2026-11-21T00:58:21.313Z",
+        "text": "Kimi should respond to the latest user: report how many replies came back and append line STEERED-OK. 20 replies. Concise. Could say \"20 replies came back (20 sent, 20 received, 0% packet loss).\" Then line. Must exact end.",
+        "started_at": "2026-11-21T00:58:21.313Z",
+        "duration_ms": 1578
+       },
+       {
+        "type": "assistant_message",
+        "item_id": "0302775e-a95b-43d8-9626-fc4bb955af66:1",
+        "step_index": 1,
+        "status": "ended",
+        "outcome": "completed",
+        "created_at": "2026-11-21T00:58:22.891Z",
+        "text": "20 replies came back: 20 sent, 20 received, 0% packet loss.\n\nSTEERED-OK"
+       }
+      ],
+      "usage": {
+       "input_other": 1108,
+       "output": 100,
+       "input_cache_read": 16640,
+       "input_cache_creation": 0
+      },
+      "outcome": "completed",
+      "ended_at": "2026-11-21T00:58:22.899Z",
+      "duration_ms": 4103
+     }
+    ],
+    "has_more": false
+   },
+   "request_id": "01M7XSS3FRRS4H13GNCJ5M4VH9"
+  }
+ },
+ "prompts": {
+  "http": 200,
+  "json": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "active": null,
+    "queued": []
+   },
+   "request_id": "01M7XSS3FZVZ099X7WGD9ZVNF0"
+  }
+ },
+ "detail": {
+  "http": 200,
+  "json": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "id": "session_7a910331-5405-4d88-9c7b-920ff8814cde",
+    "workspace_id": "wd_cwd-steer_6d93ac7b73a4",
+    "cwd": "C:/wao-probe/cwd",
+    "title": "wao-td362-steer-midtool",
+    "created_at": "2026-11-21T00:57:52.409Z",
+    "updated_at": "2026-11-21T00:58:22.900Z",
+    "activity": "idle",
+    "pending_interaction": "none",
+    "last_turn_outcome": "completed",
+    "archived": false,
+    "last_prompt": "Also, at the end of your answer, add the line STEERED-OK."
+   },
+   "request_id": "01M7XSS3G4ZC4PD2C5HNK1N0KV"
+  }
+ }
+}

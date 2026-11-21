@@ -16,3 +16,14 @@ What changed against 2.6.3 for WAO:
 - Unchanged in shape: session create, prompt submit, prompts list, turns, `prompts:steer` (the steered prompt still
   ends the running turn without an answer and opens the next turn as its opener), `prompts/{id}:abort` (again: 40402),
   `:delete` (again: 40401). Tool calls in flight show `status: "running"` and a `stage`.
+
+## t7: a correction steered in while a shell tool call is executing (captured 2026-11-21, batch 129)
+
+`t7-steer-midtool-*.json` hold one poll each as `{ turns, prompts, detail }` (each `{ http, json }`), except the
+submit and steer responses. The first prompt runs `ping -n 20`; once its Bash call shows `status: "running"`,
+`stage: "executing"`, a second prompt is queued and steered (`steered: true`). From then until the tool call ends
+(about 19 s), the steered prompt is in neither the prompts list (`active` stays the first prompt, `queued` empty) nor
+any turn (`-held`, `-held-late`). When the tool ends, the first turn ends `completed` without an answer and, in the
+same poll, the next turn opens with the steered prompt as its opener (`-new-turn`); `-settled` is the idle end state.
+2.6.3 ended the running turn at the steer instead, so the steered prompt showed up within a poll or two.
+
