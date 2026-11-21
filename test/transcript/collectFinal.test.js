@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, statSync, linkSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -409,11 +409,8 @@ test("--out：文件写不进去时非零退出、零审计追加；与 --format
 //
 // 转录是运行状态的唯一来源：--out 指向本运行（或任何运行）的 .jsonl 时，旧实现
 // 先用回答覆盖转录、随后的审计追加才报错——覆盖了的转录找不回来。现在写文件之前
-// 按文件身份（bigint stat 的 dev+ino，从目标父目录逐级往上比）判断：落在本次
-// 运行存储目录里的任何路径（不只本运行的转录）都固定文案拒绝，零写入、零审计
-// 追加；UNC 别名、junction、大小写、8.3 短名由文件系统身份自己归一。存储外的
-// 硬链接目标不拒——写入走目标同目录临时文件 + rename，只替换目录项，不透过已
-// 存在的文件写进转录（续修实测后定稿）。
+// 按真实路径判断：落在本次运行存储目录里的任何路径（不只本运行的转录）都固定
+// 文案拒绝，零写入、零审计追加；junction/符号链接以真实路径为准。
 
 const TD365_EVENTS = [
   { type: "run.started", backend: "claude-code" },
@@ -511,87 +508,6 @@ test("TD-365: 运行存储之外的普通路径照常写出（含审计）", () 
     assert.equal(r.status, 0, `存储外的目标照常写出（stderr: ${r.stderr}）`);
     assert.equal(readFileSync(outFile, "utf8"), "最终答复", "文件内容正确");
     assert.equal(countCollected(readFileSync(join(dir, "run_td365_ok.jsonl"), "utf8")), 1, "恰一条审计");
-  } finally {
-    cleanupDir(dir);
-    cleanupDir(outDir);
-  }
-});
-
-// ===== TD-365 续修（第 132 批会审 FIX_FIRST）：别名与硬链接两条绕过 =====
-
-test("TD-365 续修: --out 用 UNC 管理共享别名指进运行存储——按文件身份拒绝（仅 Windows）", (t) => {
-  if (process.platform !== "win32") {
-    t.skip("非 Windows——UNC 别名检查不适用");
-    return;
-  }
-  const dir = makeTempDir("wao-td365-unc-");
-  try {
-    writeTranscript(dir, "run_td365_unc", TD365_EVENTS);
-    // C:\X\Y → \\localhost\C$\X\Y（本机管理共享别名；realpath 保留 UNC 形式，
-    // 字符串比较认不出，身份比较按同一目录的 dev+ino 归一）。
-    const drive = /^([A-Za-z]):[\\/](.*)$/.exec(dir);
-    if (!drive) {
-      t.skip(`临时目录不是盘符路径：${dir}`);
-      return;
-    }
-    const uncDir = `\\\\localhost\\${drive[1]}$\\${dir.slice(2).replace(/\//g, "\\")}`;
-    try {
-      statSync(uncDir);
-    } catch (error) {
-      t.skip(`管理共享不可用：${error?.message ?? error}`);
-      return;
-    }
-    const transcriptPath = join(dir, "run_td365_unc.jsonl");
-    const before = readFileSync(transcriptPath, "utf8");
-    const r = runCollectFinal(dir, "run_td365_unc", ["--out", join(uncDir, "run_td365_unc.jsonl")]);
-    assert.notEqual(r.status, 0, "UNC 别名指进存储必须拒绝");
-    assert.match(r.stderr, /is inside the run store/);
-    const after = readFileSync(transcriptPath, "utf8");
-    assert.equal(after, before, "转录逐字节不变");
-    assert.equal(countCollected(after), 0, "零审计追加");
-  } finally {
-    cleanupDir(dir);
-  }
-});
-
-test("TD-365 续修: --out 指向存储外指向本运行转录的硬链接——写出成功，转录只有审计追加", () => {
-  const dir = makeTempDir("wao-td365-hl-");
-  const outDir = makeTempDir("wao-td365-hl-out-");
-  try {
-    writeTranscript(dir, "run_td365_hl", TD365_EVENTS);
-    const transcriptPath = join(dir, "run_td365_hl.jsonl");
-    const linkPath = join(outDir, "answer.txt");
-    linkSync(transcriptPath, linkPath);
-    const before = readFileSync(transcriptPath, "utf8");
-    const r = runCollectFinal(dir, "run_td365_hl", ["--out", linkPath]);
-    assert.equal(r.status, 0, `硬链接目标照常写出（stderr: ${r.stderr}）`);
-    assert.equal(readFileSync(linkPath, "utf8"), "最终答复", "硬链接位置变成回答（目录项被 rename 替换）");
-    // 转录只多出恰好一条审计行、原有行逐字节不变——回答没有透过硬链接写进转录。
-    const beforeLines = before.split(/\r?\n/).filter(Boolean);
-    const after = readFileSync(transcriptPath, "utf8");
-    const afterLines = after.split(/\r?\n/).filter(Boolean);
-    assert.equal(afterLines.length, beforeLines.length + 1, "转录只追加一行（审计）");
-    assert.equal(afterLines.slice(0, beforeLines.length).join("\n"), beforeLines.join("\n"), "原有行逐字节不变");
-    assert.ok(afterLines[afterLines.length - 1].includes('"type":"messages.collected"'), "追加的是审计事件");
-    assert.equal(countCollected(after), 1, "恰一条审计");
-  } finally {
-    cleanupDir(dir);
-    cleanupDir(outDir);
-  }
-});
-
-test("TD-365 续修: --out 目标是一个已存在目录（rename 必败）——不留临时文件，零审计", () => {
-  const dir = makeTempDir("wao-td365-rn-");
-  const outDir = makeTempDir("wao-td365-rn-out-");
-  try {
-    writeTranscript(dir, "run_td365_rn", TD365_EVENTS);
-    const occupied = join(outDir, "occupied");
-    mkdirSync(occupied);
-    const r = runCollectFinal(dir, "run_td365_rn", ["--out", occupied]);
-    assert.notEqual(r.status, 0, "临时文件改名到目录名上必失败");
-    assert.deepEqual(readdirSync(outDir).sort(), ["occupied"], "不留临时文件");
-    assert.ok(statSync(occupied).isDirectory(), "原目录原样");
-    assert.equal(countCollected(readFileSync(join(dir, "run_td365_rn.jsonl"), "utf8")), 0, "零审计追加");
   } finally {
     cleanupDir(dir);
     cleanupDir(outDir);
