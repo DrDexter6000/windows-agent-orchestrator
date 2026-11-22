@@ -159,7 +159,7 @@ npm run cli -- wao stage --cwd <目标项目>
 
 **还有席位没到终态时的 `nextStep`**：有已派发、未终态、转录读得到的席位（有 runId、`runState` 不在终态闭集、不是 `missing`）时，MCP 回执（创建与读取）带 `nextStep`：对这些席位反复 `run_await_result`，再按 consultId 重读。模板的 MCP/CLI 两面形态（工具名不带 id / 命令带 runId）与长度上限见 `wao manual supervise "等待到收口"`；此处同样不含席位 id，超长时改用不列 id 的版本。CLI 文本模式末尾加 `Next step:` 行（JSON 加 `nextStep` 字段）：`wao consult wait <consultId> --until-settled` 等到每席收口，再 `wao consult show <consultId>` 重读（收口判定与退出码见上文场景 4d 的等待段）。分页视图与全部终态都不带；`consult wait` 到期仍有席位在跑时 stderr 指向这一行，未终态席位全是 `missing`（转录读不到）或派发未成立时没有这一行，stderr 如实说明并指向 `consult show`。
 
-输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席指名拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。创建模式必传 `expectedWorkspaceRoot`——每个席位的 cwd 与组记录都以该目标为准，不读缺省绑定与进程目录；读取/分页模式可用它当场指定项目，省略才用缺省绑定，两者皆无时拒绝。以上输入拒绝都发生在任何派发之前（派发计数为 0）。之后的失败只回固定文案：创建模式是 `…before any seat was dispatched` 或 `…after seats were dispatched`（席位 run 可能在跑，用 `runs_list` 找）；读取模式区分找不到记录与记录在但渲染失败。
+输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席指名拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。创建模式必传 `expectedWorkspaceRoot`——每个席位的 cwd 与组记录都以该目标为准，不读缺省绑定与进程目录；读取/分页模式可用它当场指定项目，省略才用缺省绑定，两者皆无时拒绝。以上输入拒绝都发生在任何派发之前（派发计数为 0）。之后的失败只回固定文案：创建模式是 `…before any seat was dispatched` 或 `…after seats were dispatched`（席位 run 可能在跑，用 `lead_preflight` 的 `recentRuns` 找）；读取模式区分找不到记录与记录在但渲染失败。
 
 **与 CLI 的对应关系**：`wao consult run <briefFile> --seats a,b …`（brief 走文件；`--wait-timeout` 即场景 4d 的总预算）与创建模式同一 service；`wao consult show <consultId>` 与读取模式同一重渲染内核，但保持全量渲染（CLI 面不收窄）。参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。
 

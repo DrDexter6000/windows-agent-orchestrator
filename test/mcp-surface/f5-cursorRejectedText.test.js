@@ -44,9 +44,6 @@ const COLLECT_REJECTED_MCP =
 const REVIEW_REJECTED_MCP =
   "run_delivery_review failed — cursor is invalid or expired — re-fetch from page 1 (call again without a cursor); "
   + "never hand-modify a cursor token";
-const BUNDLE_REJECTED_MCP =
-  "run_delivery_review_bundle failed — cursor is invalid or expired — re-fetch from page 1 (call again without a cursor); "
-  + "never hand-modify a cursor token";
 const COLLECT_REJECTED_CLI =
   "collect cursor rejected: the cursor is invalid or expired — re-run from page 1 "
   + "(omit --cursor); a cursor token is opaque and must never be hand-modified";
@@ -212,34 +209,9 @@ test("F5-B1: run_delivery_review cursor on a not-yet-paginated artifact → dedi
 
 // ===== C — run_delivery_review_bundle =====
 
-test("F5-C1: run_delivery_review_bundle cursor without reviewable artifact → dedicated text (real services), zero transcript append", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-f5-c1-"));
-  try {
-    makeGitRepo(dir);
-    const runDir = join(dir, "runs");
-    const runId = "run_f5_c1";
-    writeWaitingTranscript(runDir, runId, dir);
-    const path = join(runDir, `${runId}.jsonl`);
-    const bytesBefore = statSync(path).size;
-    const server = createWaoMcpServer({ registryPath: "/x", runDir, workspaceRoot: dir });
-    const client = await buildInMemoryClient(server);
-    try {
-      const res = await client.callTool({
-        name: "run_delivery_review_bundle",
-        arguments: { runId, fileIndex: 0, cursor: "abc", waitMs: 1000 },
-      });
-      assert.equal(res.isError, true, "isError flagged");
-      assert.equal(textOf(res), BUNDLE_REJECTED_MCP, "dedicated cursor-rejected copy (exact)");
-      assert.ok(!res.structuredContent, "no structuredContent on cursor rejection");
-      assert.equal(statSync(path).size, bytesBefore, "transcript byte-identical (bundle is read-only)");
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  } finally {
-    cleanupDir(dir);
-  }
-});
+// 决定 0129：run_delivery_review_bundle 已删——其 cursor 拒绝文案随工具消亡；
+// cursor 携带纪律仍由 run_collect / run_delivery_review / run_activity 的专属文案
+// 承载（F5-A*/F5-B*/F5-D* 与各自工具面测试）。
 
 // ===== D — 分类纪律（instanceof 才折叠） =====
 

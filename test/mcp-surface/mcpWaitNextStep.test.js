@@ -8,7 +8,6 @@
 // 覆盖：
 //   - run_await_result：输入 0..270000、缺省 45000（常量），无 nextStep。
 //   - run_consult：缺省 45000（描述与 schema 一致）。
-//   - run_delivery_review_bundle：缺省 45000（描述提取值 == handler 实际值）。
 //   - run_delivery：带 waitMs 且到期未收口 → nextStep；不带 waitMs → 无。
 //   - run_dispatch / run_continue：accepted:true → 静态 nextStep；拒绝不给。
 
@@ -167,55 +166,9 @@ test("NS-M4: run_consult default 45000（描述与 handler 注入一致）", asy
   } finally { cleanupDir(dir); }
 });
 
-test("NS-M5: run_delivery_review_bundle 默认 45000（描述提取值 == handler 实际等待值）", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-ns-m5-"));
-  try {
-    makeGitRepo(dir);
-    let observedWaitMs = null;
-    const waitingDelivery = (runId) => ({
-      runId,
-      readiness: "waiting_for_verification",
-      waitReturnedEarly: false,
-      terminalState: "completed",
-      deliveryAvailable: true,
-      deliveryRequested: true,
-      deliveryRef: {
-        runId, baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
-        changedFiles: ["src/a.js"], verification: { status: "pending" },
-      },
-      deliveryFailure: null,
-      verification: { status: "pending" },
-      acceptance: { status: "pending" },
-    });
-    const { server, client } = await buildServerClient({
-      dir, registryPath: makeRegistry(dir),
-      overrides: {
-        getRunDeliveryReadinessFn: async (input) => {
-          observedWaitMs = input.waitMs;
-          return waitingDelivery(input.runId);
-        },
-      },
-    });
-    try {
-      const res = await client.callTool({
-        name: "run_delivery_review_bundle",
-        arguments: { runId: "run_ns_m5", fileIndex: 0 },
-      });
-      assert.equal(res.isError, undefined);
-      assert.equal(observedWaitMs, 45000, "省略 waitMs → 45000（决定 0095）");
-      // 描述里的 stated default 与实际一致（M12-3B-12 钉的提取口径）。
-      const tools = await client.listTools();
-      const stated = Number(/omit = default (\d+) ms wait/.exec(tools.tools.find((x) => x.name === "run_delivery_review_bundle").description)?.[1]);
-      assert.equal(stated, 45000);
-    } finally {
-      await client.close(); await server.close();
-    }
-  } finally { cleanupDir(dir); }
-});
-
-// =====================================================================
-// run_delivery — nextStep 只在带 waitMs 且未收口时给
-// =====================================================================
+// 决定 0129：run_delivery_review_bundle 已删——其缺省 45000 的"描述提取值 ==
+// handler 实际值"钉（M12-3B-12）随工具消亡；缺省 45000 的工具面钉仍由
+// NS-M1/NS-M3（run_await_result）与 NS-M4（run_consult）承载。
 
 test("NS-M6: run_delivery 带 waitMs 到期未收口 → nextStep；不带 waitMs 即时查询 → 无", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ns-m6-"));

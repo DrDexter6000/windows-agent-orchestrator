@@ -22,7 +22,7 @@
 //   3. missing.
 //
 // No permanent cache: each operation de-duplicates by name within itself, but
-// the NEXT registry_list/dispatch re-observes current state — so setting or
+// the NEXT lead_preflight-workers/dispatch read re-observes current state — so setting or
 // rotating a credential takes effect without restarting the Host.
 //
 // Security contract:
@@ -198,7 +198,7 @@ export class EnvResolver {
 
 /**
  * Create a fresh operation-scoped env resolver. Each call returns an independent
- * resolver with its own cache — so the next registry_list/dispatch/start/resume
+ * resolver with its own cache — so the next preflight-workers/dispatch/start/resume
  * re-observes current state.
  * @param {(name: string) => Promise<string|undefined>} [userEnvReader]
  * @returns {EnvResolver}
@@ -219,7 +219,7 @@ export function createEnvResolver(userEnvReader) {
  *   workers in one inventory/dispatch). If omitted, a single-use resolver is
  *   created (no cross-worker de-dupe, but still no permanent cache).
  * @param {string[]} [input.names] — which env names to resolve. Defaults to the
- *   REQUIRED names only (for registry_list). Pass inheritedEnvNames(agent) to
+ *   REQUIRED names only (for lead_preflight workers). Pass inheritedEnvNames(agent) to
  *   also bridge optional inherited env (for dispatch/start/resume).
  * @returns {Promise<{ credentialAvailability: "available"|"missing"|"not_required", missingCredentialEnvNames: string[], resolvedEnv: Record<string,string> }>}
  *   resolvedEnv carries the resolved VALUES for names that resolved. It MUST NOT
@@ -227,7 +227,7 @@ export function createEnvResolver(userEnvReader) {
  */
 export async function assessWorkerReadiness({ agent, resolver, names }) {
   const required = requiredCredentialNames(agent);
-  // Default: resolve only required names (registry_list path — cheap). Callers
+  // Default: resolve only required names (lead_preflight workers path — cheap). Callers
   // that need to bridge optional inherited env pass names explicitly.
   const toResolve = names ?? required;
   const envResolver = resolver ?? createEnvResolver();
@@ -247,7 +247,7 @@ export async function assessWorkerReadiness({ agent, resolver, names }) {
 /**
  * 决定 0074（车道就绪事实如实呈现）："token 文件在且去首尾空白后非空"的单一
  * 判定。声明了 kimiHome 的 kimi-web 车道，凭据是 <kimiHome>/server.token 文件
- * 而非环境变量——registry_list 的 credentialAvailability 取值、wao lanes /
+ * 而非环境变量——lead_preflight workers 的 credentialAvailability 取值、wao lanes /
  * onboarding 的就绪探测、wao doctor 的体检都经本函数；派发侧
  * kimiWeb.resolveBearerToken 同款语义（读失败按缺失处理——fail-closed，缺失或
  * 为空在建会话之前拒绝派发）。只报状态，绝不回显文件内容。

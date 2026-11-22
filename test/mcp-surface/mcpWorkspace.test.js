@@ -243,7 +243,7 @@ test("WSB-09: run_dispatch strict schema rejects cwd/workspaceRoot/rootUri/path"
 
 // ===== 1. (batch 119) the removed binding tools are off the surface; preflight input is strict =====
 
-test("WSB-01: removed binding tools absent; lead_preflight input is strict single-key", async () => {
+test("WSB-01: removed binding tools absent; lead_preflight input is strict (target + 0129 options)", async () => {
   const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
   const client = await buildInMemoryClient(server);
   try {
@@ -252,10 +252,15 @@ test("WSB-01: removed binding tools absent; lead_preflight input is strict singl
     for (const removed of ["workspace_status", "workspace_select", "run_wait"]) {
       assert.ok(!names.includes(removed), `${removed} must NOT be on the surface (v0.10.0)`);
     }
+    // 决定 0129：四个只读工具并入幸存者，同样不得回到工具面。
+    for (const removed of ["registry_list", "runs_list", "run_dispatch_contract_check", "run_delivery_review_bundle"]) {
+      assert.ok(!names.includes(removed), `${removed} must NOT be on the surface (decision 0129 fold-in)`);
+    }
     const pre = tools.tools.find((t) => t.name === "lead_preflight");
     assert.ok(pre, "lead_preflight tool exists");
     const inputKeys = Object.keys(pre.inputSchema.properties ?? {}).sort();
-    assert.deepEqual(inputKeys, ["expectedWorkspaceRoot"], "input schema is the optional per-call target only");
+    // 决定 0129：输入在 expectedWorkspaceRoot 之外新增可选 detail / recentRuns。
+    assert.deepEqual(inputKeys, ["detail", "expectedWorkspaceRoot", "recentRuns"], "input schema is the optional per-call target + the two 0129 options");
     assert.equal(pre.inputSchema.additionalProperties, false, "strict additionalProperties");
     // 批 119（A3）：聚合器只读（证明与读，不写共享状态）。
     assert.equal(pre.annotations.readOnlyHint, true, "read-only");

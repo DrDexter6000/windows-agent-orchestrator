@@ -49,7 +49,7 @@ export const WORKSPACE_EXPECTATION_MISMATCH_FIELDS = Object.freeze([
  * proven head by PREFIX (provenHead.startsWith(expected)). Full forms (40/64
  * hex) are unchanged exact-equality assertions (a same-length prefix IS an
  * exact match). Exported as the SINGLE shape SSOT: src/mcp/server.js binds the
- * run_dispatch / run_dispatch_contract_check inputSchema regex to this same
+ * run_dispatch inputSchema regex to this same
  * source so the wire pattern and the matching semantics can never drift.
  * isCanonicalCommitId (delivery.js) is intentionally NOT reused here — it stays
  * the full-form-only authority for the DELIVERY path, whose semantics are

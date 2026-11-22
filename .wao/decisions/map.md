@@ -130,3 +130,4 @@
 0126 | 采纳了续修谱系的后代，祖先由谱系派生为“被取代”，不再逐条拒收
 0127 | SKILL.md 保持单一入口，情形细节下沉到使用手册已有的节
 0128 | 会审结论的可靠获取：适配器按逻辑发言发事件，声明字段作为正式结论通道
+0129 | MCP 工具面 20 → 16：registry_list/runs_list/run_dispatch_contract_check/run_delivery_review_bundle 能力并进幸存者后删除

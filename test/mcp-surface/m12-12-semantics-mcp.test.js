@@ -10,7 +10,7 @@
 //
 // This slice carries:
 //   M-*   REAL MCP handlers (all four) attach semanticNotes before parse; the
-//         schema/catalog/resource parity; the review_bundle exclusion; the
+//         schema/catalog/resource parity; (0129: the bundle exclusion clause is
 //         run_diagnose trust boundary; unchanged TOOLS.length tool surface.
 //   R-*   RESOURCES: wao://semantics summary + wao://semantics/{id} template;
 //         NO per-id static resources; summary/detail parity with the SSOT;
@@ -99,7 +99,7 @@ const THREE_TOOLS = ["run_await_result", "run_delivery", "run_diagnose"];
 // M-* — REAL MCP handlers (all four) attach semanticNotes before parse.
 // =====================================================================
 
-test("M-01: three output schemas REQUIRE semanticNotes; schema/catalog parity; bundle excludes it", async () => {
+test("M-01: three output schemas REQUIRE semanticNotes; schema/catalog parity", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m01-"));
   try {
     makeGitRepo(dir);
@@ -150,14 +150,8 @@ test("M-01: three output schemas REQUIRE semanticNotes; schema/catalog parity; b
         if (THREE_TOOLS.includes(t.name)) continue;
         assert.equal(t.outputSchema?.properties?.semanticNotes, undefined, `${t.name} must NOT carry semanticNotes`);
       }
-      // run_delivery_review_bundle: neither top level nor nested delivery carries/requires it.
-      const bundle = tools.tools.find((x) => x.name === "run_delivery_review_bundle");
-      assert.ok(bundle, "bundle discoverable");
-      assert.equal(bundle.outputSchema?.properties?.semanticNotes, undefined, "bundle top level no semanticNotes");
-      assert.ok(!(bundle.outputSchema?.required ?? []).includes("semanticNotes"), "bundle top level does not require it");
-      const nested = bundle.outputSchema?.properties?.delivery ?? {};
-      assert.equal(nested.properties?.semanticNotes, undefined, "bundle nested delivery no semanticNotes");
-      assert.ok(!(nested.required ?? []).includes("semanticNotes"), "bundle nested delivery does not require it");
+      // 决定 0129：run_delivery_review_bundle 已删——其"嵌 delivery 不带
+      // semanticNotes"的对照面随之消亡（BASE 拆分仍在 server.js 供派生）。
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -29,7 +29,7 @@
 // 9. Seven read-only tools accept expectedWorkspaceRoot: proof failure and
 //    ownership mismatch never fall back; omitted input keeps legacy behavior.
 // 10. run_await_result retains the entry proof while it waits.
-// 11. run_delivery(waitMs) / run_delivery_review_bundle retain the entry proof
+// 11. run_delivery(waitMs) retains the entry proof (0129: bundle deleted)
 //     and settle; ownership refusals echo no input path.
 
 import { test } from "node:test";
@@ -538,7 +538,7 @@ test("CT-6: runId A-class tools — target≠ownership refuses, target=ownership
 
 // ===== 7: read-only tools keep the binding scope and SHOW it =====
 
-test("CT-7: runs_list / lead_preflight expose the binding scope they filtered by", async () => {
+test("CT-7: lead_preflight exposes the binding scope it filtered by (0129: runs_list folded in)", async () => {
   const aux = mkdtempSync(join(tmpdir(), "wao-ct7-aux-"));
   const scratchRoot = mkdtempSync(join(tmpdir(), "wao-ct7-scratch-"));
   try {
@@ -552,17 +552,13 @@ test("CT-7: runs_list / lead_preflight expose the binding scope they filtered by
     const server = createWaoMcpServer({ registryPath, runDir: join(aux, "runs"), workspaceRoot: REPO_ROOT });
     const client = await buildClient(server);
     try {
-      const rl = JSON.parse((await client.callTool({ name: "runs_list", arguments: {} }))
-        .content.find((b) => b.type === "text").text);
-      assert.equal(rl.scope.source, "server_config", "runs_list scope carries the binding source");
-      assert.equal(rl.scope.projectBucket, repoFact.bucket,
-        "scope.projectBucket is the write-side project bucket of the bound root");
-      assert.ok(!JSON.stringify(rl.scope).includes(fwd(REPO_ROOT)),
-        "the scope never leaks the absolute root");
+      // 决定 0129：runs_list 的 scope 投影并入 preflight workspace 节（同一
+      // 派生式：source + 非绝对 projectBucket）。
       const pf = JSON.parse((await client.callTool({ name: "lead_preflight", arguments: {} }))
         .content.find((b) => b.type === "text").text);
+      assert.equal(pf.workspace.source, "server_config", "workspace carries the binding source");
       assert.equal(pf.workspace.projectBucket, repoFact.bucket,
-        "lead_preflight workspace.projectBucket matches the same derivation");
+        "workspace.projectBucket is the write-side project bucket of the bound root");
     } finally {
       await client.close();
       await server.close();
@@ -575,12 +571,9 @@ test("CT-7: runs_list / lead_preflight expose the binding scope they filtered by
     });
     const client2 = await buildClient(server2);
     try {
-      const rl2 = JSON.parse((await client2.callTool({ name: "runs_list", arguments: {} }))
-        .content.find((b) => b.type === "text").text);
-      assert.equal(rl2.scope.projectBucket, null, "a temp-dir root has no project bucket label");
       const pf2 = JSON.parse((await client2.callTool({ name: "lead_preflight", arguments: {} }))
         .content.find((b) => b.type === "text").text);
-      assert.equal(pf2.workspace.projectBucket, null, "lead_preflight agrees");
+      assert.equal(pf2.workspace.projectBucket, null, "a temp-dir root has no project bucket label");
     } finally {
       await client2.close();
       await server2.close();
@@ -758,62 +751,26 @@ test("CT-11: run_consult read follows the call's target; create never reads the 
   }
 });
 
-test("CT-12: run_dispatch_contract_check honours the call's target and reports the scope used", async () => {
-  const x = mkdtempSync(join(tmpdir(), "wao-ct12-x-"));
-  const y = mkdtempSync(join(tmpdir(), "wao-ct12-y-"));
-  const aux = mkdtempSync(join(tmpdir(), "wao-ct12-aux-"));
-  try {
-    makeGitRepo(x);
-    makeGitRepo(y);
-    const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: x } });
-    const server = createWaoMcpServer({ registryPath, runDir: join(aux, "runs"), workspaceRoot: x });
-    const client = await buildClient(server);
-    try {
-      const withTarget = JSON.parse((await client.callTool({
-        name: "run_dispatch_contract_check",
-        arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: y },
-      })).content.find((b) => b.type === "text").text);
-      assert.equal(withTarget.workspaceScope.source, "call_target", "the check names the scope it used");
-      assert.equal(withTarget.sections.workspace, "observed", "the target itself proves, so it is observed");
-      assert.equal(withTarget.issueCodes.includes("workspace_unbound"), false);
-      // Without a target the binding remains the default scope.
-      const noTarget = JSON.parse((await client.callTool({
-        name: "run_dispatch_contract_check",
-        arguments: { agentId: "w", prompt: "p" },
-      })).content.find((b) => b.type === "text").text);
-      assert.equal(noTarget.workspaceScope.source, "server_config", "no target → binding scope");
-      // An unprovable target refuses with the shared fixed target text.
-      const bad = await client.callTool({
-        name: "run_dispatch_contract_check",
-        arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: "relative/path" },
-      });
-      assert.equal(bad.isError, true, "an unprovable target is refused");
-      assert.match((bad.content ?? []).map((b) => b.text ?? "").join(" "), /workspace target invalid/);
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  } finally {
-    cleanupDir(x); cleanupDir(y); cleanupDir(aux);
-  }
-});
+// 决定 0129：run_dispatch_contract_check 已删——"按调用目标检查并报告
+// workspaceScope"的行为随工具消亡（scope 报告是 check-only 载荷的形状）。
+// 等价边界仍被覆盖：run_dispatch 的就地预检消费同一调用目标（见
+// mcpRunDispatch.test.js 的 contractAdvisories 用例——referenced_path_probe_miss
+// 探针按调用目标根探测）；按调用目标拒绝语义由 CT-13 的 run_dispatch 族承载。
 
-
-
-// ===== 9: seven read-only tools accept a per-call workspace target =====
+// ===== 9: read-only tools accept a per-call workspace target =====
 
 const CT13_RUN_ID = "run_ct13_delivery";
 const CT13_INVALID_TEXT =
   "workspace target invalid: expectedWorkspaceRoot must be an absolute path to a canonical " +
   "Git worktree top-level (a subdirectory of a repo is rejected). Re-check the project root " +
   "and retry.";
+// 决定 0129：runs_list → lead_preflight recentRuns（列表过滤分支）；bundle 删除。
 const CT13_CASES = [
   { name: "run_delivery", arguments: { runId: CT13_RUN_ID } },
-  { name: "runs_list", arguments: {} },
+  { name: "lead_preflight", arguments: { recentRuns: 10 } },
   { name: "run_await_result", arguments: { runId: CT13_RUN_ID, waitMs: 0 } },
   { name: "run_activity", arguments: { runId: CT13_RUN_ID } },
   { name: "run_delivery_review", arguments: { runId: CT13_RUN_ID, fileIndex: 0 } },
-  { name: "run_delivery_review_bundle", arguments: { runId: CT13_RUN_ID, fileIndex: 0, waitMs: 1000 } },
 ];
 
 function ct13Text(result) {
@@ -822,16 +779,16 @@ function ct13Text(result) {
 
 function ct13AssertSuccess(testCase, result, expectedSource) {
   assert.equal(result.isError, undefined, `${testCase.name}: ${ct13Text(result)}`);
-  if (testCase.name === "runs_list") {
-    assert.equal(result.structuredContent.scope.source, expectedSource);
-    assert.equal(result.structuredContent.returnedCount, 1);
-    assert.equal(result.structuredContent.runs[0].runId, CT13_RUN_ID);
+  if (testCase.name === "lead_preflight") {
+    assert.equal(result.structuredContent.workspace.source, expectedSource);
+    assert.equal(result.structuredContent.recentRuns.returnedCount, 1);
+    assert.equal(result.structuredContent.recentRuns.runs[0].runId, CT13_RUN_ID);
   } else {
     assert.equal(result.structuredContent.runId, CT13_RUN_ID);
   }
 }
 
-test("CT-13: six read tools prove the call target, never fall back, and touch no shared state", async () => {
+test("CT-13: five read tools prove the call target, never fall back, and touch no shared state", async () => {
   const owned = mkdtempSync(join(tmpdir(), "wao-ct13-owned-"));
   const other = mkdtempSync(join(tmpdir(), "wao-ct13-other-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct13-aux-"));
@@ -894,10 +851,10 @@ test("CT-13: six read tools prove the call target, never fall back, and touch no
           name: testCase.name,
           arguments: { ...testCase.arguments, expectedWorkspaceRoot: other },
         });
-        if (testCase.name === "runs_list") {
+        if (testCase.name === "lead_preflight") {
           assert.equal(mismatch.isError, undefined);
-          assert.equal(mismatch.structuredContent.scope.source, "call_target");
-          assert.equal(mismatch.structuredContent.returnedCount, 0, "no fallback to the bound project");
+          assert.equal(mismatch.structuredContent.workspace.source, "call_target");
+          assert.equal(mismatch.structuredContent.recentRuns.returnedCount, 0, "no fallback to the bound project");
         } else {
           assert.equal(mismatch.isError, true, `${testCase.name}: cross-project target refuses`);
           const mismatchText = ct13Text(mismatch);
@@ -987,14 +944,13 @@ test("CT-14: run_await_result keeps its entry proof even with a different defaul
 });
 
 
-test("CT-15: run_delivery and review-bundle waits keep their entry proof with a different default binding", async () => {
+test("CT-15: run_delivery's wait keeps its entry proof with a different default binding (0129: bundle deleted)", async () => {
   const owned = mkdtempSync(join(tmpdir(), "wao-ct15-owned-"));
   const other = mkdtempSync(join(tmpdir(), "wao-ct15-other-"));
   const aux = mkdtempSync(join(tmpdir(), "wao-ct15-aux-"));
   const runDir = join(aux, "runs");
   const cases = [
     { name: "run_delivery", runId: "run_ct15_delivery", arguments: { waitMs: 30000 } },
-    { name: "run_delivery_review_bundle", runId: "run_ct15_bundle", arguments: { fileIndex: 0, waitMs: 30000 } },
   ];
   let startupTimer;
   try {

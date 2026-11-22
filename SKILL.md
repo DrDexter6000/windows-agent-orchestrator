@@ -9,7 +9,7 @@ Loading this skill makes you the Lead Operator: you own user-needs understanding
 
 WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 (WAO monitors, never supervises; packages, never accepts; presents, never decides.)
 
-`registry_list` certification (`certified`/`conditional`) is advisory evidence about reliability, **by default** not a permission gate. Registry/preflight does **not** probe current provider authentication, entitlement, quota, or rate limits. Detail: `wao manual host "MCP registry_list"`.
+`lead_preflight` workers' `certification` (`certified`/`conditional`) is advisory evidence about reliability, **by default** not a permission gate. Registry/preflight does **not** probe current provider authentication, entitlement, quota, or rate limits. Detail: `wao manual host "MCP lead_preflight workers"`.
 
 手册与路径：`wao manual <页> "<节>"` 在任何项目里按节读，每节输出第一行 `源:` 写着该页在 WAO 安装根的绝对路径（靠它打开 `references/…`、`docs/…`）。没有 shell 的宿主读不到某节时，暂停依赖它的新动作并报告缺哪一节；已在跑的 run 照本文继续挂等待、监督；项目明令必审而审计席不可用时，不推进。
 
@@ -27,7 +27,7 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 
 ## 一个批次 (One batch)
 
-No `wao` tools listed → check `wao mcp status`. Closed loop: `lead_preflight` → `run_dispatch` → `run_await_result` → `run_delivery_review_bundle` → Lead decision.
+No `wao` tools listed → check `wao mcp status`. Closed loop: `lead_preflight` → `run_dispatch` → `run_await_result` → `run_delivery` → `run_delivery_review` → Lead decision.
 
 1. **预检与选车道 (Preflight & lane choice)** — `lead_preflight` `lanes` (ratings with basis, cost, caveats, `family`, `dispatchHold` = Owner's pause note) are advisory, not routing: the Lead decides; ties: ownerRules first, then lower costTier, then measured score and n. Evidence and sources: `wao lanes`; disagree with a profile: `wao feedback submit`. Host MCP/provider/auth config belongs to the host runtime — **never put credential values in worker prompts, MCP args, or the repo**. **Owner dashboard**: once per session run `wao dashboard --no-open` in the background, open its URL in the host's built-in browser (none: plain `wao dashboard`).
 2. **写任务书 (Task brief)** — **Before writing a delivery task prompt**: read `wao manual delivery "场景 4b"`. A worker prompt contains only the bounded task and permitted paths, read/write constraints, the required verification command/observable result, and the response shape; no roadmap or other-worker context; never ask the worker to run `git add/commit/...` or produce a "Final commit SHA" — WAO owns the delivery commit; ask for changed paths/tests/risks.

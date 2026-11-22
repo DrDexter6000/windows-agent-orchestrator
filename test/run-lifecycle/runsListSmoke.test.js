@@ -1,8 +1,9 @@
 // test/runsListSmoke.test.js
 //
-// M10 P0-3: No-model stdio smoke for runs_list.
-// Creates workspace A and B with real transcripts, binds to A,
-// calls runs_list via in-memory MCP, verifies isolation + restart recovery.
+// M10 P0-3: No-model smoke for the MCP run listing.
+// 决定 0129：runs_list 已删——经 lead_preflight 的 recentRuns 选项（同一
+// listRuns 服务）。Creates workspace A and B with real transcripts, binds to A,
+// verifies isolation + restart recovery.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -83,9 +84,10 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
     });
     const client1 = await buildClient(server1);
     try {
-      const res = await client1.callTool({ name: "runs_list", arguments: {} });
+      const res = await client1.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
       const parsed = JSON.parse(res.content[0].text);
-      const ids = parsed.runs.map((r) => r.runId);
+      const section = parsed.recentRuns;
+      const ids = section.runs.map((r) => r.runId);
 
       // Only A's runs visible
       assert.ok(ids.includes("run_a_run"), "A running run visible");
@@ -93,16 +95,16 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
       assert.ok(!ids.includes("run_b_only"), "B run invisible");
       assert.ok(!ids.includes("run_malformed"), "malformed run invisible");
 
-      // Safe output: no paths, prompts, commands, sessions
-      const json = JSON.stringify(parsed);
+      // Safe output (scoped to the section — workspaceRoot is preflight's own
+      // proven fact, deliberately on the wire since batch 119): no paths,
+      // prompts, commands, sessions inside recentRuns.
+      const json = JSON.stringify(section);
       assert.ok(!json.includes(dirA), "no absolute path");
       assert.ok(!json.includes(dirB), "no other workspace path");
       assert.ok(!json.includes("proc_"), "no session id");
 
-      // updatedAt sorting: run_a_run should be before or equal to run_a_done
-      // (both have recent timestamps; exact order depends on write timing)
-      assert.equal(parsed.returnedCount, 2);
-      assert.equal(parsed.truncated, false);
+      assert.equal(section.returnedCount, 2);
+      assert.equal(section.truncated, false);
     } finally {
       await client1.close();
       await server1.close();
@@ -115,9 +117,9 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
     });
     const client2 = await buildClient(server2);
     try {
-      const res = await client2.callTool({ name: "runs_list", arguments: {} });
+      const res = await client2.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
       const parsed = JSON.parse(res.content[0].text);
-      const ids = parsed.runs.map((r) => r.runId);
+      const ids = parsed.recentRuns.runs.map((r) => r.runId);
       // Same runIds recovered after restart
       assert.ok(ids.includes("run_a_run"), "recovery after restart");
       assert.ok(ids.includes("run_a_done"), "recovery after restart");
@@ -137,11 +139,13 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
     });
     const client3 = await buildClient(server3);
     try {
-      const res = await client3.callTool({ name: "runs_list", arguments: { activeOnly: true } });
+      // 决定 0129：activeOnly 过滤由 preflight 的 activeRuns 节承载（经证明
+      // active = 已知非终态 + fresh owner heartbeat，M12-15 语义不变）。
+      const res = await client3.callTool({ name: "lead_preflight", arguments: {} });
       const parsed = JSON.parse(res.content[0].text);
-      const ids = parsed.runs.map((r) => r.runId);
+      const ids = parsed.activeRuns.map((r) => r.runId);
       assert.ok(ids.includes("run_a_run"), "active run visible");
-      assert.ok(!ids.includes("run_a_done"), "completed run filtered by activeOnly");
+      assert.ok(!ids.includes("run_a_done"), "completed run filtered out of activeRuns");
     } finally {
       await client3.close();
       await server3.close();

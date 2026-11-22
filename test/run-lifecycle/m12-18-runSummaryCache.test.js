@@ -788,7 +788,7 @@ test("M12-18-E14: ~1800 real transcripts — warm query performs ZERO transcript
 
 // ── Server wiring: one shared cache for lead_preflight + runs_list ────────────
 
-test("M12-18-SRV-01: two identical runs_list calls — second performs zero transcript reads (server-owned cache)", async () => {
+test("M12-18-SRV-01: two identical recentRuns calls — second performs zero transcript reads (server-owned cache)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1218-srv01-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-m1218-srv01-rd-"));
   try {
@@ -807,18 +807,20 @@ test("M12-18-SRV-01: two identical runs_list calls — second performs zero tran
     });
     const client = await buildClient(server);
     try {
-      const res1 = await client.callTool({ name: "runs_list", arguments: {} });
-      assert.ok(!res1.isError, "first runs_list succeeds");
+      // 决定 0129：runs_list 已删——同一缓存经 lead_preflight recentRuns 验证。
+      const res1 = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      assert.ok(!res1.isError, "first recentRuns succeeds");
+      assert.ok(res1 && JSON.parse(res1.content[0].text).recentRuns, "section present");
       const afterFirst = reads.length;
-      assert.equal(afterFirst, 2, "cold runs_list reads every run transcript");
-      const res2 = await client.callTool({ name: "runs_list", arguments: {} });
-      assert.equal(reads.length, afterFirst, "second identical runs_list performs zero transcript reads");
-      assert.deepEqual(JSON.parse(res2.content[0].text), JSON.parse(res1.content[0].text));
+      assert.equal(afterFirst, 2, "cold recentRuns reads every run transcript");
+      const res2 = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      assert.equal(reads.length, afterFirst, "second identical recentRuns performs zero transcript reads");
+      assert.deepEqual(JSON.parse(res2.content[0].text).recentRuns, JSON.parse(res1.content[0].text).recentRuns);
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-test("M12-18-SRV-02: lead_preflight and runs_list share ONE cache — runs_list after preflight performs zero reads", async () => {
+test("M12-18-SRV-02: preflight activeRuns and recentRuns share ONE cache — recentRuns after activeRuns performs zero reads", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1218-srv02-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-m1218-srv02-rd-"));
   try {
@@ -845,11 +847,13 @@ test("M12-18-SRV-02: lead_preflight and runs_list share ONE cache — runs_list 
       const readsAfterPreflight = reads.length;
       assert.equal(readsAfterPreflight, 2, "preflight reads every run transcript exactly once");
 
-      const res2 = await client.callTool({ name: "runs_list", arguments: {} });
-      assert.ok(!res2.isError, "runs_list succeeds");
+      // 决定 0129：runs_list 已删——第二次扫描走同一 preflight 的 recentRuns
+      // 节（同一实例缓存；activeRuns 与 recentRuns 两次扫描共用）。
+      const res2 = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      assert.ok(!res2.isError, "recentRuns succeeds");
       const parsed2 = JSON.parse(res2.content[0].text);
-      assert.equal(parsed2.runs.length, 2);
-      assert.equal(reads.length, readsAfterPreflight, "runs_list after preflight performs ZERO transcript reads — one shared cache");
+      assert.equal(parsed2.recentRuns.runs.length, 2);
+      assert.equal(reads.length, readsAfterPreflight, "recentRuns after preflight performs ZERO transcript reads — one shared cache");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });

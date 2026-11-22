@@ -71,7 +71,7 @@ read_when: 配置一条车道、kimi 与 deepseek 车道的前提、维护 kimi 
 
 声明了 `kimiHome` 的 kimi-web 车道，凭据是 `<kimiHome>/server.token` 文件（serve 拉起时生成，见下文「kimi 车道的 worker serve」一节）；这个文件是否就绪在三处可见：
 
-- MCP `registry_list` 的 `credentialAvailability` 按它取值：在且非空 = `available`，缺失或为空 = `missing`（输出不携带文件路径；没有环境变量参与，`missingCredentialEnvNames` 恒为空表）。
+- MCP `lead_preflight` workers 的 `credentialAvailability` 按它取值：在且非空 = `available`，缺失或为空 = `missing`（输出不携带文件路径；没有环境变量参与，`missingCredentialEnvNames` 恒为空表）。
 - `wao lanes` 的就绪轴按它推导（不再探 `tokenEnv`——那个变量不会被读到）：文件在且非空 = `key_only_present`，缺失或为空 = `key_only_missing`，行内点名文件路径。
 - `wao doctor` 对缺失或为空的文件报 FAIL（派发必失败），提示里写文件路径与生成方式。
 

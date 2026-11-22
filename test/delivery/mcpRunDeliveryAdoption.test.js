@@ -131,7 +131,9 @@ test("0098-MCP-4: malformed 服务值 → 固定安全错误（不回显动态�
   }
 });
 
-test("0098-MCP-5: BASE 字节不变——bundle 的嵌 delivery schema 不含 adoption", async () => {
+test("0098-MCP-5: run_delivery 的 outputSchema 含 adoption（standalone 出参独有）", async () => {
+  // 决定 0129：review bundle 已删——"嵌 BASE 不含 adoption"的对照面随之消亡，
+  // 保留 standalone 出参含 adoption 的正向断言（BASE 拆分仍在 server.js 供派生）。
   const dir = mkdtempSync(join(tmpdir(), "wao-adopt-base-"));
   try {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
@@ -139,12 +141,9 @@ test("0098-MCP-5: BASE 字节不变——bundle 的嵌 delivery schema 不含 ad
     try {
       const tools = (await client.listTools()).tools;
       const runDelivery = tools.find((t) => t.name === "run_delivery");
-      const bundle = tools.find((t) => t.name === "run_delivery_review_bundle");
-      assert.ok(runDelivery && bundle, "两个工具都在面");
+      assert.ok(runDelivery, "run_delivery 在面");
       assert.ok(JSON.stringify(runDelivery.outputSchema).includes("adoption"),
         "run_delivery 的 outputSchema 含 adoption（standalone 出参）");
-      assert.equal(JSON.stringify(bundle.outputSchema).includes("adoption"), false,
-        "review_bundle 嵌 BASE，delivery 子 schema 不含 adoption（字节不变）");
     } finally {
       await client.close();
       await server.close();

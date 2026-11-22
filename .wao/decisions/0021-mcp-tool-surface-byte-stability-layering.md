@@ -74,3 +74,15 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
   - 三条天花板按实测下调：`FROZEN_20_WIRE_CEILING` 93849→87149，`FROZEN_20_DESC_CEILING` 12219→11291，`FROZEN_20_HOSTVISIBLE_CEILING` 23937→22436；
   - `DESC_STRIPPED_CONTRACT_SHA` 重测重冻；
   - m12-10 注释链如实记录。
+
+## 追加记录：2026-11-23 减面 20 → 16（第 134 批，决定 0129）
+
+- **L2（能力并进后的真删除）**：`registry_list`、`runs_list`、`run_dispatch_contract_check`、`run_delivery_review_bundle` 四个只读工具删除；能力承接点分别是 `lead_preflight`（workers 用回 `AGENT_ENTRY` 同一 schema + `detail`/`recentRuns` 可选输入）、`run_dispatch` 的就地预检（`contractAdvisories` 进受理回执）、`run_delivery` + `run_delivery_review` 两步。Owner 明示（2026-11-22："4 个只读 MCP 工具有等价物，可以下沉——能力不丢的前提条件下，同意删"）。
+- **schema**：
+  - `lead_preflight`：输入增可选 `detail`（闭集）与 `recentRuns`（1..50）；`workers` 条目改用 `AGENT_ENTRY` 同一对象（+`cwd`/`sessionReuse`/`missingCredentialEnvNames`/`dispatchHold`）；输出增可选 `certificationEvidence` 与可选 `recentRuns` 节（条目同原 `runs_list.runs[]`）。
+  - `run_dispatch`：输出增可选 `contractAdvisories`（闭集码 + 有界说明，上限派生自 `CONTRACT_CHECK_ADVISORY_CODES` SSOT）。
+  - 四个被删工具的 inputSchema/outputSchema/annotations 整体离开 stripped 载荷。
+- **手续执行**：
+  - 三条天花板按实测下调：`FROZEN_16_WIRE_CEILING` 87157→71812，`FROZEN_16_DESC_CEILING` 11291→9711，`FROZEN_16_HOSTVISIBLE_CEILING` 22436→18473；
+  - `DESC_STRIPPED_CONTRACT_SHA` 重测重冻；
+  - m12-10 注释链如实记录。

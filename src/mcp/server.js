@@ -3,15 +3,20 @@
 // WAO MCP server factory — agent-facing control plane over stdio.
 //
 // This is the agent-facing MCP adapter. It exposes WAO application services as
-// MCP tools so an MCP host can list configured agents (registry_list) and
-// dispatch supervised background runs (run_dispatch) over the MCP protocol.
+// MCP tools so an MCP host can preflight the workspace/worker inventory
+// (lead_preflight) and dispatch supervised background runs (run_dispatch) over
+// the MCP protocol. 决定 0129（第 134 批）：registry_list 与 runs_list 的能力
+// 并入 lead_preflight（workers 全量条目 + detail/recentRuns 可选项），
+// run_dispatch_contract_check 并入 run_dispatch 的就地预检（advisory 进受理
+// 回执），run_delivery_review_bundle 由 run_delivery + run_delivery_review 两次
+// 调用等价替代——工具面 20 → 16。
 //
 // Architectural contract (see docs/02-architecture.md):
 //   - This module imports the MCP SDK + zod (the ONLY place allowed besides tests).
 //   - It depends on src/application/registryInventory.js and runDispatch.js — it
 //     does NOT import src/commands/*, does NOT shell out to the CLI, does NOT
 //     read credentials, does NOT write transcripts directly.
-//   - registry_list is read-only. run_dispatch spawns a supervised worker via the
+//   - lead_preflight is read-only. run_dispatch spawns a supervised worker via the
 //     dispatchRun service (which forks a detached runner); it is destructive.
 //
 // The factory is dependency-injectable for testing: production wires the real
@@ -31,7 +36,6 @@ import {
   getRegistryInventory,
   getRegistryInventoryWithIssues,
   getCertificationEvidenceInventory,
-  projectRegistryIssues,
   normalizeInventoryResult,
   REGISTRY_ISSUE_CODES,
   REGISTRY_ISSUES_CAP,
@@ -173,18 +177,19 @@ import {
   TERMINATION_SOURCES,
   WAIT_POLICY_SOURCES,
 } from "../application/runObservationProjection.js";
-// M12-9 Package B: the shared execution-profile resolver + the optional
-// advisory dispatch-contract precheck. The resolver is the SINGLE authority used
-// by BOTH run_dispatch and run_dispatch_contract_check (profile vs inline
-// mutual exclusivity, known/unknown/conflict/non-delivery).
+// M12-9 Package B: the shared execution-profile resolver + the advisory
+// dispatch-contract precheck. The resolver is the SINGLE authority used by
+// run_dispatch (profile vs inline mutual exclusivity,
+// known/unknown/conflict/non-delivery). 决定 0129：原 run_dispatch_contract_check
+// 工具已删；预检服务保留，由 run_dispatch 在派发前就地调用，advisory 码进受理
+// 回执的 contractAdvisories。
 import {
   resolveDeliveryVerification,
   EXECUTION_PROFILE_IDS,
 } from "../application/executionProfiles.js";
 import {
   runDispatchContractCheck,
-  CONTRACT_CHECK_ISSUE_CODES,
-  CONTRACT_CHECK_SECTIONS,
+  CONTRACT_CHECK_ADVISORY_CODES,
 } from "../application/runDispatchContract.js";
 // M13-r2 (decision 0039): multi-seat read-only council consult (Agent Union) on
 // the MCP face. The service layer owns fan-out/collect/snapshot semantics; this
@@ -309,7 +314,7 @@ import {
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { checkWorkspaceExpectation, EXPECTED_GIT_HEAD_RE } from "../application/workspaceExpectation.js";
 // 非绝对项目标签（只读范围显示——lead_preflight workspace.projectBucket
-// 与 runs_list scope.projectBucket 共用同一派生式，不复制算法）。标签是绑定根
+// 与 lead_preflight 的 projectBucket 投影共用同一派生式，不复制算法）。标签是绑定根
 // 所属项目的；链接工作树取主工作树的项目（决定 0099 R8）。
 import { projectBucketLabel } from "../projectIdentity.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
@@ -438,26 +443,19 @@ function isStringField(v) {
 // Fixed safe text returned when the underlying service fails. Intentionally
 // constant — never concatenate dynamic content here (no err.message, no path,
 // no env). This is the redaction contract: the model learns only that the
-// read failed, never why in operational detail.
-const SERVICE_ERROR_TEXT = "registry_list failed";
+// read failed, never why in operational detail. 决定 0129：原 registry_list
+// 工具已删；本文案现用于 lead_preflight 请求 detail 时证据服务的 fail-closed。
+const SERVICE_ERROR_TEXT = "lead_preflight failed";
 
-// The registry_list tool input: a strict object whose ONLY member is the
-// optional closed-set detail selector. Extra keys are rejected by zod
-// validation before the service is ever called, so a model cannot override
-// server-side registryPath/runDir via tool arguments.
-//
-// ADR-0032 修订（2026-09-22，Owner 裁定）:认证证据详情按需进入 MCP 只读面。
-// detail 是单值闭集枚举（今日仅 "certificationEvidence"）；默认调用不传
-// detail —— 简表投影（agents/issues/issuesTruncated）一字不变。请求详情时
-// 额外返回可选 certificationEvidence（按席位五列），与 CLI
-// `registry list --cert-evidence` 共用同一 getCertificationEvidenceInventory
-// 服务（同一判断，无第二套语义）。advisory-only：组件通过不推出组合绿；
-// "undeterminable" 绝不算绿；绝不派生"总体可用=true"。不改派发门
-// （--require-certified / matchedCertRecord / requireCertified=false 原语义）。
-const REGISTRY_LIST_DETAIL_VALUES = Object.freeze(["certificationEvidence"]);
-const REGISTRY_LIST_INPUT = z.object({
-  detail: z.enum([...REGISTRY_LIST_DETAIL_VALUES]).optional(),
-}).strict();
+// 决定 0129：原 registry_list 的可选 detail 选择器并入 lead_preflight 输入。
+// 单值闭集枚举（今日仅 "certificationEvidence"）；默认调用不传 detail ——
+// 简表投影一字不变。请求详情时额外返回可选 certificationEvidence（按席位
+// 五列），与 CLI `registry list --cert-evidence` 共用同一
+// getCertificationEvidenceInventory 服务（同一判断，无第二套语义）。
+// advisory-only：组件通过不推出组合绿；"undeterminable" 绝不算绿；绝不派生
+// "总体可用=true"。不改派发门（--require-certified / matchedCertRecord /
+// requireCertified=false 原语义）。
+const PREFLIGHT_DETAIL_VALUES = Object.freeze(["certificationEvidence"]);
 
 // M12-6 FR-02: strict provider readiness truth projection. Enums derive from
 // the registryInventory.js SSOT (z.enum(CONFIGURATION_STATUSES) etc.), so the
@@ -474,8 +472,10 @@ const PROVIDER_READINESS = z.object({
   credentialAvailability: z.enum(["available", "missing", "not_required"]),
 }).strict();
 
-// The structured output shape: { agents: [...] }. certification is nullable
-// because an agent may have no reliability-summary entry.
+// The structured worker entry shape — 决定 0129 起由 lead_preflight.workers[]
+// 独占承载（原 registry_list 的输出条目同一份 schema，不再各写一份）。
+// certification is nullable because an agent may have no reliability-summary
+// entry.
 // M11-7: credentialAvailability (available|missing|not_required) is DISTINCT
 // from certification and ONLY reflects whether registry-declared REQUIRED
 // credentials are present — not full runtime health. missingCredentialEnvNames
@@ -524,8 +524,7 @@ const REGISTRY_ISSUE = z.object({
   agentId: z.string().nullable(),
 }).strict();
 
-// ADR-0032 修订（2026-09-22）：按席位五列的认证证据详情行（可选——仅在
-// detail:"certificationEvidence" 时出现在输出里；默认调用一字节不多）。
+// ===== ADR-0032 修订（2026-09-22）：certificationEvidence 行投影（纯函数） =====
 //
 // 五列与 CLI `registry list --cert-evidence` 同源同义（同一服务
 // getCertificationEvidenceInventory）：
@@ -557,32 +556,6 @@ const CERT_EVIDENCE_ROW = z.object({
   summaryLedgerState: z.enum([...CERT_LEDGER_SOURCE_STATES]),
   componentLedgerState: z.enum([...CERT_LEDGER_SOURCE_STATES]),
 }).strict();
-
-const REGISTRY_LIST_OUTPUT = z.object({
-  agents: z.array(AGENT_ENTRY),
-  // M12-25: bounded per-entry issues (closed code set; canonical id only).
-  issues: z.array(REGISTRY_ISSUE).max(REGISTRY_ISSUES_CAP),
-  issuesTruncated: z.boolean(),
-  // ADR-0032 修订：可选（optional = 键缺席 ⇔ 未请求详情；请求了详情则必有
-  // ——服务抛错整次调用 fail-closed，绝不静默省略被读成"无证据行"）。
-  certificationEvidence: z.array(CERT_EVIDENCE_ROW).optional(),
-}).strict();
-
-// Read-only annotations tell MCP hosts this tool is safe to cache/retry and
-// does not mutate the world.
-const REGISTRY_LIST_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-// 必须保留：detail 证据是 advisory、never a gate；dispatchHold 是 Owner 的暂停
-// 原话——只告知、从不拦截（决定 0080）。
-const REGISTRY_LIST_DESCRIPTION =
-  "List configured worker agents: backend, model, certification, credential availability. " +
-  "Read-only; optional detail adds per-seat certification evidence — advisory, never a gate. " +
-  "Entries may carry dispatchHold: the Owner's pause note for that lane, advisory only, never blocks.";
 
 // ===== ADR-0032 修订（2026-09-22）：certificationEvidence 行投影（纯函数） =====
 //
@@ -683,7 +656,7 @@ const DISPATCH_ERROR_TEXT = "run_dispatch failed";
 // dispatch time. Actionable (names shown) but never echoes credential VALUES.
 const DISPATCH_CREDENTIAL_MISSING_TEXT =
   "run_dispatch refused: the worker is missing a required credential. " +
-  "See registry_list (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
+  "See lead_preflight workers (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
   "then set them in the current process or Windows User environment and retry.";
 
 // M11-11C: fixed, actionable error when a reusable expert already has an
@@ -848,9 +821,9 @@ const DELIVERY_INPUT = z.object({
 
 // M12-9 Package B: a profile id is a bounded free-form string here on purpose.
 // KNOWN/UNKNOWN/conflict/non-delivery is decided by the shared resolver (the
-// single source of truth), so an unknown id still reaches
-// run_dispatch_contract_check and is reported as the advisory code
-// profile_unknown — NOT a hard schema rejection. The profile-vs-inline mutual
+// single source of truth), so an unknown id still reaches the in-place
+// contract precheck and is refused as the contract-level code profile_unknown
+// — NOT a hard schema rejection. The profile-vs-inline mutual
 // exclusivity and the "delivery must declare verification when no profile is
 // selected" rules are enforced in the run_dispatch HANDLER (via the shared
 // resolver) BEFORE the dispatcher is called — they cannot live here as a
@@ -860,7 +833,7 @@ const DELIVERY_INPUT = z.object({
 
 /**
  * 0045 §1.4：派发选择器错误的固定文案（闭集码 + received 白名单回显 + 完整
- * 合法全集[≤32 项截断指向 registry_list] + 修正例）。M11-8B 纪律：isError 固定
+ * 合法全集[≤32 项截断指向 lead_preflight workers] + 修正例）。M11-8B 纪律：isError 固定
  * 文本（不 structuredContent——SDK 对 isError 出参的 outputSchema 校验未验证，
  * R3 auditor_claude 裁定保守形态）。
  * TD-319：返回**行数组**（不再 join）——有意分行的错误文本；register 的包装层
@@ -869,7 +842,7 @@ const DELIVERY_INPUT = z.object({
  */
 export function dispatchSelectorErrorText(resolution) {
   const cap = (list) => (list.length > 32
-    ? `${list.slice(0, 32).join(", ")} …（截断，全 wao lanes 详见 registry_list）`
+    ? `${list.slice(0, 32).join(", ")} …（截断，全 wao lanes 详见 lead_preflight workers）`
     : list.join(", "));
   const c = resolution.choices ?? {};
   const parts = [`dispatch refused: ${resolution.code}. ${resolution.message}`];
@@ -927,16 +900,14 @@ const RUN_DISPATCH_INPUT = z.object({
   // lowercase 7..64-hex literal (F3, 2026-10-08: short forms accepted — the
   // shared expectation SSOT matches them by PREFIX against the proven head, a
   // deliberately weakened assertion vs the full 40/64-hex exact form; regex
-  // serializes to JSON Schema and rides BOTH dispatch tools' inputSchema);
+  // serializes to JSON Schema and rides this inputSchema);
   // expectedDirty is a boolean. expectedWorkspaceRoot is the dispatch
-  // TARGET — required by the run_dispatch HANDLER (not the schema: this schema
-  // is shared with run_dispatch_contract_check, where the field is optional,
-  // and a schema-level requirement would narrow both) — proved via proveWorkspace;
+  // TARGET — required by the run_dispatch HANDLER (决定 0129 起本 schema 不再与
+  // 已删的 contract_check 工具共享；schema 保持 optional 是既有 wire 形状，
+  // handler 固定文案强制必传) — proved via proveWorkspace;
   // the session/MCP-root/server-config binding is NOT consulted for the
   // dispatch target. Absence or an unprovable value refuses with a fixed text
-  // before any side effect. run_dispatch_contract_check takes the field
-  // optionally: given, it checks against that proved project and reports
-  // workspaceScope; omitted, it follows the default binding.
+  // before any side effect.
   expectedGitHead: z.string().regex(EXPECTED_GIT_HEAD_RE).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
@@ -982,7 +953,7 @@ const RUN_DISPATCH_INPUT = z.object({
   // worker, changes the prompt, infers/expands allowedPaths, sets continuable,
   // or sets expected workspace/head/dirty. Known/unknown/conflict is decided by
   // the shared resolver; this field is a bounded free-form string so an unknown
-  // id reaches run_dispatch_contract_check as advisory code profile_unknown.
+  // id reaches the in-place precheck as contract-level code profile_unknown.
   executionProfileId: z.string().trim().min(1).max(64).optional(),
   // R10-A (Owner 2026-08-17): optional per-dispatch model override — the MCP
   // counterpart of the CLI --model flag ("use codex-driven gpt-5.6-sol-xhigh
@@ -997,8 +968,8 @@ const RUN_DISPATCH_INPUT = z.object({
   // continuable lineages — refused by the service with the typed
   // ModelOverrideConflictError collapsed to its fixed text below); requireCertified
   // is server-owned false here, so the certified-conflict door is unreachable
-  // over MCP by construction. run_dispatch_contract_check shares this schema
-  // and intentionally IGNORES the field (it advises on the delivery contract).
+  // over MCP by construction. The in-place contract precheck intentionally
+  // IGNORES the field (it advises on the delivery contract only).
   model: z.string().min(1).max(MODEL_OVERRIDE_MAX).regex(new RegExp(MODEL_OVERRIDE_WIRE_PATTERN)).optional(),
   // R11-1 (Owner 2026-08-17): optional per-dispatch reasoning effort override
   // — the MCP counterpart of the CLI --reasoning flag (composable with
@@ -1007,9 +978,9 @@ const RUN_DISPATCH_INPUT = z.object({
   // `.effort` (siblings survive — the service synthesizes, never swaps). The
   // enum is the SAME closed set the core validator uses (REASONING_EFFORTS,
   // registry.js → runManager.js → runDispatch.js re-export), serialized as a
-  // zod enum — closed-set on the wire, stricter than a regex. run_dispatch_
-  // contract_check shares this schema and intentionally IGNORES the field (it
-  // advises on the delivery contract — the same note as `model` above).
+  // zod enum — closed-set on the wire, stricter than a regex. The in-place
+  // contract precheck intentionally IGNORES the field (it advises on the
+  // delivery contract only — the same note as `model` above).
   // Mutually exclusive with provider-session reuse (refused by the service
   // with the typed ReasoningOverrideConflictError collapsed to its fixed text
   // below); requireCertified is server-owned false here, so the
@@ -1036,6 +1007,19 @@ const WORKSPACE_PROOF = z.object({
   expectedWorkspaceRootMatch: z.boolean().nullable(),
 }).strict();
 
+// ===== 决定 0129：run_dispatch 受理回执的 contractAdvisories（原
+// run_dispatch_contract_check 工具的就地承接） =====
+//
+// run_dispatch 在派发前就地跑同一份预检服务（runDispatchContractCheck，同一
+// 函数不复制）。会让派发被拒的合同级问题照旧在任何副作用之前拒绝（权威仍是
+// run_dispatch，映射到既有固定文案，语义不变）；只是提醒、不拦截的 advisory
+// 码随受理回执给出——闭集码 + 服务侧同一句固定说明，没有问题就不带这个键。
+// enum 与上限都从服务的 CONTRACT_CHECK_ADVISORY_CODES SSOT 派生（无第二份清单）。
+const CONTRACT_ADVISORY_ENTRY = z.object({
+  code: z.enum([...CONTRACT_CHECK_ADVISORY_CODES]),
+  note: z.string().max(512),
+}).strict();
+
 // run_dispatch output: runId + agentId + accepted + state + additive workspaceProof
 // + additive providerSessionRouting. No paths, PID, prompt, argv, opaque session
 // id, Lead id, or provider payload. M11-8B final closeout: strict root; agentId
@@ -1057,6 +1041,10 @@ const RUN_DISPATCH_OUTPUT = z.object({
   // 画像读失败或车道不在画像里时缺省——fail-open，绝不影响派发）。accepted:false
   // 不给；run_continue 不给。
   laneFacts: z.string().min(1).max(LANE_FACTS_LINE_MAX_CHARS).optional(),
+  // 决定 0129：就地预检（原 run_dispatch_contract_check 的承接）给出的 advisory
+  // 码 + 固定说明——只是提醒、从不拦截；零提醒 = 键缺省。accepted:false 不给。
+  contractAdvisories: z.array(CONTRACT_ADVISORY_ENTRY)
+    .max(CONTRACT_CHECK_ADVISORY_CODES.length).optional(),
 }).strict();
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
@@ -1080,84 +1068,6 @@ const RUN_DISPATCH_DESCRIPTION =
   "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
   "keeps one live process so run_correct can queue an in-flight turn. WAO never infers " +
   "continuation, correction delivery, scope, retry, or acceptance.";
-
-// ===== run_dispatch_contract_check (M12-9 advisory precheck) constants =====
-//
-// An OPTIONAL read-only / ADVISORY precheck that folds the mechanical facts a
-// Lead might want BEFORE run_dispatch — workspace binding, worker registry
-// presence, and the delivery contract (inline verification OR a frozen execution
-// profile) — into ONE bounded result. It is NOT a gate: warning/unknown/
-// contractValid=false do NOT auto-block an independent run_dispatch.
-//
-// It shares run_dispatch's INPUT schema (RUN_DISPATCH_INPUT) and the SAME
-// application validators (the shared resolveDeliveryVerification resolver +
-// prepareDeliveryRequest). Output is bounded/strict/closed-set/safe.
-const CONTRACT_CHECK_ERROR_TEXT = "run_dispatch_contract_check failed";
-
-// Closed-set section status (each section settles independently; read failure
-// is "unknown", never faked observed).
-const CONTRACT_SECTION_STATUS = z.enum(["observed", "unknown"]);
-
-// Selected profile projection: id + COUNTS only — never command text. Counts are
-// bounded by the same delivery command cap (DELIVERY_VERIFICATION_COMMANDS_MAX).
-const CONTRACT_SELECTED_PROFILE = z.object({
-  id: z.enum([...EXECUTION_PROFILE_IDS]),
-  setupCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
-  assertionCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
-}).strict();
-
-// Bounded catalog summary, surfaced ONLY when no profile is selected. id +
-// counts + a short FIXED summary — never command text.
-const CONTRACT_AVAILABLE_PROFILE = z.object({
-  id: z.enum([...EXECUTION_PROFILE_IDS]),
-  setupCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
-  assertionCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
-  summary: z.string().min(1).max(160),
-}).strict();
-
-const RUN_DISPATCH_CONTRACT_CHECK_OUTPUT = z.object({
-  advisory: z.literal(true),
-  contractValid: z.boolean(),
-  sections: z.object({
-    workspace: CONTRACT_SECTION_STATUS,
-    registry: CONTRACT_SECTION_STATUS,
-    contract: CONTRACT_SECTION_STATUS,
-  }).strict(),
-  // Explicit maxima derived from the frozen closed set / catalog / section SSOT
-  // — no second hand-maintained allowlist: issueCodes can never exceed the code
-  // set; observations never exceed one-per-section (CONTRACT_CHECK_SECTIONS);
-  // availableProfiles never exceeds the catalog. A malformed/oversized service
-  // object is rejected by the .parse() in the handler and collapses to
-  // CONTRACT_CHECK_ERROR_TEXT.
-  issueCodes: z.array(z.enum([...CONTRACT_CHECK_ISSUE_CODES])).max(CONTRACT_CHECK_ISSUE_CODES.length),
-  observations: z.array(z.string()).max(CONTRACT_CHECK_SECTIONS.length),
-  profile: CONTRACT_SELECTED_PROFILE.nullable(),
-  availableProfiles: z.array(CONTRACT_AVAILABLE_PROFILE).max(EXECUTION_PROFILE_IDS.length).optional(),
-  // Which scope this check ran against: call_target when the call supplied
-  // expectedWorkspaceRoot (proved and used for the path probes), otherwise the
-  // resolved default binding. source + non-absolute project label only — never
-  // an absolute path (same contract as runs_list scope).
-  workspaceScope: z.object({
-    source: z.enum(["call_target", "server_config", "mcp_root"]).nullable(),
-    projectBucket: z.string().nullable(),
-  }).strict(),
-}).strict();
-
-const RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
-  // 必须保留：ADVISORY、NOT a gate——contractValid 从不自动拦截。
-  "Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery contract " +
-  "(inline verification or a frozen execution profile) and observes the workspace scope + " +
-  "worker presence into one bounded closed-set result. The optional expectedWorkspaceRoot " +
-  "(absolute Git worktree top-level) checks against that proved project instead of the " +
-  "default binding; workspaceScope in the result names the scope actually used. NOT a gate " +
-  "— contractValid never auto-blocks; run_dispatch stays authoritative.";
 
 // ===== run_consult (M13-r2 multi-seat read-only council consult) constants =====
 //
@@ -1187,9 +1097,9 @@ const RUN_CONSULT_READ_ERROR_TEXT =
   "a linked worktree uses its main worktree's .wao); check the id and pass the record's project root as expectedWorkspaceRoot";
 const RUN_CONSULT_RENDER_ERROR_TEXT =
   "run_consult read failed: the consult record was found, but rendering it failed — " +
-  "read the seats directly: run_collect with each seat runId (runs_list shows them)";
+  "read the seats directly: run_collect with each seat runId (lead_preflight recentRuns shows them)";
 const RUN_CONSULT_ERROR_AFTER_DISPATCH_TEXT =
-  "run_consult failed after seats were dispatched: seat runs may be running — find them with runs_list; " +
+  "run_consult failed after seats were dispatched: seat runs may be running — find them with lead_preflight recentRuns; " +
   "the consult record may not have been written";
 const RUN_CONSULT_MODE_TEXT =
   "run_consult refused: exactly one mode — consultId (read, zero dispatch) or " +
@@ -1439,7 +1349,7 @@ const CONTINUE_VERIFICATION_REQUIRED_TEXT =
   "(verificationCommands or verificationUnavailableReason); execution profiles are not supported here.";
 const CONTINUE_CREDENTIAL_MISSING_TEXT =
   "run_continue refused: the worker is missing a required credential. " +
-  "See registry_list (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
+  "See lead_preflight workers (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
   "then set them in the current process or Windows User environment and retry.";
 
 // run_continue input: the terminal parent run to continue + the Lead's correction
@@ -1750,8 +1660,8 @@ const RUN_STATUS_OUTPUT = z.object({
   // text. ABSENT (never null) when the run has no scorecard.checked event, so
   // every pre-existing output shape stays byte-identical.
   // TD-153 (2026-09-18, schema narrowing): failedChecks is the FULL closed-set
-  // enum + a ceiling derived from the catalog — same shape as issueCodes
-  // (CONTRACT_CHECK_ISSUE_CODES, ~:747). NOT a shape-only bounded string: n=6 is
+  // enum + a ceiling derived from the catalog — same shape as the precheck's
+  // issueCodes closed set. NOT a shape-only bounded string: n=6 is
   // a small closed set, the repo norm for those is a full enum (semanticNotes is
   // the documented catalog-scale exception). Every member is ≤16 chars
   // ("hasAssistantText" is the longest), so enum membership bounds item length
@@ -1769,9 +1679,8 @@ const RUN_STATUS_OUTPUT = z.object({
   // 去留由 Lead 决定，WAO 不据此做任何动作。
   leadAdvisory: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
-  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
-  // deliberately does not carry the field.
+  // AVAILABLE_DRILLDOWNS). Only the standalone observation outputs expose it;
+  // the delivery BASE shape deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
@@ -1813,8 +1722,8 @@ const COLLECT_WORKSPACE_MISMATCH_TEXT =
 // CursorRejectedError（instanceof 分类，沿 run_activity M12-19 纪律——不透子类型：
 // 过期/跨 run/被改不区分）折叠为 isError + 这条固定文案：静态恢复指引（第 1 页
 // 重取、勿手工修改），不透原始 cursor、不透错误详情、零 structuredContent。
-// 共享句由三个携带 cursor 的观察工具（run_collect / run_delivery_review /
-// run_delivery_review_bundle）的专属文案复用——单一常量，无三份漂移。
+// 共享句由携带 cursor 的观察工具（run_collect / run_delivery_review /
+// run_activity）的专属文案复用——单一常量，无多份漂移。
 const CURSOR_REJECTED_GUIDANCE =
   "cursor is invalid or expired — re-fetch from page 1 (call again without a cursor); " +
   "never hand-modify a cursor token";
@@ -1923,9 +1832,8 @@ const RUN_COLLECT_OUTPUT = z.object({
   // text content and structuredContent from this one field.
   compactFallback: z.string().optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
-  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
-  // deliberately does not carry the field.
+  // AVAILABLE_DRILLDOWNS). Only the standalone observation outputs expose it;
+  // the delivery BASE shape deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
@@ -2012,9 +1920,8 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   signalCount: z.number().int().nonnegative(),
   signalsTruncated: z.boolean(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
-  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
-  // deliberately does not carry the field.
+  // AVAILABLE_DRILLDOWNS). Only the standalone observation outputs expose it;
+  // the delivery BASE shape deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
   // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES). Only the four
   // standalone tools that own a current outcome/delivery/diagnosis carry them;
@@ -2195,9 +2102,8 @@ function safeProjectCandidateInventory(raw) {
 
 // Delivery base shape: the legacy run_delivery contract WITHOUT M12-8B
 // metadata. The standalone output below extends it with the REQUIRED
-// availableDrilldowns; run_delivery_review_bundle embeds this base so its
-// established nested delivery contract stays byte-identical and never
-// accidentally acquires the progressive-disclosure field.
+// availableDrilldowns; the base split remains so the legacy field set stays
+// derivable in one place (决定 0129 起仅 run_delivery 自身消费).
 const RUN_DELIVERY_OUTPUT_BASE = z.object({
   runId: z.string().min(1),
   deliveryAvailable: z.boolean(),
@@ -2957,7 +2863,10 @@ function proveCallWorkspaceRoot(expectedWorkspaceRoot) {
 
 // ===== lead_preflight (advisory single-call aggregator) constants =====
 // M11-8A: lets a Lead gather workspace binding + worker credential availability +
-// active runs in ONE call instead of registry_list + runs_list round trips.
+// active runs in ONE call. 决定 0129（第 134 批）：原 registry_list 与 runs_list
+// 的能力并入——workers[] 条目与原 AGENT_ENTRY 同形（含 cwd/sessionReuse/
+// missingCredentialEnvNames/dispatchHold），可选 detail 返回认证证据行，可选
+// recentRuns 返回最近运行清单（原 runs_list.runs[] 同形，同一 listRuns 服务）。
 // ADVISORY ONLY — not a gate. Each section settles independently; a
 // failure is a warning, never a hard stop. No PASS/FAIL verdict.
 // 批 119（A3）：输入 workspaceRoot 改名 expectedWorkspaceRoot。给了就当场证明、
@@ -2967,6 +2876,11 @@ function proveCallWorkspaceRoot(expectedWorkspaceRoot) {
 
 const LEAD_PREFLIGHT_INPUT = z.object({
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // 决定 0129：原 registry_list 的可选 detail 选择器（同一闭集）。
+  detail: z.enum([...PREFLIGHT_DETAIL_VALUES]).optional(),
+  // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点）——请求的条数上限。
+  // 不传 = 不扫描、输出无 recentRuns 键。
+  recentRuns: z.number().int().min(1).max(50).optional(),
 }).strict();
 
 // 0087: lane-profile compact projection — ONE closed sub-schema used BOTH for
@@ -3062,27 +2976,19 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   }).strict().nullable(),
   // workers/activeRuns are null when unreadable (unknown), NOT when known-empty.
   // Array bounds share the application-layer SSOT caps so they cannot drift.
-  workers: z.array(z.object({
-    id: z.string().max(128),
-    backend: z.string().max(64),
-    model: z.string().max(128),
-    reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
-    certification: z.string().nullable(),
-    // TD-111: certification advisory context — same closed set + freshness date
-    // as registry_list (the aggregator always emits both, defaulting missing
-    // inventory fields to null for legacy service-shaped inputs).
-    certificationReasonCode: z.enum([...CERTIFICATION_REASON_CODES]).nullable(),
-    certificationLastHealthyAt: z.string().nullable(),
-    credentialAvailability: z.enum(["available", "missing", "not_required"]),
-    // M12-6 FR-02: same strict truth object as registry_list (shared SSOT enums).
-    providerReadiness: PROVIDER_READINESS,
-  }).strict()).max(WORKERS_CAP).nullable(),
+  // 决定 0129：条目与原 registry_list 的 AGENT_ENTRY 同一 schema 对象（同一份
+  // 定义，不再各写一份）；preflight 的 workers 上限与截断语义照旧。
+  workers: z.array(AGENT_ENTRY).max(WORKERS_CAP).nullable(),
   // M12-25: bounded safe per-entry issues from the partial inventory projection.
   // Non-empty ⇒ checkStatus.workers="warning" (→ complete=false), but the VALID
   // workers above are still returned. Empty when observed-clean or unknown.
-  // Same closed-set shape as registry_list (single SSOT for codes/cap).
+  // Closed-set shape from the registryInventory SSOT (codes/cap, single list).
   registryIssues: z.array(REGISTRY_ISSUE).max(REGISTRY_ISSUES_CAP),
   registryIssuesTruncated: z.boolean(),
+  // 决定 0129：原 registry_list detail:"certificationEvidence" 的承接点——可选
+  //（键缺席 ⇔ 未请求详情；请求了详情而证据服务抛错/形状违约 ⇒ 整次调用
+  // fail-closed 到固定错误文本，绝不静默省略被读成"无证据行"）。
+  certificationEvidence: z.array(CERT_EVIDENCE_ROW).optional(),
   activeRuns: z.array(z.object({
     runId: z.string().max(128),
     agentId: z.string().max(128),
@@ -3096,6 +3002,24 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   // from the SAME scan that produced activeRuns (lead_preflight does not
   // rescan). null when the active-run query was unreadable (unknown, NOT 0).
   unresolvedRunCount: z.number().int().nullable(),
+  // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点）——条目与原
+  // runs_list.runs[] 同形（含 activityStatus/activityBasis 闭集），另带
+  // returnedCount/truncated/unresolvedCount 事实。不请求 = 键缺席；请求而读不出
+  // 或未绑定 = null（unknown，绝不伪造空清单）；不进 checkStatus/complete。
+  recentRuns: z.object({
+    runs: z.array(z.object({
+      runId: z.string(),
+      agentId: z.string(),
+      state: z.enum([...RUN_STATES, "unknown"]),
+      terminal: z.boolean(),
+      updatedAt: z.string().datetime().nullable(),
+      activityStatus: z.enum(ACTIVITY_STATUSES),
+      activityBasis: z.enum(ACTIVITY_BASES),
+    })),
+    returnedCount: z.number().int(),
+    truncated: z.boolean(),
+    unresolvedCount: z.number().int(),
+  }).strict().nullable().optional(),
   // 0087: compact lane-profile projection (per-dimension star ratings with
   // basis). null in a worker context, when unreadable, or when the independent
   // sub-schema validation below failed — advisory reference data only, never
@@ -3124,15 +3048,21 @@ const LEAD_PREFLIGHT_DESCRIPTION =
   // 必须保留：advisory + not a gate（M12-10-G 钉）；分节独立沉降、原工具复验。
   // unboundReason 的语义（闭集恢复事实）只在这里的 workspace 一节陈述。
   // 决定 0113：open item 观察行一句话（行本体由 leadOpenItems.js 生成）。
-  "Advisory single-call preflight: workspace binding, worker credentials, active runs, " +
-  "lane profiles (per-dimension star ratings, not routing rules; wao lanes has full " +
-  "profiles). Optional expectedWorkspaceRoot proves that project on the spot and scopes " +
-  "ONLY this call (source call_target; no shared session state); when omitted the " +
-  "default binding falls back to MCP roots / server config. A failed proof returns its " +
-  "fixed refusal text with NO project content. ADVISORY ONLY — not a gate: warnings are " +
-  "facts, never an auto-stop; sections settle independently, re-verify via the original " +
-  "tools. `open item:` observation lines list what awaits Lead closeout (unsettled " +
-  "deliveries, reclaimable worktrees/branches, feedback inbox) with the next command.";
+  // 决定 0129：workers 全量条目 + detail/recentRuns 两个可选输入各一句。
+  "Advisory single-call preflight: workspace binding, full worker entries (backend, " +
+  "model, certification, credentials, dispatchHold), active runs, lane profiles " +
+  "(per-dimension star ratings, not routing rules; wao lanes has full profiles). " +
+  "Optional detail=certificationEvidence adds per-seat evidence rows (advisory, never " +
+  "a gate); optional recentRuns (1..50) lists that many recent runs — activityStatus " +
+  "unresolved (non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped. " +
+  "Optional expectedWorkspaceRoot proves that project on the spot and " +
+  "scopes ONLY this call (source call_target; no shared session state); when omitted " +
+  "the default binding falls back to MCP roots / server config. A failed proof " +
+  "returns its fixed refusal text with NO project content. ADVISORY ONLY — not a " +
+  "gate: warnings are facts, never an auto-stop; sections settle independently, " +
+  "re-verify via the original tools. `open item:` observation lines list what awaits " +
+  "Lead closeout (unsettled deliveries, reclaimable worktrees/branches, feedback " +
+  "inbox) with the next command.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -3204,60 +3134,6 @@ const RUN_STOP_DESCRIPTION =
   "claims terminal 'aborted' and runs the destructive side effect (process kill / backend " +
   "abort); concurrent/late callers rejected, zero side effects. Not idempotent; " +
   "after terminal a passing call writes only a rejection audit fact.";
-
-// ===== runs_list (workspace-bound read-only run inventory) constants =====
-
-const RUNS_LIST_ERROR_TEXT = "runs_list failed";
-
-const RUNS_LIST_INPUT = z.object({
-  activeOnly: z.boolean().optional(),
-  limit: z.number().int().min(1).max(100).optional(),
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
-}).strict();
-
-const RUNS_LIST_OUTPUT = z.object({
-  // 绑定来源 + 非绝对项目标签（<displayName>-<hash8>，与 lead_preflight
-  // workspace.projectBucket 同派生式）——标签是绑定根所属项目的，链接工作树
-  // 取主工作树的项目（决定 0099 R8）；绑定根不可识别时 projectBucket 为 null。
-  // runs_list 可按调用带目标根；省略时用缺省绑定（MCP roots → 启动配置）。
-  scope: z.object({
-    source: z.enum(["call_target", "server_config", "mcp_root"]),
-    projectBucket: z.string().min(1).max(128).nullable(),
-  }).strict(),
-  runs: z.array(z.object({
-    runId: z.string(),
-    agentId: z.string(),
-    state: z.enum([...RUN_STATES, "unknown"]),
-    terminal: z.boolean(),
-    updatedAt: z.string().datetime().nullable(),
-    // M12-15: closed-set activity projection. activityStatus=active requires a
-    // known non-terminal transcript + a fresh owner heartbeat; unresolved means
-    // non-terminal without a fresh heartbeat (never inferred failed/dead/stopped);
-    // terminal/unknown are never active. Shared SSOT enums from runList.js.
-    activityStatus: z.enum(ACTIVITY_STATUSES),
-    activityBasis: z.enum(ACTIVITY_BASES),
-  })),
-  returnedCount: z.number().int(),
-  truncated: z.boolean(),
-  // Full-scan count of known non-terminal runs lacking a fresh owner heartbeat
-  // (pre-limit, independent of activeOnly) — so lead_preflight need not rescan.
-  unresolvedCount: z.number().int(),
-});
-
-const RUNS_LIST_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const RUNS_LIST_DESCRIPTION =
-  // 必须保留：unresolved 绝不推断 failed/dead/stopped（Lead 据此分支）。
-  "List runs owned by the bound workspace (the response's scope names that binding's " +
-  "source + non-absolute project label). Each item carries activityStatus/activityBasis: " +
-  "active requires a known non-terminal transcript with a fresh owner heartbeat; unresolved " +
-  "(non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped and is counted in " +
-  "unresolvedCount. limit defaults to 50. Read-only, idempotent.";
 
 // ===== observation/termination facts（等待族共享投影）constants =====
 // 批 119（A5）：MCP 长轮询等待工具已真删除——长等待用重复 run_await_result
@@ -3421,9 +3297,8 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   observation: OBSERVATION_FACT,
   termination: TERMINATION_FACT.nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
-  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
-  // deliberately does not carry the field.
+  // AVAILABLE_DRILLDOWNS). Only the standalone observation outputs expose it;
+  // the delivery BASE shape deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
   // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES).
   semanticNotes: SEMANTIC_NOTES,
@@ -3663,9 +3538,8 @@ const RUN_ACTIVITY_OUTPUT = z.object({
   truncated: z.boolean(),
   nextCursor: z.string().regex(RUN_ACTIVITY_CURSOR_RE).max(ACTIVITY_CURSOR_MAX_CHARS).nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
-  // AVAILABLE_DRILLDOWNS). Only the seven standalone observation outputs expose
-  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
-  // deliberately does not carry the field.
+  // AVAILABLE_DRILLDOWNS). Only the standalone observation outputs expose it;
+  // the delivery BASE shape deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
@@ -3762,7 +3636,7 @@ const SEMANTICS_SUMMARY_ERROR_TEXT = "semantics summary failed";
 const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
 
 /**
- * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
+ * Create a WAO MCP server with lead_preflight, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide (16 tools; 决定 0129).
  *
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
@@ -3852,60 +3726,10 @@ const DELIVERY_REVIEW_DESCRIPTION =
   "verification_pending (advisory, NOT an error) → wait via run_delivery(waitMs). " +
   "Read-only, idempotent, workspace-bound.";
 
-// ===== run_delivery_review_bundle (M12-3B mechanical composition) =====
-//
-// One Lead-selected file page plus the delivery-readiness facts needed to know
-// whether that page is reviewable. This is a convenience composition, not a
-// semantic reviewer: it never selects/traverses files or cursors and never
-// stop/retry/repackage/accept/rejects. Atomic tools remain available.
-const DELIVERY_REVIEW_BUNDLE_ERROR_TEXT = "run_delivery_review_bundle failed";
-// TD-324（83 批 W2）：归属拒绝专属固定文案（readiness 与 review 服务均 typed
-// code；调用目标或缺省会话绑定语义，见 boundWorkspaceMismatchText）。
-const DELIVERY_REVIEW_BUNDLE_WORKSPACE_MISMATCH_TEXT =
-  boundWorkspaceMismatchText("run_delivery_review_bundle");
-// F5 (2026-10-08): 坏 cursor 专属拒绝文案（同上，组合工具同款折叠）。
-const DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT =
-  `run_delivery_review_bundle failed — ${CURSOR_REJECTED_GUIDANCE}`;
-const DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS = 45000;
-
-const DELIVERY_REVIEW_BUNDLE_INPUT = z.object({
-  runId: z.string().min(1),
-  fileIndex: z.number().int().nonnegative(),
-  cursor: z.string().max(192).optional(),
-  waitMs: z.number().int().min(DELIVERY_WAIT_MS_MIN).max(DELIVERY_WAIT_MS_MAX).optional(),
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
-}).strict();
-
-const DELIVERY_REVIEW_BUNDLE_OUTPUT = z.object({
-  runId: z.string().min(1),
-  // M12-8B: the nested delivery is the legacy BASE shape — the bundle keeps
-  // its established contract and never acquires the progressive-disclosure
-  // field (the standalone run_delivery output carries it instead).
-  delivery: RUN_DELIVERY_OUTPUT_BASE,
-  review: DELIVERY_REVIEW_OUTPUT.nullable(),
-}).strict();
-
-const DELIVERY_REVIEW_BUNDLE_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const DELIVERY_REVIEW_BUNDLE_DESCRIPTION =
-  // 必须保留：waitMs 合同（省略 = 默认等待，数值由
-  // DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS 插值，不写字面值——M12-3B-12 钉
-  // 描述与行为一致）/ review 空值语义 / Lead 供页的非选择边界 / 原子工具仍在。
-  "One bounded read-only readiness wait that returns early once settled (waitMs: " +
-  `${DELIVERY_WAIT_MS_MIN}..${DELIVERY_WAIT_MS_MAX} ms, waitMs=0 is invalid; omit = default ` +
-  `${DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS} ms wait; pending-at-deadline ` +
-  "truthful, never an error), then, only when reviewable, one Lead-selected bounded review " +
-  "page (review is null otherwise — no diff read); response always carries the safe " +
-  "run_delivery facts. fileIndex/cursor are Lead-supplied: the tool never chooses/traverses " +
-  "files or cursors, never summarizes repository text, never stop/retry/repackage/accept/" +
-  "reject. Host transport loss/cancellation does not stop the detached run — re-read " +
-  "point-in-time; run_delivery + run_delivery_review remain for atomic control " +
-  "(immediate reads).";
+// 决定 0129：run_delivery_review_bundle（M12-3B 组合）已删（Owner 批准的真删除
+// 式减面，20→16）。它是 run_delivery（带 waitMs 的一次等待）+ run_delivery_review
+//（一页审查）的组合，两次调用就是等价物；README/SKILL/手册里指向它的地方已同批
+// 改指这两个原子工具。
 
 export function createWaoMcpServer({
   registryPath,
@@ -3913,7 +3737,7 @@ export function createWaoMcpServer({
   globalWaitTimeout,
   workspaceRoot,
   // M11-7: injectable Windows user-env reader (default reads HKCU\Environment).
-  // Used by registry_list readiness + run_dispatch pre-check. Injectable for tests.
+  // Used by lead_preflight worker readiness + run_dispatch pre-check. Injectable for tests.
   userEnvReader,
   // M11-11C: server-owned Lead session identity. Generated once per server
   // (stable across calls in one server = one Lead session) and threaded to
@@ -3999,7 +3823,7 @@ export function createWaoMcpServer({
   consultsDir,
   // M12-18: injectable bounded in-memory run-transcript cache. Defaults to a
   // fresh cache owned by THIS server instance. The SAME cache is shared by the
-  // long-lived read-only query handlers (lead_preflight and runs_list) — never
+  // long-lived read-only query paths (lead_preflight's runs scans) — never
   // by decision/append/status/wait/collect/stop/reverify/correction paths. The
   // cache stores the smallest exact static run facts (extractRunFacts)
   // keyed/validated by file metadata; every query still re-applies the current
@@ -4093,7 +3917,7 @@ export function createWaoMcpServer({
   // valid agents + bounded safe per-entry issues, so one malformed entry never
   // hides the healthy workers. (An injected getRegistryInventoryFn may return
   // either the legacy bare array or the {agents, issues, issuesTruncated} shape;
-  // both registry_list and lead_preflight normalize accordingly.) The strict
+  // lead_preflight normalizes accordingly.) The strict
   // getRegistryInventory is still exported for CLI `registry list`/`validate`.
   const service = getRegistryInventoryFn ?? getRegistryInventoryWithIssues;
   // ADR-0032 修订（2026-09-22）：按需认证证据详情服务（与 CLI 共用同一判断）。
@@ -4181,8 +4005,8 @@ export function createWaoMcpServer({
   }
 
   /**
-   * Build the SDK-native readiness keepalive hook shared by run_delivery and
-   * run_delivery_review_bundle. No progress token means no notifications.
+   * Build the SDK-native readiness keepalive hook used by run_delivery's
+   * bounded wait. No progress token means no notifications.
    * Notification transport failure is owned by the application wait service,
    * which treats the side channel as best-effort and preserves observation.
    */
@@ -4308,80 +4132,9 @@ export function createWaoMcpServer({
     return { binding: await resolveWorkspaceBinding() };
   }
 
-  register(
-    "registry_list",
-    {
-      description: REGISTRY_LIST_DESCRIPTION,
-      inputSchema: REGISTRY_LIST_INPUT,
-      outputSchema: REGISTRY_LIST_OUTPUT,
-      annotations: REGISTRY_LIST_ANNOTATIONS,
-    },
-    async ({ detail } = {}) => {
-      let invResult;
-      try {
-        invResult = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
-      } catch {
-        // Redaction contract: fixed safe text only. Never surface err.message,
-        // stack, paths, env, or any dynamic detail to the model.
-        return {
-          isError: true,
-          content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
-        };
-      }
-      // M12-25B: normalize through the SINGLE shared shape. Accepts the legacy
-      // bare-array AND the partial {agents, issues, issuesTruncated} shapes;
-      // THROWS on null/malformed → fail CLOSED to the fixed MCP error (never an
-      // observed-empty success payload that would fake a read failure as clean).
-      let norm;
-      try {
-        norm = normalizeInventoryResult(invResult);
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
-        };
-      }
-      // M12-25: the shared SSOT projector bounds + truncates + sanitizes the
-      // issues BEFORE the schema parse — the same logic as the partial projector
-      // and the lead_preflight aggregator. A malicious/injected issue can never
-      // carry dynamic text, an out-of-set code, a non-canonical id, or exceed the
-      // cap; >cap input with issuesTruncated:false still reports truncation.
-      const { issues, issuesTruncated } = projectRegistryIssues(norm.issues, norm.issuesTruncated);
-      const wirePayload = { agents: norm.agents, issues, issuesTruncated };
-      // ADR-0032 修订（2026-09-22）：按需详情——仅在显式 detail 请求时追加
-      // certificationEvidence。默认调用不进本分支：载荷键集合与字节一字不变。
-      // 证据服务抛错/形状违约 → 整次调用 fail-closed 到固定错误文本：请求了
-      // 详情却静默省略，会被读成"查过了、没有证据行"（伪事实）。
-      if (detail === "certificationEvidence") {
-        try {
-          wirePayload.certificationEvidence = projectCertEvidenceRows(
-            await certEvidenceService({ registryPath, runDir }),
-          );
-        } catch {
-          return {
-            isError: true,
-            content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
-          };
-        }
-      }
-      // Validate AND return the parsed safe object — strict schemas strip any
-      // internal-only / unknown fields so the model never sees fields that
-      // bypassed the output contract.
-      let payload;
-      try {
-        payload = REGISTRY_LIST_OUTPUT.parse(wirePayload);
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
-        };
-      }
-      return {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        structuredContent: payload,
-      };
-    },
-  );
+  // 决定 0129：registry_list 工具已删（Owner 批准的真删除式减面，20→16）。
+  // 能力并入下方 lead_preflight：workers[] 条目与原 AGENT_ENTRY 同一 schema、
+  // 可选 detail=certificationEvidence 返回证据行、CLI `wao registry list` 照旧。
 
   // 批 119：MCP 绑定状态查询与会话级项目选择两个工具已真删除（Owner 批准的
   // 减面，23→20）。绑定事实改由 lead_preflight.workspace 投影；每实例共享的
@@ -4395,7 +4148,7 @@ export function createWaoMcpServer({
       outputSchema: LEAD_PREFLIGHT_OUTPUT,
       annotations: LEAD_PREFLIGHT_ANNOTATIONS,
     },
-    async ({ expectedWorkspaceRoot }) => {
+    async ({ expectedWorkspaceRoot, detail, recentRuns }) => {
       // M11-8A: advisory single-call preflight. 批 119（A3）：可选
       // expectedWorkspaceRoot 用 proveCallWorkspaceRoot 当场证明、只作用于这一
       // 次调用（source "call_target"）、不写任何共享状态（服务实例已无会话选择
@@ -4415,6 +4168,23 @@ export function createWaoMcpServer({
           workspaceBinding = await resolveWorkspaceBinding();
         } catch {
           workspaceBinding = null;
+        }
+      }
+      // 决定 0129：原 registry_list detail 的承接——仅在显式请求时读证据，且
+      // 先于聚合器（证据服务抛错/形状违约 ⇒ 整次调用 fail-closed 到固定错误
+      // 文本：请求了详情却静默省略，会被读成"查过了、没有证据行"（伪事实）；
+      // 即便聚合器随后也失败，这一失败也如实上抛，不吞）。默认调用零额外读。
+      let certEvidence = null;
+      if (detail === "certificationEvidence") {
+        try {
+          certEvidence = projectCertEvidenceRows(
+            await certEvidenceService({ registryPath, runDir }),
+          );
+        } catch {
+          return {
+            isError: true,
+            content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
+          };
         }
       }
       // M11-8A closeout (P3/truth): read the registry EXACTLY ONCE. Capture the
@@ -4467,6 +4237,9 @@ export function createWaoMcpServer({
           listRunsFn: (workspaceBinding && workspaceBinding.bound)
             ? (args) => listRunsService({ ...args, knownAgentIds, readSummaryFn: cachedRunFactsReader })
             : undefined,
+          // 决定 0129：按需 recentRuns 节（原 runs_list 的承接）——不传 = 聚合器
+          // 不扫描、输出无该键。
+          ...(recentRuns !== undefined ? { recentRunsLimit: recentRuns } : {}),
           // TD-341：runner 缺席证明（unresolved 候选 → open item 行）的读器、
           // 缓存与测试注入缝（preflight 级 probe 桩；缺省走共享证明入口）。
           runnerGoneDeps,
@@ -4488,6 +4261,10 @@ export function createWaoMcpServer({
             }
           }
         }
+        // 决定 0129：请求了详情 ⇒ 证据行必在（读已成功；parse 的闭集校验兜底）。
+        if (certEvidence != null) {
+          payload.certificationEvidence = certEvidence;
+        }
         // Validate AND return the parsed safe object — not the raw payload.
         // parse() with strict schemas strips any internal-only / unknown fields
         // so the Lead never sees fields that bypassed the output contract.
@@ -4508,14 +4285,18 @@ export function createWaoMcpServer({
           // 0087: no lane profiles derivable on aggregate failure.
           lanes: null,
           observations: [],
-          warnings: ["lead_preflight could not aggregate — use registry_list and runs_list directly"],
+          warnings: ["lead_preflight could not aggregate — retry this call; sections settle independently"],
           manualChecks: [
-            "runs_list (expectedWorkspaceRoot) — verify the workspace binding and active runs independently",
-            "registry_list — verify worker certification + credential availability",
+            "wao registry list — verify worker certification + credential availability",
+            "wao runs list — verify the workspace binding and active runs independently",
           ],
           checkStatus: { workspace: "unknown", workers: "unknown", activeRuns: "unknown" },
           complete: false,
         };
+        // 请求了详情且证据已成功读出 ⇒ fallback 也如实带上（伪省略同样不可接受）。
+        if (certEvidence != null) {
+          fallback.certificationEvidence = certEvidence;
+        }
         return {
           content: [{ type: "text", text: JSON.stringify(fallback) }],
           structuredContent: fallback,
@@ -4546,7 +4327,7 @@ export function createWaoMcpServer({
       }
       // 0045 §1.4 第 5 步：派发目标选择器（{agentId} 或 {lane, role} 二选一闭集，
       // dispatchResolution 单一真相）。lane/role 在场或 agentId 缺席→解析；错误=
-      // 固定文案带闭集码+完整合法全集（≤32 项截断指向 registry_list），零派发。
+      // 固定文案带闭集码+完整合法全集（≤32 项截断指向 lead_preflight workers），零派发。
       let effectiveAgentId = agentId;
       let resolvedLane;
       let resolvedRole;
@@ -4693,6 +4474,8 @@ export function createWaoMcpServer({
       // never forwarded). RunManager.start revalidates/pins it to defeat a
       // frozen-base TOCTOU.
       let workspaceFrozenHead = null;
+      // 决定 0129：就地预检消费的已证明绑定（与期望检查同一次证明，不二次解析）。
+      let workspaceProofBinding = null;
       {
         const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
         if (target.error) {
@@ -4724,16 +4507,74 @@ export function createWaoMcpServer({
         workspaceProof = { ...expectation.proof, expectedWorkspaceRootMatch: true };
         workspaceCwd = target.proof.root;
         workspaceFrozenHead = target.proof.gitHead;
+        workspaceProofBinding = binding;
+      }
+
+      // 决定 0129（原 run_dispatch_contract_check 的就地承接）：派发前就地跑同一份
+      // 预检服务（runDispatchContractCheck —— 同一函数，不复制）。合同级问题照旧
+      // 在任何副作用之前拒绝（dispatcher 调用计数为 0），且映射到既有固定文案，
+      // 拒绝语义不变：
+      //   - invalid_verification_path      → 既有专属文案（与 dispatcher typed
+      //     DeliveryError 同一条）；
+      //   - delivery_invalid + typed 码
+      //     invalid_allowed_paths          → 既有专属文案；
+      //   - 其余合同级码（profile_unknown / profile_requires_delivery /
+      //     profile_inline_conflict / delivery_invalid）→ 通用 DISPATCH_ERROR_TEXT
+      //     （与下方 resolver !ok 分支同一文案）。
+      // 只是提醒、不拦截的 advisory 码（CONTRACT_CHECK_ADVISORY_CODES 闭集，如
+      // referenced_path_probe_miss / verification_dir_test_form /
+      // verification_bare_node）随受理回执的 contractAdvisories 给出；预检服务
+      // 自身意外抛错时按 advisory 缺席处理——绝不把一次可派发的调用折成失败
+      // （权威是本 handler 自己的结构校验，不是预检）。
+      let contractAdvisories = null;
+      {
+        let precheck = null;
+        try {
+          precheck = await contractCheckService({
+            agentId: agentIdInput,
+            prompt,
+            delivery,
+            executionProfileId,
+            // 派发上下文里工作区恒为已证明的调用目标（上方 proveCallWorkspaceRoot）。
+            workspaceBinding: { bound: true, source: "call_target", ...workspaceProofBinding },
+            registryPath,
+          });
+        } catch {
+          precheck = null; // advisory 缺席，不拦派发
+        }
+        if (precheck && Array.isArray(precheck.issueCodes)) {
+          const blocking = precheck.issueCodes.filter((c) => !CONTRACT_CHECK_ADVISORY_CODES.includes(c));
+          if (blocking.length > 0) {
+            if (precheck.issueCodes.includes("invalid_verification_path")) {
+              return {
+                isError: true,
+                content: [{ type: "text", text: DISPATCH_INVALID_VERIFICATION_PATH_TEXT }],
+              };
+            }
+            if (precheck.deliveryErrorCode === "invalid_allowed_paths") {
+              return {
+                isError: true,
+                content: [{ type: "text", text: DISPATCH_INVALID_ALLOWED_PATHS_TEXT }],
+              };
+            }
+            return {
+              isError: true,
+              content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+            };
+          }
+          if (Array.isArray(precheck.advisories) && precheck.advisories.length > 0) {
+            contractAdvisories = precheck.advisories;
+          }
+        }
       }
 
       // M12-9 Package B: resolve the delivery verification from the selected
       // profile OR the inline block via the SHARED resolver — the single
-      // authority used by run_dispatch AND run_dispatch_contract_check, so the
-      // two tools cannot drift on what a valid profile/inline combination is.
-      // run_dispatch never depends on the precheck having been called — this IS
-      // its own real structural validation. It runs BEFORE the dispatcher is
-      // called, so any invalid contract collapses to the fixed dispatch error
-      // with the dispatcher call count at 0:
+      // structural authority for what a valid profile/inline combination is.
+      // run_dispatch never depends on the precheck above having succeeded —
+      // this IS its own real structural validation. It runs BEFORE the
+      // dispatcher is called, so any invalid contract collapses to the fixed
+      // dispatch error with the dispatcher call count at 0:
       //   - unknown profile id             → resolver !ok (profile_unknown);
       //   - profile without a delivery     → resolver !ok (profile_requires_delivery);
       //   - profile + inline verification  → resolver !ok (profile_inline_conflict);
@@ -4782,7 +4623,7 @@ export function createWaoMcpServer({
       // M11-7 (CTO closeout): the MCP adapter does NOT re-read the registry or
       // re-implement readiness. dispatchRun owns the background-preflight: it
       // reads the registry, assesses credential availability via the shared SSOT
-      // (same one registry_list uses), and throws CredentialMissingError before
+      // (same one lead_preflight workers use), and throws CredentialMissingError before
       // any transcript/fork when a REQUIRED credential is absent. The adapter
       // only passes the userEnvReader and collapses the typed error to fixed
       // actionable text.
@@ -5007,9 +4848,21 @@ export function createWaoMcpServer({
           // NEVER forwarded (the handler selects exactly these keys).
           providerSessionRouting: result.providerSessionRouting,
           // 决定 0095：受理成功的后台运行附 nextStep（静态模板，MCP 面不含
-          // runId）；accepted:false 不给。
+          // runId）；accepted:false 不给。决定 0129：有 contractAdvisories 时
+          // nextStep 追加半句（先看提醒，需要就停掉重派）。
           ...(result.accepted === true
-            ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }) }
+            ? {
+                nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" })
+                  + (contractAdvisories != null
+                    ? " Review contractAdvisories in this receipt first; stop and re-dispatch if needed."
+                    : ""),
+              }
+            : {}),
+          // 决定 0129：受理回执携带就地预检的 advisory 码（零提醒 = 键缺省；
+          // accepted:false 不给）。收据 parse 经 CONTRACT_ADVISORY_ENTRY 闭集校验，
+          // 越界码整次折成固定 dispatch 错误（不部分输出）。
+          ...(result.accepted === true && contractAdvisories != null
+            ? { contractAdvisories }
             : {}),
           // 决定 0097 §4：受理成功附所选车道一行事实（无 [wao] 前缀）。回显失败
           // =laneFactsLine 返回 null → 键缺省，绝不把受理折成错误。
@@ -5032,84 +4885,12 @@ export function createWaoMcpServer({
     },
   );
 
-  register(
-    "run_dispatch_contract_check",
-    {
-      description: RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION,
-      // Shares run_dispatch's INPUT schema — the same agentId/prompt/delivery/
-      // executionProfileId surface, validated identically. Known/unknown/
-      // conflict for the profile is decided downstream by the shared resolver.
-      inputSchema: RUN_DISPATCH_INPUT,
-      outputSchema: RUN_DISPATCH_CONTRACT_CHECK_OUTPUT,
-      annotations: RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS,
-    },
-    async ({ agentId, prompt, delivery, executionProfileId, expectedWorkspaceRoot }) => {
-      // Read-only advisory precheck. Resolve the workspace scope so the result
-      // can report it, but — unlike run_dispatch — a binding failure is NOT a
-      // hard refusal: it surfaces as the closed-set "unknown" workspace section
-      // (never faked observed/unbound). The service never dispatches, forks, or
-      // writes a transcript; it only reads the registry and consumes the
-      // resolved scope. A call that supplies expectedWorkspaceRoot is checked
-      // against THAT proved project (call_target) instead of the session
-      // binding; an unprovable target is refused with the fixed target text
-      // before any registry read.
-      let workspaceBinding = null;
-      let workspaceScope = { source: null, projectBucket: null };
-      if (expectedWorkspaceRoot !== undefined) {
-        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
-        if (target.error) {
-          return { isError: true, content: [{ type: "text", text: target.error }] };
-        }
-        workspaceBinding = { bound: true, source: "call_target", ...target.proof };
-        workspaceScope = {
-          source: "call_target",
-          projectBucket: projectBucketLabel(target.proof.root),
-        };
-      } else {
-        try {
-          workspaceBinding = await resolveWorkspaceBinding();
-        } catch {
-          workspaceBinding = null;
-        }
-        workspaceScope = workspaceBinding?.bound
-          ? {
-              source: workspaceBinding.source ?? null,
-              projectBucket: projectBucketLabel(workspaceBinding.root),
-            }
-          : { source: null, projectBucket: null };
-      }
-      try {
-        const result = await contractCheckService({
-          agentId,
-          prompt,
-          delivery,
-          executionProfileId,
-          workspaceBinding,
-          registryPath,
-        });
-        // Output boundary: parse through RUN_DISPATCH_CONTRACT_CHECK_OUTPUT so
-        // unknown/internal fields cannot cross the wire and an oversized or
-        // malformed service object collapses to the fixed error text below
-        // (strict root + the derived maxima above). Only the validated object is
-        // returned as structuredContent. workspaceScope states which project
-        // this check actually used.
-        const parsed = RUN_DISPATCH_CONTRACT_CHECK_OUTPUT.parse({ ...result, workspaceScope });
-        return {
-          content: [{ type: "text", text: JSON.stringify(parsed) }],
-          structuredContent: parsed,
-        };
-      } catch {
-        // The service is fail-closed internally and should never throw, but a
-        // defensive collapse keeps the tool contract (bounded result or fixed
-        // safe text — never an unstructured error). This also catches any
-        // output-schema parse failure (unknown or oversized fields).
-        return {
-          isError: true,
-          content: [{ type: "text", text: CONTRACT_CHECK_ERROR_TEXT }],
-        };
-      }
-    },
-  );
+  // 决定 0129：run_dispatch_contract_check 工具已删（Owner 批准的真删除式减面，
+  // 20→16）。同一份预检服务（contractCheckService）由上方 run_dispatch 在派发前
+  // 就地调用：合同级拒绝照旧发生在任何副作用之前（映射既有固定文案），advisory
+  // 码随受理回执的 contractAdvisories 给出。"只预检不派发"不再有独立入口——它
+  // 的用途（派发前发现合同问题）由"拒绝照旧在派发前 + 提醒在回执里当场给出"
+  // 覆盖（见决定 0129 不采纳一节）。
 
   register(
     "run_consult",
@@ -6385,93 +6166,9 @@ export function createWaoMcpServer({
     },
   );
 
-  // ===== runs_list (workspace-bound read-only run inventory) =====
-
-  register(
-    "runs_list",
-    {
-      description: RUNS_LIST_DESCRIPTION,
-      inputSchema: RUNS_LIST_INPUT,
-      outputSchema: RUNS_LIST_OUTPUT,
-      annotations: RUNS_LIST_ANNOTATIONS,
-    },
-    async (input) => {
-      try {
-        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
-        if (resolvedBinding.error) {
-          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
-        }
-        const binding = resolvedBinding.binding;
-        if (!binding.bound) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
-          };
-        }
-
-        // Get known agent IDs from registry for agentId validation.
-        let knownAgentIds = [];
-        try {
-          const inventory = await service({ registryPath, runDir });
-          // M12-25B finding 1: normalize through the SAME shared snapshot shape
-          // used by lead_preflight / registry_list. The default service returns
-          // the partial {agents, issues, issuesTruncated} OBJECT; the old
-          // Array.isArray(...) check treated it as non-array → knownAgentIds=[]
-          // and erased EVERY run's agentId to 'unknown' even for a valid
-          // registry. Malformed → throws → caught → knownAgentIds stays []
-          // (degraded: run agentIds 'unknown'), the intended unavailable behavior.
-          knownAgentIds = normalizeInventoryResult(inventory).agents.map((a) => a.id);
-        } catch {
-          // Registry unavailable or malformed — all agentIds will be "unknown"
-        }
-
-        const activeOnly = input?.activeOnly ?? false;
-        const limit = input?.limit ?? 50;
-
-        const result = await listRunsService({
-          runDir,
-          activeOnly,
-          latest: limit,
-          authorizedWorkspaceRoot: binding.root,
-          knownAgentIds,
-          readSummaryFn: cachedRunFactsReader,
-        });
-
-        const payload = {
-          // the binding context this page was scoped by — the Lead can
-          // see WHICH project the listed runs belong to (source + non-absolute
-          // bucket label; null label when the root cannot be identified).
-          scope: {
-            source: binding.source,
-            projectBucket: projectBucketLabel(binding.root),
-          },
-          runs: result.runs.map((r) => ({
-            runId: r.runId,
-            agentId: r.agentId,
-            state: r.state,
-            terminal: r.terminal,
-            updatedAt: r.updatedAt,
-            activityStatus: r.activityStatus,
-            activityBasis: r.activityBasis,
-          })),
-          returnedCount: result.runs.length,
-          truncated: result.matchedCount > result.runs.length,
-          unresolvedCount: typeof result.unresolvedCount === "number" ? result.unresolvedCount : 0,
-        };
-
-        RUNS_LIST_OUTPUT.parse(payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: RUNS_LIST_ERROR_TEXT }],
-        };
-      }
-    },
-  );
+  // 决定 0129：runs_list 工具已删（Owner 批准的真删除式减面，20→16）。能力并入
+  // lead_preflight 的可选 recentRuns 输入（同一 listRuns 服务、条目同形、含截断
+  // 与 unresolvedCount 事实）；CLI `wao runs list` 照旧。
 
   // ===== run_await_result (M12-3 read-only composite; 批 119 起是 MCP 面唯一的
   // 等待工具——重复调用（单次 waitMs 用缺省值，TD-364）直到终态；长等待走 CLI
@@ -6956,158 +6653,6 @@ export function createWaoMcpServer({
     },
   );
 
-  // ===== run_delivery_review_bundle (M12-3B workspace-bound composition) =====
-
-  register(
-    "run_delivery_review_bundle",
-    {
-      description: DELIVERY_REVIEW_BUNDLE_DESCRIPTION,
-      inputSchema: DELIVERY_REVIEW_BUNDLE_INPUT,
-      outputSchema: DELIVERY_REVIEW_BUNDLE_OUTPUT,
-      annotations: DELIVERY_REVIEW_BUNDLE_ANNOTATIONS,
-    },
-    async (input, extra) => {
-      try {
-        const runId = input?.runId;
-        if (!isValidRunId(runId)) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],
-          };
-        }
-        const cursor = input?.cursor;
-        if (cursor !== undefined
-            && (typeof cursor !== "string" || cursor.length === 0 || cursor.length > 192
-              || !/^[A-Za-z0-9_-]+$/.test(cursor))) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],
-          };
-        }
-
-        // Review content is workspace-bound. Resolve authority before either
-        // service so invalid/unbound requests perform zero transcript/Git reads.
-        const resolvedBinding = await resolveReadWorkspaceBinding(input?.expectedWorkspaceRoot);
-        if (resolvedBinding.error) {
-          return { isError: true, content: [{ type: "text", text: resolvedBinding.error }] };
-        }
-        const binding = resolvedBinding.binding;
-        if (!binding.bound) {
-          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
-        }
-
-        const waitMs = input?.waitMs ?? DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS;
-        const onPoll = makeDeliveryProgressPoll(extra);
-        const readinessView = await deliveryReadinessService({
-          runId,
-          runDir,
-          waitMs,
-          authorizedWorkspaceRoot: binding.root,
-          computeInventoryFn: candidateInventoryReader,
-          // 第 120 批续修（审查 B1）：review bundle 不消费"被取代"派生结果
-          // ——不付全库预筛的代价（默认 45 秒等待之后再加一次扫描会撞宿主上限）。
-          skipSupersession: true,
-          ...(onPoll ? { onPoll } : {}),
-        });
-        READINESS_ENUM.parse(readinessView.readiness);
-        if (typeof readinessView.waitReturnedEarly !== "boolean") {
-          throw new Error("bad waitReturnedEarly");
-        }
-        const deliveryPayload = {
-          ...buildRunDeliveryPayload(runId, readinessView),
-          readiness: readinessView.readiness,
-          waitReturnedEarly: readinessView.waitReturnedEarly,
-        };
-        // M12-8B: parse against the legacy BASE shape — the bundle's nested
-        // delivery must never carry the progressive-disclosure field. If a
-        // future change adds it to buildRunDeliveryPayload, this strict parse
-        // fails closed instead of leaking the field into the bundle.
-        const delivery = RUN_DELIVERY_OUTPUT_BASE.parse(deliveryPayload);
-
-        let review = null;
-        if (readinessView.readiness === "reviewable") {
-          // `reviewable` is meaningful only for a concrete durable delivery.
-          // Reject a contradictory/malformed readiness service result before
-          // the review service can read any Git content.
-          if (!delivery.deliveryAvailable
-              || delivery.deliveryCommit === null
-              || delivery.changedFileCount === null) {
-            throw new Error("reviewable without delivery artifact");
-          }
-          const result = await deliveryReviewService({
-            runId,
-            runDir,
-            authorizedWorkspaceRoot: binding.root,
-            fileIndex: input.fileIndex,
-            ...(cursor !== undefined ? { cursor } : {}),
-          });
-          const projected = projectReviewResult(result, { runId });
-          review = DELIVERY_REVIEW_OUTPUT.parse(projected);
-
-          // TD-179: the settled pending rejection is the ONE reviewable shape
-          // whose review result is the no-content verification_pending advisory
-          // (canonical null deliveryCommit/changedFileCount — there is no
-          // verified artifact to review, and the service performed ZERO Git
-          // diff reads). That exact advisory — unavailable + the closed-set
-          // pending reason + the canonical nulls — carries no artifact
-          // metadata to bind, so the match below is skipped for it alone.
-          // Every other shape (an available fragment, or a proof-backed
-          // unavailable variant like binary/diff_too_large, which always
-          // carries non-null commit/count) still must match EXACTLY.
-          const pendingAdvisory = delivery.verificationStatus === "pending"
-            && delivery.acceptanceStatus === "rejected"
-            && review.available === false
-            && review.unavailableReason === REVIEW_PENDING_REASON
-            && review.deliveryCommit === null
-            && review.changedFileCount === null;
-          // A composition must never splice delivery truth from one artifact
-          // with review bytes from another. The application service proves both
-          // independently; this transport boundary binds their safe projections.
-          if (!pendingAdvisory
-              && (review.deliveryCommit !== delivery.deliveryCommit
-                || review.changedFileCount !== delivery.changedFileCount)) {
-            throw new Error("delivery/review artifact mismatch");
-          }
-        } else if (cursor !== undefined) {
-          // A continuation token is meaningful only for an actually-returned
-          // review artifact. Never silently ignore a stale/cross-state cursor.
-          // F5: typed rejection so the catch below folds it into the bundle's
-          // dedicated cursor-rejected copy (same remedy: re-fetch from page 1).
-          throw new CursorRejectedError("cursor without reviewable artifact");
-        }
-
-        const payload = DELIVERY_REVIEW_BUNDLE_OUTPUT.parse({
-          runId,
-          delivery,
-          review,
-        });
-        return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
-      } catch (e) {
-        // F5: 同款折叠——组合工具携带 cursor 分支的坏 cursor 也走专属文案。
-        if (e instanceof CursorRejectedError) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT }],
-          };
-        }
-        // TD-324（83 批 W2）：归属拒绝专属固定文案——readiness 与 review 两个服务
-        // 都以 typed code 拒绝（先于任何 Git 证明与内容读取），不再折叠成笼统 failed。
-        if (e?.code === "workspace_not_authorized") {
-          return {
-            isError: true,
-            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_WORKSPACE_MISMATCH_TEXT }],
-          };
-        }
-        return {
-          isError: true,
-          content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],
-        };
-      }
-    },
-  );
 
   // ===== run_delivery_repackage (model-free repackage, workspace-bound destructive) =====
   // M12-1S2: re-package a retained disallowed_path failure using the original

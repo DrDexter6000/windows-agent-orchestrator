@@ -1558,7 +1558,7 @@ test("M11-11C MCP-4: busy dispatch → fixed actionable text, no runId/opaqueUui
   } finally { cleanupDir(dir); }
 });
 
-test("M11-11C MCP-5: registry_list projects sessionReuse (nullable) for each agent", async () => {
+test("M11-11C MCP-5: lead_preflight workers projects sessionReuse (nullable) for each agent", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m11c-mcp5-"));
   try {
     const registryPath = makeRegistry(dir, {
@@ -1568,9 +1568,10 @@ test("M11-11C MCP-5: registry_list projects sessionReuse (nullable) for each age
     const server = createWaoMcpServer({ registryPath, runDir: dir });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "registry_list", arguments: {} });
+      // 决定 0129：原 registry_list 的 worker 条目并入 lead_preflight.workers。
+      const res = await client.callTool({ name: "lead_preflight", arguments: {} });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-      const byId = Object.fromEntries(parsed.agents.map((a) => [a.id, a]));
+      const byId = Object.fromEntries(parsed.workers.map((a) => [a.id, a]));
       assert.equal(byId.researcher.sessionReuse, "lead_workspace", "researcher projects reuse mode");
       assert.equal(byId.coder_low.sessionReuse, null, "non-reusable agent projects null");
     } finally { await client.close(); await server.close(); }

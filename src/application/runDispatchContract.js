@@ -1,14 +1,17 @@
 // src/application/runDispatchContract.js
 //
 // M12-9 Package B: the OPTIONAL read-only / ADVISORY dispatch-contract precheck
-// service behind the `run_dispatch_contract_check` MCP tool.
+// service. 决定 0129（第 134 批）：原 `run_dispatch_contract_check` MCP 工具已
+// 删除；本服务保留并由 run_dispatch 在派发前**就地**调用（同一函数，不复制）——
+// 会让派发被拒的合同问题照旧在任何副作用之前拒绝（权威仍是 run_dispatch 的
+// 固定文案），只是提醒、不拦截的 advisory 码随受理回执的 contractAdvisories
+// 给出（本服务结果的 advisories 数组，闭集码 + 固定说明）。
 //
-// This is NOT a gate. It folds the mechanical facts a Lead might want BEFORE
-// calling run_dispatch — workspace binding, worker registry presence, and the
-// delivery contract (inline verification OR a frozen execution profile) — into
-// ONE bounded advisory result. warning/unknown/contractValid=false do NOT
-// auto-block an independent run_dispatch (the Lead decides; run_dispatch keeps
-// its own real structural validation).
+// This is NOT a gate. It folds the mechanical facts a Lead might want around a
+// dispatch — workspace binding, worker registry presence, and the delivery
+// contract (inline verification OR a frozen execution profile) — into ONE
+// bounded advisory result. Advisory codes never auto-block anything (the Lead
+// decides; run_dispatch keeps its own real structural validation).
 //
 // Hard contract (B1/B3/B4):
 //   - advisory=true always. The result carries no permit/token/passed/allowed
@@ -22,11 +25,12 @@
 //         allowedPaths / verification / absolute-path preflight).
 //     So the precheck and run_dispatch cannot drift on what a valid delivery is.
 //   - Output is bounded/strict/closed-set/safe: advisory, contractValid, section
-//     statuses, issueCodes, observations, selected profile (id + setup/assertion
-//     COUNTS only — never command text), and — only when no profile is selected —
-//     a bounded availableProfiles list (id + counts + fixed summary, no commands).
-//     NO prompt, command text, absolute path, credential, PID/session/provider
-//     payload is ever placed in the result.
+//     statuses, issueCodes, observations, advisories (closed-set code + the SAME
+//     fixed note text, one entry per advisory code), selected profile (id +
+//     setup/assertion COUNTS only — never command text), and — only when no
+//     profile is selected — a bounded availableProfiles list (id + counts +
+//     fixed summary, no commands). NO prompt, command text, absolute path,
+//     credential, PID/session/provider payload is ever placed in the result.
 //   - TD-157 referenced-path probe: when the contract resolved and the workspace
 //     scope is resolved, relative-path-looking literals in the RESOLVED
 //     verification assertion+setup commands are stat-checked against the scope
@@ -96,6 +100,12 @@ const CONTRACT_LEVEL_CODES = new Set([
   "delivery_invalid",
   "invalid_verification_path",
 ]);
+
+// 决定 0129：advisory（不拦截）码 = 闭集减合同级码，单一派生、不抄第二份清单。
+// run_dispatch 的受理回执 contractAdvisories 与 MCP wire enum 都从这里取。
+export const CONTRACT_CHECK_ADVISORY_CODES = Object.freeze(
+  CONTRACT_CHECK_ISSUE_CODES.filter((c) => !CONTRACT_LEVEL_CODES.has(c)),
+);
 
 // Resolved profile projection: id + COUNTS only. Never the command text.
 function projectSelectedProfile(profileId) {
@@ -421,9 +431,19 @@ export async function runDispatchContractCheck({
 
   const issueCodes = [];
   const observations = [];
+  // 决定 0129：advisory 码逐个配同一句固定说明（与 observations 同文本、不另写
+  // 第二套）；合同级码不进此数组——它们由 run_dispatch 的既有固定文案拒绝。
+  const advisories = [];
+  const pushAdvisory = (code, note) => {
+    issueCodes.push(code);
+    advisories.push({ code, note });
+  };
   // Sections init derives from the single CONTRACT_CHECK_SECTIONS SSOT.
   const sections = Object.fromEntries(CONTRACT_CHECK_SECTIONS.map((s) => [s, "unknown"]));
   let selectedProfileId = null;
+  // prepareDeliveryRequest 抛出的 typed deliveryCode（invalid_allowed_paths 等）；
+  // 供 run_dispatch 就地预检映射到既有专属固定文案。null = 无 typed 码。
+  let deliveryErrorCode = null;
 
   // ===== Section 1: workspace (already resolved by the adapter) =====
   // null → resolver threw → UNKNOWN (not faked unbound). bound:false → observed
@@ -435,14 +455,17 @@ export async function runDispatchContractCheck({
     sections.workspace = "observed";
   } else {
     sections.workspace = "observed";
-    issueCodes.push("workspace_unbound");
+    pushAdvisory(
+      "workspace_unbound",
+      "workspace is not bound — run_dispatch refuses without its own expectedWorkspaceRoot target (reported only; not a contract defect)",
+    );
     observations.push("workspace is not bound — run_dispatch refuses without its own expectedWorkspaceRoot target (reported only; not a contract defect)");
   }
 
   // ===== Section 2: registry (independent; read-only) =====
   // Production parity: take ONE registry snapshot via listAgents() — the SAME
-  // enumeration API registry_list / getRegistryInventory consume — and select
-  // the exact canonical id from it. We deliberately do NOT call getAgent(id):
+  // enumeration API getRegistryInventory (lead_preflight workers / CLI) consumes
+  // — and select the exact canonical id from it. We deliberately do NOT call getAgent(id):
   // in production getAgent THROWS for a missing id (registry.js), so catching
   // that throw would misreport a present-but-id-absent registry as a read
   // failure. Membership is decided by exact-id match against the snapshot —
@@ -457,13 +480,16 @@ export async function runDispatchContractCheck({
       const present = registry.listAgents().some((a) => a.id === agentId);
       sections.registry = "observed";
       if (!present) {
-        issueCodes.push("agent_not_found");
+        pushAdvisory("agent_not_found", "agentId is not present in the registry (reported only)");
         observations.push("agentId is not present in the registry (reported only)");
       }
     } catch {
       sections.registry = "unknown";
-      issueCodes.push("registry_unreadable");
-      observations.push("registry could not be read — use registry_list to check directly");
+      pushAdvisory(
+        "registry_unreadable",
+        "registry could not be read — check workers via lead_preflight or the CLI (wao registry list)",
+      );
+      observations.push("registry could not be read — check workers via lead_preflight or the CLI (wao registry list)");
     }
   } else {
     // No registry path supplied (direct service use) — cannot confirm.
@@ -494,6 +520,9 @@ export async function runDispatchContractCheck({
       sections.contract = "observed";
     } catch (e) {
       sections.contract = "observed";
+      if (e && e.name === "DeliveryError" && typeof e.deliveryCode === "string") {
+        deliveryErrorCode = e.deliveryCode;
+      }
       if (e && e.name === "DeliveryError" && e.deliveryCode === "invalid_verification_path") {
         issueCodes.push("invalid_verification_path");
       } else {
@@ -514,11 +543,17 @@ export async function runDispatchContractCheck({
   ] : [];
   const lint = lintVerificationCommands(verificationCommands);
   if (lint.directoryForm) {
-    issueCodes.push("verification_dir_test_form");
+    pushAdvisory(
+      "verification_dir_test_form",
+      "verification uses a suspected directory argument after --test — use a glob or a .js/.mjs/.cjs file (advisory; reported only)",
+    );
     verificationObservations.push("verification uses a suspected directory argument after --test — use a glob or a .js/.mjs/.cjs file (advisory; reported only)");
   }
   if (lint.bareNode) {
-    issueCodes.push("verification_bare_node");
+    pushAdvisory(
+      "verification_bare_node",
+      "verification uses bare node with --test — use scripts/wao-node.cjs or an npm script to select Node 22 (advisory; reported only)",
+    );
     verificationObservations.push("verification uses bare node with --test — use scripts/wao-node.cjs or an npm script to select Node 22 (advisory; reported only)");
   }
 
@@ -544,7 +579,10 @@ export async function runDispatchContractCheck({
       pathExists: pathExistsFn ?? defaultWorkspacePathExists,
     });
     if (missed) {
-      issueCodes.push("referenced_path_probe_miss");
+      pushAdvisory(
+        "referenced_path_probe_miss",
+        "one or more referenced relative paths were not found under the bound workspace (advisory probe; reported only)",
+      );
       verificationObservations.push(
         "one or more referenced relative paths were not found under the bound workspace (advisory probe; reported only)",
       );
@@ -565,6 +603,12 @@ export async function runDispatchContractCheck({
     sections,
     issueCodes,
     observations,
+    // 决定 0129：advisory 码 + 同一句固定说明（零提醒 = 空数组；run_dispatch
+    // 受理回执仅在非空时携带 contractAdvisories）。
+    advisories,
+    // prepareDeliveryRequest 的 typed 码（无则 null）：run_dispatch 就地预检
+    // 据此映射 invalid_allowed_paths 等既有专属固定文案，语义不变。
+    deliveryErrorCode,
     profile: selectedProfileId ? projectSelectedProfile(selectedProfileId) : null,
   };
 

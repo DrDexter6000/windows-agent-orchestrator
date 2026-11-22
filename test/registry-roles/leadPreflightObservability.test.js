@@ -456,7 +456,7 @@ test("CD-D1: conditional workers → drilldown appended in place, one bounded li
   }));
   const line = result.observations.find((o) => o.includes("conditional certification"));
   assert.ok(line, "conditional observation present");
-  assert.ok(line.endsWith("; drilldown: registry_list detail=certificationEvidence"), `drilldown appended: ${line}`);
+  assert.ok(line.endsWith("; drilldown: lead_preflight detail=certificationEvidence"), `drilldown appended: ${line}`);
   assert.ok(line.length <= 512, "still one bounded observation line");
   assert.equal(result.observations.filter((o) => o.includes("conditional certification")).length, 1,
     "still exactly one conditional line");

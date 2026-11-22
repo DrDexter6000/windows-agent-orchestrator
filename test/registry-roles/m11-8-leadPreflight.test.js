@@ -215,10 +215,15 @@ test("M11-8-6: output leaks no paths, credential values, prompts, PIDs, sessions
       workspaceBinding: { bound: true, source: "call_target", root: dir, gitHead: "c".repeat(40), dirty: false },
       registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader,
     });
-    // 批 119：workspace.workspaceRoot 有意返回规范根；其余输出里不得再出现
-    // 工作区绝对路径（两种分隔符都查）。
+    // 批 119：workspace.workspaceRoot 有意返回规范根；决定 0129：workers[].cwd
+    // 与原 registry_list 同形、有意在面（注册表配置事实）。除这两处外，其余
+    // 输出里不得出现工作区绝对路径（两种分隔符都查）。
     assert.equal(result.workspace.workspaceRoot, dir, "the canonical root is reported in workspace.workspaceRoot");
-    const rest = { ...result, workspace: { ...result.workspace, workspaceRoot: null } };
+    const rest = {
+      ...result,
+      workspace: { ...result.workspace, workspaceRoot: null },
+      workers: (result.workers ?? []).map((w) => ({ ...w, cwd: null })),
+    };
     const dumped = JSON.stringify(rest);
     assert.ok(!dumped.includes("test-key-leakcheck"), "no credential value leak");
     assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no workspace absolute path leak (forward slashes)");
@@ -382,14 +387,15 @@ test("M11-8-ADV4: no PASS/FAIL verdict; complete is mechanical readability", asy
 
 // ===== Advisory: Lead can get different conclusion from direct tool =====
 
-test("M11-8-ADV5: manualChecks point at original tools for independent re-verify", async () => {
+test("M11-8-ADV5: manualChecks point at the CLI for independent re-verify (0129)", async () => {
   const result = await aggregateLeadPreflight({
     workspaceBinding: { bound: true, source: "call_target", root: "/repo", gitHead: "f".repeat(40), dirty: false },
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [],
   });
-  assert.ok(result.manualChecks.some((m) => /runs_list/.test(m)), "manualChecks points at runs_list (binding + active runs)");
-  assert.ok(result.manualChecks.some((m) => /registry_list/.test(m)), "manualChecks points at registry_list");
+  // 决定 0129：registry_list/runs_list 已删——独立复核通道改为 CLI 命令。
+  assert.ok(result.manualChecks.some((m) => /wao runs list/.test(m)), "manualChecks points at wao runs list (binding + runs)");
+  assert.ok(result.manualChecks.some((m) => /wao registry list/.test(m)), "manualChecks points at wao registry list");
 });
 
 // ===== Truthfulness/boundedness RED→GREEN (CTO micro-closeout) =====

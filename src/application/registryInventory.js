@@ -24,7 +24,7 @@ import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { assessWorkerReadiness, alignReadinessToKimiTokenFile, createEnvResolver } from "./credentialReadiness.js";
 // TD-111: certification advisory context 闭集 SSOT——投影层用它做 fail-closed 校验：
 // summary 里的越界码/非 ISO 日期绝不透出（否则 MCP outputSchema 的 enum parse 会把
-// 整个 registry_list 打成 error）。MCP schema 的 enum 也从同一常量派生（无第二份清单）。
+// 整个 workers 节打成 error）。MCP schema 的 enum 也从同一常量派生（无第二份清单）。
 import { CERTIFICATION_REASON_CODES } from "./certificationReasons.js";
 // D2-②b 残留修复（2026-10-10）：drill 转录回查走 projectBuckets 解析链 SSOT
 // （平铺→桶扫描），与写侧 scripts/reliability/drillEvidence.mjs 同一布局事实。
@@ -35,7 +35,7 @@ import { resolveTranscriptPath } from "../projectBuckets.js";
 // 不存在第二套 identity 匹配规则。
 import { matchedCertRecord, selectCertRecord } from "../runManager.js";
 // TD-283：车道表 dispatchHold（Owner 的暂停派发说明）按车道 id 从
-// config/lanes.json 取——CLI `registry list` 与 MCP `registry_list` 共用本
+// config/lanes.json 取——CLI `registry list` 与 MCP `lead_preflight.workers` 共用本
 // 服务，同一处计算（无第二套 join）。只告知、不拦截。
 import { loadLanesConfig, validDispatchHold } from "../dispatchResolution.js";
 
@@ -207,7 +207,7 @@ export async function getRegistryInventory({
   const dispatchHoldByLane = laneDispatchHoldIndex((lanesDocFn ?? loadLanesConfig)());
 
   // M11-7 (operation closeout): ONE operation-scoped resolver shared across all
-  // workers, and resolve ONLY the required credential names (registry_list shows
+  // workers, and resolve ONLY the required credential names (preflight workers show
   // credentialAvailability, which depends solely on required names). Optional
   // inherited env (OPENAI_BASE_URL, CODEX_HOME, ...) is NOT read
   // here — it is irrelevant to the availability status and would add unnecessary
@@ -230,7 +230,7 @@ export async function getRegistryInventory({
 /**
  * M12-25: the SINGLE deterministic safe projection for registry issues at every
  * public adapter boundary — used by getRegistryInventoryWithIssues (the partial
- * projector), aggregateLeadPreflight, and the MCP registry_list handler — so the
+ * projector) and aggregateLeadPreflight (lead_preflight workers) — so the
  * closed-set / canonical-id / cap / truncation rules live in ONE place, not three.
  *
  * Bounds the result to REGISTRY_ISSUES_CAP and derives issuesTruncated = the
@@ -272,8 +272,8 @@ export function projectRegistryIssues(rawIssues, sourceTruncated = false) {
 
 /**
  * M12-25B: the SINGLE shared normalization of an inventory result at every
- * public adapter boundary — the lead_preflight aggregator, MCP registry_list,
- * the MCP lead_preflight snapshot, and MCP runs_list all consume the default
+ * public adapter boundary — the lead_preflight aggregator (workers + snapshot)
+ * and the CLI all consume the default
  * service (getRegistryInventoryWithIssues) or an injected resolver through THIS
  * one function. Accepts exactly the two VALID shapes and THROWS on anything
  * else, so every caller in a try/catch FAILS CLOSED to unknown/error: a
@@ -329,7 +329,7 @@ export function normalizeInventoryResult(result) {
 
 /**
  * M12-25: Partial registry inventory — the structured data behind MCP
- * `registry_list` / `lead_preflight` when the registry source is READABLE but
+ * `lead_preflight.workers` when the registry source is READABLE but
  * contains one or more malformed/unsupported entries.
  *
  * Distinct from the strict getRegistryInventory (CLI `registry list`/`validate`

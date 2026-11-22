@@ -1,13 +1,11 @@
 // test/mcpRegistry.test.js
 //
-// M9-1: read-only MCP stdio vertical slice — registry_list.
-//
-// Proves that a real MCP host can, over stdio, call WAO's only MCP tool
-// `registry_list`, which directly reuses the M9-0 `getRegistryInventory()`
-// application service. Covers: protocol initialize, tool list shape, exactly-once
-// service invocation, no-path-override, error containment, real stdio subprocess
-// round-trip, zero transcript side effects, clean stdout, import-boundary guard,
-// and CLI/MCP semantic parity.
+// M9-1: read-only MCP stdio vertical slice — the worker inventory.
+// 决定 0129（第 134 批）：原 registry_list 工具已删，worker 清单并入
+// lead_preflight.workers（同一 getRegistryInventory 服务、AGENT_ENTRY 同形）。
+// 本文件照旧覆盖：协议 initialize、工具面形状、恰好一次服务调用、
+// 不可越权改路径、错误遏制、真实 stdio 子进程往返、零 transcript 副作用、
+// 干净 stdout、import 边界守卫、CLI/MCP 语义等价。
 //
 // Dependencies note: this test file imports the MCP SDK client/transport
 // (allowed — MCP-specific tests). src/application/** and core modules must NOT.
@@ -125,7 +123,7 @@ test("M9-1-01: MCP initialize succeeds, server identity stable", async () => {
 // M9-1-02: listTools exposes ONLY registry_list, no write ops exposed early.
 // =====================================================================
 
-test("M9-1-02: listTools includes registry_list, no unauthorized write operations", async () => {
+test("M9-1-02: listTools includes lead_preflight (registry_list folded away); no unauthorized write operations", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m91-02-"));
   try {
     const registryPath = makeRegistry(dir, {
@@ -136,9 +134,10 @@ test("M9-1-02: listTools includes registry_list, no unauthorized write operation
     try {
       const result = await client.listTools();
       const names = result.tools.map((t) => t.name);
-      // registry_list must always be present (M9-1). run_dispatch was added in
-      // M9-2B as an authorized dispatch tool — both are expected now.
-      assert.ok(names.includes("registry_list"), "registry_list present");
+      // 决定 0129：registry_list 并入 lead_preflight.workers——幸存者在面、
+      // 被并工具不在面；run_dispatch 照旧在面。
+      assert.ok(names.includes("lead_preflight"), "lead_preflight present (registry_list's survivor)");
+      assert.equal(names.includes("registry_list"), false, "registry_list folded away (decision 0129)");
       // Defensive: ensure no bare/unauthorized write tools leaked (the authorized
       // dispatch tool is run_dispatch, not a bare "run"/"dispatch").
       const forbidden = names.filter((n) =>
@@ -158,7 +157,7 @@ test("M9-1-02: listTools includes registry_list, no unauthorized write operation
 // M9-1-03: registry_list invokes injected service exactly once, returns agents.
 // =====================================================================
 
-test("M9-1-03: registry_list calls injected service exactly once and returns structured agents", async () => {
+test("M9-1-03: lead_preflight workers calls injected service exactly once and returns structured entries", async () => {
   let callCount = 0;
   let capturedArgs = null;
   const fakeService = async (input) => {
@@ -177,7 +176,7 @@ test("M9-1-03: registry_list calls injected service exactly once and returns str
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     assert.equal(callCount, 1, "service invoked exactly once");
     assert.ok(capturedArgs, "service received its input");
     assert.equal(capturedArgs.registryPath, "/config/agents.json", "service got startup registryPath");
@@ -188,14 +187,18 @@ test("M9-1-03: registry_list calls injected service exactly once and returns str
     const textBlock = res.content.find((b) => b.type === "text");
     assert.ok(textBlock, "a text content block exists");
     const parsed = JSON.parse(textBlock.text);
-    assert.ok(Array.isArray(parsed.agents), "text JSON contains agents array");
-    assert.equal(parsed.agents.length, 2, "two agents returned");
-    assert.equal(parsed.agents[0].id, "coder_low");
+    assert.ok(Array.isArray(parsed.workers), "text JSON contains workers array");
+    assert.equal(parsed.workers.length, 2, "two workers returned");
+    assert.equal(parsed.workers[0].id, "coder_low");
+    // 决定 0129：workers 条目与原 registry_list 的 AGENT_ENTRY 同形。
+    for (const key of ["cwd", "sessionReuse", "missingCredentialEnvNames", "dispatchHold"]) {
+      assert.ok(key in parsed.workers[0], `workers entry carries ${key} (AGENT_ENTRY shape)`);
+    }
 
     // structuredContent mirrors content (if SDK supports it in this env)
     if (res.structuredContent) {
-      assert.ok(Array.isArray(res.structuredContent.agents), "structuredContent.agents is array");
-      assert.equal(res.structuredContent.agents.length, 2, "structuredContent has same agents");
+      assert.ok(Array.isArray(res.structuredContent.workers), "structuredContent.workers is array");
+      assert.equal(res.structuredContent.workers.length, 2, "structuredContent has same workers");
     }
   } finally {
     await client.close();
@@ -226,7 +229,7 @@ test("M9-1-04: tool input cannot override server registryPath/runDir", async () 
     let rejectedResult = null;
     try {
       const res = await client.callTool({
-        name: "registry_list",
+        name: "lead_preflight",
         arguments: {
           registryPath: "/attacker/registry.json",
           runDir: "/attacker/runs",
@@ -264,7 +267,7 @@ test("M9-1-04: tool input cannot override server registryPath/runDir", async () 
 // M9-1-05: service throw → spec MCP error, no sentinel stack/secret leak.
 // =====================================================================
 
-test("M9-1-05: service throw returns MCP error result, leaks no sentinel stack or secret", async () => {
+test("M9-1-05: service throw settles workers=unknown (never observed-empty), leaks no sentinel stack or secret", async () => {
   // Use a desensitization-safe sentinel (matches the repo's ALLOW list) so the
   // secret-scan gate does not flag the fixture itself. The full message-leak
   // containment is covered by M9-1-C1 below.
@@ -282,8 +285,13 @@ test("M9-1-05: service throw returns MCP error result, leaks no sentinel stack o
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
-    assert.equal(res.isError, true, "result is flagged as error");
+    // 决定 0129：registry_list 并入 preflight 后，服务抛错不再折叠成 isError——
+    // workers 节如实 unknown（绝不伪造空清单），其余节照常独立结算；泄漏边界不变。
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+    assert.notEqual(res.isError, true, "sections settle independently, not a hard error");
+    const sc = res.structuredContent ?? JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.equal(sc.workers, null, "workers stays unknown (null), never faked empty");
+    assert.equal(sc.checkStatus.workers, "unknown", "checkStatus.workers reports unknown");
     const dumped = JSON.stringify(res);
     assert.ok(!dumped.includes(SECRET_FIXTURE), "secret must not leak into result");
     const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
@@ -318,14 +326,14 @@ test("M9-1-06: real stdio subprocess completes initialize/listTools/callTool", a
 
     const tools = await client.listTools();
     const toolNames = tools.tools.map((t) => t.name);
-    assert.ok(toolNames.includes("registry_list"), "real subprocess lists registry_list");
+    assert.ok(toolNames.includes("lead_preflight"), "real subprocess lists lead_preflight");
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     const textBlock = res.content.find((b) => b.type === "text");
     assert.ok(textBlock, "real subprocess returned text content");
     const parsed = JSON.parse(textBlock.text);
-    assert.ok(Array.isArray(parsed.agents), "real subprocess returned agents array");
-    assert.equal(parsed.agents.length, 2, "two agents from real subprocess");
+    assert.ok(Array.isArray(parsed.workers), "real subprocess returned workers array");
+    assert.equal(parsed.workers.length, 2, "two workers from real subprocess");
   } finally {
     if (client) await client.close();
     cleanupDir(dir);
@@ -358,15 +366,15 @@ test("M9-1-07: real stdio result matches direct getRegistryInventory() semantics
     const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
     await client.connect(transport);
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
 
-    // MCP wraps in {agents:[...]}; the inner array must equal the service output.
+    // 决定 0129：preflight workers 条目逐字段透传同一服务的输出（同形）。
     assert.deepEqual(
-      parsed.agents,
+      parsed.workers,
       direct,
-      "MCP agents array equals direct getRegistryInventory() output",
+      "MCP workers array equals direct getRegistryInventory() output (field-for-field)",
     );
   } finally {
     if (client) await client.close();
@@ -394,7 +402,7 @@ test("M9-1-08: real stdio call adds no transcript/run files to runDir", async ()
     client = new Client({ name: "wao-m91-08-client", version: "0.0.1" }, { capabilities: {} });
     const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
     await client.connect(transport);
-    await client.callTool({ name: "registry_list", arguments: {} });
+    await client.callTool({ name: "lead_preflight", arguments: {} });
     await client.close();
     client = null;
 
@@ -484,7 +492,7 @@ test("M9-1-09: subprocess stdout is protocol-pure, no banner/log/help text", asy
     // tools/list
     send({ jsonrpc: "2.0", id: id(2), method: "tools/list" });
     // tools/call
-    send({ jsonrpc: "2.0", id: id(3), method: "tools/call", params: { name: "registry_list", arguments: {} } });
+    send({ jsonrpc: "2.0", id: id(3), method: "tools/call", params: { name: "lead_preflight", arguments: {} } });
 
     // Give the server time to respond, then close stdin to end the process.
     await new Promise((r) => setTimeout(r, 800));
@@ -623,12 +631,12 @@ test("M9-1-12: Windows path with spaces — stdio entrypoint reads explicit regi
     const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
     await client.connect(transport);
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
-    assert.equal(parsed.agents.length, 1, "spaced-path registry read successfully");
-    assert.equal(parsed.agents[0].id, "coder_low");
-    assert.equal(parsed.agents[0].certification, "certified");
+    assert.equal(parsed.workers.length, 1, "spaced-path registry read successfully");
+    assert.equal(parsed.workers[0].id, "coder_low");
+    assert.equal(parsed.workers[0].certification, "certified");
   } finally {
     if (client) await client.close();
     cleanupDir(dir);
@@ -651,7 +659,7 @@ test("M9-1-12: Windows path with spaces — stdio entrypoint reads explicit regi
 // C1: err.message containing secret + absolute path must not leak.
 // ---------------------------------------------------------------------
 
-test("M9-1-C1: error message with secret and absolute path returns only fixed safe text", async () => {
+test("M9-1-C1: service error with secret and absolute path leaks nothing into the settled payload", async () => {
   // Sentinels placed in the MESSAGE (not just a property) — this is the real
   // leak vector CTO reproduced. Use desensitization-safe words for the fixture.
   const SECRET_IN_MSG = "test-secret-value-in-message-c1";
@@ -667,15 +675,20 @@ test("M9-1-C1: error message with secret and absolute path returns only fixed sa
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
-    assert.equal(res.isError, true, "error flagged");
+    // 决定 0129：经 preflight，workers 节如实 unknown（不是 isError）；原始
+    // message 绝不进任何节——泄漏边界不变。
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+    assert.notEqual(res.isError, true, "settles as unknown, not a hard error");
+    const sc = res.structuredContent ?? {};
+    assert.equal(sc.workers, null, "workers unknown");
+    assert.equal(sc.checkStatus?.workers, "unknown", "checkStatus.workers unknown");
     const dumped = JSON.stringify(res);
     assert.ok(!dumped.includes(SECRET_IN_MSG), "secret from message must not appear in result");
     assert.ok(!dumped.includes(ABS_PATH_IN_MSG), "absolute path from message must not appear");
     assert.ok(!dumped.includes("C:\\\\Users"), "no absolute-path fragment leaks");
-    // Result must carry a fixed safe text, not the raw message.
+    // The raw service message never rides the wire (sections carry facts only).
     const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-    assert.ok(text.length > 0, "a bounded error text is present");
+    assert.ok(!/failed to read/.test(text), "raw service message never echoed");
     assert.ok(!/at .*\(.+:\d+:\d+\)/.test(text), "no stack frame leaked");
   } finally {
     await client.close();
@@ -687,7 +700,7 @@ test("M9-1-C1: error message with secret and absolute path returns only fixed sa
 // C2: extra arguments must be rejected; service must NOT be called.
 // ---------------------------------------------------------------------
 
-test("M9-1-C2: registry_list rejects extra arguments, service call count is 0", async () => {
+test("M9-1-C2: lead_preflight rejects extra arguments, service call count is 0", async () => {
   let serviceCalls = 0;
   const fakeService = async () => {
     serviceCalls += 1;
@@ -705,7 +718,7 @@ test("M9-1-C2: registry_list rejects extra arguments, service call count is 0", 
     let threw = false;
     try {
       result = await client.callTool({
-        name: "registry_list",
+        name: "lead_preflight",
         arguments: { registryPath: "/attacker/x", evil: true, runDir: "/attacker/y" },
       });
     } catch {
@@ -754,7 +767,7 @@ test("M9-1-C3: unknown tool rejected by SDK protocol layer, not hand-rolled resu
     } else {
       assert.equal(result.isError, true, "unknown tool must be error, not success");
       const text = result.content?.map((b) => b.text ?? "").join(" ") ?? "";
-      assert.ok(!text.includes('"agents"'), "must not return agents payload");
+      assert.ok(!text.includes('"workers"'), "must not return workers payload");
       // Must NOT be the old hand-rolled prefix; must carry a protocol code marker.
       assert.ok(!/^unknown tool:/.test(text.trim()), "not a hand-rolled 'unknown tool:' message");
       assert.ok(/-32602|not found/i.test(text), "error text carries SDK protocol-layer code marker");
@@ -817,7 +830,7 @@ test("M9-1-C4: real stdio stderr is fixed safe text, no paths/secrets/raw messag
 // C5: tool declares read-only annotations.
 // ---------------------------------------------------------------------
 
-test("M9-1-C5: registry_list declares readOnly/destructive/idempotent/openWorld hints", async () => {
+test("M9-1-C5: lead_preflight (registry_list's survivor) declares readOnly/destructive/idempotent/openWorld hints", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m91-c5-"));
   try {
     const registryPath = makeRegistry(dir, {
@@ -827,8 +840,8 @@ test("M9-1-C5: registry_list declares readOnly/destructive/idempotent/openWorld 
     const client = await buildInMemoryClient(server);
     try {
       const tools = await client.listTools();
-      const t = tools.tools.find((x) => x.name === "registry_list");
-      assert.ok(t, "registry_list present");
+      const t = tools.tools.find((x) => x.name === "lead_preflight");
+      assert.ok(t, "lead_preflight present");
       assert.ok(t.annotations, "tool has annotations");
       assert.equal(t.annotations.readOnlyHint, true, "readOnlyHint:true");
       assert.equal(t.annotations.destructiveHint, false, "destructiveHint:false");
@@ -861,22 +874,22 @@ test("M9-1-C6: output schema declared; structuredContent matches schema and text
   const client = await buildInMemoryClient(server);
   try {
     const tools = await client.listTools();
-    const t = tools.tools.find((x) => x.name === "registry_list");
+    const t = tools.tools.find((x) => x.name === "lead_preflight");
     assert.ok(t.outputSchema, "tool declares an output schema");
     // output schema must allow certification to be null.
     const schemaText = JSON.stringify(t.outputSchema);
     assert.ok(/certification/.test(schemaText), "output schema mentions certification");
     assert.ok(/nullable|null/.test(schemaText), "output schema allows null certification");
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     assert.ok(res.structuredContent, "structuredContent present");
     const sc = res.structuredContent;
-    assert.ok(Array.isArray(sc.agents), "structuredContent.agents is array");
+    assert.ok(Array.isArray(sc.workers), "structuredContent.workers is array");
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
     // structuredContent and text JSON must be the same payload.
     assert.deepEqual(sc, parsed, "structuredContent equals text JSON payload");
-    assert.equal(sc.agents[1].certification, null, "null certification preserved");
+    assert.equal(sc.workers[1].certification, null, "null certification preserved");
   } finally {
     await client.close();
     await server.close();
@@ -901,7 +914,7 @@ function readFileSyncCompat(p) {
 // issues:[] so existing fakes keep working.
 // =====================================================================
 
-test("M12-25-REG-1: real subprocess registry_list with valid + malformed → healthy agents + bounded issues", async () => {
+test("M12-25-REG-1: real subprocess preflight workers with valid + malformed → healthy workers + bounded issues", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1225-reg1-"));
   let client;
   try {
@@ -917,19 +930,20 @@ test("M12-25-REG-1: real subprocess registry_list with valid + malformed → hea
     const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
     await client.connect(transport);
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     assert.equal(res.isError, undefined, "partial inventory is a normal (non-error) result");
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
-    assert.ok(Array.isArray(parsed.agents), "agents array present");
-    assert.equal(parsed.agents.length, 1, "only the healthy entry is returned");
-    assert.equal(parsed.agents[0].id, "good");
-    assert.ok(Array.isArray(parsed.issues), "issues array present");
-    assert.equal(parsed.issues.length, 1, "one bounded issue for the malformed entry");
-    assert.deepEqual(Object.keys(parsed.issues[0]).sort(), ["agentId", "code"], "issue shape is exactly {code, agentId}");
-    assert.equal(parsed.issues[0].code, "invalid_configuration");
-    assert.equal(parsed.issues[0].agentId, "broken", "canonical id projected");
-    assert.equal(parsed.issuesTruncated, false);
+    assert.ok(Array.isArray(parsed.workers), "workers array present");
+    assert.equal(parsed.workers.length, 1, "only the healthy entry is returned");
+    assert.equal(parsed.workers[0].id, "good");
+    assert.ok(Array.isArray(parsed.registryIssues), "registryIssues array present");
+    assert.equal(parsed.registryIssues.length, 1, "one bounded issue for the malformed entry");
+    assert.deepEqual(Object.keys(parsed.registryIssues[0]).sort(), ["agentId", "code"], "issue shape is exactly {code, agentId}");
+    assert.equal(parsed.registryIssues[0].code, "invalid_configuration");
+    assert.equal(parsed.registryIssues[0].agentId, "broken", "canonical id projected");
+    assert.equal(parsed.registryIssuesTruncated, false);
+    assert.equal(parsed.checkStatus.workers, "warning", "partial inventory ⇒ workers warning (complete:false)");
     // structuredContent mirrors the text JSON (schema-validated).
     if (res.structuredContent) {
       assert.deepEqual(res.structuredContent, parsed, "structuredContent equals text JSON");
@@ -940,7 +954,7 @@ test("M12-25-REG-1: real subprocess registry_list with valid + malformed → hea
   }
 });
 
-test("M12-25-REG-2: whole-file invalid JSON registry → MCP error (NOT a partial result)", async () => {
+test("M12-25-REG-2: whole-file invalid JSON registry → workers unknown (NOT a partial result)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1225-reg2-"));
   let client;
   try {
@@ -953,11 +967,14 @@ test("M12-25-REG-2: whole-file invalid JSON registry → MCP error (NOT a partia
     const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
     await client.connect(transport);
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
-    assert.equal(res.isError, true, "unreadable/invalid-JSON registry source is a hard error");
-    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-    assert.ok(/registry_list failed/.test(text), "fixed safe error text");
-    assert.ok(!res.structuredContent, "no partial payload leaked on a whole-file failure");
+    // 决定 0129：经 preflight，整源不可读不再 isError——workers:null +
+    // checkStatus "unknown"（绝不伪造部分结果，也绝不伪造成空清单）。
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+    const sc = res.structuredContent ?? JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.notEqual(res.isError, true, "sections settle independently");
+    assert.equal(sc.workers, null, "unreadable/invalid-JSON registry source ⇒ workers unknown");
+    assert.equal(sc.checkStatus.workers, "unknown", "checkStatus.workers reports unknown");
+    assert.deepEqual(sc.registryIssues, [], "no partial issues fabricated");
   } finally {
     if (client) await client.close();
     cleanupDir(dir);
@@ -976,27 +993,28 @@ test("M12-25-REG-3: empty valid registry → agents [], issues [] (distinct from
     const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
     await client.connect(transport);
 
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    assert.deepEqual(parsed.agents, []);
-    assert.deepEqual(parsed.issues, []);
-    assert.equal(parsed.issuesTruncated, false);
+    assert.deepEqual(parsed.workers, []);
+    assert.deepEqual(parsed.registryIssues, []);
+    assert.equal(parsed.registryIssuesTruncated, false);
+    assert.equal(parsed.checkStatus.workers, "observed", "empty-but-readable is observed (distinct from unknown)");
   } finally {
     if (client) await client.close();
     cleanupDir(dir);
   }
 });
 
-test("M12-25-REG-4: registry_list outputSchema declares the closed issue code set + issuesTruncated", async () => {
+test("M12-25-REG-4: lead_preflight outputSchema declares the closed issue code set + registryIssuesTruncated", async () => {
   const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
   const client = await buildInMemoryClient(server);
   try {
     const tools = await client.listTools();
-    const t = tools.tools.find((x) => x.name === "registry_list");
+    const t = tools.tools.find((x) => x.name === "lead_preflight");
     assert.ok(t.outputSchema, "output schema declared");
     const schemaText = JSON.stringify(t.outputSchema);
-    assert.ok(/issues/.test(schemaText), "output schema declares issues");
-    assert.ok(/issuesTruncated/.test(schemaText), "output schema declares issuesTruncated");
+    assert.ok(/registryIssues/.test(schemaText), "output schema declares registryIssues");
+    assert.ok(/registryIssuesTruncated/.test(schemaText), "output schema declares registryIssuesTruncated");
     // Closed-set issue codes derived from the SSOT (no dynamic text).
     assert.ok(/invalid_id/.test(schemaText), "invalid_id code in the schema enum");
     assert.ok(/invalid_configuration/.test(schemaText), "invalid_configuration code in the schema enum");
@@ -1006,7 +1024,7 @@ test("M12-25-REG-4: registry_list outputSchema declares the closed issue code se
   }
 });
 
-test("M12-25-REG-5: bare-array injected service (legacy) normalized to issues:[]", async () => {
+test("M12-25-REG-5: bare-array injected service (legacy) normalized to registryIssues:[]", async () => {
   // Backward compatibility: an injected service that returns the legacy bare
   // array shape must still work — the handler normalizes it to {agents, issues:[]}.
   const fakeService = async () => [
@@ -1017,11 +1035,11 @@ test("M12-25-REG-5: bare-array injected service (legacy) normalized to issues:[]
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    assert.equal(parsed.agents.length, 1);
-    assert.deepEqual(parsed.issues, [], "legacy bare-array service → no issues");
-    assert.equal(parsed.issuesTruncated, false);
+    assert.equal(parsed.workers.length, 1);
+    assert.deepEqual(parsed.registryIssues, [], "legacy bare-array service → no issues");
+    assert.equal(parsed.registryIssuesTruncated, false);
   } finally {
     await client.close();
     await server.close();
@@ -1041,16 +1059,16 @@ test("M12-25-REG-6: partial injected service {agents, issues} threads both throu
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     assert.ok(res.structuredContent, "schema-validated structuredContent present");
-    assert.equal(res.structuredContent.agents.length, 1);
-    assert.equal(res.structuredContent.issues.length, 1);
-    assert.equal(res.structuredContent.issues[0].agentId, "broken");
-    assert.equal(res.structuredContent.issuesTruncated, false);
+    assert.equal(res.structuredContent.workers.length, 1);
+    assert.equal(res.structuredContent.registryIssues.length, 1);
+    assert.equal(res.structuredContent.registryIssues[0].agentId, "broken");
+    assert.equal(res.structuredContent.registryIssuesTruncated, false);
     // A malicious injected issue carrying extra fields must be stripped by the
     // strict schema parse — never echoed back to the model.
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    assert.deepEqual(Object.keys(parsed.issues[0]).sort(), ["agentId", "code"]);
+    assert.deepEqual(Object.keys(parsed.registryIssues[0]).sort(), ["agentId", "code"]);
     const dumped = JSON.stringify(parsed);
     assert.ok(!dumped.includes("SECRET_LEAK"), "malicious injected issue field stripped");
     assert.ok(!dumped.includes("/etc/agents.json"), "malicious injected path stripped");
@@ -1084,15 +1102,15 @@ test("M12-25-REG-7: injected >cap issues + issuesTruncated:false → bounded par
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     // Bounded partial result — NOT a generic whole-registry error.
     assert.equal(res.isError, undefined, "bounded partial result, not a whole-registry error");
     assert.ok(res.structuredContent, "schema-validated structuredContent present");
-    assert.equal(res.structuredContent.agents.length, 1, "valid worker preserved (not erased)");
-    assert.equal(res.structuredContent.agents[0].id, "good");
-    assert.equal(res.structuredContent.issues.length, REGISTRY_ISSUES_CAP, "capped at REGISTRY_ISSUES_CAP");
-    assert.equal(res.structuredContent.issuesTruncated, true, "over-cap input reports truncation despite source false");
-    for (const issue of res.structuredContent.issues) {
+    assert.equal(res.structuredContent.workers.length, 1, "valid worker preserved (not erased)");
+    assert.equal(res.structuredContent.workers[0].id, "good");
+    assert.equal(res.structuredContent.registryIssues.length, REGISTRY_ISSUES_CAP, "capped at REGISTRY_ISSUES_CAP");
+    assert.equal(res.structuredContent.registryIssuesTruncated, true, "over-cap input reports truncation despite source false");
+    for (const issue of res.structuredContent.registryIssues) {
       assert.ok(REGISTRY_ISSUE_CODES.includes(issue.code), `closed-set code only: ${issue.code}`);
       assert.ok(issue.agentId === null || isValidCanonicalAgentId(issue.agentId), "canonical agentId or null");
       assert.deepEqual(Object.keys(issue).sort(), ["agentId", "code"], "no injected field survives the schema");
@@ -1117,7 +1135,7 @@ test("M12-25-REG-7: injected >cap issues + issuesTruncated:false → bounded par
 // into an empty SUCCESS — i.e. it FAILS OPEN. This RED reproduces that and guards
 // the fail-closed fix. (The legacy bare-array and valid {agents} shapes remain
 // accepted — see REG-5/REG-6.)
-test("M12-25-REG-8: null/malformed injected inventory → registry_list fails CLOSED (isError, never observed-empty)", async () => {
+test("M12-25-REG-8: null/malformed injected inventory → workers unknown (fail-closed, never observed-empty)", async () => {
   for (const bad of [null, undefined, { noAgentsKey: true }, 42, "a-string"]) {
     const fakeService = async () => bad;
     const server = createWaoMcpServer({
@@ -1125,11 +1143,14 @@ test("M12-25-REG-8: null/malformed injected inventory → registry_list fails CL
     });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "registry_list", arguments: {} });
-      assert.equal(res.isError, true,
-        `malformed injected inventory (${JSON.stringify(bad)}) must fail closed to the MCP error, not an observed-empty success`);
-      assert.equal(res.structuredContent, undefined,
-        "fail-closed error path carries no agents payload (no fabricated observed-empty registry)");
+      // 决定 0129：经 preflight，"读不了"不再是 isError——workers:null + unknown
+      //（fail-closed 的诚实形态：绝不把读失败伪装成空清单成功）。
+      const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+      const sc = res.structuredContent ?? JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(sc.workers, null,
+        `malformed injected inventory (${JSON.stringify(bad)}) must settle unknown, never observed-empty`);
+      assert.equal(sc.checkStatus.workers, "unknown",
+        "checkStatus.workers reports unknown (no fabricated observed-empty registry)");
     } finally {
       await client.close();
       await server.close();
@@ -1225,7 +1246,7 @@ test("R10-A-MCP-1: run_dispatch input gains the additive `model` member; tool co
       // SSOT); re-assert from the toolSurface SSOT that adding a property
       // changed NEITHER the count NOR the set.
       const { TOOLS } = await import("../../src/mcp/toolSurface.js");
-      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 22-tool SSOT");
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 16-tool SSOT (0129)");
       const rd = tools.find((t) => t.name === "run_dispatch");
       const props = rd.inputSchema.properties ?? {};
       // The canonical property list = the prior closed set PLUS model (pure
@@ -1243,10 +1264,8 @@ test("R10-A-MCP-1: run_dispatch input gains the additive `model` member; tool co
       assert.equal(model.minLength, 1, "SSOT min bound serializes");
       assert.equal(model.maxLength, 128, "SSOT MODEL_OVERRIDE_MAX serializes");
       assert.match(model.pattern, /\(\?!--\)/, "the SSOT no-flag-prefix pattern serializes onto the wire");
-      // run_dispatch_contract_check SHARES the schema (M12-9 SSOT) and
-      // intentionally accepts-and-ignores model (it advises on the contract).
-      const cc = tools.find((t) => t.name === "run_dispatch_contract_check");
-      assert.ok("model" in (cc.inputSchema.properties ?? {}), "contract_check shares the additive member");
+      // 决定 0129：contract_check 工具已删——就地预检忽略 model（不再有共享
+      // schema 的第二载体；model 仍是 run_dispatch 独占输入）。
     } finally {
       await client.close();
       await server.close();
@@ -1403,7 +1422,7 @@ test("R11-1-MCP-1: run_dispatch input gains the additive `reasoning` enum member
       // SSOT); re-assert from the toolSurface SSOT that adding a property
       // changed NEITHER the count NOR the set.
       const { TOOLS } = await import("../../src/mcp/toolSurface.js");
-      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 22-tool SSOT");
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 16-tool SSOT (0129)");
       const rd = tools.find((t) => t.name === "run_dispatch");
       const props = rd.inputSchema.properties ?? {};
       // The canonical property list = the prior closed set PLUS reasoning
@@ -1425,11 +1444,8 @@ test("R11-1-MCP-1: run_dispatch input gains the additive `reasoning` enum member
         "the wire enum IS the closed REASONING_EFFORTS set",
       );
       assert.equal("pattern" in reasoning, false, "an enum, not a regex — closed-set on the wire");
-      // run_dispatch_contract_check SHARES the schema (M12-9 SSOT) and
-      // intentionally accepts-and-ignores reasoning (it advises on the
-      // delivery contract).
-      const cc = tools.find((t) => t.name === "run_dispatch_contract_check");
-      assert.ok("reasoning" in (cc.inputSchema.properties ?? {}), "contract_check shares the additive member");
+      // 决定 0129：contract_check 工具已删——就地预检忽略 reasoning（不再有
+      // 共享 schema 的第二载体；reasoning 仍是 run_dispatch 独占输入）。
     } finally {
       await client.close();
       await server.close();
@@ -1573,7 +1589,7 @@ test("R11-1-MCP-4: typed reuse conflict from the service collapses to the fixed 
 // entries (no field) to null instead of failing the whole tool.
 // =====================================================================
 
-test("TD-283: registry_list passes dispatchHold through the output schema; legacy shape defaults to null", async () => {
+test("TD-283: lead_preflight workers passes dispatchHold through the output schema; legacy shape defaults to null", async () => {
   const mkEntry = (id, extra) => ({
     id, backend: "claude-code", model: "glm-5.2", reasoningEffort: null, certification: null,
     cwd: "/repo", sessionReuse: null, credentialAvailability: "available",
@@ -1598,16 +1614,16 @@ test("TD-283: registry_list passes dispatchHold through the output schema; legac
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    const held = parsed.agents.find((a) => a.id === "held-lane");
-    const plain = parsed.agents.find((a) => a.id === "plain-lane");
+    const held = parsed.workers.find((a) => a.id === "held-lane");
+    const plain = parsed.workers.find((a) => a.id === "plain-lane");
     assert.equal(held.dispatchHold, "夹具：暂停说明", "wire carries the Owner note verbatim");
     assert.equal(plain.dispatchHold, null, "lane without a hold projects null");
 
-    const res2 = await client.callTool({ name: "registry_list", arguments: {} });
+    const res2 = await client.callTool({ name: "lead_preflight", arguments: {} });
     const parsed2 = JSON.parse(res2.content.find((b) => b.type === "text").text);
-    assert.equal(parsed2.agents[0].dispatchHold, null, "legacy service shape (no field) defaults to null, tool still succeeds");
+    assert.equal(parsed2.workers[0].dispatchHold, null, "legacy service shape (no field) defaults to null, tool still succeeds");
   } finally {
     await client.close();
     await server.close();

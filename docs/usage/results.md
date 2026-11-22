@@ -190,28 +190,28 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 - `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（含 `workdir_escape`）→ `run_activity` + `run_diagnose`，不外广告 `run_delivery_review`；未请求 delivery → `run_activity` + `run_status`。readiness 等待路径与 point-in-time 路径披露一致；无 `readiness` 时，仅 `isolationFailure.code === "workdir_escape"` 触发同一下钻提示（未知 code 不提升）。
 - `run_activity` 有 `nextCursor` → 同工具续页；终态读完 → `run_collect` compact；非终态 → `run_status`。
 
-该字段是加法字段：既有输出字段、行为、audit 语义不变；Lead 可以忽略它，直接用原子工具。`run_delivery_review_bundle` 的输出不携带该字段——其嵌套 `delivery` 保持既有合同，只有 standalone `run_delivery` 带。
+该字段是加法字段：既有输出字段、行为、audit 语义不变；Lead 可以忽略它，直接用原子工具。（决定 0129：原 `run_delivery_review_bundle` 已删，该字段只在 `run_delivery` 一处。）
 
-## MCP `runs_list`：列出 run
+## MCP 运行清单：`lead_preflight` 的 `recentRuns`（原 `runs_list` 承接）
 
-`runs_list` 让 MCP host 列出当前绑定范围内的 run。只读、幂等：不修改任何持久状态、不追加 transcript event。既没给 `expectedWorkspaceRoot` 又没有缺省绑定时返回固定错误（`workspace not bound: …`）；其它项目的 run 不可见，不跨 workspace 探测。
+决定 0129：原 `runs_list` 工具已删——`lead_preflight` 的可选输入 `recentRuns`（整数 1..50）让输出多一个 `recentRuns` 节，列出本次调用范围内最近的 run。只读、幂等：不修改任何持久状态、不追加 transcript event；不请求该输入就没有这个键、不多扫描。其它项目的 run 不可见，不跨 workspace 探测；既没给 `expectedWorkspaceRoot` 又没有缺省绑定时该节为 `null`（workspace 节如实报未绑定，不伪造成空清单）。
 
-输入三字段均可选。`expectedWorkspaceRoot`：给了就当场证明，只作用于本次调用；省略时用缺省绑定（MCP roots → 启动配置）。`activeOnly`（bool，默认 `false`）：只返回经证明 active 的 run——transcript 为已知非终态且有 fresh owner heartbeat（默认 10s 阈值）。单纯"未到终态"不足以算 active：一个非终态但缺 fresh heartbeat 的 run 不在 `activeOnly` 结果里，但也绝不据此推断它 failed/dead/stopped（仍可能长时间运行或休眠）；它计入 `unresolvedCount`，仍出现在普通（非 `activeOnly`）列表中。`limit`（整数 1..100，默认 `50`）：返回条目数上限。`runDir`、registry、`agentId`、`cwd` 等 server-owned。
+范围与 `lead_preflight` 自身一致：`expectedWorkspaceRoot` 给了就当场证明、只作用于本次调用；省略时用缺省绑定（MCP roots → 启动配置）。条目按新到旧返回，请求的数字即条数上限。`runDir`、registry、`agentId`、`cwd` 等 server-owned。
 
-`runs` 每个元素含 `runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
+`recentRuns.runs` 每个元素与原 `runs_list.runs[]` 同形——`runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
 
 - `activityStatus` ∈ `terminal | active | unresolved | unknown`
 - `activityBasis` ∈ `terminal_state | fresh_owner_heartbeat | no_fresh_owner_heartbeat | unknown_state`
 
-`active` 要求已知非终态 + fresh owner heartbeat；`unresolved` = 非终态但无 fresh heartbeat；终态与无法识别的 state 永不为 `active`。`returnedCount` = `runs.length`；`truncated` 表示因 `limit` 截断而仍有更多匹配 run；`unresolvedCount` = 全量扫描中已知非终态但缺 fresh heartbeat 的 run 数（在 `limit` 之前计数，与 `activeOnly` 无关），`lead_preflight` 复用它而无需重新扫描。
+`active` 要求已知非终态 + fresh owner heartbeat；`unresolved` = 非终态但无 fresh heartbeat，绝不据此推断 failed/dead/stopped；终态与无法识别的 state 永不为 `active`。"经证明 active"的运行另由 `lead_preflight` 的 `activeRuns` 节给出（上限 10 + `activeRunCount`/`activeRunsTruncated`）。`returnedCount` = `runs.length`；`truncated` 表示因请求条数截断而仍有更多匹配 run；`unresolvedCount` = 全量扫描中已知非终态但缺 fresh heartbeat 的 run 数（在截断之前计数）。该节不进 `checkStatus`、不影响 `complete`。
 
 每行的 `state`/`terminal`/`updatedAt` 只由本 run 自身信封事件计算（文件名即权威 runId）；MCP 查询缓存路径与 CLI 直读路径同语义。全无信封的旧 transcript 保持既有读法；任一事件带信封即严格绑定；零绑定事件（整份只有外 run 信封行）降级 pending / `updatedAt:null`——宁可可见地缺事实。`agentId` 由 events[0] 派生（append-only 首写不变量）。
 
-一次 `runs_list` / `lead_preflight` 查询先证明授权 workspace，再按查询范围缓存每个不同 ownership cwd 的 Git 顶层证明（包括 fail-closed 的不可证明结果）；不为同一项目的每个历史 run 重复启动 Git 证明进程。缓存只活在单次查询内，不跨调用持久化，也不改变 workspace 隔离、过滤或错误投影。
+一次运行清单查询（`recentRuns` / `activeRuns`）先证明授权 workspace，再按查询范围缓存每个不同 ownership cwd 的 Git 顶层证明（包括 fail-closed 的不可证明结果）；不为同一项目的每个历史 run 重复启动 Git 证明进程。缓存只活在单次查询内，不跨调用持久化，也不改变 workspace 隔离、过滤或错误投影。
 
-绝不返回：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量、messages、evidence、异常 message/stack。失败返回固定安全文案 `runs_list failed`。
+`recentRuns` 节内绝不出现：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量、messages、evidence、异常 message/stack（workspace 节的 `workspaceRoot` 是 preflight 自己的证明事实，批 119 起有意在面）；读不出时该节为 `null` + warning（unknown，不伪造空清单）。
 
-CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`。
+CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`（含 `activeOnly` 过滤）。
 
 ## MCP resources `wao://playbooks`：Lead Playbook Catalog
 
@@ -248,7 +248,7 @@ CLI 只做 argv/format/console，数据逻辑与 MCP resource 委托同一 servi
 
 ## `semanticNotes` 与 resources `wao://semantics`
 
-恰好三个 standalone 只读成功结果——`run_await_result`/`run_delivery`/`run_diagnose`（CLI `runs wait` 同一目录与 selector）——携带 REQUIRED `semanticNotes`（1..4 条；每条三键 `{ id, meaning, doesNotMean }`；`id` 是冻结的 namespaced 闭集值：`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）。每条已自解释，不必重推导；选择器不变量与闭集目录（read_failure 不产终止 note、passed 不是 acceptance 等）见[架构](../02-architecture.md)的 Self-Describing Results 条。`run_delivery_review_bundle` 嵌入的 nested delivery 不含 `semanticNotes`。
+恰好三个 standalone 只读成功结果——`run_await_result`/`run_delivery`/`run_diagnose`（CLI `runs wait` 同一目录与 selector）——携带 REQUIRED `semanticNotes`（1..4 条；每条三键 `{ id, meaning, doesNotMean }`；`id` 是冻结的 namespaced 闭集值：`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`）。每条已自解释，不必重推导；选择器不变量与闭集目录（read_failure 不产终止 note、passed 不是 acceptance 等）见[架构](../02-architecture.md)的 Self-Describing Results 条。
 
 两个只读 resources（`resources/read`，mimeType `application/json`）：
 

@@ -73,11 +73,11 @@ Codex CLI、OpenCode 或任何 MCP host——以 stdio MCP server 方式驱动 W
 状态、隔离、transcript、交付验证与 Lead 接受/拒绝决策的持久记录（它记录 Lead 的决策，
 不替 Lead 决策）；worker 只收到有界的任务 prompt，不参与编排。
 
-WAO 暴露 **20 个 MCP 工具**，覆盖受监督的 Lead 闭环：
+WAO 暴露 **16 个 MCP 工具**，覆盖受监督的 Lead 闭环（决定 0129：四个只读工具的能力并入幸存者——worker/运行清单并入 `lead_preflight`、派发预检并入 `run_dispatch`、审查组合并入 `run_delivery` + `run_delivery_review`）：
 
-> `inventory → preflight（按调用带目标根）→ dispatch → await result → delivery query/review → Lead decision`
+> `preflight（按调用带目标根；workers 清单 + 最近运行）→ dispatch → await result → delivery query/review → Lead decision`
 
-外加 `runs_list` 恢复入口。`run_consult`（CLI `wao consult`，即 **Agent Union**）召集
+`run_consult`（CLI `wao consult`，即 **Agent Union**）召集
 有界多席跨族系咨询：机械扇出、原文收集、council-diff 把每席完整原话并列呈现——
 意见留痕、绝不自动合成，分歧由 Lead 读取裁定。Playbook 目录按需经 MCP resources（`wao://playbooks`）读取，
 不占工具面。每个改状态的操作都与 CLI fallback 调用同一共享 application service，产生
@@ -107,7 +107,7 @@ WAO 暴露 **20 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 | 你想…… | 读这个 |
 |---|---|
 | **从零开始——安装、单 worker、校验、MCP host、首个 canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md)——唯一的新用户上手路径 |
-| **作为 agent / 脚本使用编排器**（20 个 MCP 工具、命令、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
+| **作为 agent / 脚本使用编排器**（16 个 MCP 工具、命令、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
 | **作为人类部署 / 配置 / 运维** | [`docs/usage.md`](docs/usage.md)——部署与使用各页的地图 |
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |

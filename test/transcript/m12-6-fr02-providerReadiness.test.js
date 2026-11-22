@@ -299,13 +299,14 @@ test("M12-6-FR02-D1: run_diagnose output schema exposes code enum == general SSO
   }
 });
 
-test("M12-6-FR02-D2: registry_list output schema exposes strict providerReadiness closed sets", async () => {
+test("M12-6-FR02-D2: lead_preflight workers (原 registry_list 承接) exposes strict providerReadiness closed sets", async () => {
   const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
   const client = await buildInMemoryClient(server);
   try {
     const tools = await client.listTools();
-    const t = tools.tools.find((x) => x.name === "registry_list");
-    const pr = t.outputSchema.properties.agents.items.properties.providerReadiness;
+    const t = tools.tools.find((x) => x.name === "lead_preflight");
+    const items = t.outputSchema.properties.workers.anyOf?.[0]?.items ?? t.outputSchema.properties.workers.items;
+    const pr = items.properties.providerReadiness;
     assert.ok(pr, "providerReadiness property present on agent entry");
     assert.deepEqual(pr.properties.configurationStatus.enum, ["configured"], "configurationStatus closed to configured");
     assert.deepEqual(pr.properties.authenticationStatus.enum, ["unknown"], "authenticationStatus closed to unknown");
@@ -456,7 +457,7 @@ test("M12-6-FR02-D8: registry_list service output WITHOUT providerReadiness is r
   }
 });
 
-test("M12-6-FR02-D9: registry_list round-trips providerReadiness through the wire", async () => {
+test("M12-6-FR02-D9: lead_preflight workers (原 registry_list 承接) round-trips providerReadiness through the wire", async () => {
   const pr = {
     configurationStatus: "configured",
     authenticationStatus: "unknown",
@@ -472,11 +473,11 @@ test("M12-6-FR02-D9: registry_list round-trips providerReadiness through the wir
   });
   const client = await buildInMemoryClient(server);
   try {
-    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const res = await client.callTool({ name: "lead_preflight", arguments: {} });
     assert.equal(res.isError, undefined);
-    assert.deepEqual(res.structuredContent.agents[0].providerReadiness, pr, "structuredContent carries providerReadiness");
+    assert.deepEqual(res.structuredContent.workers[0].providerReadiness, pr, "structuredContent carries providerReadiness");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    assert.deepEqual(parsed.agents[0].providerReadiness, pr, "text JSON carries providerReadiness");
+    assert.deepEqual(parsed.workers[0].providerReadiness, pr, "text JSON carries providerReadiness");
   } finally {
     await client.close();
     await server.close();

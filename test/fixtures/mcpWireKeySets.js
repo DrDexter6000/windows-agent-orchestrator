@@ -25,7 +25,8 @@ export const RUN_STATUS_OUTPUT_KEYS = Object.freeze([
 // R11-1-MCP-1 / B1). agentId + prompt required; the rest optional additive
 // members (delivery, M12-6 expectations, M12-9 executionProfileId, M12-7
 // continuable, M12-16 correctable, Round-4 readOnly, R10-A model, R11-1
-// reasoning). run_dispatch_contract_check SHARES this schema (M12-9 SSOT).
+// reasoning). 决定 0129：原 run_dispatch_contract_check 共享该 schema 的第二
+// 载体已随工具删除（就地预检复用同一 resolver，不另立输入面）。
 // 0045 §1.4 第 5 步（2026-10-05）：+lane/+role（agentId 转可选——{agentId} 或
 // {lane, role} 二选一闭集，选择器校验在 handler 经 dispatchResolution）。
 // 0052（2026-10-10）：+fresh（复用会话逃生口——强制 first+epoch+1，Lead 裁量）。
@@ -41,7 +42,7 @@ export const RUN_DISPATCH_INPUT_KEYS = Object.freeze([
 // M12-1S1/M12-4A candidateInventory + candidateKind; M12-6 3B2a the reverify
 // chain trio; M12-8B availableDrilldowns; M12-12 semanticNotes; M12-13
 // isolationFailure; 0098 adoption（主分支 WAO-Adopted-From 三态——standalone
-// 出参独有，review bundle 嵌 BASE 不带）.
+// 出参独有；0129 起 review bundle 已删，adoption 只在 standalone 面）.
 export const RUN_DELIVERY_OUTPUT_KEYS = Object.freeze([
   "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
   "changedFileCount", "changedPaths", "changedPathsTruncated",

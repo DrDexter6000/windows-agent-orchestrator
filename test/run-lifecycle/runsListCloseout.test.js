@@ -46,12 +46,21 @@ async function buildClient(server) {
   return client;
 }
 
-// Real registry inventory returns an ARRAY (not {agents: [...]})
+// Real registry inventory returns an ARRAY (not {agents: [...]}).
+// 0129：经 lead_preflight 消费——条目需齐 AGENT_ENTRY 的字段（workers 节
+// 过同一 strict schema；缺 credentialAvailability 会使整份投影 fail-closed）。
 function realRegistryInventory() {
+  const readiness = { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "not_required" };
+  const entry = (id, backend, model) => ({
+    id, backend, model, reasoningEffort: null, certification: "certified",
+    certificationReasonCode: null, certificationLastHealthyAt: null,
+    cwd: "/repo", sessionReuse: null, credentialAvailability: "not_required",
+    missingCredentialEnvNames: [], providerReadiness: readiness, dispatchHold: null,
+  });
   return async () => [
-    { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", certification: "certified", cwd: "/repo" },
-    { id: "coder_hq", backend: "claude-code", model: "glm-5.2", certification: "certified", cwd: "/repo" },
-    { id: "tester", backend: "codex", model: "default", certification: "certified", cwd: "/repo" },
+    entry("coder_low", "claude-code", "glm-5-turbo"),
+    entry("coder_hq", "claude-code", "glm-5.2"),
+    entry("tester", "codex", "default"),
   ];
 }
 
@@ -69,9 +78,10 @@ test("KNOWN-AGENT-01: known agentId 'coder_low' preserved through MCP runs_list"
     });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: {} });
+      // 决定 0129：runs_list 已删，经 lead_preflight recentRuns。
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
       const parsed = JSON.parse(res.content[0].text);
-      const run = parsed.runs.find((r) => r.runId === "run_known");
+      const run = parsed.recentRuns.runs.find((r) => r.runId === "run_known");
       assert.ok(run, "run must appear in list");
       assert.equal(run.agentId, "coder_low", "known agentId must be preserved, not 'unknown'");
     } finally {
@@ -93,9 +103,9 @@ test("KNOWN-AGENT-02: unknown agentId still maps to 'unknown'", async () => {
     });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: {} });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
       const parsed = JSON.parse(res.content[0].text);
-      const run = parsed.runs.find((r) => r.runId === "run_unknown_agent");
+      const run = parsed.recentRuns.runs.find((r) => r.runId === "run_unknown_agent");
       assert.ok(run);
       assert.equal(run.agentId, "unknown", "unregistered agentId must be 'unknown'");
     } finally {
@@ -129,10 +139,10 @@ test("KNOWN-AGENT-03: default partial-inventory service preserves known agentId 
     const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: {} });
-      assert.equal(res.isError, undefined, "runs_list must succeed for a valid registry");
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      assert.equal(res.isError, undefined, "recentRuns must succeed for a valid registry");
       const parsed = JSON.parse(res.content[0].text);
-      const run = parsed.runs.find((r) => r.runId === "run_default_service");
+      const run = parsed.recentRuns.runs.find((r) => r.runId === "run_default_service");
       assert.ok(run, "run must appear in list");
       assert.equal(run.agentId, "coder_low",
         "default partial-inventory service must preserve the known agentId, not erase it to 'unknown'");

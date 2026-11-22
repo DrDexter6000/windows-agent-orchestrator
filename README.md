@@ -87,11 +87,14 @@ accept/reject decision recording (it records the Lead's decision; it does not ac
 reject for the Lead); workers receive only a bounded task prompt and stay out of
 orchestration.
 
-WAO exposes **20 MCP tools** covering the supervised Lead loop:
+WAO exposes **16 MCP tools** covering the supervised Lead loop (decision 0129 folded
+four read-only tools into their survivors — registry/run listings into `lead_preflight`,
+the dispatch precheck into `run_dispatch`, the review bundle into `run_delivery` +
+`run_delivery_review`):
 
-> `inventory → preflight (per-call target) → dispatch → await result → delivery query/review → Lead decision`
+> `preflight (per-call target; workers + recent runs) → dispatch → await result → delivery query/review → Lead decision`
 
-plus `runs_list` recovery. `run_consult` (CLI `wao consult`, a.k.a. the **Agent Union**)
+`run_consult` (CLI `wao consult`, a.k.a. the **Agent Union**)
 convenes bounded multi-seat, cross-family consultations: mechanical fan-out, verbatim
 collection, and a council-diff view that places each seat's full original answer side
 by side (CLI renders in full; the MCP face returns a capped receipt and pages each
@@ -131,7 +134,7 @@ Follow [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md):
 | You want to… | Read this |
 |---|---|
 | **Start from zero — install, one worker, validate, MCP host, first canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — the single new-user setup path |
-| **Use the orchestrator as an agent / from a script** (20 MCP tools, commands, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
+| **Use the orchestrator as an agent / from a script** (16 MCP tools, commands, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — map of the deployment and usage pages |
 | **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
 | **Compare backend capabilities / understand certification** | [`docs/surface/certification.md`](docs/surface/certification.md) (generated) + [`docs/certification-runbook.md`](docs/certification-runbook.md) |

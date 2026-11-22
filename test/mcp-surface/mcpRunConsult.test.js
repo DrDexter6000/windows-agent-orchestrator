@@ -922,7 +922,7 @@ test("MRC-W7: linked-worktree target — records go to the MAIN worktree's .wao;
 // E — surface truth: roster slot, annotations, description guards, no drilldowns
 // =====================================================================
 
-test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_continue; dispatch-family annotations; description semantic guards; NOT a drilldown carrier", async () => {
+test("MRC-E1: run_consult sits between run_dispatch and run_continue; dispatch-family annotations; description semantic guards; NOT a drilldown carrier", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-e1-"));
   try {
     makeGitRepo(dir);
@@ -935,7 +935,7 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
       const names = tools.map((t) => t.name);
       const idx = names.indexOf("run_consult");
       assert.ok(idx !== -1, "run_consult is on the surface");
-      assert.equal(names[idx - 1], "run_dispatch_contract_check", "roster slot: after contract check");
+      assert.equal(names[idx - 1], "run_dispatch", "roster slot: after run_dispatch (0129: contract check folded into it)");
       assert.equal(names[idx + 1], "run_continue", "roster slot: before continue");
 
       const entry = tools[idx];

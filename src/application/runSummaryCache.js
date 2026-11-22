@@ -1,7 +1,7 @@
 // src/application/runSummaryCache.js
 //
 // M12-18: bounded in-memory run-transcript cache for the long-lived MCP query
-// handlers (lead_preflight + runs_list).
+// handlers (lead_preflight's runs scans).
 //
 // Design contract:
 //   - runs/<runId>.jsonl remains the SOLE truth. This cache is a process-memory
@@ -138,7 +138,7 @@ export function createRunSummaryCache({
     // stem 为权威 runId 传给 extractRunFacts —— 与 listRuns 直读分支（runList.js
     // 传文件名 stem）同一语义，缓存路径与直读路径的 state/terminal 投影从此同源。
     // 修复前 extractFactsFn(events) 无 runId → boundReportScope(events, null)
-    // 返回 null → 历史无绑定读法（外 run 终态尾条可翻转 MCP runs_list /
+    // 返回 null → 历史无绑定读法（外 run 终态尾条可翻转 MCP recentRuns /
     // lead_preflight / Owner 看板缓存行——三面全部经本缓存）。stem 是调用方
     // transcriptPathFor(resolvedRunDir, runId) 的原样回取，非新事实。
     const facts = extractFactsFn(events, basename(key, ".jsonl"));

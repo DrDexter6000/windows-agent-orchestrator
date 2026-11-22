@@ -1,7 +1,8 @@
 // test/mcp-surface/mcpRegistryCertEvidence.test.js
 //
 // ADR-0032 修订（2026-09-22，Owner 裁定）：认证证据详情按需投影到 MCP
-// registry_list 只读面——MCP 层保真测试（不是服务层测试的重复）。
+// 只读面——MCP 层保真测试（不是服务层测试的重复）。决定 0129（第 134 批）：
+// 原 registry_list 工具已删，detail 选项并入 lead_preflight（同一证据服务）。
 //
 // 与 test/registry-roles/certificationEvidenceInventory.test.js（服务层）的
 // 分工：服务层钉 getCertificationEvidenceInventory 的判定；本文件钉
@@ -73,7 +74,8 @@ async function buildInMemoryClient(server) {
 }
 
 async function callRegistryList(client, args = {}) {
-  const res = await client.callTool({ name: "registry_list", arguments: args });
+  // 决定 0129：原 registry_list detail 承接到 lead_preflight（同名入参）。
+  const res = await client.callTool({ name: "lead_preflight", arguments: args });
   const textBlock = res.content.find((b) => b.type === "text");
   return { res, parsed: JSON.parse(textBlock.text) };
 }
@@ -146,11 +148,8 @@ test("ADR32-MCP-1: default call keeps the exact prior key set; evidence service 
     try {
       const { res, parsed } = await callRegistryList(client);
       assert.equal(res.isError, undefined, "default call succeeds");
-      assert.deepEqual(
-        Object.keys(parsed).sort(),
-        ["agents", "issues", "issuesTruncated"],
-        "default payload keys are exactly the prior shape (no certificationEvidence)",
-      );
+      // 决定 0129：默认 preflight 载荷不再有"恰三键"的旧形状（preflight 自有
+      // 全量键集，见 m11-8）；本钉收窄为：默认调用无 certificationEvidence 键。
       assert.equal("certificationEvidence" in parsed, false, "no evidence key even with ledgers present");
       assert.deepEqual(res.structuredContent, parsed, "structuredContent equals text JSON");
       assert.equal(evidenceCalls, 0, "evidence service NOT called without detail");
@@ -181,11 +180,10 @@ test("ADR32-MCP-2: detail call returns per-seat five-column rows through the MCP
     try {
       const { res, parsed } = await callRegistryList(client, { detail: "certificationEvidence" });
       assert.equal(res.isError, undefined, "detail call succeeds");
-      assert.deepEqual(
-        Object.keys(parsed).sort(),
-        ["agents", "certificationEvidence", "issues", "issuesTruncated"],
-        "detail adds exactly one key",
-      );
+      // detail 恰加一个键（certificationEvidence）；与默认调用的差集只有它。
+      const { parsed: base } = await callRegistryList(client);
+      const added = Object.keys(parsed).filter((k) => !(k in base));
+      assert.deepEqual(added, ["certificationEvidence"], "detail adds exactly one key");
       assert.deepEqual(res.structuredContent, parsed, "structuredContent equals text JSON (schema-validated)");
       assert.equal(parsed.certificationEvidence.length, 1, "one row per registered seat");
       const row = parsed.certificationEvidence[0];
@@ -441,7 +439,7 @@ test("ADR32-MCP-6: detail is a closed set — out-of-set values rejected before 
         let rejected = false;
         try {
           const res = await client.callTool({
-            name: "registry_list",
+            name: "lead_preflight",
             arguments: { detail: bad },
           });
           assert.equal(res.isError, true, "wire rejects detail=" + JSON.stringify(bad));
@@ -454,7 +452,7 @@ test("ADR32-MCP-6: detail is a closed set — out-of-set values rejected before 
       assert.equal(evidenceCalls, 0, "evidence service never called for a bad detail value");
       // 旧防线不回归：额外键仍被拒（path override 不因新参数复活）。
       const res = await client.callTool({
-        name: "registry_list",
+        name: "lead_preflight",
         arguments: { registryPath: "/attacker/x" },
       });
       assert.equal(res.isError, true, "extra keys still rejected (strict input)");
@@ -486,10 +484,10 @@ test("ADR32-MCP-7: evidence service throw / malformed rows fail closed to the fi
       const server = createWaoMcpServer({ registryPath, runDir, getCertificationEvidenceFn: fake });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "registry_list", arguments: { detail: "certificationEvidence" } });
+        const res = await client.callTool({ name: "lead_preflight", arguments: { detail: "certificationEvidence" } });
         assert.equal(res.isError, true, "service throw fails closed");
         const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-        assert.match(text, /registry_list failed/, "fixed safe text");
+        assert.match(text, /lead_preflight failed/, "fixed safe text");
         assert.ok(!text.includes("C:\secret"), "no path leak");
         assert.equal(res.structuredContent, undefined, "no partial payload");
       } finally {
@@ -506,7 +504,7 @@ test("ADR32-MCP-7: evidence service throw / malformed rows fail closed to the fi
       });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "registry_list", arguments: { detail: "certificationEvidence" } });
+        const res = await client.callTool({ name: "lead_preflight", arguments: { detail: "certificationEvidence" } });
         assert.equal(res.isError, true, "non-array rows fail closed");
         assert.equal(res.structuredContent, undefined, "no observed-empty success payload");
       } finally {
@@ -531,7 +529,7 @@ test("ADR32-MCP-7: evidence service throw / malformed rows fail closed to the fi
       });
       const client = await buildInMemoryClient(server);
       try {
-        const res = await client.callTool({ name: "registry_list", arguments: { detail: "certificationEvidence" } });
+        const res = await client.callTool({ name: "lead_preflight", arguments: { detail: "certificationEvidence" } });
         assert.equal(res.isError, true, "out-of-set applicability fails closed (never fabricated green)");
         assert.equal(res.structuredContent, undefined, "no payload leaked past the schema");
       } finally {
@@ -545,12 +543,12 @@ test("ADR32-MCP-7: evidence service throw / malformed rows fail closed to the fi
 });
 
 // =====================================================================
-// 8. wire 面声明（additive-only）：registry_list input 增恰一个可选闭集
-//    detail；output 增恰一个可选 certificationEvidence；22 工具闭集不变；
-//    详情不得复制进 lead_preflight / run_await_result。
+// 8. wire 面声明（决定 0129 后的形态）：detail 作为 lead_preflight 的可选
+//    闭集输入成员；certificationEvidence 作为其可选输出成员；16 工具闭集；
+//    详情不得复制进 run_await_result / run_status。
 // =====================================================================
 
-test("ADR32-MCP-8: tools/list declares the additive detail member; evidence NOT copied to other tools", async () => {
+test("ADR32-MCP-8: lead_preflight declares the detail member; evidence NOT copied to other tools", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-adr32-m8-"));
   try {
     const registryPath = makeRegistry(dir, { seat: agentEntry(dir, "high") });
@@ -558,42 +556,32 @@ test("ADR32-MCP-8: tools/list declares the additive detail member; evidence NOT 
     const client = await buildInMemoryClient(server);
     try {
       const tools = (await client.listTools()).tools;
-      // 工具闭集：数量与顺序仍是冻结 SSOT（不新增工具）。
-      assert.deepEqual(tools.map((t) => t.name), TOOLS, "frozen 22-tool surface unchanged");
+      // 工具闭集：数量与顺序仍是冻结 SSOT（决定 0129 后为 16 工具）。
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "frozen 16-tool surface unchanged");
 
-      const rl = tools.find((t) => t.name === "registry_list");
-      // 输入：恰一个可选成员 detail，闭集枚举；strict 不变。
+      const pf = tools.find((t) => t.name === "lead_preflight");
+      // 输入：detail 是可选闭集枚举成员（与 expectedWorkspaceRoot/recentRuns 并列）。
       assert.deepEqual(
-        Object.keys(rl.inputSchema.properties ?? {}).sort(),
-        ["detail"],
-        "input gains exactly one member",
+        Object.keys(pf.inputSchema.properties ?? {}).sort(),
+        ["detail", "expectedWorkspaceRoot", "recentRuns"],
+        "input members are the per-call target + the two 0129 options",
       );
-      assert.equal(rl.inputSchema.additionalProperties, false, "input stays strict");
+      assert.equal(pf.inputSchema.additionalProperties, false, "input stays strict");
       assert.deepEqual(
-        (rl.inputSchema.required ?? []),
+        (pf.inputSchema.required ?? []),
         [],
         "detail is optional (default call shape unchanged)",
       );
       assert.deepEqual(
-        rl.inputSchema.properties.detail.enum,
+        pf.inputSchema.properties.detail.enum,
         ["certificationEvidence"],
         "detail closed set on the wire",
       );
-      // 输出：certificationEvidence 可选；三既有键仍必填（默认契约不动）。
-      assert.deepEqual(
-        Object.keys(rl.outputSchema.properties ?? {}).sort(),
-        ["agents", "certificationEvidence", "issues", "issuesTruncated"],
-        "output gains exactly one optional member",
-      );
-      assert.deepEqual(
-        (rl.outputSchema.required ?? []).sort(),
-        ["agents", "issues", "issuesTruncated"],
-        "the three prior output members stay required (default contract intact)",
-      );
-      assert.equal(rl.outputSchema.properties.certificationEvidence.type, "array");
+      // 输出：certificationEvidence 可选成员在场（默认键集不含它——见 MCP-1）。
+      assert.equal(pf.outputSchema.properties.certificationEvidence.type, "array");
 
-      // 详情不复制进 lead_preflight / run_await_result。
-      for (const name of ["lead_preflight", "run_await_result"]) {
+      // 详情不复制进 run_await_result / run_status。
+      for (const name of ["run_await_result", "run_status"]) {
         const t = tools.find((x) => x.name === name);
         const dumped = JSON.stringify(t.inputSchema) + JSON.stringify(t.outputSchema);
         assert.ok(!dumped.includes("certificationEvidence"),

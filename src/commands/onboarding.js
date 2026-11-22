@@ -32,7 +32,7 @@ import * as hostDescriptors from "../hostAdapters/hostDescriptors.js";
 // R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
 // User scope) — no second registry read or env-name policy here.
 // 决定 0074：kimiHome 车道的 token 文件探测同样复用 credentialReadiness 的单一
-// 判定（registry_list 取值 / doctor 体检 / 派发侧拒绝同源）。
+// 判定（lead_preflight workers 取值 / doctor 体检 / 派发侧拒绝同源）。
 import { resolveCredentialEnv, kimiHomeTokenFileState } from "../application/credentialReadiness.js";
 // R9（决策 0023）：会审就绪分级块的族系展示标签（推断，非契约）。
 import { familyLabel } from "../application/modelFamily.js";

@@ -6,7 +6,7 @@
 // filters by workspace ownership (MCP path), and returns a safe list.
 //
 // CLI `runs list` delegates to this service for shared logic.
-// MCP `runs_list` calls this service with authorizedWorkspaceRoot to
+// MCP lead_preflight `recentRuns` calls this service with authorizedWorkspaceRoot to
 // enforce project isolation.
 //
 // Architectural contract:
@@ -93,7 +93,7 @@ function scanOwnerLeaseCandidates(runDir) {
  * 保持历史读法；任一事件带信封即严格绑定，混信封下不可归属降级 pending。
  * runId 缺省（既有直接调用的兼容形状）时保持历史无绑定读法——R21（TD-128
  * W1）起 runSummaryCache 的 read() 以缓存 key 的文件名 stem 调用本函数，
- * MCP runs_list / lead_preflight / Owner 看板三条缓存路径与直读分支同语义。
+ * MCP lead_preflight（activeRuns/recentRuns）/ Owner 看板等缓存路径与直读分支同语义。
  * R21 (TD-128 W3)：updatedAt 同 scope 绑定派生（末【绑定】事件 ts）。
  * agentId/ownershipEvents 维持全量事件派生（events[0] 类按 TD-128 类级登记）。
  *
@@ -114,7 +114,7 @@ export function extractRunFacts(events, runId = null) {
   // (finalizeSummary) so cached facts stay registry-independent.
   const rawAgentId = events[0]?.agentId;
   // R21 (TD-128 W3)：updatedAt = 末【绑定】事件 ts（与 R20-C 已绑的 --latest
-  // 排序键同形状、内部自洽）——外 run 远期尾条不再拉动 runs_list 行的
+  // 排序键同形状、内部自洽）——外 run 远期尾条不再拉动 recentRuns 行的
   // updatedAt 及由其派生的排序 / historyRange 窗。runId 缺省或全无信封时
   // scope === events（历史读法恒等）；合法全绑定 transcript 上绑定派生与
   // 全量派生同值（探针钉）。零绑定事件（整份只有外 run 信封行）→ null
@@ -234,7 +234,7 @@ function summaryWindowMs(facts) {
  *   workspace verification + ownerLiveness) is O(current lease candidates); no
  *   historical transcript is opened or parsed (the directory read itself still
  *   touches every entry). "history" scans run_*.jsonl and filters by a bounded
- *   inclusive transcript-updated range. When ABSENT (MCP runs_list / CLI)
+ *   inclusive transcript-updated range. When ABSENT (MCP recentRuns / CLI)
  *   behavior is byte-identical to before: full scan + unresolvedCount.
  * @param {{fromMs:number, toMs:number}} [input.historyRange] — M12-20: the
  *   bounded inclusive [fromMs, toMs] window for scanScope:"history", keyed on
@@ -561,7 +561,7 @@ export async function listRuns(input) {
       }
     }
 
-    // activeOnly (default scope, MCP runs_list / CLI) returns ONLY proven-active
+    // activeOnly (default scope, MCP preflight activeRuns / CLI) returns ONLY proven-active
     // runs. Terminal / unknown / unresolved runs are excluded — but unresolved
     // stays discoverable via the ordinary list and is counted in unresolvedCount
     // (full scan, pre-limit, independent of activeOnly).
@@ -596,7 +596,7 @@ export async function listRuns(input) {
     summaries.length = limit;
   }
 
-  // M12-20: the default scope (no scanScope — MCP runs_list / CLI) reports the
+  // M12-20: the default scope (no scanScope — MCP recentRuns / CLI) reports the
   // full-scan unresolvedCount. active/history instead echo scanScope so a client
   // can guard mode/epoch races; they NEVER surface unresolvedCount (the full
   // inventory is intentionally not scanned in active, and history is a bounded
