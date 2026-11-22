@@ -19,7 +19,9 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { linkedWorktreeEntry, listWorktrees, removeWorktree } from "../isolation.js";
-import { planWorktreeReclaim, applyWorktreeReclaim, RECLAIM_REFUSAL_CODES } from "../application/worktreeReclaim.js";
+import {
+  planWorktreeReclaim, applyWorktreeReclaim, RECENT_BOUND_EVENT_MS, RECLAIM_REFUSAL_CODES,
+} from "../application/worktreeReclaim.js";
 import { readInstallRoot, resolveConfigPath } from "../installRoot.js";
 // TD-319：本命令自己往 stderr 打的报错与提示也走统一渲染（拼进的路径、
 // 拒绝明细、异常消息里的控制字符显示为转义写法，不能伪造一行）。
@@ -143,12 +145,14 @@ async function worktreeReclaimCommand(rest, config) {
   console.log(`  普查：worktrees ${plan.counts.worktrees}，wao/* 分支 ${plan.counts.waoBranches}；保留 ${kept}，回收 ${byCategory.reclaim ?? 0}`);
   const summary = Object.entries(byCategory).filter(([, v]) => v > 0).map(([c, v]) => `${c}=${v}`).join(" ");
   console.log(`  分类计数（按 runId，含无独立条目的共享成员）：${summary}`);
-  // B92：分类计数只显示 running=N，看不出里面有多少是"最近 15 分钟内有事件"的
-  // 保留项（例如刚 lineage-close 的成员）——它们不是回收不了，只是要等静默窗过
-  // 去。有这类项时多打一行固定说明；没有时输出逐字不变。
+  // B92（第 133 批修订）：分类计数只显示 running=N，看不出里面有多少是"近期有
+  // 计入活动"的保留项——它们不是回收不了，只是要等静默窗过去。近期活动不含
+  // Lead 的记账事件（裁决、谱系关闭、收集等，见 worktreeReclaim 的
+  // RECENT_ACTIVITY_IGNORED_EVENT_TYPES）。有这类项时多打一行固定说明；没有
+  // 时输出逐字不变；分钟数由常量派生。
   const recentEventKept = plan.items.filter((i) => i.reason === "recent_event").length;
   if (recentEventKept > 0) {
-    console.log(`  其中 ${recentEventKept} 项最近 15 分钟内有事件（例如刚关闭谱系），15 分钟后重新生成计划即可按规则判定`);
+    console.log(`  其中 ${recentEventKept} 项最近 ${Math.round(RECENT_BOUND_EVENT_MS / 60_000)} 分钟内有 worker 或 WAO 活动，静默窗过后重新生成计划即可按规则判定（Lead 的裁决、谱系关闭、收集记录不重置窗口）`);
   }
   // 逐条打印回收项——审阅计划时要看的审批事实（同一 runId 的树/
   // 分支条目只打一行；已并入与 cherry 数沿用条目 info 字段）。

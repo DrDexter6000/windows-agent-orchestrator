@@ -15,7 +15,7 @@ const require = createRequire(import.meta.url);
 import { spawn } from "node:child_process";
 
 import {
-  planWorktreeReclaim, computeTreeFingerprint, untrackedIgnoredManifest,
+  planWorktreeReclaim, computeTreeFingerprint, untrackedIgnoredManifest, RECENT_BOUND_EVENT_MS,
 } from "../../src/application/worktreeReclaim.js";
 import { worktreeCommand } from "../../src/commands/worktree.js";
 
@@ -162,6 +162,140 @@ test("分类：最后一条绑定事件 15 分钟内 → running/recent_event", 
   const { plan } = await s.plan();
   const item = oneItem(plan, "run_rec");
   assert.equal(item.reason, "recent_event");
+});
+
+// ── 第 133 批：Lead 的记账事件不重置近期活动窗口（RECENT_ACTIVITY_IGNORED_EVENT_TYPES）──
+// 已采纳运行的尾部是裁决 + 放树（或收集/谱系关闭）记账、之前的 worker/验证事
+// 件早于窗口 → 不再因 recent_event 保留；重新打包被拒与验证结果照旧计入。
+
+/** 记账事件用的"刚发生"时刻（与 fixedNow 同基准，落在 15 分钟窗口内）。 */
+const FRESH_BOOKKEEPING_TS = () => new Date(fixedNow() - 30_000).toISOString();
+
+test("分类（第 133 批）：尾部是 run.delivery_accepted + run.worktree_released（15 分钟内）→ 不因 recent_event 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bk_a");
+  const fresh = FRESH_BOOKKEEPING_TS();
+  s.seed("run_bk_a", decidedRunEvents({
+    repo: s.repo, wt, branch: "wao/run_bk_a", baseCommit: s.mainCommit, decision: "accepted",
+  }).map((e) => (e.type === "run.delivery_accepted" ? { ...e, ts: fresh } : e))
+    .concat([{ type: "run.worktree_released", ts: fresh }]));
+  const { plan } = await s.plan();
+  const tree = itemsOf(plan, "run_bk_a").find((i) => i.action === "remove_tree");
+  assert.ok(tree, `裁决+放树记账不重置窗口，树应可回收: ${JSON.stringify(itemsOf(plan, "run_bk_a"))}`);
+  assert.equal(tree.category, "reclaim");
+});
+
+test("分类（第 133 批）：尾部是 messages.collected 或 run.lineage_closed（15 分钟内）→ 同样不拦", async () => {
+  const s = await scenario();
+  const wtB = s.wt("run_bk_b");
+  s.seed("run_bk_b", decidedRunEvents({
+    repo: s.repo, wt: wtB, branch: "wao/run_bk_b", baseCommit: s.mainCommit, decision: "accepted",
+  }).concat([{ type: "messages.collected", ts: FRESH_BOOKKEEPING_TS() }]));
+  const wtC = s.wt("run_bk_c");
+  s.seed("run_bk_c", decidedRunEvents({
+    repo: s.repo, wt: wtC, branch: "wao/run_bk_c", baseCommit: s.mainCommit, decision: "accepted",
+  }).concat([{ type: "run.lineage_closed", rootRunId: "run_bk_c", ts: FRESH_BOOKKEEPING_TS() }]));
+  const { plan } = await s.plan();
+  for (const runId of ["run_bk_b", "run_bk_c"]) {
+    const tree = itemsOf(plan, runId).find((i) => i.action === "remove_tree");
+    assert.ok(tree, `${runId} 的收集/谱系关闭记账不重置窗口，树应可回收: ${JSON.stringify(itemsOf(plan, runId))}`);
+    assert.equal(tree.category, "reclaim");
+  }
+});
+
+test("分类（第 133 批）：闭集其余记账成员（会话清理良性结果 / 树已不在 / 验收录档）落在尾部 → 同样不拦", async () => {
+  const s = await scenario();
+  const tails = [
+    ["run_bk_s", [{ type: "run.upstream_session_already_gone", backendSessionId: "sess" }]],
+    ["run_bk_g", [{ type: "run.worktree_already_gone" }]],
+    ["run_bk_ar", [{ type: "acceptance.recorded", decision: "accepted", reason: "r" }]],
+  ];
+  for (const [runId, tail] of tails) {
+    const wt = s.wt(runId);
+    s.seed(runId, decidedRunEvents({
+      repo: s.repo, wt, branch: `wao/${runId}`, baseCommit: s.mainCommit, decision: "accepted",
+    }).concat(tail.map((e) => ({ ...e, ts: FRESH_BOOKKEEPING_TS() }))));
+  }
+  const { plan } = await s.plan();
+  for (const [runId] of tails) {
+    const tree = itemsOf(plan, runId).find((i) => i.action === "remove_tree");
+    assert.ok(tree, `${runId} 的记账尾部不重置窗口，树应可回收: ${JSON.stringify(itemsOf(plan, runId))}`);
+    assert.equal(tree.category, "reclaim");
+  }
+});
+
+test("分类（第 133 批）反例：尾部是 run.delivery_repackage_rejected（15 分钟内）→ 仍按 recent_event 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bk_r");
+  s.seed("run_bk_r", decidedRunEvents({
+    repo: s.repo, wt, branch: "wao/run_bk_r", baseCommit: s.mainCommit, decision: "accepted",
+  }).concat([{ type: "run.delivery_repackage_rejected", rejectionReason: "disallowed_path", ts: FRESH_BOOKKEEPING_TS() }]));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_bk_r");
+  assert.equal(item.reason, "recent_event", "重新打包被拒表示 Lead 正在补救，照旧计入窗口");
+});
+
+test("分类（第 133 批）反例：15 分钟内有验证结果事件（run.delivery_verification_passed）→ 仍按 recent_event 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bk_v");
+  s.seed("run_bk_v", cleanRunEvents({ repo: s.repo, wt, branch: "wao/run_bk_v" })
+    .concat([{ type: "run.delivery_verification_passed", ts: FRESH_BOOKKEEPING_TS() }]));
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_bk_v");
+  assert.equal(item.reason, "recent_event", "验证结果事件照旧计入窗口");
+});
+
+// ── sol 会审 1：交付未收口的运行一律保留（不靠事件时间碰运气）──
+
+test("分类（sol 会审 1）：前台形状——终态、无心跳、尾部 run.delivery_rejected（15 分钟内）但验证仍 pending → running/delivery_unsettled", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_fg1");
+  const created = verifiedDeliveryRef("run_fg1", { baseCommit: s.mainCommit, verificationStatus: "pending" });
+  const rejected = verifiedDeliveryRef("run_fg1", { baseCommit: s.mainCommit, acceptance: "rejected", verificationStatus: "pending" });
+  s.seed("run_fg1", [
+    { type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: "wao/run_fg1", delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit } },
+    { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+    { type: "run.delivery_created", delivery: created },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+    { type: "run.delivery_rejected", delivery: rejected, deliveryCommit: created.deliveryCommit, reason: "reject", ts: FRESH_BOOKKEEPING_TS() },
+  ]);
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_fg1");
+  assert.equal(item.category, "running");
+  assert.equal(item.reason, "delivery_unsettled", "拒收事件已被豁免、终态心跳都放行——收口门是唯一拦下的关");
+  assert.equal(item.detail, "verification_pending");
+  assert.equal(itemsOf(plan, "run_fg1").filter((i) => i.action === "remove_tree" || i.action === "delete_branch").length, 0,
+    "计划不得出任何删除项");
+});
+
+test("分类（sol 会审 1）：补验证链 pending（requested 无结果，事件早于窗口）→ 同样 delivery_unsettled", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_rv1");
+  const created = verifiedDeliveryRef("run_rv1", { baseCommit: s.mainCommit });
+  s.seed("run_rv1", [
+    ...decidedRunEvents({ repo: s.repo, wt, branch: "wao/run_rv1", baseCommit: s.mainCommit, decision: "accepted" }),
+    { type: "run.delivery_reverification_requested", delivery: created, deliveryCommit: created.deliveryCommit, reason: "tooling_invalid" },
+  ]);
+  const { plan } = await s.plan();
+  const item = oneItem(plan, "run_rv1");
+  assert.equal(item.reason, "delivery_unsettled");
+  assert.equal(item.detail, "reverify_pending");
+  assert.equal(itemsOf(plan, "run_rv1").filter((i) => i.action === "remove_tree" || i.action === "delete_branch").length, 0);
+});
+
+test("分类（sol 会审 2）：runs verify-commit 记账对——outcome 落在尾部不重置窗口，started 照旧计入", async () => {
+  const s = await scenario();
+  const wtO = s.wt("run_lco");
+  s.seed("run_lco", decidedRunEvents({ repo: s.repo, wt: wtO, branch: "wao/run_lco", baseCommit: s.mainCommit, decision: "accepted" })
+    .concat([{ type: "run.lead_commit_check_outcome", checkId: "c1", commit: "a".repeat(40), status: "passed", results: [], cleanup: "ok", ts: FRESH_BOOKKEEPING_TS() }]));
+  const wtS = s.wt("run_lcs");
+  s.seed("run_lcs", decidedRunEvents({ repo: s.repo, wt: wtS, branch: "wao/run_lcs", baseCommit: s.mainCommit, decision: "accepted" })
+    .concat([{ type: "run.lead_commit_check_started", checkId: "c2", commit: "b".repeat(40), commands: ["npm test"], ts: FRESH_BOOKKEEPING_TS() }]));
+  const { plan } = await s.plan();
+  assert.ok(itemsOf(plan, "run_lco").some((i) => i.action === "remove_tree"),
+    "核验结束的 outcome 是 Lead 记账，不重置窗口");
+  assert.equal(oneItem(plan, "run_lcs").reason, "recent_event",
+    "started 启动真实核验命令，照旧计入窗口");
 });
 
 test("分类：新鲜 owner 心跳 → running/fresh_owner_heartbeat", async () => {
@@ -959,9 +1093,9 @@ test("CLI：worktree reclaim 计划模式打印 sha256 并写文件；--apply �
   );
 });
 
-// B92：分类计数只显示 running=N——里面"最近 15 分钟内有事件"的保留项（例如刚
-// lineage-close）不是回收不了，只是要等静默窗过去。有这类项时摘要多一行固定
-// 说明；没有时输出逐字不变。
+// B92（第 133 批修订文案）：分类计数只显示 running=N——里面"近期有计入活动"的
+// 保留项不是回收不了，只是要等静默窗过去（记账事件已不计入）。有这类项时摘要
+// 多一行固定说明；没有时输出逐字不变；分钟数由常量派生（改常量时文案跟着变）。
 test("CLI：计划摘要——recent_event 保留项多一行固定说明；无这类项时不打这行", async () => {
   const s = await scenario();
   const outPath = join(s.base, "plan-recent-cli.json");
@@ -973,7 +1107,7 @@ test("CLI：计划摘要——recent_event 保留项多一行固定说明；无�
     const wtPlain = s.wt("run_cli_plain");
     s.seed("run_cli_plain", cleanRunEvents({ repo: s.repo, wt: wtPlain, branch: "wao/run_cli_plain" }));
     await worktreeCommand(["reclaim", "--cwd", s.repo, "--out", outPath, "--run-dir", s.runDir], { runDir: s.runDir });
-    assert.ok(!logs.some((l) => l.includes("最近 15 分钟内有事件")), "无 recent_event 项时不打说明行");
+    assert.ok(!logs.some((l) => l.includes("分钟内有 worker 或 WAO 活动")), "无 recent_event 项时不打说明行");
     // 有 recent_event 项：最后一条绑定事件 30 秒前（CLI 不注入时钟，用真实时钟）。
     logs.length = 0;
     const wtRecent = s.wt("run_cli_recent");
@@ -982,8 +1116,9 @@ test("CLI：计划摘要——recent_event 保留项多一行固定说明；无�
       .filter(Boolean)
       .concat([{ type: "run.state_change", from: "running", to: "completed", reason: "done", ts: new Date(Date.now() - 30_000).toISOString() }]));
     await worktreeCommand(["reclaim", "--cwd", s.repo, "--out", outPath, "--run-dir", s.runDir], { runDir: s.runDir });
+    const recentMinutes = Math.round(RECENT_BOUND_EVENT_MS / 60_000);
     assert.ok(
-      logs.includes("  其中 1 项最近 15 分钟内有事件（例如刚关闭谱系），15 分钟后重新生成计划即可按规则判定"),
+      logs.includes(`  其中 1 项最近 ${recentMinutes} 分钟内有 worker 或 WAO 活动，静默窗过后重新生成计划即可按规则判定（Lead 的裁决、谱系关闭、收集记录不重置窗口）`),
       `说明行逐字打出: ${JSON.stringify(logs)}`,
     );
     const countLine = logs.find((l) => l.includes("分类计数"));

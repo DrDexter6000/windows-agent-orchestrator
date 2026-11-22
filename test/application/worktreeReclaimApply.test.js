@@ -19,7 +19,7 @@ import { worktreeCommand } from "../../src/commands/worktree.js";
 
 import {
   git, makeRepo, mkdtemp, makeWorktree, makeLinkedWorktree, makeRunTreeIn, commitIn, seedTranscript,
-  cleanRunEvents, decidedRunEvents, memberRunEvents, cleanupDir, fixedNow,
+  cleanRunEvents, decidedRunEvents, memberRunEvents, cleanupDir, fixedNow, OLD_TS,
   lineageRootRunEvents, lineageChildRunEvents, verifiedDeliveryRef,
 } from "../_worktreeReclaimHarness.mjs";
 
@@ -559,7 +559,11 @@ test("apply（G3）：缺交付载荷的采纳事件不算合法裁决 → 跳�
   const result = await applyWorktreeReclaim({ planPath, expectSha256: shaOfPlan(s), runDir: s.runDir, now: fixedNow });
   const tree = outcomeOf(result, "remove_tree", "run_gl_a");
   assert.equal(tree.outcome, "skipped", JSON.stringify(tree));
-  assert.equal(tree.reason, "supersession_unproven_now");
+  // sol 复核 2：缺载荷的采纳让交付事实 malformed（收口 undeterminable）→ 活动
+  // 门按保守先拦（running_now:delivery_unsettled:delivery_facts_malformed）；
+  // 派生重证的 supersession_unproven_now 路径由下方 C1 用例（run_sup_c）钉。
+  assert.equal(tree.reason, "running_now");
+  assert.match(String(tree.detail ?? ""), /delivery_unsettled:delivery_facts_malformed/);
   assert.ok(existsSync(wt), "非法采纳不算裁决 → 树保留");
 });
 
@@ -1574,6 +1578,169 @@ test("apply：孪生副本平铺有刚发生的绑定事件、归档较旧、两
   assert.equal(outcomeOf(result, "remove_tree", "run_tw4").reason, "running_now");
   assert.match(outcomeOf(result, "remove_tree", "run_tw4").detail ?? "", /run_tw4:recent_event/);
   assert.ok(existsSync(wt), "平铺副本的近期事件必须触发 15 分钟保护");
+});
+
+// ── 第 133 批：执行门与计划共用"跳过 Lead 记账事件"的近期活动取时 ──
+
+/** 计划批准后往转录尾部追加"刚发生"的事件行（envelope 同 seedTranscript）。 */
+function appendFreshEvents(path, runId, events) {
+  appendFileSync(path, events.map((e, i) => JSON.stringify({
+    ts: new Date(fixedNow() - 1000).toISOString(), seq: 90 + i, runId, agentId: "coder_hq", ...e,
+  })).map((l) => `${l}\n`).join(""), "utf8");
+}
+
+test("apply（第 133 批）：批准后追加 Lead 记账事件（裁决/放树/收集/谱系关闭）→ 执行门不拦，树与分支照删", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bk_apply");
+  const p = s.accepted("run_bk_apply", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      appendFreshEvents(p, "run_bk_apply", [
+        { type: "run.worktree_released" },
+        { type: "messages.collected" },
+        { type: "run.lineage_closed", rootRunId: "run_bk_apply" },
+      ]);
+    },
+  });
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_bk_apply").outcome, "removed",
+    "记账事件不重置窗口，执行门放行");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bk_apply").outcome, "deleted");
+  assert.ok(!existsSync(wt), "树应删除");
+});
+
+test("apply（第 133 批）反例：批准后追加 run.delivery_repackage_rejected → 执行门仍按 recent_event 拦下", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bk_rp");
+  const p = s.accepted("run_bk_rp", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      appendFreshEvents(p, "run_bk_rp", [
+        { type: "run.delivery_repackage_rejected", rejectionReason: "disallowed_path" },
+      ]);
+    },
+  });
+  assert.equal(outcomeOf(result, "remove_tree", "run_bk_rp").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_bk_rp").reason, "running_now");
+  assert.match(outcomeOf(result, "remove_tree", "run_bk_rp").detail ?? "", /run_bk_rp:recent_event/);
+  assert.ok(existsSync(wt), "重新打包被拒（补救中）必须触发 15 分钟保护");
+});
+
+// ── sol 会审 1/3：收口门与"只剩分支"删除路径 ──
+
+test("apply（sol 会审 1）：批准后事实变为验证 pending + 已拒收（前台形状，事件都早于窗口）→ 执行门按收口拦下，树不删", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_fg2");
+  const p = s.accepted("run_fg2", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 重写为前台拒收形状：created 声明验证 pending、已拒收、终态，全部落在
+      // OLD_TS——近期窗口不触发，拦下的必须是收口门而不是时间窗。
+      const created = verifiedDeliveryRef("run_fg2", { baseCommit: s.mainCommit, verificationStatus: "pending" });
+      const rejected = verifiedDeliveryRef("run_fg2", { baseCommit: s.mainCommit, acceptance: "rejected", verificationStatus: "pending" });
+      writeFileSync(p, [
+        { type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: "wao/run_fg2", delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit } },
+        { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+        { type: "run.delivery_created", delivery: created },
+        { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+        { type: "run.delivery_rejected", delivery: rejected, deliveryCommit: created.deliveryCommit, reason: "reject" },
+      ].map((e, i) => JSON.stringify({ ts: OLD_TS, seq: i + 1, runId: "run_fg2", agentId: "coder_hq", ...e })).join("\n") + "\n", "utf8");
+    },
+  });
+  assert.equal(outcomeOf(result, "remove_tree", "run_fg2").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_fg2").reason, "running_now");
+  assert.match(outcomeOf(result, "remove_tree", "run_fg2").detail ?? "", /run_fg2:delivery_unsettled:verification_pending/);
+  assert.ok(existsSync(wt), "验证未收口（可能在机器验证闸前排队、无心跳）必须保留");
+});
+
+test("apply（sol 会审 3）：只剩分支的运行——批准后追加 run.delivery_repackage_rejected → 删 ref 前被拦下", async () => {
+  const s = await scenario();
+  // 树早已自动释放、只剩分支的旧运行形态：建分支不建树。
+  git(["branch", "wao/run_bo1", s.mainCommit], s.repo);
+  s.seed("run_bo1", decidedRunEvents({ repo: s.repo, wt: null, branch: "wao/run_bo1", baseCommit: s.mainCommit, decision: "accepted" }));
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      appendFreshEvents(join(s.runDir, "run_bo1.jsonl"), "run_bo1", [
+        { type: "run.delivery_repackage_rejected", rejectionReason: "disallowed_path" },
+      ]);
+    },
+  });
+  assert.equal(outcomeOf(result, "delete_branch", "run_bo1").outcome, "skipped");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bo1").reason, "running_now",
+    "分支路径删 ref 前同样复核近期活动（此前只有成员门）");
+  assert.match(outcomeOf(result, "delete_branch", "run_bo1").detail ?? "", /run_bo1:recent_event/);
+  assert.ok(git(["branch", "--list", "wao/run_bo1"], s.repo).length > 0, "ref 保留");
+});
+
+test("apply（sol 会审 1×3）：只剩分支的运行——批准后落盘 pending 的补验证请求（事件早于窗口）→ 删 ref 前被收口门拦下", async () => {
+  const s = await scenario();
+  git(["branch", "wao/run_bo2", s.mainCommit], s.repo);
+  s.seed("run_bo2", decidedRunEvents({ repo: s.repo, wt: null, branch: "wao/run_bo2", baseCommit: s.mainCommit, decision: "accepted" }));
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // ts 用 OLD_TS：近期窗口不触发，证明拦下的是收口判定。
+      const created = verifiedDeliveryRef("run_bo2", { baseCommit: s.mainCommit });
+      appendFileSync(join(s.runDir, "run_bo2.jsonl"), [
+        { type: "run.delivery_reverification_requested", delivery: created, deliveryCommit: created.deliveryCommit, reason: "tooling_invalid" },
+      ].map((e) => JSON.stringify({ ts: OLD_TS, seq: 90, runId: "run_bo2", agentId: "coder_hq", ...e })).map((l) => `${l}\n`).join(""), "utf8");
+    },
+  });
+  assert.equal(outcomeOf(result, "delete_branch", "run_bo2").outcome, "skipped");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bo2").reason, "running_now");
+  assert.match(outcomeOf(result, "delete_branch", "run_bo2").detail ?? "", /run_bo2:delivery_unsettled:reverify_pending/);
+  assert.ok(git(["branch", "--list", "wao/run_bo2"], s.repo).length > 0, "ref 保留");
+});
+
+test("apply（sol 复核 1）：计划同时含摘树与删分支、执行前树与登记已不在——批后追加 run.lead_commit_check_started → ref 保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_vcy");
+  const p = s.accepted("run_vcy", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 形态：runs verify-commit 在独立 detached 树里核验，原工作树及其 Git 登记
+      // 被正常移除（分支与 tip 保留），核验 started 落在 15 分钟窗口内。
+      git(["worktree", "remove", "--force", wt], s.repo);
+      appendFreshEvents(p, "run_vcy", [
+        { type: "run.lead_commit_check_started", checkId: "c9", commit: "c".repeat(40), commands: ["npm test"] },
+      ]);
+    },
+  });
+  assert.equal(outcomeOf(result, "remove_tree", "run_vcy").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_vcy").reason, "tree_missing");
+  const br = outcomeOf(result, "delete_branch", "run_vcy");
+  assert.equal(br.outcome, "skipped", "摘树复核因 tree_missing 提前返回，分支不得继承未跑完的复核");
+  assert.equal(br.reason, "running_now", "核验还在跑（started 在窗口内）→ 活动门拦下");
+  assert.match(br.detail ?? "", /run_vcy:recent_event/);
+  assert.ok(git(["branch", "--list", "wao/run_vcy"], s.repo).length > 0, "ref 保留");
+});
+
+test("apply（sol 复核 2）：孪生副本两份相同的 pending 转录——收口按副本各判，任一 unsettled 即保留", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_tw_pend");
+  const p = s.accepted("run_tw_pend", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 两份内容相同的前台拒收形状副本（平铺 + 归档），全部 OLD_TS：拼接判会把
+      // 两条 delivery_created 读成 malformed 而漏放行——按副本各判则各自
+      // verification_pending。
+      const created = verifiedDeliveryRef("run_tw_pend", { baseCommit: s.mainCommit, verificationStatus: "pending" });
+      const rejected = verifiedDeliveryRef("run_tw_pend", { baseCommit: s.mainCommit, acceptance: "rejected", verificationStatus: "pending" });
+      const lines = [
+        { type: "run.started", backend: "test", cwd: s.repo, worktreePath: wt, worktreeBranch: "wao/run_tw_pend", delivery: { mode: "git_commit_v1", baseCommit: s.mainCommit } },
+        { type: "run.state_change", from: null, to: "running", reason: "spawned" },
+        { type: "run.delivery_created", delivery: created },
+        { type: "run.state_change", from: "running", to: "completed", reason: "done" },
+        { type: "run.delivery_rejected", delivery: rejected, deliveryCommit: created.deliveryCommit, reason: "reject" },
+      ].map((e, i) => JSON.stringify({ ts: OLD_TS, seq: i + 1, runId: "run_tw_pend", agentId: "coder_hq", ...e })).join("\n") + "\n";
+      writeFileSync(p, lines, "utf8");
+      s.seed("run_tw_pend", [], { archiveMonth: "2026-01" });
+      writeFileSync(join(dirname(s.runDir), "runs-archive", "2026-01", "run_tw_pend.jsonl"), lines, "utf8");
+    },
+  });
+  assert.equal(outcomeOf(result, "remove_tree", "run_tw_pend").outcome, "skipped");
+  assert.equal(outcomeOf(result, "remove_tree", "run_tw_pend").reason, "running_now");
+  assert.match(outcomeOf(result, "remove_tree", "run_tw_pend").detail ?? "", /run_tw_pend:delivery_unsettled:verification_pending/);
+  assert.ok(existsSync(wt), "孪生 pending 副本不能因拼接判 malformed 而放行删除");
 });
 
 test("apply：批准后树目录被外部删除（登记残留）→ 那棵树跳过、记录落盘、CLI 非零退出码", async () => {

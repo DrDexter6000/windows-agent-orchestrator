@@ -426,15 +426,17 @@ async function collectRunBranchOpenItems({
       ? ` + ${worktreeCount} run worktree(s) under .wao-worktrees/`
       : "";
     // b78：写明"能否回收以回收计划为准"——计划保留最近 RECENT_BOUND_EVENT_MS
-    // 内有事件的运行，Lead 做出空计划不是出错；分钟数由常量派生，不另写数字。
-    // 第 120 批：这一行如实覆盖"已裁决、被取代、谱系已关闭、无交付"四种来源
-    //（后两种不写事件，也不再催裁决）。
+    // 内有计入活动的运行，Lead 做出空计划不是出错；分钟数由常量派生，不另写
+    // 数字。第 133 批：计入活动不含 Lead 的记账事件（裁决、谱系关闭、收集），
+    // 文案如实写明。第 120 批：这一行如实覆盖"已裁决、被取代、谱系已关闭、
+    // 无交付"四种来源（后两种不写事件，也不再催裁决）。
     const keptRecentMinutes = Math.round(RECENT_BOUND_EVENT_MS / 60_000);
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${reclaimBranches} decided / superseded / lineage-closed / no-delivery wao/run_* branch(es)${wt} `
       + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only; `
       + `the plan decides what is reclaimable — an empty plan can be normal, `
-      + `runs with an event in the last ${keptRecentMinutes} minutes are kept)${truncSuffix}`,
+      + `runs with worker or WAO activity in the last ${keptRecentMinutes} minutes are kept; `
+      + `Lead decisions, lineage closes and collect records do not reset the window)${truncSuffix}`,
     ));
   }
   if (missingTranscripts > 0) {

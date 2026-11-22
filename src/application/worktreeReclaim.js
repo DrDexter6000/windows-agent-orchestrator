@@ -16,7 +16,8 @@
 //                       .wao-worktrees，或经核验关联工作树自己的同名根）下的
 //                       一级 <合法 runId> 子目录 / 符号链接或 junction / 不属
 //                       于这个仓库的 worktree
-//   3 running           非终态 / 最后一条绑定事件 15 分钟内 / 新鲜 owner 心跳
+//   3 running           非终态 / 最后一条计入近期活动的绑定事件 15 分钟内（闭集
+//                       见 RECENT_ACTIVITY_IGNORED_EVENT_TYPES）/ 新鲜 owner 心跳
 //   4 reuse_open        只对真有复用关系的运行（自身绑过 rootRunId 或线系里有
 //                       别的成员）求值：线系成员非终态 / 槽目录新鲜认领 /
 //                       线系既未关闭也未 accepted
@@ -35,6 +36,11 @@
 //                       点名者按第 8 类处理并记"--include 点名"
 //   7 tree_protection   头指针漂移（detached/换了分支/tip 不等）/ 嵌套保护 /
 //                       空壳非空
+//   7b running(收口)    交付请求了但收口仍 unsettled——验证/补验证未出结果（sol
+//                       会审 1；前台交付的验证无 owner 心跳，pending 时拒收后
+//                       验证还在跑）。放在 7 之后：其余保留类命中的照旧，只有
+//                       其余门都放行的形状才落到本门（undecided+pending 仍报
+//                       第 5 类 delivery_packaged_undecided）
 //   8 reclaim           已裁决或线系已关（树脏不阻塞，按放弃处理并标注）/
 //                       未裁决且树完全干净 / 空壳目录（不在 git 登记里且为空）
 //
@@ -84,6 +90,9 @@ import { gitChildEnv, isValidRunId } from "../delivery.js";
 import { createPrivateIndexCopy } from "../gitPrivateIndex.js";
 import { readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
+// sol 会审 1：交付收口判定与读取面（runWait / runDelivery / leadOpenItems）同一
+// 份实现，只导入不改——计划分类 7b 与执行门 stillActiveFromDisk 共用。
+import { determineRunSettlement } from "./runSettlement.js";
 import {
   enumerateLineageMembers, lineageClosedIn, lineageMemberFiles, lineageRootFromEvents, lineageSlotClaimBusy,
 } from "./lineageClose.js";
@@ -104,7 +113,7 @@ export const RECLAIM_KEEP_REASONS = Object.freeze([
   "transcript_unreadable", "twin_transcripts", "transcript_missing", "git_fact_failed", "lineage_refused",
   "registered_missing", "registration_ambiguous", "undeterminable",
   "source_worktree", "outside_worktrees_dir", "symlink_or_junction", "foreign_worktree", "private_clone",
-  "non_terminal", "recent_event", "fresh_owner_heartbeat",
+  "non_terminal", "recent_event", "fresh_owner_heartbeat", "delivery_unsettled",
   "lineage_member_active", "slot_claim_fresh", "lineage_not_closed",
   "delivery_packaged_undecided", "undecided_dirty_tree",
   "referenced_short_sha", "transcript_missing_unmerged", "reference_scan_failed",
@@ -123,6 +132,43 @@ export const RECLAIM_REFUSAL_CODES = Object.freeze([
 
 /** 最后一条绑定事件的新鲜阈（第 3 类）。 */
 export const RECENT_BOUND_EVENT_MS = 15 * 60_000;
+
+/** 不计入近期活动（计划第 3 类与执行门共用的 recent_event 谓词）的绑定事件
+ * 类型闭集（第 133 批）：只收 Lead 自己的记账事件——自身不启动也不续跑任何
+ * 进程、也不表示补救正在进行，落在尾部时不重置 15 分钟窗口（先例：runSettle
+ * 的 QUIET_WINDOW_IGNORED_EVENT_TYPES）。逐项理由：
+ *   run.delivery_accepted / run.delivery_rejected——run_delivery_decide 的
+ *     裁决记录，纯记账，不动任何进程；
+ *   run.worktree_released / run.worktree_already_gone——采纳后 Lead 放树流程
+ *     （upstreamSessionRelease）的良性结果：树已删/本就不在，不证明还有进程
+ *     在写树；
+ *   run.upstream_session_deleted / run.upstream_session_already_gone——同一
+ *     流程的上游会话清理良性结果，纯记账；
+ *   run.lineage_closed——runs lineage-close 的关闭记录；
+ *   messages.collected——run_collect / runs collect 的读取记账；
+ *   acceptance.recorded——wao accept 对非交付 run 的验收记账；
+ *   run.lead_commit_check_outcome——runs verify-commit 核验结束后的结果记账
+ *     （sol 会审 2；配对的 run.lead_commit_check_started 会启动真实核验命令，
+ *     刻意照旧计入）。
+ * 刻意**不收**（照旧计入窗口）：run.delivery_repackage_rejected——对回收它
+ * 表示 Lead 正在补救（可能马上重试重新打包），与 runSettle 把它当纯审计事件
+ * 的用途不同；树/会话释放的异常结果（run.worktree_release_failed、
+ * run.worktree_release_skipped、run.upstream_session_delete_failed、
+ * run.upstream_session_delete_skipped）——still_present 可能是仍有进程占着树，
+ * not_tip 可能树正被别的运行使用，保守计入；验证/补验证/重新打包的开始与
+ * 结果事件；任何 worker 事件。 */
+export const RECENT_ACTIVITY_IGNORED_EVENT_TYPES = Object.freeze([
+  "run.delivery_accepted",
+  "run.delivery_rejected",
+  "run.worktree_released",
+  "run.worktree_already_gone",
+  "run.upstream_session_deleted",
+  "run.upstream_session_already_gone",
+  "run.lineage_closed",
+  "messages.collected",
+  "acceptance.recorded",
+  "run.lead_commit_check_outcome",
+]);
 
 function sha256Hex(input) {
   return createHash("sha256").update(input).digest("hex");
@@ -605,12 +651,19 @@ function isNonTerminalState(state) {
   return typeof state === "string" && !TERMINAL_STATES.includes(state);
 }
 
-function lastBoundEventTs(events, runId) {
-  let ts = null;
-  for (const e of events) {
-    if (e && e.runId === runId && typeof e.ts === "string") ts = e.ts;
+/** 最后一条**计入近期活动**的绑定事件时刻（ISO 字符串；无可计事件 → null）。
+ * 计划分类第 3 类与执行门 stillActiveFromDisk 共用这一个取法（第 133 批）：
+ * 从尾往前找第一条绑定且不在 RECENT_ACTIVITY_IGNORED_EVENT_TYPES 里的事件
+ * ——Lead 的记账事件不重置 15 分钟窗口。孪生副本由调用方各自取值再取最大。 */
+function lastCountedActivityTs(events, runId) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e && e.runId === runId && typeof e.ts === "string"
+      && !RECENT_ACTIVITY_IGNORED_EVENT_TYPES.includes(e.type)) {
+      return e.ts;
+    }
   }
-  return ts;
+  return null;
 }
 
 function deliveryDecision(events, runId) {
@@ -891,7 +944,7 @@ export async function planWorktreeReclaim({
     if (!entry.twin) {
       info.events = entry.readsEvents[0];
       info.state = lastBoundState(info.events, runId);
-      info.lastTs = lastBoundEventTs(info.events, runId);
+      info.lastTs = lastCountedActivityTs(info.events, runId);
       info.decision = deliveryDecision(info.events, runId);
       info.packaged = hasPackagedDelivery(info.events, runId);
     }
@@ -1295,6 +1348,21 @@ export async function planWorktreeReclaim({
       if (!onOwnBranch || !tipOk) { keep("tree_protection", "head_drift"); return; }
     }
 
+    // 7b 交付未收口（sol 会审 1）：交付请求了但收口仍 unsettled——验证或补验
+    // 证还没出结果。前台交付的验证跑在前台 CLI 进程里、没有 owner 心跳，可能
+    // 还在机器验证闸前排队；pending 时拒收（验证继续）后 run.delivery_rejected
+    // 已被 RECENT_ACTIVITY_IGNORED_EVENT_TYPES 豁免，终态/近期/心跳三关都拦不
+    // 住。按收口状态判（determineRunSettlement，与读取面同一实现），不靠事件
+    // 时间碰运气。放在 7 之后：其余保留类命中的照旧（undecided+pending 仍报第
+    // 5 类 delivery_packaged_undecided），只有其余门都放行的形状才落到本门。
+    if (info.packaged && info.events) {
+      const settlement = determineRunSettlement(info.events, runId);
+      if (settlement.status === "unsettled") {
+        keep("running", "delivery_unsettled", settlement.reason);
+        return;
+      }
+    }
+
     // 8 reclaim 候选（嵌套保护与空壳空判据在全部主体分类完后统一判定）。
     classifications.set(runId, { category: "reclaim_candidate" });
   };
@@ -1640,17 +1708,31 @@ async function stillActiveFromDisk(runId, filesByRun, factsView, runDirAbs, now)
   }
   const state = lastBoundState(events, runId);
   if (state && !TERMINAL_STATES.includes(state)) return { active: true, detail: "non_terminal" };
-  // 孪生副本各自取最后一条绑定事件的时间，再取各副本的最大值——拼接后取
-  // "最后一条"会让排在数组后面的较旧归档副本盖住平铺副本里刚发生的事件，
-  // 15 分钟保护失效。终态判断照旧（终态不同仍按无法判定，上方已拒）。
+  // 孪生副本各自取最后一条计入近期活动的绑定事件时刻，再取各副本的最大值
+  // ——拼接后取"最后一条"会让排在数组后面的较旧归档副本盖住平铺副本里刚发
+  // 生的事件，15 分钟保护失效。终态判断照旧（终态不同仍按无法判定，上方已
+  // 拒）。
   let ts = null;
   for (const ev of reads) {
-    const t = lastBoundEventTs(ev, runId);
+    const t = lastCountedActivityTs(ev, runId);
     if (t != null && (ts == null || t > ts)) ts = t;
   }
   const parsed = ts ? Date.parse(ts) : NaN;
   if (Number.isFinite(parsed) && now() - parsed < RECENT_BOUND_EVENT_MS) {
     return { active: true, detail: "recent_event" };
+  }
+  // sol 会审 1：交付未收口（验证/补验证 pending）= 仍有 WAO 流程可能在跑——按
+  // 收口状态判，不靠事件时间碰运气（前台验证无 owner 心跳，可能在机器验证闸
+  // 前排队）。与计划分类 7b 同一判定。sol 复核 2：按**每份副本各自**判——拼接
+  // 后两份内容相同的 pending 转录会拼出两条 delivery_created，收口被读成
+  // malformed（undeterminable）而漏放行；任一份 unsettled 或 undeterminable 都
+  // 按仍在活动处理（保守）。
+  for (const ev of reads) {
+    if (!hasPackagedDelivery(ev, runId)) continue;
+    const settlement = determineRunSettlement(ev, runId);
+    if (settlement.status === "unsettled" || settlement.status === "undeterminable") {
+      return { active: true, detail: `delivery_unsettled:${settlement.reason}` };
+    }
   }
   if (factsView.poison) return { active: true, detail: `lineage_refused_now:${factsView.poison.reason}` };
   const root = lineageRootFromEvents(events, runId) ?? runId;
@@ -1853,6 +1935,41 @@ function supersessionBasisRunIds(item) {
   return typeof item.supersededByRunId === "string" ? [item.runId] : [];
 }
 
+/** 增量刷新转录事实并折叠成 stillActiveFromDisk 的输入视图（sol 会审 3）：摘
+ * 树前复核与"只剩分支"的删除路径共用——刷新失败/读不出的闭集跳过理由与折叠
+ * 写法只有这一份，两条路径不各写一份。 */
+async function refreshedGateView(ctx) {
+  let refreshed;
+  try {
+    refreshed = await refreshTranscriptFacts(ctx.transcripts, ctx.runDirAbs);
+  } catch {
+    return { skip: "undeterminable_now", detail: "transcript_enumeration_failed" };
+  }
+  if (refreshed.statFailed != null) {
+    return { skip: "undeterminable_now", detail: `transcript_stat_failed:${refreshed.statFailed}` };
+  }
+  if (refreshed.skipped.length > 0) {
+    return { skip: "undeterminable_now", detail: `lineage_refused_now:archive_enumeration_skipped:${refreshed.skipped[0]?.dir ?? refreshed.skipped[0]?.file ?? ""}` };
+  }
+  if (refreshed.unreadableNow.length > 0) {
+    return { skip: "undeterminable_now", detail: `transcript_unreadable_now:${refreshed.unreadableNow[0]}` };
+  }
+  if (ctx.transcripts.poison) {
+    return { skip: "undeterminable_now", detail: `lineage_refused_now:${ctx.transcripts.poison.reason}:${ctx.transcripts.poison.detail}` };
+  }
+  const filesByRun = new Map();
+  for (const f of refreshed.files) {
+    const id = f.name.replace(/\.jsonl$/, "");
+    if (!filesByRun.has(id)) filesByRun.set(id, []);
+    filesByRun.get(id).push(f);
+  }
+  return {
+    filesByRun,
+    factsView: { byRoot: refreshed.byRoot, poison: ctx.transcripts.poison },
+    byDeclaredReal: refreshed.byDeclaredReal,
+  };
+}
+
 /** 删树前复核：真实路径、HEAD/分支/tip、指纹（嵌套在册树不计入清单）、嵌套
  * 保护、整树每个成员仍在跑与否（计划成员名单 ∪ apply 索引时点名单 ∪ 增量
  * 刷新后的当前声明名单，逐成员从磁盘现读；线系候选集用刷新后的 byRoot）。
@@ -1911,31 +2028,9 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
   // 转录事实按磁盘现状增量刷新（新出现/size·mtime 变了的文件现读重算，未变
   // 的沿用 apply 开头的索引——转录只追加）。成员名单与线系候选集都用刷新后
   // 的聚合：索引建好之后新声明这棵树/新绑进线系的运行，只有这里看得到。
-  let refreshed;
-  try {
-    refreshed = await refreshTranscriptFacts(ctx.transcripts, ctx.runDirAbs);
-  } catch {
-    return { skip: "undeterminable_now", detail: "transcript_enumeration_failed" };
-  }
-  if (refreshed.statFailed != null) {
-    return { skip: "undeterminable_now", detail: `transcript_stat_failed:${refreshed.statFailed}` };
-  }
-  if (refreshed.skipped.length > 0) {
-    return { skip: "undeterminable_now", detail: `lineage_refused_now:archive_enumeration_skipped:${refreshed.skipped[0]?.dir ?? refreshed.skipped[0]?.file ?? ""}` };
-  }
-  if (refreshed.unreadableNow.length > 0) {
-    return { skip: "undeterminable_now", detail: `transcript_unreadable_now:${refreshed.unreadableNow[0]}` };
-  }
-  if (ctx.transcripts.poison) {
-    return { skip: "undeterminable_now", detail: `lineage_refused_now:${ctx.transcripts.poison.reason}:${ctx.transcripts.poison.detail}` };
-  }
-  const filesByRun = new Map();
-  for (const f of refreshed.files) {
-    const id = f.name.replace(/\.jsonl$/, "");
-    if (!filesByRun.has(id)) filesByRun.set(id, []);
-    filesByRun.get(id).push(f);
-  }
-  const factsView = { byRoot: refreshed.byRoot, poison: ctx.transcripts.poison };
+  const gateView = await refreshedGateView(ctx);
+  if (gateView.skip) return gateView;
+  const { filesByRun, factsView } = gateView;
   // 共享树按**每个成员**复核：计划名单（item.treeMembers，批准时点快照）∪
   // apply 索引时点的声明名单 ∪ 刷新后的当前声明名单。只看当前名单会在成员
   // 转录消失时漏掉它；只看计划名单会漏掉批准后才绑上来的成员。任一成员在
@@ -1945,7 +2040,7 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
     item.runId,
     ...planMembers,
     ...(ctx.transcripts.byDeclaredReal.get(item.treeRealPath.toLowerCase()) ?? []),
-    ...(refreshed.byDeclaredReal.get(item.treeRealPath.toLowerCase()) ?? []),
+    ...(gateView.byDeclaredReal.get(item.treeRealPath.toLowerCase()) ?? []),
   ]);
   for (const memberRunId of memberIds) {
     const a = await stillActiveFromDisk(memberRunId, filesByRun, factsView, ctx.runDirAbs, ctx.now);
@@ -2343,6 +2438,33 @@ export async function applyWorktreeReclaim({
             runId: item.runId, action: "delete_branch", outcome: "skipped",
             reason: basis.skip, detail: basis.detail, branch: item.branch,
           });
+          continue;
+        }
+        // sol 会审 3 + sol 复核 1：每个要删的 ref 在 CAS 删除前都现跑一次"仍在
+        // 活动"复核——不按"计划里有没有摘树条目"跳过：摘树复核可能在活动判断
+        // 之前就提前返回（tree_missing 等——例如 runs verify-commit 在独立
+        // detached 树里核验、原树与登记已被正常移除的形态），同一 run 的分支不
+        // 能继承一份没跑完的复核。即使摘树复核刚跑过且放行，重跑也只是一次
+        // stat 扫描（增量刷新复用未变文件的索引事实）。计划批准后 Lead 可能刚
+        // 落盘一次被拒的重新打包（run.delivery_repackage_rejected）、验证仍未
+        // 收口或核验还在跑（run.lead_commit_check_started 在窗口内）。与树路径
+        // 同一实现（refreshedGateView + stillActiveFromDisk），不另写一份；放在
+        // 成员门之后，两门都在 CAS 删除之前。唯一豁口：无转录分支是既定合法形
+        // 态（计划期三处皆无、已并入/点名豁免的可删）——计划期就没有转录的，
+        // "此刻也没有"不另拦，交成员门；计划期有而现在没有 → 保守跳过。
+        const view = await refreshedGateView(ctx);
+        if (view.skip) {
+          results.push({ runId: item.runId, action: "delete_branch", outcome: "skipped", reason: view.skip, ...(view.detail ? { detail: view.detail } : {}), branch: item.branch });
+          continue;
+        }
+        const a = await stillActiveFromDisk(item.runId, view.filesByRun, view.factsView, ctx.runDirAbs, ctx.now);
+        if (a.active) {
+          results.push({ runId: item.runId, action: "delete_branch", outcome: "skipped", reason: "running_now", detail: `${item.runId}:${a.detail}`, branch: item.branch });
+          continue;
+        }
+        if (a.undetermined
+          && !(a.detail === "transcript_missing_now" && (item.facts?.transcriptLocations ?? []).length === 0)) {
+          results.push({ runId: item.runId, action: "delete_branch", outcome: "skipped", reason: "undeterminable_now", detail: `${item.runId}:${a.detail}`, branch: item.branch });
           continue;
         }
         // 测试缝：预检与检出判断都已过后、CAS 删除前一刻的钩子（证明 update-ref -d

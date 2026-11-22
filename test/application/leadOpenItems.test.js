@@ -84,7 +84,8 @@ const CROSS_TREE_HINT = "some runs were dispatched from another worktree: pass t
 // 从 worktreeReclaim 的 RECENT_BOUND_EVENT_MS 派生（改常量时文案跟着变，不抄数字）。
 const RECLAIM_TAIL = " left for reclaim (`wao worktree reclaim --out <plan.json>` plans it; read-only; "
   + `the plan decides what is reclaimable — an empty plan can be normal, `
-  + `runs with an event in the last ${Math.round(RECENT_BOUND_EVENT_MS / 60_000)} minutes are kept)`;
+  + `runs with worker or WAO activity in the last ${Math.round(RECENT_BOUND_EVENT_MS / 60_000)} minutes are kept; `
+  + `Lead decisions, lineage closes and collect records do not reset the window)`;
 const MISSING_LINE = (n) => `open item: ${n} wao/run_* branch(es) without a usable transcript fact `
   + "(not found, unreadable, conflicting copies, or a broken recorded project fact; "
   + "read-only `wao worktree reclaim --out <plan.json>` plan lists the branches)";
