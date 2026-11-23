@@ -17,7 +17,7 @@
       "id": "glm-pro",
       "backend": "zcode",
       "model": {
-        "id": "bigmodel-api/GLM-5.3"
+        "id": "bigmodel-api/GLM-5.4"
       },
       "reasoning": {
         "effort": "max"

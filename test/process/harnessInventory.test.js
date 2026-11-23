@@ -21,6 +21,7 @@ import {
   parseUpdaterLine,
   selectUpdaterConclusion,
   dedupeTargets,
+  builtinConfigDriftNotes,
   crossChannelVerdict,
   npmDistTags,
   collectRows,
@@ -342,6 +343,45 @@ test("collectRows: zcode 前三段不同 → behind 且提示更新器自报与 
     const unknown = unknownRows[0];
     assert.equal(unknown.localVersion, null, "产品版本缺席不拿 bundle 序列参比");
     assert.equal(unknown.conclusion, "unknown");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("builtinConfigDriftNotes: 内置 provider 配置所在版本文件夹与已装 ZCode 不同（含非版本名）才出一条；相同或未配置不出", () => {
+  const at = (version) => `C:\\Users\\me\\.zcode\\v2\\runtime\\provider\\windows-x86_64\\${version}\\endpoint-78d7\\zcode-builtin.json`;
+  const notes = builtinConfigDriftNotes([
+    ["glm-pro", { env: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: at("3.15.1") } }],
+    ["glm-flash", { env: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: "C:/x/4.0.0/endpoint-78d7/zcode-builtin.json" } }],
+    ["glm-dev", { env: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: at("0.0.0-dev") } }],
+    ["glm-plain", {}],
+  ], "4.0.0.10870");
+  assert.equal(notes.length, 2);
+  assert.match(notes[0], /^glm-pro: .*3\.15\.1 文件夹.*4\.0\.0\.10870/);
+  assert.match(notes[1], /^glm-dev: .*0\.0\.0-dev 文件夹/);
+});
+
+test("collectRows: zcode 行对指向旧版本文件夹的席位附漂移注记（只提示，不改结论）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-hinv-"));
+  try {
+    const regPath = join(dir, "agents.json");
+    const bundle = "C:/ZCode/resources/glm/zcode.cjs";
+    const builtin = "C:/u/.zcode/v2/runtime/provider/windows-x86_64/3.15.1/endpoint-78d7/zcode-builtin.json";
+    writeFileSync(regPath, JSON.stringify({ agents: {
+      "glm-pro": { backend: "zcode", binary: bundle, env: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: builtin } },
+    } }));
+    const rows = await collectRows({
+      registryPath: regPath,
+      readRegistryFn: readRegistry,
+      ...fakeDeps({
+        probeResults: { [`zcode@${bundle}`]: { distribution: "zcode", version: "0.18.0", binaryPath: "node", fingerprint: "v1-x", verified: true, reason: null } },
+        updater: { conclusion: { kind: "up_to_date", version: "4.0.0", timestamp: "2026-11-23 07:03:05", local: "4.0.0", logFile: "2026-11-23.log" }, reason: null },
+        productVersions: { [resolve(dirname(bundle), "..", "..", "ZCode.exe")]: { version: "4.0.0.10870", reason: null } },
+      }),
+    });
+    const row = rows[0];
+    assert.equal(row.conclusion, "latest", "漂移只是注记，版本结论不变");
+    assert.ok(row.notes.some((n) => n.startsWith("glm-pro: ZCODE_BUILTIN_PROVIDER_CONFIG_FILE 指向 3.15.1 文件夹")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
