@@ -445,11 +445,12 @@ export async function dedupeTargets(seatEntries, { resolveInvocationFn, resolveB
     const key = `${backend}\u0000${normalizeTargetKey(resolveBare(bare))}\u0000${prefixArgs.join("\u0000")}`;
     let group = byKey.get(key);
     if (group === undefined) {
-      group = { backend, seats: [], anchor: { id, config, resolvedInvocation } };
+      group = { backend, seats: [], members: [], anchor: { id, config, resolvedInvocation } };
       byKey.set(key, group);
       groups.push(group);
     }
     group.seats.push(id);
+    group.members.push([id, config]);
   }
   return groups;
 }
@@ -481,6 +482,7 @@ export async function collectRows({
       resolvedInvocation: group.anchor.resolvedInvocation,
       anchorAgentId: group.anchor.id,
       seats: group.seats,
+      members: group.members,
       probeFn, npmViewFn, readUpdaterFn, productVersionFn, hashFn, crossChannelFn,
     }));
   }
@@ -504,7 +506,35 @@ export async function collectRows({
   return rows;
 }
 
-async function buildRow({ backend, agent, resolvedInvocation, anchorAgentId, seats, probeFn, npmViewFn, readUpdaterFn, productVersionFn, hashFn, crossChannelFn }) {
+/**
+ * ZCODE_BUILTIN_PROVIDER_CONFIG_FILE lives in a folder named after the ZCode
+ * version that wrote it (`…/<version>/endpoint-<hash>/zcode-builtin.json`).
+ * Old folders stay on disk and keep working, but their model list stops at
+ * that version (GLM-5.4 was absent from 3.15.1), so a seat left on an older
+ * folder silently cannot see newer models. One note per such seat.
+ *
+ * @param {Array<[string, object]>} members — [seatId, registry config] pairs
+ * @param {string} productVersion — installed ZCode exe version
+ * @returns {string[]}
+ */
+export function builtinConfigDriftNotes(members, productVersion) {
+  const installed = extractVersion(productVersion);
+  const notes = [];
+  for (const [id, config] of members) {
+    const file = config?.env?.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE;
+    if (typeof file !== "string") continue;
+    const parts = file.split(/[\\/]/);
+    const at = parts.findIndex((s) => s.startsWith("endpoint-"));
+    if (at < 1) continue;
+    const folder = parts[at - 1];
+    const parsed = extractVersion(folder);
+    if (installed !== null && parsed !== null && compareParsedVersions(parsed, installed) === 0) continue;
+    notes.push(`${id}: ZCODE_BUILTIN_PROVIDER_CONFIG_FILE 指向 ${folder} 文件夹，已装 ZCode 是 ${productVersion}——该文件的模型清单停在 ${folder}，改指已装版本的文件夹`);
+  }
+  return notes;
+}
+
+async function buildRow({ backend, agent, resolvedInvocation, anchorAgentId, seats, members = [], probeFn, npmViewFn, readUpdaterFn, productVersionFn, hashFn, crossChannelFn }) {
   const notes = [`席位: ${seats.join(", ")}`];
 
   // 版本探针也不需要凭据：借 probeRuntimeIdentity 既有的 spawnFn 注入缝把剥离
@@ -594,6 +624,7 @@ async function buildRow({ backend, agent, resolvedInvocation, anchorAgentId, sea
         if (updaterLocal !== null && compareParsedVersions(updaterLocal, extractVersion(product.version)) !== 0) {
           notes.push(`更新器自报 local=${updater.conclusion.local} 与主 exe VersionInfo=${product.version} 不一致（以 exe 为准）`);
         }
+        notes.push(...builtinConfigDriftNotes(members, product.version));
       }
     } else {
       notes.push("产品版本与 bundle sha256 不可取: 席位未配置 binary");
