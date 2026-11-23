@@ -78,7 +78,7 @@ import { backendFor } from "../backends/factory.js";
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
 // 决定 0074：kimiHome 车道 token 文件体检复用 credentialReadiness 的单一判定
-//（registry_list 取值 / wao lanes 探测 / 派发侧拒绝同源）。
+//（lead_preflight workers 取值 / wao lanes 探测 / 派发侧拒绝同源）。
 import { resolveCredentialEnv, requiredCredentialNames, readWindowsEnvScoped, aggregateCredentialSources, kimiHomeTokenFileState } from "../application/credentialReadiness.js";
 // TD-229：native OAuth 通道长期令牌名（envPolicy SSOT——doctor 只报模式与来源，
 // 值不回显）。kimiServerTokenFile：kimiHome 车道 token 文件路径（决定 0074 SSOT）。
@@ -241,7 +241,7 @@ export async function waoDoctorCommand(args, config) {
   //     agent id（如含换行或敏感串），此前会被原样拼进 registry_entry_<id> /
   //     cwd_<id> / backend_map_<id> / zcode_binary_<id> 等检查名与 detail——敏感串
   //     进输出，换行还能在文本输出里伪造一行检查。仓库对非法 id 的既定做法是
-  //     绝不回显（normalizeAgent 抛固定文案；registry_list 的
+  //     绝不回显（normalizeAgent 抛固定文案；preflight workers 的
   //     projectRegistryIssues 投影成 agentId: null）。此处先行分流：合法 id 的
   //     条目进入后续全部检查；非法 id 的条目不进任何逐 worker 检查（条目校验、
   //     CLI/key、cwd、binary、承重 env、OAuth、panel——派发对它们本就会拒，
@@ -384,7 +384,7 @@ export async function waoDoctorCommand(args, config) {
   // 5. required credential key（scoped + 作用域扩展）：只查保留 worker 声明的 env 名
   //    （不写死名单）。进程 env 命中 → OK；未命中 → credentialReadiness 的 User 作用
   //    域再查（reader 经 config.userEnvReader 注入缝——与 5b/5d 同款）：命中 → INFO
-  //    （派发时凭据桥从 User 作用域注入，不依赖进程继承——与 registry_list 的
+  //    （派发时凭据桥从 User 作用域注入，不依赖进程继承——与 preflight workers 的
   //    credentialAvailability 同判 available）；仍无 → FAIL。
   if (!registryOk) {
     pushCheck(checks, { name: "keys", pass: true, level: "info", detail: "未配置（跳过）" });
@@ -410,7 +410,7 @@ export async function waoDoctorCommand(args, config) {
         pushCheck(checks, { name: `key_${name}`, pass: true, detail: "已设置" });
       } else if (r.source === "user_env") {
         // 派发不依赖进程继承：RunManager 的 env 解析器对全部继承变量做 User 作用域
-        // 回退（凭据桥注入），registry_list 的 credentialAvailability 同判 available
+        // 回退（凭据桥注入），preflight workers 的 credentialAvailability 同判 available
         // ——此处 WARN 是虚警（MCP 宿主里建议"重启终端"更是无从执行）。
         // 会审修复批：身份探针自 TD-208 起已能回退读 User 作用域，不再是"需要
         // 新开终端"的例子——该面收敛为"只有直接读进程环境变量的第三方工具"。
@@ -436,7 +436,7 @@ export async function waoDoctorCommand(args, config) {
   // 5a. 决定 0074（车道就绪事实如实呈现）：声明 kimiHome 的 kimi-web 车道，派发
   //     凭据=<kimiHome>/server.token（kimiWeb backend 建会话前读它）。与 budget_*
   //     同口径：承重文件缺失或为空=FAIL（派发必失败）；存在时不产生条目（零 OK
-  //     噪音）。判定单一实现 credentialReadiness.kimiHomeTokenFileState（registry_list
+  //     噪音）。判定单一实现 credentialReadiness.kimiHomeTokenFileState（preflight workers
   //     的 credentialAvailability 取值与 wao lanes 的就绪探测同源）；detail 点名
   //     文件路径与生成方式，值不回显。探测事实存 Map 供 panel 行复用（不二次读盘）。
   const kimiTokenState = new Map();

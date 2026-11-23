@@ -97,7 +97,7 @@ const SEVEN_KEYS = ["cost", "detail", "purpose", "readOnly", "reveals", "tool", 
 // 1. All seven output schemas expose the exact bounded metadata.
 // =====================================================================
 
-test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bounded shape; the bundle never acquires it", async () => {
+test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bounded shape; no other tool carries it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-md01-"));
   try {
     makeGitRepo(dir);
@@ -146,20 +146,8 @@ test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bound
         assert.equal(t.outputSchema?.properties?.availableDrilldowns, undefined,
           `${t.name} must NOT carry availableDrilldowns`);
       }
-      // The run_delivery_review_bundle keeps its established nested delivery
-      // contract: neither the bundle top level nor its nested delivery schema
-      // may carry or require the progressive-disclosure field.
-      const bundle = tools.tools.find((x) => x.name === "run_delivery_review_bundle");
-      assert.ok(bundle, "bundle discoverable");
-      assert.equal(bundle.outputSchema?.properties?.availableDrilldowns, undefined,
-        "bundle top level must NOT carry availableDrilldowns");
-      assert.ok(!(bundle.outputSchema?.required ?? []).includes("availableDrilldowns"),
-        "bundle top level must NOT require availableDrilldowns");
-      const nested = bundle.outputSchema?.properties?.delivery ?? {};
-      assert.equal(nested.properties?.availableDrilldowns, undefined,
-        "bundle nested delivery must NOT carry availableDrilldowns");
-      assert.ok(!(nested.required ?? []).includes("availableDrilldowns"),
-        "bundle nested delivery must NOT require availableDrilldowns");
+      // 决定 0129：run_delivery_review_bundle 已删——"组合工具不携带渐进披露字段"
+      // 的对照面随之消亡；上方"除 SIX 外任何工具不得携带"的循环已覆盖现面全部工具。
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

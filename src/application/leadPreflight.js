@@ -4,14 +4,17 @@
 //
 // Aggregates the mechanical facts a Lead needs to start WAO orchestration —
 // workspace binding, worker credential availability, and active runs — into ONE
-// result so the Lead does not have to call registry_list + runs_list as
-// separate round trips.
+// result. 决定 0129（第 134 批）：原 `registry_list` 与 `runs_list` 两个只读
+// MCP 工具的能力并入本聚合器——workers[] 条目与原 registry_list 的
+// AGENT_ENTRY 同形（cwd/sessionReuse/missingCredentialEnvNames/dispatchHold
+// 随全量透传、不设比原工具更紧的上限），可选 recentRuns 返回最近运行清单
+//（limit 1..100 且支持 activeOnly；与原 runs_list.runs[] 同形、同一 listRuns
+// 服务，含截断与 unresolvedCount 事实）。
 //
 // This is an OPTIONAL ADVISORY aggregator, NOT an authorization gate:
 //   - It never produces permit/token/approval/preflightPassed state.
-//   - run_dispatch / registry_list / runs_list do NOT depend
-//     on it having succeeded.
-//   - Each check is settled INDEPENDENTLY: a failure in one (e.g. runs_list)
+//   - run_dispatch does NOT depend on it having succeeded.
+//   - Each check is settled INDEPENDENTLY: a failure in one section
 //     does NOT swallow the others (workspace/registry results are still returned).
 //   - The output reports observations + warnings + manualChecks. It does NOT use
 //     PASS/FAIL (which a Lead might misread as a global verdict). A check-level
@@ -148,8 +151,14 @@ export {
 // separately as activeRunCount + activeRunsTruncated.
 // Exported so the MCP output schema enforces the SAME bound (single SSOT).
 export const ACTIVE_RUNS_CAP = 10;
-// Cap on workers returned (defensive against a pathological registry).
-export const WORKERS_CAP = 64;
+// 决定 0129（第 134 批会审修正）：workers **不设上限**。原 `registry_list`
+// 工具返回全部有效席位，registry 本身也没有条目数上限（readRegistry 逐条读
+// agents）；preflight 的 workers 用同一边界，schema 也不设 max——不制造比原
+// 工具更紧的上限。
+// 决定 0129：recentRuns 的请求上限与原 runs_list 一致（该工具缺省 50、上限
+// 100）；activeOnly 缺省 false。MCP schema 与这里同值，聚合器对越界值回落缺省。
+export const RECENT_RUNS_LIMIT_DEFAULT = 50;
+export const RECENT_RUNS_LIMIT_MAX = 100;
 // TD-341（第 89 批 C2）：runner 缺席证明的 unresolved 候选上限（listRuns 同一
 // 次扫描里有界保留，按 updatedAt 新到旧）。超出上限的照旧只计入
 // unresolvedRunCount，不做证明、不进 open item 行。
@@ -309,6 +318,10 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   application-layer use / tests), the real getRegistryInventory is used — but
  *   the MCP path always passes an explicit resolver to guarantee one read.
  * @param {Function} [input.listRunsFn] — injectable; signature matches listRuns
+ * @param {{limit?:number, activeOnly?:boolean}} [input.recentRuns] — 决定 0129：
+ *   请求 recentRuns 节时传入（limit 1..100，缺省 50；activeOnly 先筛活动再
+ *   截断，与原 runs_list 同一 listRuns 语义）。不传 = 不扫描、输出无 recentRuns
+ *   键；传了（哪怕 {}）= 请求，读不出/未绑定输出 null。
  * @param {Function} [input.serverBuildFactsFn] — injectable server-build facts
  *   reader (serverBuildFacts.readServerBuildFacts; the MCP handler passes the
  *   real one). When provided, one advisory server-build line is derived from the
@@ -368,6 +381,7 @@ export async function aggregateLeadPreflight({
   userEnvReader,
   getRegistryInventoryFn,
   listRunsFn,
+  recentRuns,
   serverBuildFactsFn,
   gateStatusFn,
   laneProfilesFn,
@@ -523,11 +537,15 @@ export async function aggregateLeadPreflight({
     // issues (closed-set code, canonical agentId-or-null, no injected field).
     // An injected resolver cannot smuggle dynamic text, and >cap input with
     // issuesTruncated:false still reports truncation. Same logic as the partial
-    // projector and the MCP registry_list handler — one projection, not three.
+    // projector and the partial inventory — one projection, not several.
     const projected = projectRegistryIssues(norm.issues, norm.issuesTruncated);
     registryIssues = projected.issues;
     registryIssuesTruncated = projected.issuesTruncated;
-    workers = agents.slice(0, WORKERS_CAP).map((a) => ({
+    // 决定 0129：workers 条目与原 registry_list 的 AGENT_ENTRY 同形——全量透传
+    //（cwd/sessionReuse/missingCredentialEnvNames/dispatchHold 随行），legacy 注入
+    // 缺字段时按各自 null/[] 兜底（同 reasoningEffort 惯例），绝不编造。会审修正：
+    // **不截断**——原 registry_list 返回全部有效席位，registry 本身无条目数上限。
+    workers = agents.map((a) => ({
       id: a.id,
       backend: a.backend,
       model: a.model,
@@ -537,17 +555,21 @@ export async function aggregateLeadPreflight({
       // ?? null 兜底 service-shaped 注入缺字段的 legacy 形状，同 reasoningEffort 惯例）。
       certificationReasonCode: a.certificationReasonCode ?? null,
       certificationLastHealthyAt: a.certificationLastHealthyAt ?? null,
+      cwd: a.cwd,
+      sessionReuse: a.sessionReuse ?? null,
       credentialAvailability: a.credentialAvailability,
+      missingCredentialEnvNames: Array.isArray(a.missingCredentialEnvNames)
+        ? a.missingCredentialEnvNames
+        : [],
       // M12-6 FR-02: strict provider readiness truth. The inventory service
       // provides it; the fallback keeps this aggregator truthful even when a
       // caller supplies a service-shaped inventory without the field (only
       // unknown/not_checked values can be derived here — no probe exists).
       providerReadiness: a.providerReadiness ?? buildProviderReadiness(a.credentialAvailability),
+      // TD-283: Owner 暂停说明，advisory only——告知、从不拦截。
+      dispatchHold: a.dispatchHold ?? null,
     }));
     checkStatus.workers = "observed";
-    if (agents.length > WORKERS_CAP) {
-      warnings.push(`worker inventory truncated to ${WORKERS_CAP} (registry has ${agents.length}) — use registry_list for the full list`);
-    }
     // M12-25: partial inventory — valid workers are returned, but the workers
     // section is a WARNING (→ complete=false) when any entry was omitted. This
     // keeps "registry had a bad entry" distinct from an observed-clean list and
@@ -556,7 +578,7 @@ export async function aggregateLeadPreflight({
       checkStatus.workers = "warning";
       warnings.push(
         `worker inventory has ${registryIssues.length} malformed/unsupported entr${registryIssues.length === 1 ? "y" : "ies"} omitted; ` +
-        `${workers.length} valid worker(s) returned — use registry_list for the bounded per-entry issue list`,
+        `${workers.length} valid worker(s) returned — see registryIssues in this result`,
       );
     }
     const conditional = workers.filter((w) => w.certification === "conditional");
@@ -564,11 +586,11 @@ export async function aggregateLeadPreflight({
     if (conditional.length > 0) {
       // Drilldown pointer appended in place — still ONE bounded observation line.
       observations.push(
-        `${conditional.length} worker(s) have conditional certification (reported only); drilldown: registry_list detail=certificationEvidence`,
+        `${conditional.length} worker(s) have conditional certification (reported only); drilldown: lead_preflight detail=certificationEvidence`,
       );
     }
     if (missing.length > 0) {
-      observations.push(`${missing.length} worker(s) are missing a required credential — see registry_list for env names`);
+      observations.push(`${missing.length} worker(s) are missing a required credential — see workers[].missingCredentialEnvNames in this result`);
     }
     observations.push(
       "live provider authentication, entitlement, quota, and rate limits were not checked; " +
@@ -576,7 +598,7 @@ export async function aggregateLeadPreflight({
     );
   } catch {
     checkStatus.workers = "unknown";
-    warnings.push("worker inventory could not be read — use registry_list to check directly");
+    warnings.push("worker inventory could not be read — retry, or use the CLI (wao registry list)");
   }
 
   // --- Section 3: active runs (independent; bounded; only when bound & readable) ---
@@ -603,6 +625,11 @@ export async function aggregateLeadPreflight({
         // 注入的 listRunsFn 不识别该选项时不返回该字段，本节自然 no-op）。
         unresolvedCandidatesCap: UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP,
       });
+      // 决定 0129（第 134 批会审修）：工作区权威复证失败 ≠ 零条活动运行。
+      // 按"读不出"处理（catch 会把本节记 unknown / null），绝不伪造空清单。
+      if (result.workspaceAuthorizationUnavailable === true) {
+        throw new Error("workspace authorization could not be proven for the active-run query");
+      }
       unresolvedCandidates = Array.isArray(result.unresolvedCandidates)
         ? result.unresolvedCandidates
         : null;
@@ -610,8 +637,8 @@ export async function aggregateLeadPreflight({
       activeRunCount = typeof result.matchedCount === "number" ? result.matchedCount : all.length;
       unresolvedRunCount = typeof result.unresolvedCount === "number" ? result.unresolvedCount : null;
       // Keep activeRuns entries minimal — no per-run activityStatus. The closed-set
-      // activity projection lives on runs_list summaries; here we only report the
-      // proven-active count + the bounded run list.
+      // activity projection lives on listRuns summaries (recentRuns below / CLI
+      // runs list); here we only report the proven-active count + the bounded list.
       activeRuns = all.slice(0, ACTIVE_RUNS_CAP).map((r) => ({
         runId: r.runId,
         agentId: r.agentId,
@@ -631,12 +658,12 @@ export async function aggregateLeadPreflight({
       if (typeof unresolvedRunCount === "number" && unresolvedRunCount > 0) {
         observations.push(
           `${unresolvedRunCount} unresolved non-terminal run(s) were omitted from activeRuns — ` +
-          "they lack a fresh owner heartbeat and do not prove failure or stop; use runs_list to inspect them",
+          "they lack a fresh owner heartbeat and do not prove failure or stop; inspect them via lead_preflight recentRuns or the CLI (wao runs list)",
         );
       }
     } catch {
       checkStatus.activeRuns = "unknown";
-      warnings.push("active-run query could not be read — use runs_list to check directly");
+      warnings.push("active-run query could not be read — retry, or use the CLI (wao runs list)");
       // unresolvedRunCount stays null (unknown, NOT faked 0).
     }
   } else if (workspace && !workspace.bound) {
@@ -645,6 +672,64 @@ export async function aggregateLeadPreflight({
   } else {
     // workspace unknown (resolver threw) → cannot determine; leave activeRuns null.
     checkStatus.activeRuns = "unknown";
+  }
+
+  // --- Section 3c: recent runs on demand (决定 0129；advisory, independent) ---
+  // 原 runs_list 工具的承接点：仅在调用方显式传 recentRuns（哪怕 {}）时才扫描
+  //（不请求 = 输出无该键、零额外扫描），复用同一个 listRuns 服务（含
+  // activityStatus/activityBasis 的诚实语义与 unresolvedCount 的事实）。会审
+  // 修正：补齐原工具的两种查询——limit 1..100（缺省 50）、activeOnly 先筛活动
+  // 再截断（同一 listRuns 语义）。范围与 activeRuns 同一绑定（调用目标或缺省
+  // 绑定）。与 lanes 同判法：不进 checkStatus、不影响 complete；读不出 → null +
+  // warning（unknown，绝不伪造空清单）；未绑定时同样 null（无可扫描的范围）。
+  const recentRunsRequested = recentRuns !== undefined;
+  let recentRunsSection = null;
+  if (recentRunsRequested) {
+    const limit = Number.isInteger(recentRuns?.limit)
+      && recentRuns.limit >= 1
+      && recentRuns.limit <= RECENT_RUNS_LIMIT_MAX
+      ? recentRuns.limit
+      : RECENT_RUNS_LIMIT_DEFAULT;
+    const activeOnly = recentRuns?.activeOnly === true;
+    if (workspace && workspace.bound && typeof listRunsFn === "function") {
+      try {
+        const result = await listRunsFn({
+          runDir,
+          latest: limit,
+          activeOnly,
+          authorizedWorkspaceRoot: workspaceBinding.root,
+          knownAgentIds,
+        });
+        // 决定 0129（第 134 批会审修）：复证失败 → 下面 catch 投影为
+        // recentRuns:null + warning（绝不投影成零条空清单）。
+        if (result.workspaceAuthorizationUnavailable === true) {
+          throw new Error("workspace authorization could not be proven for the recent-run query");
+        }
+        const rows = Array.isArray(result.runs) ? result.runs : [];
+        recentRunsSection = {
+          runs: rows.map((r) => ({
+            runId: r.runId,
+            agentId: r.agentId,
+            state: r.state,
+            terminal: r.terminal,
+            updatedAt: r.updatedAt ?? null,
+            activityStatus: r.activityStatus,
+            activityBasis: r.activityBasis,
+          })),
+          returnedCount: rows.length,
+          truncated: (typeof result.matchedCount === "number" ? result.matchedCount : rows.length)
+            > rows.length,
+          unresolvedCount: typeof result.unresolvedCount === "number" ? result.unresolvedCount : 0,
+        };
+      } catch {
+        recentRunsSection = null;
+        warnings.push("recent-run query could not be read — retry, or use the CLI (wao runs list)");
+      }
+    } else if (workspace && !workspace.bound) {
+      recentRunsSection = null;
+      observations.push("recent-run listing skipped (workspace not bound)");
+    }
+    // workspace unknown（resolver 抛错）→ 保持 null（无可扫描范围）。
   }
 
   // --- Section 3b: proven runner-gone unresolved runs (TD-341; advisory, read-only) ---
@@ -838,8 +923,8 @@ export async function aggregateLeadPreflight({
   const complete = allObserved;
 
   const manualChecks = [
-    "runs_list (expectedWorkspaceRoot) — verify the workspace binding and active runs independently",
-    "registry_list — verify configured workers, recorded certification, and credential presence (not live provider quota)",
+    "wao registry list — verify configured workers, recorded certification, and credential presence (not live provider quota)",
+    "wao runs list — verify the workspace binding and recent runs independently",
   ];
 
   return {
@@ -853,6 +938,9 @@ export async function aggregateLeadPreflight({
     activeRunCount,
     activeRunsTruncated,
     unresolvedRunCount,
+    // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点）。仅在调用方请求时
+    // 存在；未请求时为 undefined（键缺省），读不出/未绑定为 null（unknown）。
+    ...(recentRunsRequested ? { recentRuns: recentRunsSection } : {}),
     // 0087: compact lane-profile projection ({scale, dimensionLabels, rows});
     // null in a worker context, when the file/lanes table is unreadable, or
     // (at the MCP boundary) when the sub-schema validation fails. Advisory

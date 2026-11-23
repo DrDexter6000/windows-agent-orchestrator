@@ -1446,7 +1446,7 @@ async function runsListCommand(args, config) {
 
   // TD-137①：裸 `runs list` 不再恢复文件名升序——直接沿用 listRuns 的默认
   // updatedAt desc（最新优先，null 最后、runId 升序决胜）。--latest N 的截取
-  // 语义不变；MCP runs_list 走同一服务投影，不受 CLI 本层影响。
+  // 语义不变；MCP lead_preflight recentRuns 走同一服务投影，不受 CLI 本层影响。
 
   // TD-86（D2 A1）：--format json 直接序列化 listRuns 结果（服务默认排序），
   // 零新计算；空结果也输出 {runs:[], matchedCount:0} 而非 "No runs found." 文本。
@@ -2641,8 +2641,8 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   } else {
     console.log(`[unavailable: ${result.unavailableReason}]`);
   }
-  // 第 120 批：被取代的交付多一行（派生事实；不改本命令的 JSON 形状——MCP
-  // run_delivery_review_bundle 原样不动）。第 120 批续修（审查 A5）：本命令的
+  // 第 120 批：被取代的交付多一行（派生事实；不改本命令的 JSON 形状）。
+  // 第 120 批续修（审查 A5）：本命令的
   // 授权根（--cwd，缺省当前目录）就是核验被查询运行的那个根，后代 D 用同一个
   // 根核验。第 120 批续修（E3）：分页读取只在**第一页**（`--file-index 0` 且无
   // cursor）打印提示并派生——续修谱系成员逐页翻页时不再每页付一次全库预筛。

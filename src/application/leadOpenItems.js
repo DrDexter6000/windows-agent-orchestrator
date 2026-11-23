@@ -29,8 +29,9 @@
 //      本项目，与转录读不出一起进"找不到或冲突"行。该口径只用于本节的计数
 //      与 runId，不改
 //      verifyRunWorkspaceOwnership 本身、不改其它工具的归属授权——审查与
-//      裁定工具按**会话绑定**核对归属（run_delivery_review_bundle /
-//      run_delivery 不收 expectedWorkspaceRoot，wao runs wait 不收 --cwd），
+//      裁定工具按**调用目标或缺省绑定**核对归属（run_delivery /
+//      run_delivery_review 可带 expectedWorkspaceRoot，缺省随绑定；wao runs
+//      wait 不收 --cwd），
 //      所以"等裁定/终态未收口/无法判定收口"三行在**该行列出的运行里至少有
 //      一个派发自与绑定根不同的工作树**时，提示按调用带那棵工作树的根
 //      （expectedWorkspaceRoot）再查（或在那棵工作树里跑 CLI）；行内不出现
@@ -397,7 +398,7 @@ async function collectRunBranchOpenItems({
     const ids = joinRunIdsBounded(awaitingDecision, 150, OPEN_ITEM_RUNIDS_CAP);
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${awaitingDecision.length} settled delivery run(s) await a Lead decision `
-      + `(run_delivery_review_bundle): ${ids.text}`
+      + `(run_delivery / run_delivery_review): ${ids.text}`
       + `${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
       + `${continuable > 0 ? `; ${continuable} continuable (run_continue hint)` : ""}`
       + `${crossTree.awaiting ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,

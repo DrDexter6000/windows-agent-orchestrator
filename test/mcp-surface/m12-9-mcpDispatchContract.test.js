@@ -4,6 +4,12 @@
 // run_dispatch's executionProfileId integration, exercised over the in-memory
 // MCP wire (the same path a real host uses).
 //
+// 决定 0129（第 134 批会审修正）：run_dispatch_contract_check **保留**——它独有
+// 的"只预检不派发"与"省略 executionProfileId 时列出 availableProfiles"在 MCP
+// 面没有等价物。run_dispatch 派发前另就地跑同一份预检（提醒进受理回执的
+// contractAdvisories）：本文件同时钉住"预检绝不误拦"（意外异常/畸形提醒不
+// 阻断派发、且不会在 run 已启动后让宿主收到 isError）。
+//
 // Contract (B1–B4):
 //   - run_dispatch_contract_check shares run_dispatch's INPUT schema (same keys,
 //     both strict) and the SAME application validators (shared resolver +
@@ -446,7 +452,7 @@ test("B3: run_dispatch with profile + inline verification conflict → fixed err
   assert.equal(dispatchCalls, 0, "dispatcher never called on profile/inline conflict");
 });
 
-test("B3: run_dispatch with profile but no delivery → fixed error, count 0", async () => {
+test("B3: run_dispatch with profile but no delivery → fixed error text, count 0", async () => {
   let dispatchCalls = 0;
   await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
@@ -459,6 +465,7 @@ test("B3: run_dispatch with profile but no delivery → fixed error, count 0", a
       },
     });
     assert.equal(res.isError, true);
+    assert.deepEqual(res.content, [{ type: "text", text: "run_dispatch failed" }]);
   }, {
     dispatchRunFn: async () => { dispatchCalls += 1; throw new Error("must not dispatch"); },
   });
@@ -540,7 +547,7 @@ function validAvailableProfile(id) {
   return { id, setupCommandCount: 1, assertionCommandCount: 1, summary: "s" };
 }
 
-test("B4/output-boundary: a malformed service result (unknown internal field) collapses, nothing crosses", async () => {
+test("B4/output-boundary: an unknown internal service field never crosses the wire (explicit projection)", async () => {
   await withServer(async ({ dir, client }) => {
     const res = await client.callTool({
       name: "run_dispatch_contract_check",
@@ -552,7 +559,14 @@ test("B4/output-boundary: a malformed service result (unknown internal field) co
         executionProfileId: "node-npm-test-v1",
       },
     });
-    assertFixedCollapse(res);
+    // 决定 0129 修：handler 只投影已发布的字段（不再 spread 服务结果），未知的
+    // 内部字段被丢弃而不是把一次只读预检折成错误。
+    assert.equal(res.isError, undefined, "projection keeps the advisory result");
+    const r = res.structuredContent;
+    assert.equal(r.advisory, true);
+    assert.equal(r.contractValid, true);
+    assert.equal(r.internalTranscriptPath, undefined, "unknown/internal field never crosses");
+    assert.equal(JSON.stringify(r).includes("/tmp/secret.jsonl"), false, "no value leak");
   }, {
     runDispatchContractCheckFn: async () => ({
       advisory: true,
@@ -561,7 +575,7 @@ test("B4/output-boundary: a malformed service result (unknown internal field) co
       issueCodes: [],
       observations: [],
       profile: null,
-      // Unknown/internal field the strict schema must NOT forward to the host.
+      // Unknown/internal field the handler must NOT forward to the host.
       internalTranscriptPath: "/tmp/secret.jsonl",
     }),
   });
@@ -644,6 +658,163 @@ test("B4/output-boundary: an oversized availableProfiles array collapses (cap = 
       profile: { id: "node-npm-test-v1", setupCommandCount: 1, assertionCommandCount: 1 },
       availableProfiles: Array.from({ length: EXECUTION_PROFILE_IDS.length + 1 }, (_, i) =>
         validAvailableProfile(EXECUTION_PROFILE_IDS[i % EXECUTION_PROFILE_IDS.length])),
+    }),
+  });
+});
+
+// ===== 0129 会审修：预检绝不误拦 + 提醒在派发前严格校验 =====
+//
+// run_dispatch 的就地预检是"提醒的来源"，不是派发的权威：它自身的意外异常、
+// 或它给出的畸形提醒，都只能在回执里**缺席**，绝不能让一次可派发的调用失败，
+// 更不能出现"run 已启动、宿主却收到 isError"。
+
+test("0129-P4: an unexpected precheck throw never blocks a dispatchable run (advisory absent)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0129-p4-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let dispatchCalls = 0;
+    const server = createWaoMcpServer({
+      registryPath,
+      runDir: join(dir, "runs"),
+      workspaceRoot: dir,
+      dispatchRunFn: async (input) => {
+        dispatchCalls += 1;
+        return {
+          accepted: true, runId: "run_0129_p4", agentId: input.agentId, state: "pending",
+          transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+        };
+      },
+      // 预检服务自身意外抛错（不是可派发的合同缺陷）→ 按提醒缺席处理。
+      runDispatchContractCheckFn: async () => { throw new Error("precheck internal failure"); },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low",
+          prompt: "x",
+          expectedWorkspaceRoot: dir,
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+        },
+      });
+      assert.equal(dispatchCalls, 1, "dispatch still runs — a precheck crash never blocks");
+      assert.equal(res.isError, undefined, "accepted receipt, not an error");
+      assert.equal("contractAdvisories" in res.structuredContent, false, "advisory absent → key absent");
+      assert.doesNotMatch(res.structuredContent.nextStep, /contractAdvisories/, "plain nextStep");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("0129-P5: malformed contractAdvisories are dropped BEFORE dispatch (no post-start isError)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0129-p5-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let dispatchCalls = 0;
+    const server = createWaoMcpServer({
+      registryPath,
+      runDir: join(dir, "runs"),
+      workspaceRoot: dir,
+      dispatchRunFn: async (input) => {
+        dispatchCalls += 1;
+        return {
+          accepted: true, runId: "run_0129_p5", agentId: input.agentId, state: "pending",
+          transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+        };
+      },
+      // 一个会越过 wire 闭集/上限的提醒（未知码 + 超长 note）混在合法 advisory
+      // 码里：严格预校验必须在派发之前整组丢弃，绝不能让 RUN_DISPATCH_OUTPUT.parse
+      // 在 run 已启动之后抛错折成 isError。
+      runDispatchContractCheckFn: async () => ({
+        advisory: true,
+        contractValid: true,
+        sections: { workspace: "observed", registry: "observed", contract: "observed" },
+        issueCodes: ["referenced_path_probe_miss"],
+        observations: [],
+        advisories: [
+          { code: "referenced_path_probe_miss", note: "legit advisory" },
+          { code: "not_a_closed_set_code", note: "x" },
+          { code: "verification_dir_test_form", note: "y".repeat(513) },
+        ],
+        deliveryErrorCode: null,
+        profile: null,
+        availableProfiles: [],
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low",
+          prompt: "x",
+          expectedWorkspaceRoot: dir,
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+        },
+      });
+      assert.equal(dispatchCalls, 1, "run started exactly once — validation ran before dispatch");
+      assert.equal(res.isError, undefined, "the host must NOT get isError after the run started");
+      assert.equal("contractAdvisories" in res.structuredContent, false, "malformed set dropped entirely");
+      assert.doesNotMatch(res.structuredContent.nextStep, /contractAdvisories/, "plain nextStep");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("0129-P6: four simultaneous issue categories still return a bounded advisory result (never the fixed tool failure)", async () => {
+  await withServer(async ({ dir, client }) => {
+    const res = await client.callTool({
+      name: "run_dispatch_contract_check",
+      arguments: {
+        agentId: "coder_low",
+        prompt: "x",
+        expectedWorkspaceRoot: dir,
+        delivery: {
+          mode: "git_commit_v1",
+          allowedPaths: ["src"],
+          verificationCommands: ["node --test test/some-dir"],
+        },
+      },
+    });
+    // 四类同时出现：workspace 未绑定（服务侧强制）、registry 不可读、结构校验
+    // 意外异常、lint 提醒。输出 schema 只允许三条 observations；服务层必须
+    // 有界合成，不能让整次工具折成 `run_dispatch_contract_check failed`。
+    assert.equal(res.isError, undefined, "bounded advisory result, not the fixed tool failure");
+    const r = res.structuredContent;
+    assert.equal(r.advisory, true);
+    assert.ok(r.observations.length <= CONTRACT_CHECK_SECTIONS.length,
+      `observations bounded (${r.observations.length} <= ${CONTRACT_CHECK_SECTIONS.length})`);
+    const joined = r.observations.join(" ");
+    for (const needle of ["not bound", "could not be read", "could not be validated", "directory argument"]) {
+      assert.ok(joined.includes(needle), `all four facts survive: ${needle}`);
+    }
+    for (const code of ["workspace_unbound", "registry_unreadable", "verification_dir_test_form", "verification_bare_node"]) {
+      assert.ok(r.issueCodes.includes(code), `${code} reported`);
+    }
+    assert.equal(r.sections.contract, "unknown", "precheck did not complete — not a contract defect");
+    assert.equal(r.contractValid, false);
+  }, {
+    // Exercise the REAL service (not a hand-built result) with the four failure
+    // sources injected; only the workspace binding is forced unbound so the
+    // workspace category is present alongside the other three.
+    runDispatchContractCheckFn: (args) => runDispatchContractCheck({
+      ...args,
+      workspaceBinding: { bound: false },
+      registryPath: "ignored",
+      readRegistryFn: async () => { throw new Error("unreadable registry"); },
+      prepareDeliveryRequestFn: () => { throw new Error("unexpected internal failure"); },
+      pathExistsFn: () => false,
     }),
   });
 });

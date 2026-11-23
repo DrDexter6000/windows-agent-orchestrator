@@ -4,7 +4,7 @@
 //
 // 认证 summary 的自由文本 `reason`（scripts/reliability/certification.mjs）会携带
 // 调用方/错误派生文本（blockerReason 原文、missingCategories 插值等）——那是磁盘
-// 契约，永不改写；但 wire（registry_list / lead_preflight）需要一个**机器可读、
+// 契约，永不改写；但 wire（lead_preflight.workers）需要一个**机器可读、
 // 安全**的 advisory 码：闭集、冻结、与 reason 分支一一对应。
 //
 // 本模块是该闭集的唯一权威（single source of truth）：

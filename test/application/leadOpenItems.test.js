@@ -301,7 +301,7 @@ test("OI-A1: 等裁定 / 终态未收口 / 留待回收（已采纳+已拒收+�
     assertLineShape(lines);
     assert.equal(lines.length, 3, `恰好三行（未终态与杂 ref 不出行）: ${JSON.stringify(lines)}`);
     assert.equal(lines[0],
-      "open item: 1 settled delivery run(s) await a Lead decision (run_delivery_review_bundle): run_a1");
+      "open item: 1 settled delivery run(s) await a Lead decision (run_delivery / run_delivery_review): run_a1");
     assert.equal(lines[1],
       "open item: 1 terminal run(s) not settled (verification/reverify without a result; "
       + "run_delivery or `wao runs wait <runId> --until-settled`): run_a2");
@@ -416,7 +416,7 @@ test("OI-A2: 可续计数正例（谱系在、未采纳、未闭合）在等裁�
       },
     });
     assert.equal(lines[0],
-      "open item: 2 settled delivery run(s) await a Lead decision (run_delivery_review_bundle): "
+      "open item: 2 settled delivery run(s) await a Lead decision (run_delivery / run_delivery_review): "
       + "run_c1, run_c2; 1 continuable (run_continue hint)");
   } finally { cleanupDir(root); }
 });
@@ -816,7 +816,7 @@ test("OI-A11: 缺省解析走 resolveTranscriptPathDetailed——桶内正常份
     });
     assert.equal(lines.length, 2, `等裁定一行 + 冲突/缺失一行: ${JSON.stringify(lines)}`);
     assert.equal(lines[0],
-      "open item: 1 settled delivery run(s) await a Lead decision (run_delivery_review_bundle): run_k1",
+      "open item: 1 settled delivery run(s) await a Lead decision (run_delivery / run_delivery_review): run_k1",
       "恰好 run_k1 被分类并点名（k2 冲突不静默择一——变异后平铺份混入即红）");
     assert.ok(!lines[0].includes("run_k2"), "冲突副本的 runId 不进等裁定行");
     assert.equal(lines[1], MISSING_LINE(2), "1 份冲突副本 + 1 份未找到同行计数");

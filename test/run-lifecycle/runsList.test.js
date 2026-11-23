@@ -214,9 +214,9 @@ test("LIST-06: read-only — transcript bytes unchanged after call", async () =>
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-// ── MCP runs_list tests ──────────────────────────────────────────────────────
+// ── MCP 运行清单测试（决定 0129：runs_list 已删，经 lead_preflight recentRuns）──
 
-test("MCP-01: tool list includes runs_list", async () => {
+test("MCP-01: tool list folds runs_list into lead_preflight (decision 0129)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpruns-01-"));
   try {
     makeGitRepo(dir);
@@ -225,7 +225,8 @@ test("MCP-01: tool list includes runs_list", async () => {
     try {
       const tools = await client.listTools();
       const names = tools.tools.map((t) => t.name);
-      assert.ok(names.includes("runs_list"));
+      assert.equal(names.includes("runs_list"), false, "runs_list folded away (decision 0129)");
+      assert.ok(names.includes("lead_preflight"), "lead_preflight is the survivor");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -241,25 +242,95 @@ test("MCP-02: only current workspace runs visible", async () => {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dirA });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: {} });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
       const parsed = JSON.parse(res.content[0].text);
-      assert.equal(parsed.runs.length, 1);
-      assert.equal(parsed.runs[0].runId, "run_a1");
+      assert.ok(parsed.recentRuns, "recentRuns section present when requested");
+      assert.equal(parsed.recentRuns.runs.length, 1);
+      assert.equal(parsed.recentRuns.runs[0].runId, "run_a1");
       // Project B run invisible
-      assert.ok(!JSON.stringify(parsed).includes("run_b1"));
+      assert.ok(!JSON.stringify(parsed.recentRuns).includes("run_b1"));
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dirA, { recursive: true, force: true }); rmSync(dirB, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-test("MCP-03: workspace not bound → fixed error", async () => {
+test("MCP-02b: recentRuns activeOnly filters proven-active runs BEFORE the limit (runs_list parity)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mcpruns-02b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mcpruns-02b-rd-"));
+  try {
+    makeGitRepo(dir);
+    // Older run stays non-terminal with a FRESH owner heartbeat → proven active.
+    await seedRun(runDir, "run_old_active", dir, "running", "coder_low");
+    writeFileSync(
+      join(runDir, ".owner-run_old_active"),
+      JSON.stringify({ heartbeatAt: Date.now(), pid: process.pid }),
+      "utf8",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    // Newer run is terminal → the plain (newest-first) limit would pick it.
+    await seedRun(runDir, "run_new_done", dir, "completed", "coder_low");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const plain = JSON.parse((await client.callTool({
+        name: "lead_preflight", arguments: { recentRuns: { limit: 1 } },
+      })).content[0].text);
+      assert.deepEqual(plain.recentRuns.runs.map((r) => r.runId), ["run_new_done"],
+        "plain limit: newest first, truncated after the limit");
+      assert.equal(plain.recentRuns.truncated, true);
+      const active = JSON.parse((await client.callTool({
+        name: "lead_preflight", arguments: { recentRuns: { limit: 1, activeOnly: true } },
+      })).content[0].text);
+      assert.deepEqual(active.recentRuns.runs.map((r) => r.runId), ["run_old_active"],
+        "activeOnly filters proven-active runs FIRST, then truncates (same as runs_list)");
+      assert.equal(active.recentRuns.runs[0].activityStatus, "active");
+      assert.equal(active.recentRuns.truncated, false, "only one run matched the active filter");
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP-02c: unprovable workspace authority during the scan → recentRuns/activeRuns null (never a fabricated empty list)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mcpruns-02c-"));
+  try {
+    makeGitRepo(dir);
+    const server = createWaoMcpServer({
+      registryPath: "/r.json",
+      runDir: dir,
+      workspaceRoot: dir,
+      // 决定 0129（会审修）：复证失败的服务标记必须被 preflight 当成"读不出"，
+      // 而不是零条 + complete:true。
+      listRunsFn: async () => ({ runs: [], matchedCount: 0, workspaceAuthorizationUnavailable: true }),
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
+      const parsed = JSON.parse(res.content[0].text);
+      assert.notEqual(res.isError, true, "sections settle honestly, not a hard error");
+      assert.equal(parsed.recentRuns, null, "requested but unreadable → null, never an empty list");
+      assert.equal(parsed.activeRuns, null, "active-run section is unknown too");
+      assert.equal(parsed.checkStatus.activeRuns, "unknown");
+      assert.equal(parsed.complete, false);
+      assert.ok(parsed.warnings.some((w) => /could not be read/.test(w)), "honest warning present");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-03: workspace not bound → recentRuns null + workspace.bound:false (honest, no scan)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpruns-03-"));
   try {
     makeGitRepo(dir);
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: {} });
-      assert.ok(res.isError);
+      // 决定 0129：原 runs_list 的"未绑定固定错误"不再存在——preflight 如实
+      // 报 workspace.bound:false，recentRuns 为 null（无可扫描范围，不跨项目）。
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
+      const parsed = JSON.parse(res.content[0].text);
+      assert.notEqual(res.isError, true, "not an error — sections settle honestly");
+      assert.equal(parsed.workspace.bound, false, "workspace reported unbound");
+      assert.equal(parsed.recentRuns, null, "recentRuns stays null (never cross-workspace)");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -275,7 +346,7 @@ test("MCP-04: extra args rejected", async () => {
     });
     const client = await buildClient(server);
     try {
-      await client.callTool({ name: "runs_list", arguments: { evil: true } });
+      await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 5 }, evil: true } });
     } catch {
       // zod rejects — OK
     } finally { await client.close(); await server.close(); }
@@ -283,7 +354,7 @@ test("MCP-04: extra args rejected", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("MCP-05: safe output — no path/prompt/command/session", async () => {
+test("MCP-05: safe recentRuns output — no path/prompt/command/session inside the section", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpruns-05-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-mcpruns-05-rd-"));
   try {
@@ -292,8 +363,12 @@ test("MCP-05: safe output — no path/prompt/command/session", async () => {
     const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: {} });
-      const json = res.content[0].text;
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
+      const parsed = JSON.parse(res.content[0].text);
+      assert.ok(parsed.recentRuns, "section present");
+      // 决定 0129：workspace.workspaceRoot 是批 119 起的既有事实（Lead 给出并
+      // 经证明的 Git 根，刻意在面）；安全边界断言收窄到 recentRuns 节内部。
+      const json = JSON.stringify(parsed.recentRuns);
       assert.ok(!json.includes(dir), "no absolute path");
       assert.ok(!json.includes("proc_"), "no session id");
       assert.ok(!json.includes("prompt"), "no prompt");
@@ -310,7 +385,8 @@ test("MCP-06: annotations correct", async () => {
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
-      const t = tools.tools.find((t) => t.name === "runs_list");
+      // 决定 0129：runs_list 已删；recentRuns 乘载体的 lead_preflight 保持只读注解。
+      const t = tools.tools.find((t) => t.name === "lead_preflight");
       assert.equal(t.annotations.readOnlyHint, true);
       assert.equal(t.annotations.destructiveHint, false);
       assert.equal(t.annotations.idempotentHint, true);
@@ -719,9 +795,9 @@ test("M12-15-ACT-09: unresolvedCount reflects the FULL scan even when limit trun
   } finally { rmSync(runDir, { recursive: true, force: true }); }
 });
 
-// ── M12-15: real in-memory MCP runs_list schema + behavior ───────────────────
+// ── M12-15: real in-memory MCP run-listing schema + behavior（0129：经 recentRuns）──
 
-test("M12-15-MCP-01: runs_list output declares activityStatus/activityBasis enums + unresolvedCount (SSOT)", async () => {
+test("M12-15-MCP-01: recentRuns output declares activityStatus/activityBasis enums + unresolvedCount (SSOT)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1215-mcp01-"));
   try {
     makeGitRepo(dir);
@@ -729,21 +805,22 @@ test("M12-15-MCP-01: runs_list output declares activityStatus/activityBasis enum
     const client = await buildClient(server);
     try {
       const { tools } = await client.listTools();
-      const t = tools.find((x) => x.name === "runs_list");
-      const schema = t.outputSchema;
-      const runItem = schema.properties.runs.items;
+      // 决定 0129：runs_list 已删——闭集枚举随 recentRuns 节进 lead_preflight schema。
+      const t = tools.find((x) => x.name === "lead_preflight");
+      const recent = t.outputSchema.properties.recentRuns.anyOf?.[0] ?? t.outputSchema.properties.recentRuns;
+      const runItem = recent.properties.runs.items;
       // The per-run closed-set enums are present...
       assert.deepEqual([...runItem.properties.activityStatus.enum].sort(),
         ["active", "terminal", "unknown", "unresolved"].sort());
       assert.deepEqual([...runItem.properties.activityBasis.enum].sort(),
         ["fresh_owner_heartbeat", "no_fresh_owner_heartbeat", "terminal_state", "unknown_state"].sort());
-      // ...and unresolvedCount is a top-level field.
-      assert.ok(schema.properties.unresolvedCount, "runs_list output declares unresolvedCount");
+      // ...and unresolvedCount is a section field.
+      assert.ok(recent.properties.unresolvedCount, "recentRuns section declares unresolvedCount");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("M12-15-MCP-02: runs_list maps activityStatus/activityBasis + unresolvedCount through the handler", async () => {
+test("M12-15-MCP-02: recentRuns maps activityStatus/activityBasis + unresolvedCount through the handler", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1215-mcp02-"));
   try {
     makeGitRepo(dir);
@@ -761,13 +838,14 @@ test("M12-15-MCP-02: runs_list maps activityStatus/activityBasis + unresolvedCou
     });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "runs_list", arguments: { activeOnly: true } });
-      const parsed = JSON.parse(res.content[0].text);
-      assert.equal(parsed.runs.length, 1);
-      assert.equal(parsed.runs[0].activityStatus, "active");
-      assert.equal(parsed.runs[0].activityBasis, "fresh_owner_heartbeat");
-      assert.equal(parsed.unresolvedCount, 2);
-      assert.equal(parsed.truncated, false);
+      // 决定 0129：runs_list 已删——同一投影经 lead_preflight recentRuns 上 wire。
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
+      const section = JSON.parse(res.content[0].text).recentRuns;
+      assert.equal(section.runs.length, 1);
+      assert.equal(section.runs[0].activityStatus, "active");
+      assert.equal(section.runs[0].activityBasis, "fresh_owner_heartbeat");
+      assert.equal(section.unresolvedCount, 2);
+      assert.equal(section.truncated, false);
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -1152,6 +1230,28 @@ test("TD-256: authorizedWorkspaceRoot null=空集（fail-closed）而省略=真�
     const all = await listRuns({ runDir: dir });
     assert.equal((all.runs ?? all.items ?? []).length, 1, "省略键=真实列表（1 条在册）");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// 决定 0129（第 134 批会审修）：非 null 的工作区权威若复证失败，绝不能伪装成
+// "没有可见运行"；listRuns 如实给失败标记（preflight 据此给 null）。TD-256 的
+// null 死形状保持原意：刻意的空集，不带失败标记。
+test("0129: an unprovable non-null workspace authority is surfaced as a failure marker (null stays the dead-shape empty set)", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-0129-rl-marker-"));
+  const nonGit = mkdtempSync(join(tmpdir(), "wao-0129-rl-nongit-"));
+  try {
+    const { listRuns } = await import("../../src/application/runList.js");
+    const failed = await listRuns({ runDir, authorizedWorkspaceRoot: nonGit });
+    assert.deepEqual(failed.runs, [], "no fabricated runs");
+    assert.equal(failed.workspaceAuthorizationUnavailable, true,
+      "unprovable authority is surfaced, not silently read as zero runs");
+    const dead = await listRuns({ runDir, authorizedWorkspaceRoot: null });
+    assert.deepEqual(dead.runs, [], "null dead shape keeps its fail-closed empty set");
+    assert.equal(dead.workspaceAuthorizationUnavailable, undefined,
+      "null is intentional gate-disabled, not a read failure");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+    rmSync(nonGit, { recursive: true, force: true });
+  }
 });
 
 test("TD-256: 扫源钉——src/ 零处 authorizedWorkspaceRoot: null（active 门禁用死形状）", () => {

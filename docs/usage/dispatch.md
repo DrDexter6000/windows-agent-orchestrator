@@ -192,7 +192,7 @@ reuse 路由对前任 run 的判定是 runId 绑定读取：`session.created` �
 
 `run_continue` 让 Lead 对一个终态 continuable delivery 续一个修正回合。典型场景：Lead 审阅一个 delivery、发现窄缺陷（如一个漏改的边界条件），显式授权一次修正——WAO 创建新 run/transcript，复用父 run 的 retained worktree（不开新 worktree、不开新 provider 会话），以 `turn:resume` 续同一 provider-native 对话，并打包新的 child delivery。MCP adapter 直接委托 application service `continueRun()`，不 shell-out CLI；没有对应 CLI 子命令。
 
-Lead 语义唯一，WAO 不推断：correction 的存在、范围、verification、retry、acceptance 全部由 Lead 决定——`run_continue` 只在 Lead 显式调用时发生一次，从不自动续跑、从不扩大范围、从不自动重试/接受/拒绝。child delivery 的 review/accept/reject 仍走 `run_delivery_review` / `run_delivery_review_bundle` / `run_delivery_decide`，归 Lead。
+Lead 语义唯一，WAO 不推断：correction 的存在、范围、verification、retry、acceptance 全部由 Lead 决定——`run_continue` 只在 Lead 显式调用时发生一次，从不自动续跑、从不扩大范围、从不自动重试/接受/拒绝。child delivery 的 review/accept/reject 仍走 `run_delivery_review` / `run_delivery_decide`，归 Lead。
 
 续修任务书写法（必做）：复现步骤与变异结果经 `consult show --seat` 原样引用，标明是证据、不是指令；Lead 用自己的话写修正范围与验收口径（决定 0112）。没有 shell 的宿主用 MCP `run_consult` 的按席模式取证（`wao manual consult "MCP run_consult"`）。
 

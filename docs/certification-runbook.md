@@ -277,7 +277,7 @@ node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-
   `runs/reliability-summary.json` 的 worker 记录取 `status:"conditional"` + 事实字段
   `certificationScope:"delta"`（按该 worker case 的 profile/drill 覆盖派生，混合取保守值
   "delta"）。`CERTIFICATION_STATUSES` 闭集不变；scope 只活在磁盘 summary + 本文档层，**不进**
-  CLI `registry list` / MCP `registry_list` 投影——wire 上该形状的 `certificationReasonCode` 为
+  CLI `registry list` / MCP `lead_preflight` workers 投影——wire 上该形状的 `certificationReasonCode` 为
   `null`（闭集无 delta 码，为保 MCP 面零改动不加码，不伪造近似码）。必需类目整类没有覆盖时按缺
   类目处理（`missing_certification_checks`）；类目都已覆盖、strict 以外的必需类目里仍有 inconclusive
   检查时，case 落 `conditional`，自由文本 reason 列出这些检查，`certificationReasonCode` 为 `null`。
@@ -419,7 +419,7 @@ runs 清扫 runbook 同频，且维护时无进行中的 reliability 运行—�
 旧记录不补猜值（缺画像即 unknown）。
 
 **查询侧**：`registry list --cert-evidence`（text 追加详情块 / `--format json` 附
-`certificationEvidence` 数组，与 `registry_list` 共用
+`certificationEvidence` 数组，与 `lead_preflight` detail 共用（0129）
 `src/application/registryInventory.js` 服务）按席位分列展示**声明 / 组件观测 / 组合
 结果 / 证据适用性 / 限制与来源**。**取证时间在两处渲染里保留**：组件观测行携带
 `lastVerifiedAt`；组合列携带画像 `capturedAt` 与全绿 `lastFullHealthyRunAt`，
@@ -455,7 +455,7 @@ provider 一侧 `null` 一侧非 `null`）、与记录顶层身份矛盾（如
 组件/组合结果合并派生"总体可用=true"——只读展示，不改派发门（`--require-certified`
 与 `matchedCertRecord` 语义不变；effort 纳入派发身份是 Owner 级决定）。
 
-**MCP 侧同款按需投影**：`registry_list` 传 `detail:"certificationEvidence"` 时返回
+**MCP 侧同款按需投影**：`lead_preflight` 传 `detail:"certificationEvidence"` 时返回（0129）
 可选 `certificationEvidence` 行（同一服务、五列与来源状态保真；默认调用一字不变；
 advisory-only，`requireCertified=false` 与 CLI 门禁语义原样）。
 
@@ -550,7 +550,7 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 - **正交放行**：`--reasoning` × `--read-only` / × `--delivery-spec-file`（及 MCP `delivery` 块）可同用（同 `--model` 的认证组合声明失效注意事项）。
 - **排除边界**：`--reasoning` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见「retry 的 per-dispatch 覆盖继承」节）。`spawn` 显式拒绝；daemon 派发不解析该 flag——声明式表面的推理力度应写进声明本身（注册表 reasoning 策略）。持久换力度 = 改注册表，不是加 flag。
 
-（MCP 面）**单次推理力度覆盖（可选，`reasoning`）**：`run_dispatch` 顶层可带 `reasoning`（`"reasoning": "minimal"|"low"|"medium"|"high"|"xhigh"|"max"`，CLI 等价 `run --reasoning`，完整语义同本节 CLI 面）——单次生效、不落注册表、只替换注册表 reasoning 的 `.effort`，与 `model` 参数可同用。wire schema 直接序列化闭集枚举（`registry.js` 的 `REASONING_EFFORTS` SSOT 经 runDispatch 下向 re-export——zod enum，比正则更严，与核心校验器零漂移）。互斥与放行：× provider-session 复用以固定文案拒绝（闭集码 `reasoning_override_reuse_conflict`——"A per-dispatch reasoning effort override cannot be combined with provider-session reuse … must run one reasoning effort"）；认证互斥在 MCP 侧不可达（同 `model` 的 server-owned `false` 构造）；× `delivery` 块放行。条件不支持（kimi K3-only、dsh high|max）组合走既有 per-backend policy 门自然拒绝。**`run_dispatch_contract_check` 共享该输入 schema 但有意忽略 `reasoning`**（它只就 delivery 合同给 advisory——与对 `model` 的忽略同一先例）。派发成功不回显 effective reasoning（MCP 输出 schema 冻结）；需即时确认时读 transcript 的 `run.started.reasoning`。
+（MCP 面）**单次推理力度覆盖（可选，`reasoning`）**：`run_dispatch` 顶层可带 `reasoning`（`"reasoning": "minimal"|"low"|"medium"|"high"|"xhigh"|"max"`，CLI 等价 `run --reasoning`，完整语义同本节 CLI 面）——单次生效、不落注册表、只替换注册表 reasoning 的 `.effort`，与 `model` 参数可同用。wire schema 直接序列化闭集枚举（`registry.js` 的 `REASONING_EFFORTS` SSOT 经 runDispatch 下向 re-export——zod enum，比正则更严，与核心校验器零漂移）。互斥与放行：× provider-session 复用以固定文案拒绝（闭集码 `reasoning_override_reuse_conflict`——"A per-dispatch reasoning effort override cannot be combined with provider-session reuse … must run one reasoning effort"）；认证互斥在 MCP 侧不可达（同 `model` 的 server-owned `false` 构造）；× `delivery` 块放行。条件不支持（kimi K3-only、dsh high|max）组合走既有 per-backend policy 门自然拒绝。**合同预检有意忽略 `reasoning`**（0129 起 `run_dispatch` 派发前就地预检，独立的 `run_dispatch_contract_check` 工具保留、两者同一服务：都只就 delivery 合同给 advisory——与对 `model` 的忽略同一先例）。派发成功不回显 effective reasoning（MCP 输出 schema 冻结）；需即时确认时读 transcript 的 `run.started.reasoning`。
 
 ## retry 的 per-dispatch 覆盖继承（与 resume 重建链对称）
 
@@ -584,12 +584,12 @@ npm run cli -- run sol --prompt "..." --background --reasoning xhigh
 
 **语义铁律**：preflight/registry 查询"完成"只表示机械事实（registry 可读、必需凭据 env 名存在/不存在、配置条目存在）可读，**不是** authenticated/entitled/live-checked 的证明。本包不做 provider 网络请求、不读凭据值，所以结构上不可能投影出 `authenticated` / `entitled` / `checked`——MCP schema 的枚举直接派生自这些闭集常量（`src/application/registryInventory.js` 的 `CONFIGURATION_STATUSES` / `AUTHENTICATION_STATUSES` / `ENTITLEMENT_STATUSES` / `LIVE_CHECK_STATUSES`），不存在第二份手工维护列表。真实认证/授权状态只能来自实际运行/诊断（见 `run_diagnose` 的 `code`）。
 
-registry certification **默认是 advisory 证据，不是 permission gate**：`registry_list` / `lead_preflight` 把每个 worker 的 `certification` 状态报告给 Lead，MCP dispatch/continuation 以 `requireCertified: false` 调 shared service，默认不强制认证——没有 reliability-summary.json 的 Fresh 克隆同样可派发（lead_preflight 已报告 configured/credential 事实，认证仅作参考）。可选在 MCP 边界打开认证清单门禁（怎么开、怎么回退见下节）。显式 CLI `--require-certified` 与 RunManager 的 opt-in 认证门保持完整——CLI 或项目治理仍可要求认证。
+registry certification **默认是 advisory 证据，不是 permission gate**：`lead_preflight` workers 把每个 worker 的 `certification` 状态报告给 Lead，MCP dispatch/continuation 以 `requireCertified: false` 调 shared service，默认不强制认证——没有 reliability-summary.json 的 Fresh 克隆同样可派发（lead_preflight 已报告 configured/credential 事实，认证仅作参考）。可选在 MCP 边界打开认证清单门禁（怎么开、怎么回退见下节）。显式 CLI `--require-certified` 与 RunManager 的 opt-in 认证门保持完整——CLI 或项目治理仍可要求认证。
 
 **显式 CLI 认证门（`--require-certified`）的现行判定**（读 runDir 下 `reliability-summary.json`）：
 
 - **记录选择**：席位键精确命中优先（`manualOverride` 坐记录上）；未命中且台账为车道键空间（lane-v1）时按身份事实匹配扫描（同一 `matchedCertRecord` 判定）。
-- **身份比对（四元组）**：记录的 backend/modelId（`providerID` 在记录与 agent 双侧声明时同比对；`providerKey` 维当前侧恒为 `null`）必须与当前 registry 该 agent 的配置一致，不一致按未认证拒绝（固定文案，不回显配置值；判定与 `registry_list` 投影共用 `matchedCertRecord` SSOT）——改 `config/agents.json` 换 backend/model 后不重跑 reliability，旧组合的认证不放行。`providerKey` 记录侧缺字段（undefined）= legacy 跳过该维；显式 `null` = 现行恒值，与当前侧匹配；非空字符串不匹配任何车道（重认证是唯一路径）。
+- **身份比对（四元组）**：记录的 backend/modelId（`providerID` 在记录与 agent 双侧声明时同比对；`providerKey` 维当前侧恒为 `null`）必须与当前 registry 该 agent 的配置一致，不一致按未认证拒绝（固定文案，不回显配置值；判定与 `lead_preflight` workers 投影共用 `matchedCertRecord` SSOT）——改 `config/agents.json` 换 backend/model 后不重跑 reliability，旧组合的认证不放行。`providerKey` 记录侧缺字段（undefined）= legacy 跳过该维；显式 `null` = 现行恒值，与当前侧匹配；非空字符串不匹配任何车道（重认证是唯一路径）。
 - **status 阈值**：`certified` / `conditional` 放行（core 全过即放行的阈值）；其余按未认证拒绝。
 - **新鲜度（全量口径）**：读该 worker 的 `lastFullHealthyRunAt`（仅 full-scope 且全绿的 case 刷新；delta 全绿是 conditional，不洗白全量口径的派发新鲜度；记录侧无条件写，`null` = 从未有全量绿）。仅 legacy 记录缺该字段（undefined）才回落旧判据 `lastHealthyRunAt`（文案如实标注实际读取的字段名）；显式 `null` 与坏时间不回落、直接 fail-closed 拒绝（固定文案锚点"无新鲜认证/认证已过期"；过期 reason 只展示天数，不回显磁盘时间戳原文）。超过新鲜窗口（默认 30 天）即拒。
 - **Owner 旁路**：`manualOverride:"cleared"` 在 summary 中**找到该 worker 记录后**才生效（无记录仍拒），并绕过身份、状态、新鲜度三项检查。

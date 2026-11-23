@@ -143,15 +143,9 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 
 `--all` 与 `--file-index`/`--cursor` 互斥；`--out FILE` 把全文写进文件、stdout 只打一行摘要（回显路径经同一秘密脱敏）；`--since-parent` 只对续修子运行可用，父交付提交由谱系事实证明（“已证明”指提交已证明存在，不要求其验证通过），不可传入提交号，无父运行、跨工作区、跨谱系、父无已证明交付或本轮无增量均以固定文案拒绝。
 
-## MCP `run_delivery_review_bundle`（readiness + 单文件一页组合）
+## 交付首屏查询（原 `run_delivery_review_bundle` 的两步替代，决定 0129）
 
-`run_delivery_review_bundle` 是默认的低摩擦 delivery 首屏查询：一个调用先等待 delivery readiness，再仅在 readiness 为 `reviewable` 时读取 Lead 指定的一个文件页。它机械组合既有 `getRunDeliveryReadiness`、`run_delivery` 安全投影和 `getRunDeliveryReview`/`projectReviewResult`，不引入第二份 delivery/readiness/review 判定。
-
-- 输入：`waitMs` 省略时按默认窗口等待一次 readiness（数值以工具描述为准，不在这里重写）；要即时读取用 `run_delivery`（不带 `waitMs`）加 `run_delivery_review`。合法区间与 `run_delivery` 共用，何时返回见[监督](supervise.md)「等待到收口」。它是一次 readiness 等待预算，不会给 delivery 和 review 分别再分配一个 wait。
-- 输出（strict）：`delivery` 为 `run_delivery` 安全投影，`review` 为单页 review 或 `null`。非 `reviewable` 状态返回 `review:null`，同时保留完整安全 delivery/readiness 事实；该路径零 diff/Git review read。`reviewable` 时 review commit 与 changed-file count 必须和 delivery 投影精确一致，否则整次调用固定失败。
-- Lead 权限不变：WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment、不判定 binary/diff-too-large 是否可接受，也不 stop/retry/repackage/accept/reject。Lead 仍须审查 `0..changedFileCount-1` 的全部文件和全部页面，然后独立调用 `run_delivery_decide`。
-- 原子路径保留：`run_delivery` 与 `run_delivery_review` 继续可单独调用；长 worker、人工轮询、故障排查和非标准流程不受组合工具限制。
-- 安全边界：workspace/runId-bound；非 reviewable 时携带 cursor 会 fail-closed，而不是静默忽略；任何服务异常、malformed output 或跨 artifact 拼接固定返回 `run_delivery_review_bundle failed`，无 partial structured output、动态错误、路径或 secret 泄漏。
+原组合工具已删，改由 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用：先 `run_delivery`（`waitMs` 区间与返回时机见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再 `run_delivery_review`。**两次调用没有组合工具的跨结果保证**：Lead 要把 `run_delivery_review` 回执的 `deliveryCommit`/`changedFileCount` 与先前 `run_delivery` 结果对照，不一致就重读重审；例外是已裁决但验证仍 pending——此时 `run_delivery_review` 给 `available:false`、`unavailableReason:"verification_pending"`，这是正常形态，不是两次回执不一致。两个原子工具的边界不变：workspace/runId-bound、非 reviewable 带 cursor fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment，也不 stop/retry/repackage/accept/reject；失败回各自固定文案、无 partial 输出或泄漏。Lead 仍须审查全部页面后独立调用 `run_delivery_decide`。
 
 ## MCP `run_delivery_reverify`（未变工件重验证）
 
@@ -165,9 +159,9 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 - 原 vs effective verification：原始终态 verification 保留不改写，第二条链也不改写第一条链的事实；`run_delivery` 投影同时给出 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（最新一条 reverify 链的结果，含 `reverify: {status, reason}` 链事实）。消费方一律以最新一条链为准：只有最新链完整（requested + outcome）时 effective 才取其结果，非完整链（none/pending/malformed）不改变 effective 状态（fail-closed）。有 reverify 链时，决定门禁取"决定之前最近一条完整链"的结果作支撑，accept 须 passed；决定之后追加的请求不能事后给决定撑腰。
 - 安全输出：不返回 commands/worktree 路径/stderr/reason/env/raw events（字段形状与闭集见生成层；settled 输出含本次收敛的 `attempt`）。
 
-Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery_review_bundle`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
+Lead 仍须在 decision 前完整 review（`run_delivery_review`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
 
-规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。派发前用 `run_dispatch_contract_check` 的 advisory 探针预检引用路径；验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
+规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。受理后立即看回执里的 `contractAdvisories`（引用路径等提醒当场给出），需要就停掉重派；要**派发前**预检，用 `run_dispatch_contract_check`（只预检不派发）。验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
 
 CLI 等价（同一 service 与安全投影，不是 raw 通道，不能改断言命令）：
 

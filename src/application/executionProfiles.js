@@ -17,7 +17,7 @@
 //     source change to this one module — there is no runtime registration.
 //
 // Shared resolver (B3): resolveDeliveryVerification is the SINGLE authority used
-// by BOTH run_dispatch and run_dispatch_contract_check. It enforces:
+// by run_dispatch (and its in-place contract precheck, 决定 0129). It enforces:
 //   - profile vs inline verification (verificationSetupCommands /
 //     verificationCommands / verificationUnavailableReason) are MUTUALLY
 //     EXCLUSIVE — never two authorities;
@@ -119,7 +119,7 @@ function deliveryHasInlineVerification(delivery) {
 /**
  * Resolve the effective delivery verification from EITHER a selected profile OR
  * the inline delivery block — never both. This is the SINGLE authority shared by
- * run_dispatch and run_dispatch_contract_check.
+ * run_dispatch and its in-place contract precheck (决定 0129).
  *
  * Outcomes:
  *   - { ok:true, source:"profile", profileId, verification } — profile supplies

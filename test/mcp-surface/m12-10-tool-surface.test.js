@@ -2,7 +2,7 @@
 //
 // M12-10 progressive-disclosure correction — the FROZEN tool surface.
 //
-// WAO exposes EXACTLY 20 always-registered MCP tools. There is NO tool-profile
+// WAO exposes EXACTLY 17 always-registered MCP tools. There is NO tool-profile
 // model, NO startup flag, and NO restart-to-recover: every operational tool is
 // independently callable for the lifetime of the connection. The built-in
 // playbook catalog moved OFF the tool surface entirely (it is presented as MCP
@@ -13,30 +13,36 @@
 // wait — taking the surface from 23 to 20: per-call `expectedWorkspaceRoot`
 // replaces the shared session selection, `lead_preflight.workspace` carries the
 // binding facts, and repeated `run_await_result` (CLI `runs wait` for long
-// waits) replaces the long-poll.
+// waits) replaces the long-poll. Batch 134 (decision 0129, Owner-approved)
+// folded three read-only tools into their survivors, taking the surface from 20
+// to 17: `registry_list`/`runs_list` into `lead_preflight` (workers carry the
+// full agent entry; optional detail/recentRuns), and `run_delivery_review_bundle`
+// into `run_delivery` + `run_delivery_review`. `run_dispatch_contract_check` is
+// KEPT: its check-only (preview without dispatch) and availableProfiles listing
+// have no MCP equivalent (batch-134 review correction).
 //
 // This is a PRESENTATION/TRUTH lock, not a permission or routing layer. There
 // is no branching on Host/runtime name, no `tools/list_changed` dependency, and
-// no dynamic registration — the 20 tools are registered unconditionally at
+// no dynamic registration — the 17 tools are registered unconditionally at
 // server construction.
 //
 // Contracts under test:
-//   A — tools/list returns EXACTLY the deterministic 20-tool set, in the frozen
+//   A — tools/list returns EXACTLY the deterministic 17-tool set, in the frozen
 //       registration order, with NO `playbook_list`/`playbook_get`, NO
-//       batch-119-removed tool, and NO profile-driven variance.
-//   B — the batch-119-removed tools are NOT advertised and calling them returns
-//       the SDK's fixed not-found; `run_dispatch_contract_check` (formerly
-//       profile-hidden) remains advertised and its handler is reached on call.
+//       batch-119/134-removed tool, and NO profile-driven variance.
+//   B — the batch-119/134-removed tools are NOT advertised and calling them
+//       returns the SDK's fixed not-found; the retained contract_check handler
+//       is reachable.
 //   C — the toolProfile model is GONE: `createWaoMcpServer({toolProfile})` does
-//       not throw and does not change the 20-tool surface for ANY value.
+//       not throw and does not change the 17-tool surface for ANY value.
 //   D — stdio `parseMcpArgs` IGNORES legacy `--tool-profile` as an ordinary
 //       unknown flag (no parse, no output key, no throw); the legacy
 //       `--registry`/`--run-dir`/`--workspace-root` parsing is byte-unchanged.
-//   E — `src/mcp/toolSurface.js` is the single frozen SSOT (20 names, frozen,
+//   E — `src/mcp/toolSurface.js` is the single frozen SSOT (17 names, frozen,
 //       unique, registration order); every DRILLDOWN_TOOLS carrier is a member.
 //   F — `src/mcp/toolProfiles.js` is DELETED (the profile model is gone).
 //   G — compacted descriptions retain the key semantic guards.
-//   H — no-model wire measurement: deterministic 20-tool wire, bounded by a
+//   H — no-model wire measurement: deterministic 17-tool wire, bounded by a
 //       frozen ceiling (regression protection), and honestly recorded.
 
 import { test } from "node:test";
@@ -49,17 +55,16 @@ import { createHash } from "node:crypto";
 
 // ---- Frozen closed set (the contract) ----
 
-// Registration order exactly as emitted by tools/list. Batch 119 (v0.10.0,
-// Owner-approved true-removal shrink): the former 23-tool set MINUS the session
-// workspace selection, the binding-status query, and the MCP long-poll wait
-// tools = 20.
+// Registration order exactly as emitted by tools/list. Batch 134 (decision
+// 0129, Owner-approved; review correction keeps run_dispatch_contract_check):
+// the former 20-tool set MINUS the three folded read-only tools = 17.
 const TOOL_SET = Object.freeze([
-  "registry_list", "lead_preflight",
+  "lead_preflight",
   "run_dispatch", "run_dispatch_contract_check", "run_consult", "run_continue",
   "run_correct",
   "run_status", "run_collect", "run_diagnose", "run_delivery", "run_delivery_decide",
-  "run_stop", "runs_list", "run_await_result", "run_activity",
-  "run_delivery_review", "run_delivery_review_bundle", "run_delivery_repackage",
+  "run_stop", "run_await_result", "run_activity",
+  "run_delivery_review", "run_delivery_repackage",
   "run_delivery_reverify",
 ]);
 
@@ -70,6 +75,12 @@ const REMOVED_PLAYBOOK_TOOLS = Object.freeze(["playbook_list", "playbook_get"]);
 // and calling them must return the SDK's fixed not-found.
 const REMOVED_V10_TOOLS = Object.freeze([
   "workspace_select", "workspace_status", "run_wait",
+]);
+
+// 决定 0129（第 134 批，Owner 批准）：三个只读工具的能力并进留下的工具后
+// 删除；run_dispatch_contract_check 因"只预检不派发"无等价物而保留（会审修正）。
+const REMOVED_134_TOOLS = Object.freeze([
+  "registry_list", "runs_list", "run_delivery_review_bundle",
 ]);
 
 // ---- harness ----
@@ -124,7 +135,7 @@ function notFound(res) {
 // A — exact deterministic 20-tool set, no removed tools, no profile variance
 // =====================================================================
 
-test("M12-10-A1: tools/list returns exactly the 20-tool set in deterministic order", async () => {
+test("M12-10-A1: tools/list returns exactly the 17-tool set in deterministic order", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-a1-"));
   try {
     makeGitRepo(dir);
@@ -132,8 +143,8 @@ test("M12-10-A1: tools/list returns exactly the 20-tool set in deterministic ord
     try {
       const tools = await client.listTools();
       const names = tools.tools.map((t) => t.name);
-      assert.deepEqual(names, TOOL_SET, "exactly the 20-tool set in registration order");
-      assert.equal(names.length, 20, "exactly 20");
+      assert.deepEqual(names, TOOL_SET, "exactly the 17-tool set in registration order");
+      assert.equal(names.length, 17, "exactly 17");
     } finally {
       await client.close();
       await server.close();
@@ -143,7 +154,7 @@ test("M12-10-A1: tools/list returns exactly the 20-tool set in deterministic ord
   }
 });
 
-test("M12-10-A2: no playbook tool and no batch-119-removed tool is exposed", async () => {
+test("M12-10-A2: no playbook tool and no batch-119/134-removed tool is exposed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-a2-"));
   try {
     makeGitRepo(dir);
@@ -155,6 +166,9 @@ test("M12-10-A2: no playbook tool and no batch-119-removed tool is exposed", asy
       }
       for (const name of REMOVED_V10_TOOLS) {
         assert.ok(!names.includes(name), `${name} must NOT be a tool (v0.10.0 true-removal shrink)`);
+      }
+      for (const name of REMOVED_134_TOOLS) {
+        assert.ok(!names.includes(name), `${name} must NOT be a tool (decision 0129 fold-in shrink)`);
       }
     } finally {
       await client.close();
@@ -174,7 +188,7 @@ test("M12-10-A3: every advertised tool is a member of the frozen TOOL_SET (close
       const surface = new Set(TOOL_SET);
       const names = (await client.listTools()).tools.map((t) => t.name);
       for (const name of names) {
-        assert.ok(surface.has(name), `advertised tool ${name} is in the frozen 20-set`);
+        assert.ok(surface.has(name), `advertised tool ${name} is in the frozen 17-set`);
       }
     } finally {
       await client.close();
@@ -189,15 +203,15 @@ test("M12-10-A3: every advertised tool is a member of the frozen TOOL_SET (close
 // B — removed tools are not-found; formerly-hidden contract_check stays callable
 // =====================================================================
 
-test("M12-10-B1: calling the batch-119-removed tools returns the SDK's fixed not-found", async () => {
+test("M12-10-B1: calling the batch-119/134-removed tools returns the SDK's fixed not-found", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-b1-"));
   try {
     makeGitRepo(dir);
     const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
     try {
       const advertised = new Set((await client.listTools()).tools.map((t) => t.name));
-      for (const name of REMOVED_V10_TOOLS) {
-        assert.ok(!advertised.has(name), `${name} is not advertised (v0.10.0 true-removal)`);
+      for (const name of [...REMOVED_V10_TOOLS, ...REMOVED_134_TOOLS]) {
+        assert.ok(!advertised.has(name), `${name} is not advertised (true-removal shrink)`);
         const res = await client.callTool({ name, arguments: {} });
         assert.equal(notFound(res), true, `${name} call returns the fixed not-found`);
       }
@@ -210,21 +224,30 @@ test("M12-10-B1: calling the batch-119-removed tools returns the SDK's fixed not
   }
 });
 
-test("M12-10-B2: run_dispatch_contract_check stays advertised and its handler is reached", async () => {
+test("M12-10-B2: folded-in survivors stay advertised; the retained contract_check handler is reached (decision 0129)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-b2-"));
   try {
     makeGitRepo(dir);
     let contractCalls = 0;
     const { server, client } = await buildServerClient({
-      dir, registryPath: makeRegistry(dir),
+      dir,
+      registryPath: makeRegistry(dir),
       overrides: {
         runDispatchContractCheckFn: async () => { contractCalls += 1; return {}; },
       },
     });
     try {
-      // run_dispatch_contract_check (formerly profile-hidden): handler reaches
-      // the service (counter=1), then collapses the {} payload to its fixed
-      // error — NOT a not-found.
+      // The folded tools' survivors plus the RETAINED contract_check are on the
+      // surface; the preflight call reaches its handler (advisory payload, NOT a
+      // not-found), and the contract_check handler reaches its service (the {}
+      // payload then collapses to that tool's own fixed error — still not a
+      // not-found).
+      const advertised = new Set((await client.listTools()).tools.map((t) => t.name));
+      for (const name of ["lead_preflight", "run_dispatch", "run_dispatch_contract_check", "run_delivery", "run_delivery_review"]) {
+        assert.ok(advertised.has(name), `${name} stays advertised (decision 0129 surface)`);
+      }
+      const pf = await client.callTool({ name: "lead_preflight", arguments: {} });
+      assert.equal(notFound(pf), false, "lead_preflight handler reached (not not-found)");
       const cc = await client.callTool({
         name: "run_dispatch_contract_check",
         arguments: { agentId: "coder_low", prompt: "x" },
@@ -244,13 +267,13 @@ test("M12-10-B2: run_dispatch_contract_check stays advertised and its handler is
 // C — the toolProfile model is gone (ignored, never throws, never varies)
 // =====================================================================
 
-test("M12-10-C1: createWaoMcpServer ignores toolProfile — same 20 tools for any value, no throw", async () => {
+test("M12-10-C1: createWaoMcpServer ignores toolProfile — same 17 tools for any value, no throw", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-c1-"));
   try {
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir);
     // The legacy values "full" and "lead", plus a totally unknown value, must
-    // all yield the SAME 20-tool surface and must NOT throw.
+    // all yield the SAME 17-tool surface and must NOT throw.
     for (const profile of ["full", "lead", "bogus", undefined]) {
       const { createWaoMcpServer } = await import("../../src/mcp/server.js");
       assert.doesNotThrow(() => {
@@ -260,15 +283,15 @@ test("M12-10-C1: createWaoMcpServer ignores toolProfile — same 20 tools for an
         createWaoMcpServer({ toolProfile: profile, registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
       }, `toolProfile=${String(profile)} must not throw`);
     }
-    // Connected cross-check: default vs explicit "lead" produce identical 20-tool
+    // Connected cross-check: default vs explicit "lead" produce identical 17-tool
     // surfaces in the same deterministic order.
     const a = await buildServerClient({ dir, registryPath });
     const b = await buildServerClient({ dir, registryPath, overrides: { toolProfile: "lead" } });
     try {
       const na = (await a.client.listTools()).tools.map((t) => t.name);
       const nb = (await b.client.listTools()).tools.map((t) => t.name);
-      assert.deepEqual(na, TOOL_SET, "default = 20");
-      assert.deepEqual(nb, TOOL_SET, "toolProfile:'lead' ignored → still 20");
+      assert.deepEqual(na, TOOL_SET, "default = 17");
+      assert.deepEqual(nb, TOOL_SET, "toolProfile:'lead' ignored → still 17");
       assert.deepEqual(nb, na, "no profile variance");
     } finally {
       await a.client.close(); await a.server.close();
@@ -316,16 +339,16 @@ test("M12-10-D2: legacy --registry/--run-dir/--workspace-root parsing is byte-un
 // E — toolSurface.js SSOT: frozen 20-set, unique, DRILLDOWN_TOOLS ⊆ surface
 // =====================================================================
 
-test("M12-10-E1: src/mcp/toolSurface.js exports the frozen 20-tool SSOT", async () => {
+test("M12-10-E1: src/mcp/toolSurface.js exports the frozen 17-tool SSOT", async () => {
   const { TOOLS } = await import("../../src/mcp/toolSurface.js");
-  assert.deepEqual(TOOLS, TOOL_SET, "TOOLS == frozen 20-tool set in registration order");
-  assert.equal(TOOLS.length, 20);
+  assert.deepEqual(TOOLS, TOOL_SET, "TOOLS == frozen 17-tool set in registration order");
+  assert.equal(TOOLS.length, 17);
   assert.ok(Object.isFrozen(TOOLS), "TOOLS is frozen");
   // Uniqueness (no tool registered twice).
   assert.equal(new Set(TOOLS).size, TOOLS.length, "TOOLS has no duplicates");
-  // The removed playbook tools and the batch-119-removed tools are NOT members.
+  // The removed playbook tools and the batch-119/134-removed tools are NOT members.
   const set = new Set(TOOLS);
-  for (const name of [...REMOVED_PLAYBOOK_TOOLS, ...REMOVED_V10_TOOLS]) {
+  for (const name of [...REMOVED_PLAYBOOK_TOOLS, ...REMOVED_V10_TOOLS, ...REMOVED_134_TOOLS]) {
     assert.ok(!set.has(name), `${name} is not in the surface`);
   }
 });
@@ -394,19 +417,28 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
     // generic error; page-1 fresh chain or afterSeq from a known sequence).
     assert.match(d("run_activity"), /fixed generic error/);
     assert.match(d("run_activity"), /afterSeq/);
-    // M12-19: the delivery waitMs contract is stated truthfully on both
-    // wait-capable delivery tools (no hidden clamp, no altered range/default).
+    // M12-19: the delivery waitMs contract is stated truthfully on the
+    // wait-capable delivery tool (no hidden clamp, no altered range/default).
+    // (决定 0129：review bundle 已删，该合同只在 run_delivery 一处陈述。)
     assert.match(d("run_delivery"), /1000\.\.300000/);
     assert.match(d("run_delivery"), /waitMs=0 is invalid/);
-    assert.match(d("run_delivery_review_bundle"), /1000\.\.300000/);
-    assert.match(d("run_delivery_review_bundle"), /waitMs=0 is invalid/);
+    // 决定 0129：lead_preflight 描述说明两个新选项与 unresolved 语义。
+    assert.match(d("lead_preflight"), /detail=certificationEvidence/);
+    assert.match(d("lead_preflight"), /recentRuns/);
+    assert.match(d("lead_preflight"), /never inferred failed\/dead\/stopped/);
+    // 决定 0129 会审修正：保留的预检工具必须写明 advisory/not a gate 与独有
+    // 能力（check-only、availableProfiles）——这是它不被并进 run_dispatch 的理由。
+    assert.match(d("run_dispatch_contract_check"), /advisory/i);
+    assert.match(d("run_dispatch_contract_check"), /not a gate/i);
+    assert.match(d("run_dispatch_contract_check"), /check-only/i);
+    assert.match(d("run_dispatch_contract_check"), /available profiles/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 // =====================================================================
-// H — no-model wire measurement: deterministic 21-tool wire, bounded + honest
+// H — no-model wire measurement: deterministic 17-tool wire, bounded + honest
 // =====================================================================
 
 // Historical 2026-08 23-tool wire baseline (documented reference only; see M12-10-H).
@@ -434,7 +466,15 @@ const RED_23_WIRE = 75492;
 // 三个工具（23→20）；lead_preflight 输入改名 expectedWorkspaceRoot、workspace 增
 // workspaceRoot/call_target、run_status/run_diagnose 增可选目标、runs_list scope
 // 收 call_target 语义：93849→87149（实测；Owner 硬顶 94532 内）。
-const FROZEN_20_WIRE_CEILING = 87157;
+// 第 134 批（决定 0129，Owner 批准的真删除式减面 + 会审修正）：删 registry_list /
+// runs_list / run_delivery_review_bundle 三个只读工具（能力并入 lead_preflight 与
+// 原子审查对；run_dispatch_contract_check 因"只预检不派发"与 availableProfiles
+// 无等价物而**保留**），lead_preflight 输入增 detail/recentRuns（recentRuns 带
+// limit 1..100 与 activeOnly）、workers 条目改 AGENT_ENTRY 同形且**不设上限**、
+// 输出增可选 certificationEvidence/recentRuns、run_dispatch 出参增可选
+// contractAdvisories：87157→76543（实测；Owner 硬顶 94532 内；仍低于 2a1875ac
+// 的 87157）。三条冻结线与 SHA 均按实测下调重冻。
+const FROZEN_17_WIRE_CEILING = 76543;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -503,11 +543,11 @@ async function measureWire() {
   }
 }
 
-test("M12-10-H: deterministic 20-tool wire at or below the frozen ceiling", async () => {
+test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", async () => {
   const m = await measureWire();
-  // The surface is exactly 20 (re-asserted for the measured server).
-  assert.equal(m.count, 20, `measured count is 20 (got ${m.count})`);
-  assert.deepEqual(m.names, TOOL_SET, "measured set == frozen 20-set");
+  // The surface is exactly 17 (re-asserted for the measured server).
+  assert.equal(m.count, 17, `measured count is 17 (got ${m.count})`);
+  assert.deepEqual(m.names, TOOL_SET, "measured set == frozen 17-set");
   // Honest regression narrative (M12-25 re-baseline): the 22-tool wire (75967)
   // now EXCEEDS the historical 75492 23-tool baseline (RED_23_WIRE). The smaller
   // tool count carries materially richer OUTPUT-CONTRACT schemas accumulated
@@ -519,8 +559,8 @@ test("M12-10-H: deterministic 20-tool wire at or below the frozen ceiling", asyn
   // is retained as a documented historical reference, not an active assertion.
   // (M13-r2 note: the surface is now literally 23 tools again — 84494 measured —
   // and RED_23_WIRE still names the OLD 2026-08 baseline, not this surface.)
-  assert.ok(m.wireBytes <= FROZEN_20_WIRE_CEILING,
-    `20-tool wire (${m.wireBytes}) <= frozen ceiling (${FROZEN_20_WIRE_CEILING})`);
+  assert.ok(m.wireBytes <= FROZEN_17_WIRE_CEILING,
+    `17-tool wire (${m.wireBytes}) <= frozen ceiling (${FROZEN_17_WIRE_CEILING})`);
 });
 
 // =====================================================================
@@ -687,8 +727,19 @@ test("M12-10-H: deterministic 20-tool wire at or below the frozen ceiling", asyn
 // 为 TD-329 后的冻结值。）
 // 第 118 批：7 个读工具输入增 expectedWorkspaceRoot、runs_list scope.source 增
 // call_target——schema 在 stripped 载荷内，SHA 如实翻新；描述零增量。
+// 第 134 批（决定 0129，Owner 批准 + 会审修正）：三个只读工具整面移出
+//（registry_list / runs_list / run_delivery_review_bundle 的 schemas 随之离开
+// stripped 载荷）；run_dispatch_contract_check **保留**（其 schema 仍在
+// stripped 载荷内）；lead_preflight 输入增 detail/recentRuns（recentRuns 的
+// limit/activeOnly 对象）、workers 改 AGENT_ENTRY 同形且不设 max、输出增可选
+// certificationEvidence/recentRuns、run_dispatch 出参增可选 contractAdvisories
+// ——SHA 如实翻新。（历史值：
+// 90e8445d93d72b778e75ebed3cc9da503d0c1cf5cf7760bf4d5deadabe5528d2 为
+// 0129 首轮（四删、20→16）后的冻结值；
+// b5abee2571f96bcbbeaa1742a54ab6be0bf21c1ef7cc9c2dcc2fbdc6665d3667 为
+// TD-354 后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "b5abee2571f96bcbbeaa1742a54ab6be0bf21c1ef7cc9c2dcc2fbdc6665d3667";
+  "d398828b8eef5da845ed66f579ab4906860303b3a7989556e8c2644ac70625b8";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。
@@ -806,7 +857,11 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 第 118 批：7 个读工具加可选 expectedWorkspaceRoot：12219→12219（实测；Owner 硬顶内）。
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：删三工具、preflight 描述改写、
 // run_status/run_diagnose 描述加目标根一句：12219→11291（实测；Owner 硬顶 12347 内）。
-const FROZEN_20_DESC_CEILING = 11291;
+// 第 134 批（决定 0129，Owner 批准 + 会审修正）：删三个只读工具、保留
+// contract_check（其描述随之回面）、lead_preflight 描述加新选项说明与
+// unresolved 语义句：11291→10402（实测；Owner 硬顶 12347 内；仍低于 2a1875ac
+// 的 11291）。
+const FROZEN_17_DESC_CEILING = 10402;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：12063→12219（实测；Owner 硬顶 12347 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 描述加一句"回执在有未终态
@@ -826,7 +881,11 @@ const FROZEN_20_DESC_CEILING = 11291;
 // 第 118 批：7 个读工具加可选 expectedWorkspaceRoot：23426→23937（实测；Owner 硬顶内）。
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：删三工具、其余 inputSchema 增删
 // 如批注：23937→22436（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
-const FROZEN_20_HOSTVISIBLE_CEILING = 22436;
+// 第 134 批（决定 0129，Owner 批准 + 会审修正）：删三个只读工具、保留
+// contract_check、preflight 输入增 recentRuns 对象（limit/activeOnly）+ workers
+// 不设 max：22436→20870（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内；
+// 仍低于 2a1875ac 的 22436）。
+const FROZEN_17_HOSTVISIBLE_CEILING = 20870;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：23270→23426（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句
@@ -897,8 +956,8 @@ async function measureSurface() {
 
 test("M12-16-A: description-stripped tools/list contract is byte-stable (SHA-256 losslessness guard)", async () => {
   const m = await measureSurface();
-  // Same 20 tools, same names, same order.
-  assert.equal(m.count, 20, `measured count is 20 (got ${m.count})`);
+  // Same 17 tools, same names, same order.
+  assert.equal(m.count, 17, `measured count is 17 (got ${m.count})`);
   assert.deepEqual(m.names, TOOL_SET, "names/order unchanged by slimming");
   // The description-stripped payload must hash to the frozen contract. ANY change
   // to a schema, annotation, name, or order — anything but a tool's description
@@ -921,8 +980,8 @@ test("M12-16-B: descriptions stay under the frozen ceiling (prevents description
   const m = await measureSurface();
   // Frozen ceiling at the achieved GREEN value — prevents description creep.
   assert.ok(
-    m.descBytes <= FROZEN_20_DESC_CEILING,
-    `desc bytes (${m.descBytes}) <= frozen ceiling (${FROZEN_20_DESC_CEILING})`,
+    m.descBytes <= FROZEN_17_DESC_CEILING,
+    `desc bytes (${m.descBytes}) <= frozen ceiling (${FROZEN_17_DESC_CEILING})`,
   );
   // Material-reduction floor vs the M12-15 baseline (PRE_M12_16_DESC_BASELINE
   // 11812 − M12_16_DESC_REDUCTION_MIN 500 = 11312): RETIRED at M13-r2, same
@@ -940,7 +999,7 @@ test("M12-16-C: hostVisible (name + description + inputSchema) at or below the f
   // Frozen ceiling at the achieved value — prevents hostVisible creep (the
   // projection every host pays per session; decision 0078 / TD-286).
   assert.ok(
-    m.hostVisibleBytes <= FROZEN_20_HOSTVISIBLE_CEILING,
-    `hostVisible bytes (${m.hostVisibleBytes}) <= frozen ceiling (${FROZEN_20_HOSTVISIBLE_CEILING})`,
+    m.hostVisibleBytes <= FROZEN_17_HOSTVISIBLE_CEILING,
+    `hostVisible bytes (${m.hostVisibleBytes}) <= frozen ceiling (${FROZEN_17_HOSTVISIBLE_CEILING})`,
   );
 });

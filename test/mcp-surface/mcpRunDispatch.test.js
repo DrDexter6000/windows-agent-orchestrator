@@ -87,11 +87,11 @@ async function buildStdioSubprocessTransport({ registryPath, runDir, workspaceRo
 // ===== Tests =====
 
 // ---------------------------------------------------------------------
-// M9-2B-01: tools/list contains exactly registry_list + run_dispatch with correct
-//           schemas and annotations.
+// M9-2B-01: tools/list has run_dispatch with the strict schema and annotations
+//           (0129: registry_list is folded into lead_preflight.workers).
 // ---------------------------------------------------------------------
 
-test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema and annotations", async () => {
+test("M9-2B-01: tools/list has run_dispatch with strict schema and annotations (0129: registry_list folded into lead_preflight)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-01-"));
   try {
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
@@ -101,7 +101,8 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
       const tools = await client.listTools();
       const names = tools.tools.map((t) => t.name).sort();
       assert.ok(names.includes("run_dispatch"), "run_dispatch present");
-      assert.ok(names.includes("registry_list"), "registry_list present");
+      assert.ok(names.includes("lead_preflight"), "lead_preflight present (registry_list's survivor, decision 0129)");
+      assert.equal(names.includes("registry_list"), false, "registry_list folded away (decision 0129)");
 
       const rd = tools.tools.find((t) => t.name === "run_dispatch");
       assert.ok(rd, "run_dispatch present");
@@ -1107,11 +1108,11 @@ test("TD-319: dispatchSelectorErrorText 返回行数组——join 结果与改�
     "accepted forms: agentId | lane+role",
     'fix: run_dispatch({ "lane": "claude-opus", "role": "auditor", "prompt": "任务文本" }) 或 run_dispatch({ "agentId": "<别名>", "prompt": "任务文本" })',
   ]);
-  // >32 项截断指向 registry_list 的行也保持单行结构。
+  // >32 项截断指向 lead_preflight workers（0129 前指向 registry_list）的行也保持单行结构。
   const many = Array.from({ length: 40 }, (_, i) => `lane_${i}`);
   const capped = dispatchSelectorErrorText({ ...resolution, choices: { lanes: many, roles: ["coder"] } });
   const cappedLaneLine = capped.find((l) => l.startsWith("known lanes"));
-  assert.match(cappedLaneLine, /lane_31 …（截断，全 wao lanes 详见 registry_list）/);
+  assert.match(cappedLaneLine, /lane_31 …（截断，全 wao lanes 详见 lead_preflight workers）/);
   assert.ok(!cappedLaneLine.includes("\n"));
 });
 
@@ -1267,4 +1268,138 @@ test("0097: accepted run_dispatch carries laneFacts (no [wao] prefix); null → 
       } finally { await clientRefused.close(); await serverRefused.close(); }
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// 决定 0129：原 run_dispatch_contract_check 的就地承接——run_dispatch 在派发前
+// 跑同一份预检服务；合同级问题照旧在任何副作用之前拒绝（既有固定文案），
+// advisory 码随受理回执的 contractAdvisories 给出（闭集码 + 固定说明，
+// 零提醒不带该键；nextStep 届时提醒先看它）。
+// =====================================================================
+
+test("0129-P1: dispatch receipt carries contractAdvisories (dir-form lint + path-probe miss); advisory never blocks; nextStep mentions it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0129-p1-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let dispatchCalls = 0;
+    const fakeDispatcher = async () => {
+      dispatchCalls += 1;
+      return {
+        accepted: true, runId: "run_0129_p1", agentId: "coder_low", state: "pending",
+        transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+      };
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      // verification 用目录形式的 --test 实参（verification_dir_test_form）+
+      // 引用不存在的相对路径（referenced_path_probe_miss 按调用目标根探测）。
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low",
+          prompt: "do it",
+          expectedWorkspaceRoot: dir,
+          delivery: {
+            mode: "git_commit_v1",
+            allowedPaths: ["src"],
+            verificationCommands: ["node --test test/definitely-missing-dir/"],
+          },
+        },
+      });
+      assert.equal(dispatchCalls, 1, "advisories never block — dispatcher reached exactly once");
+      assert.equal(res.isError, undefined, "accepted");
+      const sc = res.structuredContent;
+      assert.ok(Array.isArray(sc.contractAdvisories), "receipt carries contractAdvisories");
+      const codes = sc.contractAdvisories.map((a) => a.code);
+      assert.ok(codes.includes("verification_dir_test_form"), "dir-form advisory present");
+      assert.ok(codes.includes("referenced_path_probe_miss"), "path-probe advisory present (call-target root)");
+      for (const adv of sc.contractAdvisories) {
+        assert.ok(typeof adv.note === "string" && adv.note.length > 0, "each advisory carries its fixed note");
+      }
+      assert.match(sc.nextStep, /contractAdvisories/, "nextStep points at the advisories first");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("0129-P2: contract-level issue refuses before the dispatcher with the existing fixed text (invalid_verification_path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0129-p2-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let dispatchCalls = 0;
+    const fakeDispatcher = async () => {
+      dispatchCalls += 1;
+      return { accepted: true, runId: "x", agentId: "coder_low", state: "pending" };
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low",
+          prompt: "x",
+          expectedWorkspaceRoot: dir,
+          delivery: {
+            mode: "git_commit_v1",
+            allowedPaths: ["src"],
+            // 绝对路径字面量 → 合同级 invalid_verification_path（既有专属文案）。
+            verificationCommands: [`node ${join(dir, "definitely", "absolute.js")}`],
+          },
+        },
+      });
+      assert.equal(dispatchCalls, 0, "refused BEFORE any side effect (dispatcher count 0)");
+      assert.equal(res.isError, true, "refused");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /run_dispatch refused: invalid_verification_path/, "existing closed-set text");
+      assert.ok(!res.structuredContent, "no receipt payload on refusal");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("0129-P3: clean contract → receipt has NO contractAdvisories key and the plain nextStep", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-0129-p3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const fakeDispatcher = async () => ({
+      accepted: true, runId: "run_0129_p3", agentId: "coder_low", state: "pending",
+      transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      // 无 delivery 的普通派发：预检零 advisory → 回执不带该键。
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined, "accepted");
+      assert.equal("contractAdvisories" in res.structuredContent, false, "zero advisories → key absent");
+      assert.doesNotMatch(res.structuredContent.nextStep, /contractAdvisories/, "plain nextStep template");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
 });

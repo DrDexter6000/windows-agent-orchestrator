@@ -1815,11 +1815,14 @@ test("run_dispatch 输入形状契约：executionProfileId 顶层、verification
     "docs/usage/host.md 必须把 executionProfileId 记为顶层（与 delivery 同级）");
   // Inline verification uses the real delivery-level field names.
   assert.ok(/verificationCommands/.test(host), "docs/usage/host.md 必须记录 delivery.verificationCommands");
-  // contractValid scope: mechanical contract only; it must NOT pre-evaluate the
-  // run_dispatch expectations.
-  assert.ok(/contractValid/.test(host), "docs/usage/host.md 必须记录 contractValid");
-  assert.ok(/expectedGitHead|expectedDirty|expectedWorkspaceRoot/.test(host),
-    "docs/usage/host.md 必须列出 contractValid 不预评的 expectedGitHead/expectedDirty/expectedWorkspaceRoot");
+  // 0129 会审修正：contract_check 工具保留（只预检不派发），contractValid 仍在；
+  // 同时 run_dispatch 的就地预检把提醒写进受理回执的 contractAdvisories。
+  assert.ok(/contractValid/.test(host), "docs/usage/host.md 必须记录 contractValid（保留的预检工具）");
+  assert.ok(/run_dispatch_contract_check/.test(host), "docs/usage/host.md 必须记录保留的 run_dispatch_contract_check");
+  assert.ok(/就地.*预检|in-place precheck/.test(host), "docs/usage/host.md 必须记录 run_dispatch 的就地预检（0129）");
+  assert.ok(/contractAdvisories/.test(host), "docs/usage/host.md 必须记录 contractAdvisories");
+  assert.ok(/不预评.*expectedGitHead|expectedGitHead.*不预评/.test(host),
+    "docs/usage/host.md 必须列出预检不预评的 expectedGitHead/expectedDirty/expectedWorkspaceRoot");
   // The contract check shares the INPUT SCHEMA (not "Zod"), and the service does
   // not import a validation library. Regression guard for the stale "共享输入 Zod"
   // wording that wrongly attributed a Zod import to the service.
@@ -2123,20 +2126,9 @@ test("M12-4A docs: backend recovery is model-free and preserves Lead scope/decis
     "architecture 必须保留 Lead decision 权威");
 });
 
-test("M12-3B docs: review bundle is mechanical, one-page, and preserves Lead decisions + atomic tools", () => {
-  const skill = read("SKILL.md");
-  const delivery = read("docs/usage/delivery.md");
-  const arch = read("docs/02-architecture.md");
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage/delivery.md", delivery], ["docs/02-architecture.md", arch]]) {
-    assert.ok(text.includes("run_delivery_review_bundle"), `${name} documents the bundle`);
-  }
-  assert.match(delivery, /一个.*文件页|one.*page/i);
-  assert.match(delivery, /不选择.*fileIndex|never.*select/i);
-  assert.match(delivery, /不遍历文件|never.*travers/i);
-  assert.match(delivery, /Lead.*run_delivery_decide|Lead.*accept|Lead.*reject/i);
-  assert.match(delivery, /原子.*保留|atomic.*保留|atomic.*remain/i);
-  assert.match(delivery, /review:null.*非.*reviewable|非.*reviewable.*review:null/i);
-});
+// 决定 0129：run_delivery_review_bundle 已删——本守卫钉的组合工具文档正文随
+// 工具退役（守卫一起退役，SSOT §4）；等价审查边界（不选择 fileIndex、Lead
+// decides、原子工具语义）由 run_delivery_review 自身的文档与测试承载。
 
 // M12-0-07: ADR-0018 exists at the exact filename, is accepted/dated 2026-07-27,
 // docs-only, does not claim runtime features implemented, partial-supersedes 0010
@@ -2382,7 +2374,7 @@ test("TD-166: SKILL.md 指针完整性——docs//references/ 路径存在，承
     { page: "results", section: "MCP run_collect" }, // 取结果与游标
     { page: "results", section: "semanticNotes" }, // 哪几个工具带语义注记/下钻
     { page: "consult", section: "三席会审" }, // 会审操作细节
-    { page: "host", section: "MCP registry_list" }, // 认证 advisory 语义
+    { page: "host", section: "MCP lead_preflight workers" }, // 认证 advisory 语义（0129 改名）
     { page: "host", section: "项目级 Workspace Activation" }, // 读类目标回落
     { page: "delivery", section: "安全 delivery diff 审查" }, // 一次读完/续修轮审阅
     { page: "maintenance", section: "管理历史 run" }, // lineage-close 配方
@@ -2586,11 +2578,11 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
 
 test("README 是新读者入口：当前工具计数 / 快速开始节地图指针 / 链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
-  // 当前工具计数与陈旧计数（18/16/23）负向。
-  assert.ok(/20 MCP tools|20 tools/.test(readme),
-    "README 必须声明当前 20 MCP tools");
-  assert.ok(!/18 MCP tools|16-tool|16 MCP|23 MCP tools|23 tools/.test(readme),
-    "README 不得再声称 18/16/23-tool（当前 20 always-registered MCP tools）");
+  // 当前工具计数（0129：17，会审修正保留 contract_check）与陈旧计数（16/18/20/23）负向。
+  assert.ok(/17 MCP tools|17 tools/.test(readme),
+    "README 必须声明当前 17 MCP tools（决定 0129）");
+  assert.ok(!/18 MCP tools|16-tool|16 MCP|20-tool|20 MCP tools|23 MCP tools|23 tools/.test(readme),
+    "README 不得再声称 16/18/20/23-tool（当前 17 always-registered MCP tools）");
   // 里程碑进度只做负向：不得再标 in progress。
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");
@@ -3835,10 +3827,10 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
     { mcp: ["run_await_result"], cli: ["runs wait"] },
     { mcp: ["run_collect"], cli: ["collect"] },
     { mcp: [], cli: ["runs summary", "runs list"] },
-    { mcp: ["runs_list"], cli: ["runs list"] },
+    { mcp: ["lead_preflight"], cli: ["runs list"] },
     { mcp: ["run_dispatch"], cli: ["run"] },
     { mcp: ["run_delivery", "run_delivery_decide"], cli: ["runs delivery"] },
-    { mcp: ["run_delivery_review", "run_delivery_review_bundle"], cli: ["runs delivery review"] },
+    { mcp: ["run_delivery_review"], cli: ["runs delivery review"] },
     { mcp: ["run_stop"], cli: ["stop"] },
     { mcp: ["run_diagnose"], cli: ["runs diagnose"] },
   ];

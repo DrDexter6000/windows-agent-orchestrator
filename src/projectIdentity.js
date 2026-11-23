@@ -368,7 +368,7 @@ export function deriveProjectBucketSlug(identity) {
 
 /**
  * 一个根路径的非绝对、确定性项目标签（`<displayName>-<hash8>`）。用于只读
- * 范围显示（lead_preflight workspace.projectBucket、runs_list
+ * 范围显示（lead_preflight workspace.projectBucket、recentRuns
  * scope.projectBucket）——"preflight 不输出绝对路径"合同内的项目标识：标签是
  * **绑定根所属项目**的（R8 之后链接工作树取主工作树的项目），不暴露完整路径。
  * 判定与写侧 `projectFactFromCwd` 用同一份生产 io（`productionProjectIo()`，

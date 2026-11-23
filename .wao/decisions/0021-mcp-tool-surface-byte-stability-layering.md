@@ -74,3 +74,15 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
   - 三条天花板按实测下调：`FROZEN_20_WIRE_CEILING` 93849→87149，`FROZEN_20_DESC_CEILING` 12219→11291，`FROZEN_20_HOSTVISIBLE_CEILING` 23937→22436；
   - `DESC_STRIPPED_CONTRACT_SHA` 重测重冻；
   - m12-10 注释链如实记录。
+
+## 追加记录：2026-11-23 减面 20 → 17（第 134 批，决定 0129；会审修正后改写）
+
+- **L2（能力并进后的真删除）**：`registry_list`、`runs_list`、`run_delivery_review_bundle` 三个只读工具删除；能力承接点分别是 `lead_preflight`（workers 用回 `AGENT_ENTRY` 同一 schema 且不设上限 + `detail`/`recentRuns` 可选输入）、`run_delivery` + `run_delivery_review` 两步（Lead 自行对照 `deliveryCommit`/`changedFileCount`，无跨结果保证）。**`run_dispatch_contract_check` 保留，不删**——首轮交付把它并进 `run_dispatch` 的就地预检，交付会审（sol）核出"只预检不派发"与 `availableProfiles` 在 MCP 面没有等价物，Lead 裁定恢复（见 0129 改写后的正文与"不采纳"一节）。Owner 批准删除只读工具的原话以"能力不丢"为前提（2026-11-22："4 个只读 MCP 工具有等价物，可以下沉——能力不丢的前提条件下，同意删"）；对本工具该前提不成立，故保留。
+- **schema**：
+  - `lead_preflight`：输入增可选 `detail`（闭集）与 `recentRuns`（对象 `{limit?:1..100, activeOnly?:boolean}`；limit 缺省 50，与原 `runs_list` 一致，activeOnly 先筛活动再截断）；`workers` 条目改用 `AGENT_ENTRY` 同一对象（+`cwd`/`sessionReuse`/`missingCredentialEnvNames`/`dispatchHold`），数组**不设 max**（原 `registry_list` 无上限，会审修正删掉 `WORKERS_CAP=64`）；输出增可选 `certificationEvidence` 与可选 `recentRuns` 节（条目同原 `runs_list.runs[]`；请求了但读不出/未绑定为 `null`，未请求键缺席）。
+  - `run_dispatch`：输出增可选 `contractAdvisories`（闭集码 + 有界说明，上限派生自 `CONTRACT_CHECK_ADVISORY_CODES` SSOT）；提醒数组在派发前严格预校验，畸形/超限整组丢弃。
+  - 三个被删工具的 inputSchema/outputSchema/annotations 整体离开 stripped 载荷；`run_dispatch_contract_check` 的 schema 保留在载荷内。
+- **手续执行**：
+  - 三条天花板按实测下调重冻：`FROZEN_17_WIRE_CEILING` 87157→76543，`FROZEN_17_DESC_CEILING` 11291→10402，`FROZEN_17_HOSTVISIBLE_CEILING` 22436→20870（均仍低于 2a1875ac 的冻结值：只降不升）；
+  - `DESC_STRIPPED_CONTRACT_SHA` 重测重冻为 `d398828b8eef5da845ed66f579ab4906860303b3a7989556e8c2644ac70625b8`；
+  - m12-10 注释链如实记录。

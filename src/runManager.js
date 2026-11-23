@@ -1197,7 +1197,7 @@ export class RunManager {
 
     // M11-7 (CTO closeout): credential availability check BEFORE transcript
     // creation or spawn (foreground/resume path). Same SSOT as dispatchRun and
-    // registry_list. A missing REQUIRED credential throws here (zero transcript,
+    // lead_preflight workers. A missing REQUIRED credential throws here (zero transcript,
     // zero worktree, zero spawn). Resolved values (incl. Windows user-env bridge)
     // are passed to backend.spawn so the worker child inherits them and the
     // redactor scrubs them. Values never enter argv/transcript/MCP output.
@@ -2164,7 +2164,7 @@ export class RunManager {
     }
 
     // M11-7 (CTO closeout): credential availability check on resume too — same
-    // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →
+    // SSOT as start/dispatchRun/preflight workers. Missing REQUIRED credential →
     // throw (spawn count 0, transcript bytes unchanged). Resolved values are
     // passed to the resume spawn for the worker child env + redactor.
     const resumeReadiness = await assessWorkerReadiness({

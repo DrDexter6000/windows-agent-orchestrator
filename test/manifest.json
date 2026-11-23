@@ -312,7 +312,6 @@
       "delivery/m12-13-verification-timeout.test.js",
       "registry-roles/m12-14-workerScopeContract.test.js",
       "delivery/mcpRunDeliveryReview.test.js",
-      "delivery/mcpRunDeliveryReviewBundle.test.js",
       "run-lifecycle/m12-19-processRecovery.test.js",
       "delivery/runDelivery.test.js",
       "delivery/runDeliveryReadBinding.test.js",

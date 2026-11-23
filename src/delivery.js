@@ -224,7 +224,7 @@ function validateAllowedPaths(allowedPaths) {
 
 /**
  * The allowedPaths rule in one sentence, for refusals that must not echo the
- * entry (run_dispatch, run_dispatch_contract_check).
+ * entry (run_dispatch and its in-place precheck, 决定 0129).
  */
 export const ALLOWED_PATHS_RULE_TEXT =
   "each allowedPaths entry is a repo-relative file or directory path - no absolute or rooted path, no empty, "
