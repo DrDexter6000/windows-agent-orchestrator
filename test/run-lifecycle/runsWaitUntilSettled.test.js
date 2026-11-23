@@ -25,6 +25,7 @@ import { join } from "node:path";
 
 import { runsCommand } from "../../src/commands/runs.js";
 import { judgeRunSettlementOnce } from "../../src/application/runSettlementWait.js";
+import { readTranscript } from "../../src/transcript.js";
 
 const BASE = "b".repeat(40);
 const DELIVERED = "d".repeat(40);
@@ -1441,10 +1442,13 @@ function lineageResume(runId, rootRunId) {
   return { type: "run.session_reuse", runId, agentId: "coder_low", mode: "run_lineage", turn: "resume", rootRunId };
 }
 
-// 续跑谱系的根转录（闭态检查读它）；closed 时带 bound run.lineage_closed。
+// 续跑谱系的根转录（闭态检查与 --since-parent 同款的父边读取都读它）：根自己
+// 带 turn:first 的谱系事实（与真实的首轮可续派发同形）；closed 时带 bound
+// run.lineage_closed。
 function seedRootLines(dir, rootRunId, { closed = false } = {}) {
   writeLines(dir, rootRunId, [
     { type: "run.started", runId: rootRunId, agentId: "coder_low", backend: "claude-code", cwd: "D:/fake/ws" },
+    lineageFirst(rootRunId),
     ...(closed ? [{ type: "run.lineage_closed", runId: rootRunId, agentId: "coder_low", rootRunId, reason: "lead closed", reasonSha256: "0".repeat(64) }] : []),
   ]);
 }
@@ -1463,21 +1467,26 @@ test("U-12: 可续未决定交付收口 → 终行与 JSON 的 nextStep 用 deli
     ]);
     const r = await runWaitSettled({ dir, runId });
     assert.equal(r.exitCode, undefined, "收口退出 0");
-    assert.equal(r.outLines.length, 3, `终行三行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines.length, 4, `终行四行，实际: ${JSON.stringify(r.outLines)}`);
     assert.equal(r.outLines[0], `Run: ${runId} (completed)`);
     assert.equal(r.outLines[1], "Settlement: settled (delivery_settled; verification passed)");
+    // 第 136 批：交付要点一行（谱系根是自己，不是续修——没有 Land 句）。
+    assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`);
     assert.equal(
-      r.outLines[2],
-      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.`,
+      r.outLines[3],
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`,
     );
-    // JSON 面：键集不变（{settled,runId,state,settlement,nextStep}），nextStep 同款。
+    // JSON 面：键序 {settled,runId,state,settlement,delivery,nextStep}，nextStep 同款。
     const j = await runWaitSettled({ dir, runId, asJson: true });
     assert.equal(j.exitCode, undefined);
     const parsed = JSON.parse(j.out);
-    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "runId", "settled", "settlement", "state"]);
+    assert.deepEqual(Object.keys(parsed), ["settled", "runId", "state", "settlement", "delivery", "nextStep"]);
+    assert.deepEqual(parsed.delivery, {
+      deliveryCommit: DELIVERED, baseCommit: BASE, changedFileCount: 1, changedPaths: ["src/a.js"],
+    });
     assert.equal(parsed.settlement.reason, "delivery_settled");
     assert.match(parsed.nextStep, new RegExp(`the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`));
-    assert.match(parsed.nextStep, /An accepted delivery can no longer be continued\. Verification passed is not acceptance\.$/);
+    assert.match(parsed.nextStep, /An accepted delivery cannot be continued\. Verification passed is not acceptance\.$/);
   } finally {
     cleanupDir(dir);
   }
@@ -1528,19 +1537,21 @@ test("U-15: 收口交付已有被采纳的后代（第 120 批派生被取代）
     ]);
     const r = await runWaitSettled({ dir, runId: ROOT });
     assert.equal(r.exitCode, undefined, "收口退出 0");
-    assert.equal(r.outLines.length, 3, `终行三行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines.length, 4, `终行四行，实际: ${JSON.stringify(r.outLines)}`);
     assert.equal(r.outLines[1], "Settlement: settled (delivery_settled; verification passed)");
+    // 第 136 批：被取代的交付照旧给交付要点（事实仍在），只是不给续修提示。
+    assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`);
     assert.equal(
-      r.outLines[2],
+      r.outLines[3],
       `Next step: Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`,
     );
-    assert.ok(!r.outLines[2].includes("awaits the Lead's review"), "不再说等 Lead 裁决");
-    assert.ok(!r.outLines[2].includes("run_continue"), "不给续修提示");
-    // JSON 面：键集不变（{settled,runId,state,settlement,nextStep}），nextStep 同款。
+    assert.ok(!r.outLines[3].includes("awaits the Lead's review"), "不再说等 Lead 裁决");
+    assert.ok(!r.outLines[3].includes("run_continue"), "不给续修提示");
+    // JSON 面：nextStep 同款，delivery 对象照给。
     const j = await runWaitSettled({ dir, runId: ROOT, asJson: true });
     assert.equal(j.exitCode, undefined);
     const parsed = JSON.parse(j.out);
-    assert.deepEqual(Object.keys(parsed).sort(), ["nextStep", "runId", "settled", "settlement", "state"]);
+    assert.deepEqual(Object.keys(parsed).sort(), ["delivery", "nextStep", "runId", "settled", "settlement", "state"]);
     assert.equal(parsed.nextStep,
       `Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`);
   } finally {
@@ -1561,10 +1572,12 @@ test("U-13: 无谱系事件的普通交付收口 → 照旧 settled_line（负�
     ]);
     const r = await runWaitSettled({ dir, runId });
     assert.equal(r.exitCode, undefined);
+    assert.equal(r.outLines.length, 4, `终行四行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`);
     assert.equal(
-      r.outLines[2],
-      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Verification passed is not acceptance.`,
-      "无可续谱系事实 → 旧 settled_line 模板一字不差",
+      r.outLines[3],
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
+      "无可续谱系事实 → settled_line 模板（审查命令一次读完）",
     );
   } finally {
     cleanupDir(dir);
@@ -1578,18 +1591,27 @@ test("U-14: 续跑子运行（turn:resume，根是另一运行）——根转录
     const runId = "run_u14_child";
     const ref = makeRef(runId);
     seedRootLines(dir, ROOT, { closed: false });
+    // 真实的续修子运行：首条事件是续修事实（runContinue 在 spawn 之前写它）。
     writeLines(dir, runId, [
-      started(runId),
+      continuationFact(runId, ROOT, ROOT),
       lineageResume(runId, ROOT),
+      started(runId),
       created(runId, ref),
       stateChange(runId, "completed"),
       outcome(runId, "passed", ref),
     ]);
     const r = await runWaitSettled({ dir, runId });
     assert.equal(r.exitCode, undefined, "收口退出 0");
+    assert.equal(r.outLines.length, 5, `终行五行，实际: ${JSON.stringify(r.outLines)}`);
+    assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`);
+    // 第 136 批：续修子交付的提交建在谱系基线上、带累积树——写明落地方式。
+    assert.equal(
+      r.outLines[3],
+      `Land: cumulative tree on the lineage base ${"b".repeat(12)}; fast-forward or merge from the base, not from the parent delivery.`,
+    );
     assert.match(
-      r.outLines[2],
-      new RegExp(`^Next step: Settled\\. Delivery awaits the Lead's review: wao runs delivery ${runId}\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`),
+      r.outLines[4],
+      new RegExp(`^Next step: Settled\\. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`),
       "子运行经根转录判未闭合 → 给可续提示（谱系措辞）",
     );
   } finally {
@@ -1605,21 +1627,421 @@ test("U-15: 续跑子运行——根转录已闭合 → 照旧 settled_line（�
     const ref = makeRef(runId);
     seedRootLines(dir, ROOT, { closed: true });
     writeLines(dir, runId, [
-      started(runId),
+      continuationFact(runId, ROOT, ROOT),
       lineageResume(runId, ROOT),
+      started(runId),
       created(runId, ref),
       stateChange(runId, "completed"),
       outcome(runId, "passed", ref),
     ]);
     const r = await runWaitSettled({ dir, runId });
     assert.equal(r.exitCode, undefined);
+    assert.equal(r.outLines.length, 5, `终行五行，实际: ${JSON.stringify(r.outLines)}`);
+    // 根已闭合：不给续修提示；但仍是续修子交付——落地方式照给。
     assert.equal(
-      r.outLines[2],
-      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Verification passed is not acceptance.`,
-      "根已闭合 → 旧 settled_line 模板一字不差",
+      r.outLines[3],
+      `Land: cumulative tree on the lineage base ${"b".repeat(12)}; fast-forward or merge from the base, not from the parent delivery.`,
+    );
+    assert.equal(
+      r.outLines[4],
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
+      "根已闭合 → settled_line 模板（审查命令一次读完）",
     );
   } finally {
     cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 136 批：收口终行带交付要点。delivery_settled 时只从等待器已读到的同一份
+// 快照投影——不另读；文本多一行 Delivery（提交号与基线各前 12 位、文件总数、
+// 前 3 个路径，超出写"…"），JSON 多一个 delivery 对象。路径经与 MCP run_delivery
+// 同一个有界安全投影与同一个环境密钥值脱敏；投影不成立只是不带这一行，收口
+// 判定与退出码不受影响。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const U16_BASE = "0123456789abcdef0123456789abcdef01234567";
+const U16_COMMIT = "fedcba9876543210fedcba9876543210fedcba98";
+const U16_FILES = [
+  "SKILL.md",
+  "docs/usage/supervise.md",
+  "src/application/runNextStep.js",
+  "src/commands/runs.js",
+  "test/run-lifecycle/runsWaitUntilSettled.test.js",
+];
+
+function settledDeliveryEvents(runId, ref) {
+  return [started(runId), created(runId, ref), stateChange(runId, "completed"), outcome(runId, "passed", ref)];
+}
+
+// 换提交号的夹具：created 载荷里的 verifiedCommit 必须与交付提交号一致，否则交付
+// 事实校验判 malformed（与真实的打包事实同形）。
+function makeRefAt(runId, commit, over = {}) {
+  const ref = makeRef(runId, { baseCommit: U16_BASE, deliveryCommit: commit, ...over });
+  return { ...ref, verification: { ...ref.verification, verifiedCommit: commit } };
+}
+
+test("U-16: 普通交付（5 个文件）收口 → Delivery 行列前 3 个路径加省略号与总数；JSON delivery 只带前 3 个；快照只读一次", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_u16";
+    const ref = makeRefAt(runId, U16_COMMIT, { changedFiles: U16_FILES });
+    writeLines(dir, runId, settledDeliveryEvents(runId, ref));
+    let reads = 0;
+    const readTranscriptFn = async (path) => {
+      reads += 1;
+      return readTranscript(path);
+    };
+    const r = await runWaitSettled({ dir, runId, deps: { readTranscriptFn } });
+    assert.equal(r.exitCode, undefined, "收口退出 0");
+    assert.deepEqual(r.outLines, [
+      `Run: ${runId} (completed)`,
+      "Settlement: settled (delivery_settled; verification passed)",
+      `Delivery: ${U16_COMMIT.slice(0, 12)} on ${U16_BASE.slice(0, 12)}, 5 file(s): ${U16_FILES.slice(0, 3).join(", ")}…`,
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
+    ]);
+    assert.equal(reads, 1, "交付要点取自等待器已读到的同一份快照，不另读");
+    const j = await runWaitSettled({ dir, runId, asJson: true });
+    const parsed = JSON.parse(j.out);
+    assert.deepEqual(Object.keys(parsed), ["settled", "runId", "state", "settlement", "delivery", "nextStep"]);
+    assert.deepEqual(parsed.delivery, {
+      deliveryCommit: U16_COMMIT, baseCommit: U16_BASE, changedFileCount: 5, changedPaths: U16_FILES.slice(0, 3),
+    });
+    assert.ok(!("land" in parsed), "普通运行（谱系根是自己）不带 land");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-17: 文件数不超过 3 → 路径全列、不加省略号", async () => {
+  const dir = makeRunDir();
+  try {
+    const one = "run_u17one";
+    const refOne = makeRefAt(one, U16_COMMIT, { changedFiles: ["docs/a.md"] });
+    writeLines(dir, one, settledDeliveryEvents(one, refOne));
+    const r1 = await runWaitSettled({ dir, runId: one });
+    assert.equal(r1.outLines[2], `Delivery: ${U16_COMMIT.slice(0, 12)} on ${U16_BASE.slice(0, 12)}, 1 file(s): docs/a.md`);
+    const three = "run_u17three";
+    const files = ["docs/b.md", "docs/c.md", "src/d.js"];
+    const refThree = makeRefAt(three, U16_COMMIT, { changedFiles: files });
+    writeLines(dir, three, settledDeliveryEvents(three, refThree));
+    const r3 = await runWaitSettled({ dir, runId: three });
+    assert.equal(r3.outLines[2], `Delivery: ${U16_COMMIT.slice(0, 12)} on ${U16_BASE.slice(0, 12)}, 3 file(s): ${files.join(", ")}`);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-18: 路径命中环境密钥值 → 整条路径折成 [REDACTED]（与 MCP run_delivery 同一脱敏）", async () => {
+  const dir = makeRunDir();
+  const secretPath = "src/qa1w2e3r4t5y6u7i8.js";
+  const envName = "U18_API_TOKEN";
+  const prev = process.env[envName];
+  process.env[envName] = secretPath;
+  try {
+    const runId = "run_u18";
+    const ref = makeRef(runId, { changedFiles: ["docs/a.md", secretPath] });
+    writeLines(dir, runId, settledDeliveryEvents(runId, ref));
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 2 file(s): docs/a.md, [REDACTED]`);
+    const j = await runWaitSettled({ dir, runId, asJson: true });
+    assert.deepEqual(JSON.parse(j.out).delivery.changedPaths, ["docs/a.md", "[REDACTED]"]);
+  } finally {
+    if (prev === undefined) delete process.env[envName];
+    else process.env[envName] = prev;
+    cleanupDir(dir);
+  }
+});
+
+test("U-19: 交付载荷的路径不合规（越界路径 / 未排序）→ 不带 Delivery 行与 delivery 键；收口与退出码不变", async () => {
+  for (const [label, changedFiles] of [["traversal", ["../escape.js"]], ["unsorted", ["src/b.js", "src/a.js"]]]) {
+    const dir = makeRunDir();
+    try {
+      const runId = `run_u19_${label}`;
+      const ref = makeRef(runId, { changedFiles });
+      writeLines(dir, runId, settledDeliveryEvents(runId, ref));
+      const r = await runWaitSettled({ dir, runId });
+      assert.equal(r.exitCode, undefined, `${label}：收口判定不受投影影响`);
+      assert.deepEqual(r.outLines, [
+        `Run: ${runId} (completed)`,
+        "Settlement: settled (delivery_settled; verification passed)",
+        `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
+      ]);
+      const j = await runWaitSettled({ dir, runId, asJson: true });
+      const parsed = JSON.parse(j.out);
+      assert.ok(!("delivery" in parsed) && !("land" in parsed), `${label}：不带 delivery/land 键`);
+    } finally {
+      cleanupDir(dir);
+    }
+  }
+});
+
+test("U-20: 没有交付的收口（打包失败）→ 不带 Delivery 行与 delivery 键", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_u20";
+    writeLines(dir, runId, [
+      started(runId),
+      { type: "run.delivery_failed", runId, agentId: "coder_low", deliveryCode: "disallowed_path", message: "changes outside allowedPaths" },
+      stateChange(runId, "failed"),
+    ]);
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined);
+    assert.equal(r.outLines.length, 3);
+    assert.equal(r.outLines[1], "Settlement: settled (packaging_failed)");
+    const j = await runWaitSettled({ dir, runId, asJson: true });
+    const parsed = JSON.parse(j.out);
+    assert.deepEqual(Object.keys(parsed), ["settled", "runId", "state", "settlement", "nextStep"]);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+function rejectedDecision(runId, ref) {
+  return {
+    type: "run.delivery_rejected", runId, agentId: "coder_low",
+    delivery: {
+      ...ref,
+      verification: { status: "passed", commands: [], verifiedCommit: ref.deliveryCommit, results: [] },
+      acceptance: { status: "rejected", reviewerType: "lead_agent" },
+    },
+    deliveryCommit: ref.deliveryCommit,
+    reason: "not good enough",
+  };
+}
+
+// 一条谱系的根：continuable、交付未裁决。
+function seedContinuableRoot(dir, rootRunId) {
+  const ref = makeRef(rootRunId);
+  writeLines(dir, rootRunId, [
+    started(rootRunId),
+    lineageFirst(rootRunId),
+    created(rootRunId, ref),
+    stateChange(rootRunId, "completed"),
+    outcome(rootRunId, "passed", ref),
+  ]);
+}
+
+test("U-21: 续修子交付的 Land 句只在交付还能落地时给——未裁决/已采纳照给；已拒收、已有被采纳的后代不给", async () => {
+  const dir = makeRunDir();
+  const landLine = `Land: cumulative tree on the lineage base ${"b".repeat(12)}; fast-forward or merge from the base, not from the parent delivery.`;
+  try {
+    // 未裁决的子交付：已在 U-14 钉住（Land 在 Delivery 之后、Next step 之前）。
+    // 已采纳的子交付：照给——Lead 接下来就要落地它。
+    {
+      const ROOT = "run_u21_roota";
+      const CHILD = "run_u21_acc";
+      const ref = makeRef(CHILD);
+      seedContinuableRoot(dir, ROOT);
+      writeLines(dir, CHILD, [
+        continuationFact(CHILD, ROOT, ROOT),
+        lineageResume(CHILD, ROOT),
+        started(CHILD),
+        created(CHILD, ref),
+        stateChange(CHILD, "completed"),
+        outcome(CHILD, "passed", ref),
+        acceptedDecision(CHILD, ref),
+      ]);
+      const r = await runWaitSettled({ dir, runId: CHILD });
+      assert.equal(r.exitCode, undefined);
+      assert.deepEqual(r.outLines.slice(2), [
+        `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`,
+        landLine,
+        "Next step: Settled. The Lead decision is recorded: accepted. Verification passed is not acceptance.",
+      ]);
+      const j = await runWaitSettled({ dir, runId: CHILD, asJson: true });
+      const parsed = JSON.parse(j.out);
+      assert.deepEqual(Object.keys(parsed), ["settled", "runId", "state", "settlement", "delivery", "land", "nextStep"]);
+      assert.equal(parsed.land, landLine.slice("Land: ".length));
+    }
+    // 已拒收的子交付：不会落地，不给。
+    {
+      const ROOT = "run_u21_rootb";
+      const CHILD = "run_u21_rej";
+      const ref = makeRef(CHILD);
+      seedContinuableRoot(dir, ROOT);
+      writeLines(dir, CHILD, [
+        continuationFact(CHILD, ROOT, ROOT),
+        lineageResume(CHILD, ROOT),
+        started(CHILD),
+        created(CHILD, ref),
+        stateChange(CHILD, "completed"),
+        outcome(CHILD, "passed", ref),
+        rejectedDecision(CHILD, ref),
+      ]);
+      const r = await runWaitSettled({ dir, runId: CHILD });
+      assert.equal(r.exitCode, undefined);
+      assert.equal(r.outLines.length, 4, `已拒收：没有 Land 行，实际: ${JSON.stringify(r.outLines)}`);
+      assert.match(r.outLines[3], /^Next step: Settled\. The Lead decision is recorded: rejected\./);
+      const j = await runWaitSettled({ dir, runId: CHILD, asJson: true });
+      assert.ok(!("land" in JSON.parse(j.out)), "已拒收：JSON 不带 land");
+    }
+    // 已有被采纳后代的子交付：谱系只落地最终候选，不给。
+    {
+      const ROOT = "run_u21_rootc";
+      const MID = "run_u21_mid";
+      const GRAND = "run_u21_grand";
+      const refMid = makeRef(MID);
+      const refGrand = makeRef(GRAND);
+      seedContinuableRoot(dir, ROOT);
+      writeLines(dir, MID, [
+        continuationFact(MID, ROOT, ROOT),
+        lineageResume(MID, ROOT),
+        started(MID),
+        created(MID, refMid),
+        stateChange(MID, "completed"),
+        outcome(MID, "passed", refMid),
+      ]);
+      writeLines(dir, GRAND, [
+        continuationFact(GRAND, MID, ROOT),
+        lineageResume(GRAND, ROOT),
+        started(GRAND),
+        created(GRAND, refGrand),
+        stateChange(GRAND, "completed"),
+        outcome(GRAND, "passed", refGrand),
+        acceptedDecision(GRAND, refGrand),
+      ]);
+      const r = await runWaitSettled({ dir, runId: MID });
+      assert.equal(r.exitCode, undefined);
+      assert.equal(r.outLines.length, 4, `被取代：没有 Land 行，实际: ${JSON.stringify(r.outLines)}`);
+      assert.equal(r.outLines[3], `Next step: Settled. A descendant of this run was already accepted (${GRAND}); no Lead decision is needed here.`);
+      const j = await runWaitSettled({ dir, runId: MID, asJson: true });
+      assert.ok(!("land" in JSON.parse(j.out)), "被取代：JSON 不带 land");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 136 批续修（会审 sol 的复现）：Land 的谱系判断与 --since-parent（决定 0116）
+// 同一份读取——只认转录第一条续修事实，尾补的声明不算；Land 只依赖谱系事实与
+// 交付基线，路径投影不成立时照样给。路径里的 Unicode 行分隔符按控制字符同样
+// 拒绝。收口 JSON 的路径键与 MCP run_delivery 同名（changedPaths）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LAND_LINE = `Land: cumulative tree on the lineage base ${"b".repeat(12)}; fast-forward or merge from the base, not from the parent delivery.`;
+
+// 真实的续修子交付：首条事件是续修事实（runContinue 在 spawn 之前写它）、谱系
+// 事实与它一致、根转录可读——--since-parent 的父边读取在这份转录上成立。
+function continuationChildLines(runId, rootRunId, ref) {
+  return [
+    continuationFact(runId, rootRunId, rootRunId),
+    lineageResume(runId, rootRunId),
+    started(runId),
+    created(runId, ref),
+    stateChange(runId, "completed"),
+    outcome(runId, "passed", ref),
+  ];
+}
+
+test("U-22: Land 的谱系判断与 --since-parent 同一口径——尾补的续修声明、没有首条续修事实的续跑，都不出 Land", async () => {
+  const dir = makeRunDir();
+  try {
+    // (a) 根运行：快照尾部追加一条绑定同一 run、声明另一个谱系根的续修事实。
+    //     --since-parent 拒绝这种尾补事实（续修事实必须是转录第一条事件）。
+    const ROOT = "run_u22_root";
+    const OTHER = "run_u22_other";
+    const refRoot = makeRef(ROOT);
+    writeLines(dir, ROOT, [
+      started(ROOT),
+      lineageFirst(ROOT),
+      created(ROOT, refRoot),
+      stateChange(ROOT, "completed"),
+      outcome(ROOT, "passed", refRoot),
+      { type: "run.background_submitted", runId: ROOT, agentId: "coder_low", background: true, continuation: true, parentRunId: OTHER, rootRunId: OTHER },
+    ]);
+    const a = await runWaitSettled({ dir, runId: ROOT });
+    assert.equal(a.exitCode, undefined, "收口退出 0");
+    assert.equal(a.outLines.length, 4, `不出 Land 行，实际: ${JSON.stringify(a.outLines)}`);
+    assert.equal(a.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`, "交付要点照给");
+    assert.match(a.outLines[3], /^Next step: /);
+    const ap = JSON.parse((await runWaitSettled({ dir, runId: ROOT, asJson: true })).out);
+    assert.ok(!("land" in ap), "尾补谱系声明 → JSON 不带 land");
+    assert.deepEqual(ap.delivery, { deliveryCommit: DELIVERED, baseCommit: BASE, changedFileCount: 1, changedPaths: ["src/a.js"] });
+
+    // (b) 只有 turn:resume 的谱系事实、没有首条续修事实（--since-parent 判"没有父运行"）。
+    const ROOT2 = "run_u22_root2";
+    const CHILD = "run_u22_child";
+    const refChild = makeRef(CHILD);
+    seedRootLines(dir, ROOT2, { closed: false });
+    writeLines(dir, CHILD, [
+      started(CHILD),
+      lineageResume(CHILD, ROOT2),
+      created(CHILD, refChild),
+      stateChange(CHILD, "completed"),
+      outcome(CHILD, "passed", refChild),
+    ]);
+    const b = await runWaitSettled({ dir, runId: CHILD });
+    assert.equal(b.exitCode, undefined);
+    assert.ok(!b.outLines.some((l) => l.startsWith("Land:")), `没有首条续修事实 → 不出 Land，实际: ${JSON.stringify(b.outLines)}`);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-23: 真正的续修子交付带一个坏路径 → 路径投影不成立：不出 Delivery 行，Land 照样给", async () => {
+  const dir = makeRunDir();
+  try {
+    const ROOT = "run_u23_root";
+    const CHILD = "run_u23_child";
+    const ref = makeRef(CHILD, { changedFiles: ["../escape.js", "src/b.js"] });
+    seedRootLines(dir, ROOT, { closed: false });
+    writeLines(dir, CHILD, continuationChildLines(CHILD, ROOT, ref));
+    const r = await runWaitSettled({ dir, runId: CHILD });
+    assert.equal(r.exitCode, undefined, "收口退出 0");
+    assert.deepEqual(r.outLines, [
+      `Run: ${CHILD} (completed)`,
+      "Settlement: settled (delivery_settled; verification passed)",
+      LAND_LINE,
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${CHILD} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${CHILD}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`,
+    ]);
+    const parsed = JSON.parse((await runWaitSettled({ dir, runId: CHILD, asJson: true })).out);
+    assert.deepEqual(Object.keys(parsed), ["settled", "runId", "state", "settlement", "land", "nextStep"], "没有 delivery 键，land 照给");
+    assert.equal(parsed.land, LAND_LINE.slice("Land: ".length));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-24: 76 字符的可续 runId → CLI 收口行不触顶（改动前触顶于 70，改审查命令后一度降到 64）", async () => {
+  const dir = makeRunDir();
+  try {
+    const runId = "run_" + "y".repeat(72);
+    assert.equal(runId.length, 76);
+    const ref = makeRef(runId);
+    writeLines(dir, runId, [started(runId), lineageFirst(runId), created(runId, ref), stateChange(runId, "completed"), outcome(runId, "passed", ref)]);
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined, "交付已收口——收口行不能抛错");
+    assert.equal(r.outLines.length, 4, `实际: ${JSON.stringify(r.outLines)}`);
+    const nextLine = r.outLines[3];
+    assert.ok(nextLine.startsWith("Next step: "));
+    assert.ok(nextLine.length - "Next step: ".length <= 480, `整句 ${nextLine.length - "Next step: ".length} ≤ 480`);
+    assert.match(nextLine, new RegExp(`wao runs delivery review ${runId} --all\\.`));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U-25: 路径含 Unicode 行分隔符（U+2028 / U+2029 / U+0085）→ 按控制字符同样拒绝：不出 Delivery 行，输出不带出", async () => {
+  for (const [label, sep] of [["U2028", "\u2028"], ["U2029", "\u2029"], ["U0085", "\u0085"]]) {
+    const dir = makeRunDir();
+    try {
+      const runId = `run_u25_${label}`;
+      const ref = makeRef(runId, { changedFiles: [`src/a${sep}b.js`] });
+      writeLines(dir, runId, settledDeliveryEvents(runId, ref));
+      const r = await runWaitSettled({ dir, runId });
+      assert.equal(r.exitCode, undefined, `${label}：收口判定不受影响`);
+      assert.deepEqual(r.outLines, [
+        `Run: ${runId} (completed)`,
+        "Settlement: settled (delivery_settled; verification passed)",
+        `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
+      ], `${label}：不出 Delivery 行`);
+      assert.ok(!r.out.includes(sep), `${label}：输出不带出该字符`);
+      assert.ok(!("delivery" in JSON.parse((await runWaitSettled({ dir, runId, asJson: true })).out)), `${label}：JSON 不带 delivery`);
+    } finally {
+      cleanupDir(dir);
+    }
   }
 });
 
@@ -1854,6 +2276,25 @@ test("W-07c (B91): 重新打包形状证明成立但重读已有结果 → 照�
     assert.equal(reads, 2, "一轮正常读 + 证明后一次重读");
     assert.match(r.out, /Settlement: settled \(delivery_settled/);
     assert.ok(!/verifier_gone|Stuck:/.test(r.out), "不报 verifier_gone");
+    // 第 136 批续修（建议）：重新打包恢复后的收口同样投影交付要点——交付提交、
+    // 基线与路径取自重新打包后的事实。走同一条恢复路径（先 pending、证明后重读
+    // 已有结果）。
+    let jsonReads = 0;
+    const j = await runWaitSettled({
+      dir, runId, asJson: true,
+      deps: {
+        ...verifierProofDeps,
+        readTranscriptFn: async () => {
+          jsonReads += 1;
+          return jsonReads === 1 ? events : [...events, outcome(runId, "passed", ref)];
+        },
+      },
+    });
+    assert.equal(j.exitCode, undefined, "JSON 面同样收口退出 0");
+    assert.equal(jsonReads, 2, "同一条恢复路径");
+    assert.deepEqual(JSON.parse(j.out).delivery, {
+      deliveryCommit: DELIVERED, baseCommit: BASE, changedFileCount: 1, changedPaths: ["src/a.js"],
+    });
   } finally {
     cleanupDir(dir);
   }
@@ -2841,6 +3282,40 @@ test("M-18: 去重后 16 个目标被接受（17 个 argv、1 个重复）", asy
     assert.equal(parsed.multi, true);
     assert.equal(parsed.results.length, 1);
     assert.equal(parsed.remaining.length, 15, "15 个仍在等");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// 第 136 批：多目标等待与单目标共用同一个终行渲染器——有交付的收口目标同样带
+// 交付要点（文本 Delivery 行 / JSON delivery 对象）。
+test("M-19: 多目标里有交付的收口目标 → 终行带 Delivery、results 项带 delivery（同一渲染器）", async () => {
+  const dir = makeRunDir();
+  try {
+    const delivered = "run_m19a";
+    const pending = "run_m19b";
+    const ref = makeRefAt(delivered, U16_COMMIT, { changedFiles: U16_FILES });
+    writeLines(dir, delivered, settledDeliveryEvents(delivered, ref));
+    writeLines(dir, pending, [started(pending, { delivery: false })]);
+    const r = await runWaitSettledMulti({ dir, runIds: [delivered, pending] });
+    assert.equal(r.exitCode, undefined);
+    const from = r.outLines.indexOf(`Run: ${delivered} (completed)`);
+    assert.ok(from !== -1, JSON.stringify(r.outLines));
+    assert.deepEqual(r.outLines.slice(from), [
+      `Run: ${delivered} (completed)`,
+      "Settlement: settled (delivery_settled; verification passed)",
+      `Delivery: ${U16_COMMIT.slice(0, 12)} on ${U16_BASE.slice(0, 12)}, 5 file(s): ${U16_FILES.slice(0, 3).join(", ")}…`,
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${delivered} --all. Verification passed is not acceptance.`,
+      `Still waiting: ${pending}`,
+      `Re-arm: wao runs wait ${pending} --until-settled --run-dir ${dir}`,
+    ]);
+    const j = await runWaitSettledMulti({ dir, runIds: [delivered, pending], asJson: true });
+    const parsed = JSON.parse(j.out);
+    assert.deepEqual(parsed.remaining, [pending]);
+    assert.deepEqual(Object.keys(parsed.results[0]), ["settled", "runId", "state", "settlement", "delivery", "nextStep"]);
+    assert.deepEqual(parsed.results[0].delivery, {
+      deliveryCommit: U16_COMMIT, baseCommit: U16_BASE, changedFileCount: 5, changedPaths: U16_FILES.slice(0, 3),
+    });
   } finally {
     cleanupDir(dir);
   }

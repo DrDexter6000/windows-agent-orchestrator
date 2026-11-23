@@ -1,9 +1,13 @@
 // src/application/runNextStep.js
 //
 // 决定 0095：`nextStep`——等待族工具没等到收口时的一句固定英文模板，按面渲染
-//（MCP 只写 MCP 工具名、不含 runId；CLI 写 CLI 命令、带 runId）。它是新字段，
-// 不复用 run_status 的 leadAdvisory（那是"静默 30 分钟"的含义），也不进只陈述
-// 事实的 semanticNotes。
+//（MCP 只写 MCP 工具名；CLI 写 CLI 命令、带 runId）。它是新字段，不复用
+// run_status 的 leadAdvisory（那是"静默 30 分钟"的含义），也不进只陈述事实的
+// semanticNotes。
+// 第 136 批唯一的例外：MCP 面的 dispatch_accepted 与 consult_seats_running 在
+// 模板末尾补一句 CLI 写法（宿主有后台命令行时一条命令等到收口）——MCP 服务
+// 不知道宿主有没有命令行，所以两种写法都给，先 MCP 后 CLI；那句 CLI 命令因此
+// 带本次受理的 runId / consultId，是 MCP 面唯一落 id 的地方。
 //
 // 措辞纪律：只说"signs of life were last observed N min ago" / "no new signs of
 // life in the transcript for N min"，不断言 worker 在推进或已停；不出现宿主名；
@@ -79,6 +83,22 @@ function minutesFromMs(ageMs) {
   return Math.floor(ageMs / 60000);
 }
 
+/** 第 136 批：MCP 面模板末尾的 CLI 写法半句（派发/续修与会审回执共用同一句式）。 */
+function backgroundShellClause(command, effect) {
+  return ` If your host has a background shell, you can instead run ${command} there; one command ${effect}.`;
+}
+
+/**
+ * 第 136 批续修：MCP 面带 CLI 半句的模板——CLI 半句只在**最终上线的整句**（含
+ * 调用方追加在后的一切后缀）不超上限时才加，放不下就不加，MCP 写法与后缀照旧。
+ * 合法的长 id 不能让已经受理的结果变成报错（派发已调用、续修已受理、会审记录
+ * 已读到）；不改上限、不截断 id。后缀与半句一起在这里算，调用方不再自行拼接。
+ */
+function withCliClauseIfFits(base, clause, suffix) {
+  const withClause = base + clause + suffix;
+  return withClause.length <= NEXT_STEP_MAX_LEN ? withClause : base + suffix;
+}
+
 function render(surface, situation, runId, extras) {
   const m = minutesFromMs(extras.vitalSignAgeMs ?? 0);
   let text;
@@ -104,17 +124,24 @@ function render(surface, situation, runId, extras) {
         : `Delivery is not settled yet: the run, its packaging, verification or a reverify chain still has no result. Wait with wao runs wait ${runId} --until-settled. Verification passed is not acceptance.`;
       break;
     case "dispatch_accepted":
+      // 第 136 批：MCP 面在 MCP 写法后补一句 CLI 写法（带受理的 runId）。
       text = surface === "mcp"
-        ? "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles."
+        ? withCliClauseIfFits(
+          "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles.",
+          backgroundShellClause(`wao runs wait ${runId} --until-settled`, "waits until settlement"),
+          extras.suffix,
+        )
         : `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId} --until-settled.`;
       break;
     case "settled_line": {
       // CLI 等待器的收口终行（按收口判定的 reason 闭集分支）。
       switch (extras.settlementReason) {
         case "delivery_settled":
+          // 第 136 批：审查命令直接给能一次读完的那条（决定 0116），不再先指向
+          // wao runs delivery 查询。
           text = extras.acceptanceStatus === "accepted" || extras.acceptanceStatus === "rejected"
             ? `Settled. The Lead decision is recorded: ${extras.acceptanceStatus}. Verification passed is not acceptance.`
-            : `Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Verification passed is not acceptance.`;
+            : `Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`;
           break;
         case "packaging_failed":
           text = `Settled: packaging failed. Diagnose with wao runs diagnose ${runId}. Verification passed is not acceptance.`;
@@ -141,7 +168,9 @@ function render(surface, situation, runId, extras) {
           : "Delivery settled. Its lineage was dispatched continuable and it is not accepted: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.")
         : (extras.acceptanceStatus === "rejected"
           ? `Settled. The Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. Verification passed is not acceptance.`
-          : `Settled. Delivery awaits the Lead's review: wao runs delivery ${runId}. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.`);
+          // 第 136 批续修：审查命令让这一句长了 13 字符——别处改短 28 字符，runId
+          // 触顶长度从 70 提到 78，同一长度的 runId 不比改动前更早触顶。
+          : `Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`);
       break;
     case "delivery_superseded":
       // 第 120 批：收口的交付已有被采纳的后代（派生事实）。只说这一件事——
@@ -177,7 +206,12 @@ function render(surface, situation, runId, extras) {
       break;
     case "consult_seats_running": {
       if (surface === "mcp") {
-        text = `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`;
+        // 第 136 批：MCP 写法后补一句 CLI 写法（带这场会审的 consultId）。
+        text = withCliClauseIfFits(
+          `${extras.nonTerminalSeatCount} of ${extras.seatCount} seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.`,
+          backgroundShellClause(`wao consult wait ${extras.consultId} --until-settled`, "waits for all seats"),
+          extras.suffix,
+        );
       } else {
         // CLI 面：一条 `consult wait <consultId> --until-settled` 等全部席位收口
         //（逐席 runs wait 是旧用法，命令已提供整场等待）。runId 清单仍是事实陈列
@@ -229,23 +263,29 @@ export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
 
 /**
  * 构造一句 nextStep。surface "cli" 必须给 runId（模板带 runId）；"mcp" 的模板
- * 不含 runId（传了也不会渲染）。settled_line 需要 settlementReason（收口判定
- * 的 settled 类 reason）与可选 acceptanceStatus；delivery_continuable 的
- * acceptanceStatus 只接受 null（未决定）或 "rejected"，其余抛错（调用方把服务
- * 里表示未决定的值如 "pending" 转成 null 再传）；delivery_superseded（第 120
- * 批）需要非空的 supersededByRunId——文案点名那个被采纳的后代，只说"无需再
- * 裁决"；verifier_gone、runner_gone
- * 与 runner_unproven 只有 CLI 面（verifier_gone 可另给 terminalState——运行
- * 终态：failed 且未决定时渲染重新打包交付的续验文案，其余值渲染 completed
- * 形状的既有文案）；
- * consult_seats_running 在 MCP 面用 seatCount/nonTerminalSeatCount，
+ * 除第 136 批的两处 CLI 半句外不含 runId（传了也不会渲染）——所以 MCP 面的
+ * dispatch_accepted 需要 runId、consult_seats_running 需要 consultId。
+ * settled_line 需要 settlementReason（收口判定的 settled 类 reason）与可选
+ * acceptanceStatus；delivery_continuable 的 acceptanceStatus 只接受 null（未
+ * 决定）或 "rejected"，其余抛错（调用方把服务里表示未决定的值如 "pending"
+ * 转成 null 再传）；delivery_superseded（第 120 批）需要非空的
+ * supersededByRunId——文案点名那个被采纳的后代，只说"无需再裁决"；
+ * verifier_gone、runner_gone 与 runner_unproven 只有 CLI 面（verifier_gone 可
+ * 另给 terminalState——运行终态：failed 且未决定时渲染重新打包交付的续验
+ * 文案，其余值渲染 completed 形状的既有文案）；
+ * consult_seats_running 在 MCP 面用 seatCount/nonTerminalSeatCount/consultId，
  * 在 CLI 面用 seatRunIds/consultId（可再给 cliJson 选不列 runId 的回退说法）。
- * 长度超上限抛错（consult_seats_running 的 CLI 面有文档化的不列 runId 回退）。
+ * 长度超上限抛错（consult_seats_running 的 CLI 面有文档化的不列 runId 回退；
+ * MCP 面的 CLI 半句放不下就不加——见 withCliClauseIfFits）。
  *
  * @param {object} input
  * @param {"mcp"|"cli"} input.surface
  * @param {string} input.situation — NEXT_STEP_SITUATIONS 成员
- * @param {string} [input.runId]
+ * @param {string} [input.runId] — CLI 面必给；MCP 面只有 dispatch_accepted 用
+ *   （末尾 CLI 命令带本次受理的 runId）
+ * @param {string} [input.suffix] — MCP 面 dispatch_accepted / consult_seats_running
+ *   用：调用方要追加在末尾的后缀（如合同提醒、继承合同那半句）。它和 CLI 半句
+ *   一起算长度，由这里拼好返回——调用方不要再自行追加。其余情形不用。
  * @param {number|null} [input.vitalSignAgeMs] — 毫秒（vitalSignAgeMs 共享函数的输出）
  * @param {string|null} [input.settlementReason]
  * @param {string|null} [input.acceptanceStatus]
@@ -254,7 +294,8 @@ export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
  * @param {string|null} [input.supersededByRunId] — delivery_superseded 用：那个
  *   已被采纳的后代 runId（第 120 批的派生事实）
  * @param {string[]} [input.seatRunIds] — CLI consult：未终态席位的 runId 清单
- * @param {string} [input.consultId] — CLI consult：重读用的 consultId
+ * @param {string} [input.consultId] — consult：重读或整场等待用的 consultId（MCP
+ *   面与 CLI 面都要）
  * @param {boolean} [input.cliJson] — CLI consult 回退说法用 JSON 面措辞
  * @param {number} [input.seatCount] — MCP consult：席位总数
  * @param {number} [input.nonTerminalSeatCount] — MCP consult：未终态席位数
@@ -264,6 +305,7 @@ export function buildNextStep({
   surface,
   situation,
   runId = null,
+  suffix = "",
   vitalSignAgeMs = null,
   settlementReason = null,
   acceptanceStatus = null,
@@ -306,14 +348,26 @@ export function buildNextStep({
     } else if (!Number.isInteger(seatCount) || seatCount <= 0
       || !Number.isInteger(nonTerminalSeatCount) || nonTerminalSeatCount <= 0) {
       throw new Error("buildNextStep: consult_seats_running on MCP needs positive seatCount and nonTerminalSeatCount");
+    } else if (typeof consultId !== "string" || consultId.length === 0) {
+      // 第 136 批：MCP 面末尾的 CLI 命令带这场会审的 consultId。
+      throw new Error(`buildNextStep: consult_seats_running on MCP needs a consultId, got: ${JSON.stringify(consultId)}`);
     }
   } else if (surface === "cli" && (typeof runId !== "string" || runId.length === 0)) {
     throw new Error(`buildNextStep: surface "cli" renders commands with a runId, got: ${JSON.stringify(runId)}`);
+  } else if (surface === "mcp" && situation === "dispatch_accepted"
+    && (typeof runId !== "string" || runId.length === 0)) {
+    // 第 136 批：MCP 面末尾的 CLI 命令带本次受理的 runId。
+    throw new Error(`buildNextStep: dispatch_accepted on MCP needs the accepted runId, got: ${JSON.stringify(runId)}`);
+  }
+  // 第 136 批续修：后缀由这里拼（与 CLI 半句一起算长度），只接受字符串。
+  if (typeof suffix !== "string") {
+    throw new Error(`buildNextStep: suffix must be a string, got: ${JSON.stringify(suffix)}`);
   }
   if (vitalSignAgeMs !== null && !Number.isFinite(vitalSignAgeMs)) {
     vitalSignAgeMs = null;
   }
   return render(surface, situation, runId, {
+    suffix,
     vitalSignAgeMs,
     settlementReason,
     acceptanceStatus,

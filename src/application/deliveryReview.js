@@ -50,8 +50,11 @@ export function validateProjectedPath(p) {
   // character. C1 (e.g. NEL=0x85) is a real attack vector: it is invisible/
   // bidi-affecting in some editors and could smuggle content or break path
   // parsing. The previous regex only covered C0+DEL; C1 is now included.
+  // The Unicode line separators U+2028 / U+2029 are rejected the same way:
+  // they are not C0/C1 but split lines in JS and many renderers, so a file
+  // name carrying one would break the one-line output that quotes the path.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f-\x9f]/.test(p)) {
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(p)) {
     throw new Error("invalid changedPath: control character present");
   }
   // Backslash is non-canonical (Git uses forward slash); reject so the output
@@ -76,15 +79,17 @@ export function validateProjectedPath(p) {
  *   - Output is at most CHANGED_PATHS_LIMIT paths, deterministic (first N after
  *     validating the input is already sorted).
  *   - The CHANGED_PATHS_LIMIT cap is a hard ceiling: a caller-supplied limit
- *     (test-only hook) is clamped to [0, CHANGED_PATHS_LIMIT]; it can never
- *     raise the cap. The MCP adapter does not expose limit to the model.
+ *     (server-owned narrowing, e.g. the few paths on the `runs wait
+ *     --until-settled` closing line; also a test hook) is clamped to
+ *     [0, CHANGED_PATHS_LIMIT]; it can never raise the cap. The MCP adapter
+ *     does not expose limit to the model.
  *   - changedFileCount is the REAL total from the input array (not the capped
  *     length), so truncation is detectable.
  *   - Input is never mutated.
  *
  * @param {object} input
  * @param {string[]} input.changedFiles — sorted unique repo-relative paths
- * @param {number} [input.limit] — optional test-only hook; clamped to [0, CHANGED_PATHS_LIMIT]
+ * @param {number} [input.limit] — optional narrowing hook; clamped to [0, CHANGED_PATHS_LIMIT]
  * @returns {{changedFileCount: number, changedPaths: string[], changedPathsTruncated: boolean}}
  */
 export function projectDeliveryChangedPaths({ changedFiles, limit } = {}) {

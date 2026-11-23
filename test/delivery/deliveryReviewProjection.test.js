@@ -952,6 +952,8 @@ test("M11-3B-PA-PATH-C1: validateProjectedPath rejects C0, C1, DEL control chars
     "src/\u009fx.js",   // C1 APC
     "src/\x00x.js",     // C0 NUL
     "src/\x7fx.js",     // DEL
+    "src/\u2028x.js",   // LINE SEPARATOR — 第 136 批续修：同按控制字符拒绝
+    "src/\u2029x.js",   // PARAGRAPH SEPARATOR
   ];
   for (const p of badPaths) {
     assert.throws(
@@ -959,6 +961,10 @@ test("M11-3B-PA-PATH-C1: validateProjectedPath rejects C0, C1, DEL control chars
       /control|invalid|canonical/i,
       `path with control char U+${p.charCodeAt(4).toString(16)} must be rejected`,
     );
+  }
+  // U+2028 / U+2029 走的就是控制字符那一条路（不是别的拒绝理由顶替命中）。
+  for (const p of ["src/\u2028x.js", "src/\u2029x.js"]) {
+    assert.throws(() => validateProjectedPath(p), /control character present/, `U+${p.charCodeAt(4).toString(16)}`);
   }
   // Control: a clean canonical path passes.
   assert.equal(validateProjectedPath("src/a.js"), "src/a.js");

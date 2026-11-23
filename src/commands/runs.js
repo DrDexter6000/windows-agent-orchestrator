@@ -27,7 +27,10 @@ import { createInterface } from "node:readline";
 import { join, resolve, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 
-import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
+import {
+  readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES,
+  validateDeliveryFacts,
+} from "../transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
 import {
   aggregateRunUsages,
@@ -66,6 +69,10 @@ import {
 } from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview, resolveRunDeliveryReviewTarget } from "../application/runDeliveryReview.js";
+// 第 136 批：收口终行的交付要点——路径经 MCP run_delivery 同一个有界安全投影。
+import { projectDeliveryChangedPaths } from "../application/deliveryReview.js";
+// 第 136 批续修：收口终行 Land 的谱系事实与 --since-parent 用同一份读取。
+import { resolveContinuationParentEdge } from "../application/continuationParentEdge.js";
 // TD-324（83 批 W2）：归属拒绝固定文案共用的原因清单片段（ownership SSOT 导出）。
 import { WORKSPACE_MISMATCH_REASONS_TEXT } from "../application/runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
@@ -693,11 +700,94 @@ function supersededTextLine(supersededByRunId) {
   return `Superseded: a descendant delivery was already accepted (${supersededByRunId}); no Lead decision is needed here`;
 }
 
+// 第 136 批：收口终行的交付要点里列出的改动路径条数（文本行与 JSON 对象用同
+// 一个小常量——两面给同一批事实）。
+const SETTLED_DELIVERY_FILES_SHOWN = 3;
+
+function shortCommit(commit) {
+  return commit.slice(0, 12);
+}
+
+/**
+ * 第 136 批：delivery_settled 的交付投影——只读等待器已读到的那份快照
+ *（events），不另读。事实权威是 validateDeliveryFacts（runId-bound，与收口判定
+ * 同一模式；delivery_settled 只在它判 valid 时成立）。
+ *   - ref：交付身份（提交号与基线）。事实有效就有；Land 只依赖它与谱系事实。
+ *   - delivery：交付要点（ref 加路径）。路径经 projectDeliveryChangedPaths（与
+ *     MCP run_delivery 同一个有界、安全、相对路径投影）再过同一个环境密钥值
+ *     脱敏。续修：路径投影不成立时为 null——不能连 Land 一起丢。
+ * 没有有效交付返回 null：收口判定与退出码不受影响，终行只是不带这两项。
+ * @param {object} events — 等待器读到的快照事件
+ * @param {string} runId
+ * @returns {{ref: {deliveryCommit: string, baseCommit: string}, delivery: {deliveryCommit: string, baseCommit: string, changedFileCount: number, changedPaths: string[]}|null}|null}
+ */
+function projectSettledDelivery(events, runId) {
+  if (!Array.isArray(events)) return null;
+  const facts = validateDeliveryFacts(events, { expectedRunId: runId, allowVerificationPending: true });
+  if (!facts.valid || !facts.createdRef) return null;
+  const ref = {
+    deliveryCommit: facts.createdRef.deliveryCommit,
+    baseCommit: facts.createdRef.baseCommit,
+  };
+  try {
+    const { changedFileCount, changedPaths } = projectDeliveryChangedPaths({
+      changedFiles: facts.createdRef.changedFiles,
+      limit: SETTLED_DELIVERY_FILES_SHOWN,
+    });
+    // 与 MCP run_delivery 同一脱敏：路径被环境密钥值改写就整条折成固定标记。
+    const redactor = createSecretRedactor();
+    return {
+      ref,
+      delivery: {
+        ...ref,
+        changedFileCount,
+        // 键名与 MCP run_delivery 同名（续修：changedFiles 改 changedPaths）。
+        changedPaths: changedPaths.map((p) => {
+          const redacted = redactor.redactString(p);
+          return redacted === p ? p : "[REDACTED]";
+        }),
+      },
+    };
+  } catch {
+    return { ref, delivery: null };
+  }
+}
+
+/** 第 136 批：交付要点的文本行（提交号与基线各前 12 位、文件总数、前几个路径）。 */
+function deliveryTextLine(delivery) {
+  const paths = delivery.changedPaths.length > 0
+    ? `: ${delivery.changedPaths.join(", ")}${delivery.changedFileCount > delivery.changedPaths.length ? "…" : ""}`
+    : "";
+  return `Delivery: ${shortCommit(delivery.deliveryCommit)} on ${shortCommit(delivery.baseCommit)}, ${delivery.changedFileCount} file(s)${paths}`;
+}
+
+/**
+ * 第 136 批：续修子交付的落地方式。子交付的提交建在谱系基线上、带累积树，不在
+ * 父交付之上——从父交付 fast-forward 会失败，所以写明从基线落地。
+ * 续修：谱系事实取 --since-parent（决定 0116）用的同一份读取
+ *（resolveContinuationParentEdge——只认转录第一条续修事实，尾补的声明不算），
+ * 不另写规则；它要读父转录，读不到与 --since-parent 同样当"没有父运行"。
+ * 只依赖谱系事实与交付基线（ref），不依赖路径投影。已拒收、或已有被采纳的
+ * 后代（谱系只落地最终候选）的交付不会被落地，也不给。
+ */
+async function continuationLandNote(ref, { events, runId, runDir, readTranscriptFn, acceptanceStatus, supersededByRunId }) {
+  if (ref === null || supersededByRunId || acceptanceStatus === "rejected") return null;
+  try {
+    await resolveContinuationParentEdge({ runId, events, runDir, readTranscriptFn });
+  } catch {
+    return null;
+  }
+  return `cumulative tree on the lineage base ${shortCommit(ref.baseCommit)}; fast-forward or merge from the base, not from the parent delivery.`;
+}
+
 /**
  * 闭集 outcome（非 interrupted）的终行渲染：settled / verifier_gone /
  * runner_gone / runner_unproven / conflict / untrusted 每支的文本行、JSON
  * 对象与退出码（0 = 调用面不设 process.exitCode）。settled 支的可续提示判定
- *（决定 0112）照旧用等待器读到的同一份快照事件，不另读新快照。
+ *（决定 0112）照旧用等待器读到的同一份快照事件，不另读新快照；第 136 批起
+ * delivery_settled 另给交付要点（Delivery 行 / JSON delivery 对象），同样只取
+ * 这份快照；续修子交付的落地方式（Land 行 / JSON land）的谱系事实用
+ * --since-parent 的读取，会读一次父转录。
  */
 async function renderSettledOutcome({ outcome, runId, runDir, deps = {} }) {
   if (outcome.kind === "settled") {
@@ -743,11 +833,22 @@ async function renderSettledOutcome({ outcome, runId, runDir, deps = {} }) {
     });
     const reverify = s.facts.reverifyStatus === "complete" ? `; reverify ${s.facts.effectiveVerificationStatus}` : "";
     const verification = s.facts.verificationStatus ? `; verification ${s.facts.verificationStatus}${reverify}` : "";
+    // 第 136 批：交付要点取自等待器读到的同一份快照；没有交付（或投影不成立）时
+    // 不带这一行 / 这个键。续修：Land 只依赖交付身份与谱系事实（--since-parent
+    // 的读取，见 continuationLandNote），路径投影不成立时照样给。
+    const projected = s.reason === "delivery_settled" ? projectSettledDelivery(outcome.events, runId) : null;
+    const delivery = projected?.delivery ?? null;
+    const land = await continuationLandNote(projected?.ref ?? null, {
+      events: outcome.events, runId, runDir, readTranscriptFn: deps.readTranscriptFn ?? readTranscript,
+      acceptanceStatus: s.facts.acceptanceStatus, supersededByRunId,
+    });
     return {
       exitCode: 0,
       lines: [
         `Run: ${runId} (${s.facts.state})`,
         `Settlement: settled (${s.reason}${verification})`,
+        ...(delivery ? [deliveryTextLine(delivery)] : []),
+        ...(land ? [`Land: ${land}`] : []),
         `Next step: ${nextStep}`,
       ],
       json: {
@@ -755,6 +856,8 @@ async function renderSettledOutcome({ outcome, runId, runDir, deps = {} }) {
         runId,
         state: s.facts.state,
         settlement: { status: s.status, reason: s.reason, facts: s.facts },
+        ...(delivery ? { delivery } : {}),
+        ...(land ? { land } : {}),
         nextStep,
       },
     };
