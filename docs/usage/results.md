@@ -190,11 +190,11 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 - `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（含 `workdir_escape`）→ `run_activity` + `run_diagnose`，不外广告 `run_delivery_review`；未请求 delivery → `run_activity` + `run_status`。readiness 等待路径与 point-in-time 路径披露一致；无 `readiness` 时，仅 `isolationFailure.code === "workdir_escape"` 触发同一下钻提示（未知 code 不提升）。
 - `run_activity` 有 `nextCursor` → 同工具续页；终态读完 → `run_collect` compact；非终态 → `run_status`。
 
-该字段是加法字段：既有输出字段、行为、audit 语义不变；Lead 可以忽略它，直接用原子工具。（决定 0129：原 `run_delivery_review_bundle` 已删，该字段只在 `run_delivery` 一处。）
+该字段是加法字段：既有输出字段、行为、audit 语义不变；Lead 可以忽略它，直接用原子工具。
 
-## MCP 运行清单：`lead_preflight` 的 `recentRuns`（原 `runs_list` 承接）
+## MCP 运行清单：`lead_preflight` 的 `recentRuns`
 
-决定 0129：原 `runs_list` 工具已删——`lead_preflight` 的可选输入 `recentRuns`（对象 `{limit?: 1..100, activeOnly?: boolean}`，缺省 limit 50、activeOnly false）让输出多一个 `recentRuns` 节。只读幂等：不改持久状态、不追加事件；不请求该输入就没有这个键、不多扫描。其它项目的 run 不可见，不跨 workspace 探测；既没给 `expectedWorkspaceRoot` 又没有缺省绑定时该节为 `null`（workspace 节如实报未绑定），请求了但读不出也为 `null` + warning——绝不伪造空清单。
+`lead_preflight` 的可选输入 `recentRuns`（对象 `{limit?: 1..100, activeOnly?: boolean}`，缺省 limit 50、activeOnly false）让输出多一个 `recentRuns` 节。只读幂等：不改持久状态、不追加事件；不请求该输入就没有这个键、不多扫描。其它项目的 run 不可见，不跨 workspace 探测；既没给 `expectedWorkspaceRoot` 又没有缺省绑定时该节为 `null`（workspace 节如实报未绑定），请求了但读不出也为 `null` + warning——绝不伪造空清单。
 
 范围与 `lead_preflight` 自身一致：`expectedWorkspaceRoot` 给了就当场证明、只作用于本次调用；省略时用缺省绑定。条目按新到旧返回；`activeOnly:true` 先筛"经证明 active"的运行、再按 `limit` 截断（与原 `runs_list` 同一 `listRuns` 语义）。`runDir`、registry 等 server-owned。
 

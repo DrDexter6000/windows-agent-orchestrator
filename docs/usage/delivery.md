@@ -143,9 +143,9 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 
 `--all` 与 `--file-index`/`--cursor` 互斥；`--out FILE` 把全文写进文件、stdout 只打一行摘要（回显路径经同一秘密脱敏）；`--since-parent` 只对续修子运行可用，父交付提交由谱系事实证明（“已证明”指提交已证明存在，不要求其验证通过），不可传入提交号，无父运行、跨工作区、跨谱系、父无已证明交付或本轮无增量均以固定文案拒绝。
 
-## 交付首屏查询（原 `run_delivery_review_bundle` 的两步替代，决定 0129）
+## 交付首屏查询
 
-原组合工具已删，改由 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用：先 `run_delivery`（`waitMs` 区间与返回时机见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再 `run_delivery_review`。**两次调用没有组合工具的跨结果保证**：Lead 要把 `run_delivery_review` 回执的 `deliveryCommit`/`changedFileCount` 与先前 `run_delivery` 结果对照，不一致就重读重审；例外是已裁决但验证仍 pending——此时 `run_delivery_review` 给 `available:false`、`unavailableReason:"verification_pending"`，这是正常形态，不是两次回执不一致。两个原子工具的边界不变：workspace/runId-bound、非 reviewable 带 cursor fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment，也不 stop/retry/repackage/accept/reject；失败回各自固定文案、无 partial 输出或泄漏。Lead 仍须审查全部页面后独立调用 `run_delivery_decide`。
+用 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用：先 `run_delivery`（`waitMs` 区间与返回时机见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再 `run_delivery_review`。**两次调用没有组合工具的跨结果保证**：Lead 要把 `run_delivery_review` 回执的 `deliveryCommit`/`changedFileCount` 与先前 `run_delivery` 结果对照，不一致就重读重审；例外是已裁决但验证仍 pending——此时 `run_delivery_review` 给 `available:false`、`unavailableReason:"verification_pending"`，这是正常形态，不是两次回执不一致。两个原子工具的边界不变：workspace/runId-bound、非 reviewable 带 cursor fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment，也不 stop/retry/repackage/accept/reject；失败回各自固定文案、无 partial 输出或泄漏。Lead 仍须审查全部页面后独立调用 `run_delivery_decide`。
 
 ## MCP `run_delivery_reverify`（未变工件重验证）
 

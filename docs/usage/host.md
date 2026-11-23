@@ -76,7 +76,7 @@ legacy argv 兼容：旧 profile 参数当作普通未知 flag 忽略，既有 H
 
 ## MCP `lead_preflight` workers（worker 清单）
 
-只读操作（决定 0129：原 `registry_list` 工具并入 `lead_preflight.workers`；CLI `wao registry list` 照旧）。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`registryPath`/`runDir` 是启动配置，调用方不能覆盖。输出为 MCP `content`（text = JSON）+ `structuredContent`（同义对象）；`workers` 列出**全部有效席位（不截断）**，条目与 CLI `registry list --format json` 的数组元素同一形状（`id`/`backend`/`model`/`reasoningEffort`/`certification`/`certificationReasonCode`/`certificationLastHealthyAt`/`cwd`/`sessionReuse`/`credentialAvailability`/`missingCredentialEnvNames`/`providerReadiness`/`dispatchHold`）。调用前后 runDir 不会有新增 transcript/run 文件。
+只读操作（CLI 对应 `wao registry list`）。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。`registryPath`/`runDir` 是启动配置，调用方不能覆盖。输出为 MCP `content`（text = JSON）+ `structuredContent`（同义对象）；`workers` 列出**全部有效席位（不截断）**，条目与 CLI `registry list --format json` 的数组元素同一形状（`id`/`backend`/`model`/`reasoningEffort`/`certification`/`certificationReasonCode`/`certificationLastHealthyAt`/`cwd`/`sessionReuse`/`credentialAvailability`/`missingCredentialEnvNames`/`providerReadiness`/`dispatchHold`）。调用前后 runDir 不会有新增 transcript/run 文件。
 
 registry 源可读但某条目无法 normalize/project 时走**部分投影**：有效 worker 照常返回，另附有界安全的 `registryIssues`（闭集码；`REGISTRY_ISSUES_CAP=32` + `registryIssuesTruncated`），不是整表失败；零有效 worker 但有 issues 不等于空 registry。整表源不可读或非法 JSON 是另一类失败：`checkStatus.workers:"unknown"`、`workers:null`（绝不伪造成部分结果）。判定与安全边界见[架构](../02-architecture.md) §2.3；WAO 不据此停派发、换 worker 或标记 healthy。
 
