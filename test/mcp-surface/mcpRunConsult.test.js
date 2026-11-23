@@ -1152,6 +1152,52 @@ test("MRC-W5: a seat that wrote a file (readOnlyViolation) still yields a readab
   }
 });
 
+// 第 136 批续修（两席复现）：98–128 字符的 consultId（入参 schema 允许到 128）让
+// run_consult 读到记录却渲染失败（"found, but rendering it failed"）。CLI 半句只在
+// 整句不超 480 时才加——放不下就不加，回执照常返回。
+test("MRC-W8: 128 字符 consultId（入参 schema 上限）的记录照样读得出——nextStep ≤ 480，放不下的 CLI 半句不加", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w7-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    mkdirSync(consultsDir, { recursive: true });
+    writeTranscript(runDir, "run_consult_stub_seat_a", makeTranscript("run_consult_stub_seat_a", { state: "running", finalText: "Q1: 仍在核对。\n" }));
+    const longId = "consult_" + "d".repeat(120);
+    assert.equal(longId.length, 128);
+    writeFileSync(join(consultsDir, `${longId}.json`), JSON.stringify({
+      consultId: longId,
+      createdAt: "2026-10-02T12:00:00.000Z",
+      brief: { path: null, sha256: sha256(BRIEF) },
+      budgetMs: 180000,
+      elapsedMs: 5,
+      questions: [{ q: 1, heading: "Q1 方案可行吗" }],
+      seats: [{ agentId: "seat_a", runId: "run_consult_stub_seat_a", runState: "running", formatState: "partial", backend: null, provider: null }],
+      fieldDiff: [],
+    }), "utf8");
+    const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      const read = await callConsult(client, { consultId: longId });
+      assert.equal(read.threw, false);
+      assert.notEqual(read.res.isError, true, `记录读得到就必须渲染得出（实测：${errText(read.res)}）`);
+      const receipt = read.res.structuredContent;
+      assert.equal(receipt.consultId, longId);
+      assert.equal(typeof receipt.nextStep, "string", "有未终态席位 → 带 nextStep");
+      assert.ok(receipt.nextStep.length <= 480, `整句 ${receipt.nextStep.length} ≤ 480`);
+      assert.match(receipt.nextStep, /^1 of 1 seats are not terminal yet\. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs/);
+      assert.match(receipt.nextStep, /re-read this consult with run_consult and its consultId\.$/);
+      assert.ok(!receipt.nextStep.includes("wao consult wait"), "整句放不下——不加 CLI 半句");
+      assert.ok(!receipt.nextStep.includes("run_consult_stub_seat_a"), "不落席位 id");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("MRC-W6: dispatch attempts that produced no run do not count as dispatched seats", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mrc-w6-"));
   try {
@@ -1236,17 +1282,19 @@ test("MRC-A2: 投影——只有未终态席位（有 runId、非 missing）才�
   ]), { pageMeasure: measure });
   assert.equal("nextStep" in noneRunning, false, "missing 与无 runId 席位不算在跑");
 
-  // 一个非终态席 → 带 MCP 面 nextStep（不带任何具体 id）。
+  // 一个非终态席 → 带 MCP 面 nextStep（不落席位 id；第 136 批起末尾的 CLI 半句
+  // 带这场会审的 consultId）。
   const running = projectConsultReceipt(receiptFixture([
     receiptSeat("seat_a", { runId: "run_a", runState: "running" }),
     receiptSeat("seat_b", { runId: "run_b", runState: "completed" }),
   ]), { pageMeasure: measure });
   assert.deepEqual(Object.keys(running).sort(), RECEIPT_RUNNING_KEYS);
   assert.equal(running.nextStep,
-    "1 of 2 seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.");
+    "1 of 2 seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId. If your host has a background shell, you can instead run wao consult wait consult_20261030071437756abc123 --until-settled there; one command waits for all seats.");
   // 批 119：模板点名 run_await_result——具体席位 id 的检查用词边界（run_a 不再
   // 是子串误报：run_await_result 里 run_a 后面是 w，\b 不成立）。
-  assert.ok(!/\brun_a\b/.test(running.nextStep) && !running.nextStep.includes(running.consultId), "不含具体 id");
+  assert.ok(!/\brun_a\b/.test(running.nextStep), "不落席位 id");
+  assert.equal(running.nextStep.split(running.consultId).length - 1, 1, "consultId 只出现在那条 CLI 命令里");
   assert.ok(running.nextStep.length <= 480);
 });
 
@@ -1269,6 +1317,9 @@ test("MRC-A3: create 与 read 两条路径都带 nextStep；席位到终态后�
       const createdReceipt = created.res.structuredContent;
       assert.match(createdReceipt.nextStep, /^1 of 2 seats are not terminal yet\./);
       assert.ok(!createdReceipt.nextStep.includes("run_consult_stub_seat_a"), "create 回执不带具体 runId");
+      // 第 136 批：末尾的 CLI 半句带这场会审的 consultId（MCP 写法在前）。
+      assert.match(createdReceipt.nextStep, new RegExp(
+        `run_consult and its consultId\\. If your host has a background shell, you can instead run wao consult wait ${createdReceipt.consultId} --until-settled there; one command waits for all seats\\.$`));
 
       const readBack = await callConsult(client, { consultId: createdReceipt.consultId, expectedWorkspaceRoot: dir });
       assert.equal(readBack.threw, false);

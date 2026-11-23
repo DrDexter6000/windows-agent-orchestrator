@@ -1408,3 +1408,92 @@ test("0129-P3: clean contract → receipt has NO contractAdvisories key and the 
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// 第 136 批续修（会审 kimi 复现）：合法的长 runId 不能让已经受理的派发变成
+// `run_dispatch failed`——CLI 半句只在最终上线的整句（含合同提醒后缀）不超
+// NEXT_STEP_MAX_LEN（480）时才加，放不下就不加；MCP 写法与后缀照旧。
+// =====================================================================
+
+async function dispatchWithAdvisories(runId) {
+  const dir = mkdtempSync(join(tmpdir(), "wao-136-longid-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let dispatchCalls = 0;
+    const fakeDispatcher = async () => {
+      dispatchCalls += 1;
+      return {
+        accepted: true, runId, agentId: "coder_low", state: "pending",
+        transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+      };
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      // 与 0129-P1 同款：目录形式的 --test 实参 + 引用不存在的相对路径 → 两条 advisory。
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low",
+          prompt: "do it",
+          expectedWorkspaceRoot: dir,
+          delivery: {
+            mode: "git_commit_v1",
+            allowedPaths: ["src"],
+            verificationCommands: ["node --test test/definitely-missing-dir/"],
+          },
+        },
+      });
+      return { dispatchCalls, res };
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+}
+
+test("136-L1: 150 字符 runId + contractAdvisories → dispatcher 恰好一次、受理成功；nextStep ≤ 480，MCP 写法与提醒在、CLI 半句不加", async () => {
+  const longId = "run_" + "x".repeat(146);
+  assert.equal(longId.length, 150);
+  const { dispatchCalls, res } = await dispatchWithAdvisories(longId);
+  assert.equal(dispatchCalls, 1, "派发已经发生");
+  assert.equal(res.isError, undefined, `受理不能变成报错（实测：${res.content?.[0]?.text ?? ""}）`);
+  const sc = res.structuredContent;
+  assert.equal(sc.accepted, true);
+  assert.equal(sc.runId, longId);
+  assert.ok(Array.isArray(sc.contractAdvisories) && sc.contractAdvisories.length > 0, "回执带 contractAdvisories");
+  assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
+  assert.match(sc.nextStep, /^Background run accepted\. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles\./);
+  assert.match(sc.nextStep, /Review contractAdvisories in this receipt first; stop and re-dispatch if needed\.$/);
+  assert.ok(!sc.nextStep.includes("wao runs wait"), "整句放不下——不加 CLI 半句");
+});
+
+test("136-L2: 120 字符 runId（kimi 复现的长度）+ contractAdvisories → 不再是 run_dispatch failed；整句 489 放不下，CLI 半句不加", async () => {
+  const longId = "run_" + "x".repeat(116);
+  assert.equal(longId.length, 120);
+  const { dispatchCalls, res } = await dispatchWithAdvisories(longId);
+  assert.equal(dispatchCalls, 1, "派发已经发生");
+  assert.equal(res.isError, undefined, `受理不能变成报错（实测：${res.content?.[0]?.text ?? ""}）`);
+  const sc = res.structuredContent;
+  assert.equal(sc.accepted, true);
+  assert.ok(Array.isArray(sc.contractAdvisories) && sc.contractAdvisories.length > 0, "回执带 contractAdvisories");
+  assert.equal(sc.nextStep,
+    "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. Review contractAdvisories in this receipt first; stop and re-dispatch if needed.");
+  assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
+});
+
+test("136-L2b: 110 字符 runId + contractAdvisories → 整句 479 放得下：CLI 半句与提醒后缀都在、半句在前", async () => {
+  const longId = "run_" + "x".repeat(106);
+  assert.equal(longId.length, 110);
+  const { res } = await dispatchWithAdvisories(longId);
+  assert.equal(res.isError, undefined, `受理不能变成报错（实测：${res.content?.[0]?.text ?? ""}）`);
+  const next = res.structuredContent.nextStep;
+  assert.ok(next.length <= 480, `整句 ${next.length} ≤ 480`);
+  assert.match(next, new RegExp(
+    `wao runs wait ${longId} --until-settled there; one command waits until settlement\\. Review contractAdvisories in this receipt first; stop and re-dispatch if needed\\.$`));
+});

@@ -3,7 +3,8 @@
 // 决定 0095（第 49 批）：nextStep 纯函数的分支、两面渲染与措辞纪律。
 // 全部确定性、零 I/O。钉住：
 //   - 每个情形闭集成员、两面（mcp/cli）各自渲染；
-//   - MCP 面不含 runId；CLI 面带 runId；
+//   - MCP 面不落 id——唯一的例外是第 136 批补的 CLI 命令半句（派发/续修的
+//     runId、consult 的 consultId），先 MCP 写法后 CLI 写法；CLI 面带 runId；
 //   - ≤480（引用 LEAD_ADVISORY_WIRE_MAX_LEN），超限抛错（用超长 runId 触发）；
 //   - 不出现宿主名；不建议 accept/reject。
 
@@ -59,11 +60,17 @@ test("NEXT-02: delivery_unsettled / dispatch_accepted 两类固定模板", () =>
   assert.match(delivery, /not settled yet/);
   assert.match(delivery, /Call run_delivery again with waitMs/);
   assert.match(delivery, /Verification passed is not acceptance/);
-  const dispatch = buildNextStep({ surface: "mcp", situation: "dispatch_accepted" });
+  const dispatch = buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId: RUN_ID });
   assert.match(dispatch, /Before ending the turn, keep a wait attached/);
   assert.match(dispatch, /call run_await_result repeatedly with its default waitMs/);
   // TD-364：引导句不再写上限数字（桌面宿主约 60s 超时，照旧文案做必超时）。
   assert.ok(!dispatch.includes("270000"), "不写 waitMs 上限数字");
+  // 第 136 批：MCP 写法在前、CLI 写法在后——宿主有后台命令行时，一条命令等到
+  // 收口；CLI 半句带这次受理的 runId（MCP 面唯一落 id 的地方）。
+  assert.equal(dispatch,
+    `Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. If your host has a background shell, you can instead run wao runs wait ${RUN_ID} --until-settled there; one command waits until settlement.`);
+  assert.equal(dispatch.split(RUN_ID).length - 1, 1, "runId 只出现在那条 CLI 命令里");
+  assert.ok(dispatch.length <= NEXT_STEP_MAX_LEN);
   const dispatchCli = buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID });
   assert.match(dispatchCli, /wao runs wait run_\S+ --until-settled/);
 });
@@ -72,7 +79,9 @@ test("NEXT-03: 收口终行四支（CLI）——一律带 verification passed is
   const line = (settlementReason, acceptanceStatus = null) => buildNextStep({
     surface: "cli", situation: "settled_line", runId: RUN_ID, settlementReason, acceptanceStatus,
   });
-  assert.match(line("delivery_settled"), /Delivery awaits the Lead's review: wao runs delivery run_\S+/);
+  assert.match(line("delivery_settled"), /Delivery awaits the Lead's review: wao runs delivery review run_\S+ --all\./);
+  // 第 136 批：审查命令直接给能一次读完的那条，不再先指向 runs delivery 查询。
+  assert.ok(!line("delivery_settled").includes(": wao runs delivery run_"), "不再先指向 runs delivery 查询");
   assert.match(line("delivery_settled", "accepted"), /decision is recorded: accepted/);
   assert.match(line("delivery_settled", "rejected"), /decision is recorded: rejected/);
   assert.match(line("packaging_failed"), /packaging failed[\s\S]*wao runs diagnose run_\S+/);
@@ -114,7 +123,7 @@ test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超�
       const text = buildNextStep({
         surface,
         situation,
-        ...(surface === "cli" ? { runId: RUN_ID } : {}),
+        runId: RUN_ID,
         vitalSignAgeMs: 6 * 60 * 60 * 1000,
         settlementReason: "delivery_settled",
         acceptanceStatus: null,
@@ -131,6 +140,12 @@ test("NEXT-05: 480 上限——正常输入全部在限内；超限抛错（超�
     () => buildNextStep({ surface: "cli", situation: "wait_vital_recent", runId: "r".repeat(400), vitalSignAgeMs: 60_000 }),
     /exceeds 480/,
   );
+  // 第 136 批续修：MCP 面的 dispatch_accepted 内嵌 runId（CLI 半句）——半句放得下
+  // 才加，超长 runId 不抛错（已经受理的派发不能变成报错）；MCP 写法本身恒在限内。
+  // 不静默截断：返回的是完整的 MCP 写法，id 不被改写。
+  const longIdDispatch = buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId: "r".repeat(400) });
+  assert.equal(longIdDispatch,
+    "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles.");
 });
 
 test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把体征说成推进/停止结论", () => {
@@ -143,7 +158,11 @@ test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把
     runWaitNextStep({ surface: "cli", terminal: false, vitalSignAgeMs: null, runId: RUN_ID }),
     runWaitNextStep({ surface: "cli", terminal: true, vitalSignAgeMs: null, runId: RUN_ID }),
     buildNextStep({ surface: "mcp", situation: "delivery_unsettled" }),
-    buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }),
+    buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId: RUN_ID }),
+    buildNextStep({
+      surface: "mcp", situation: "consult_seats_running",
+      seatCount: 1, nonTerminalSeatCount: 1, consultId: "consult_20261029210000000abc123",
+    }),
     buildNextStep({ surface: "cli", situation: "settled_line", runId: RUN_ID, settlementReason: "delivery_settled" }),
     // 决定 0112：可续提示四句（两面 × 未决定/已拒收）。
     buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: null }),
@@ -164,7 +183,8 @@ test("NEXT-06: 措辞纪律——无宿主名、不建议 accept/reject、不把
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 决定 0096：两个新情形——verifier_gone（CLI 面）与 consult_seats_running
-//（MCP 面不带任何具体 id；CLI 面列 runId，超长时改用不列 runId 的版本）。
+//（MCP 面不落席位 id，只在第 136 批补的 CLI 命令半句里带 consultId；CLI 面列
+// runId，超长时改用不列 runId 的版本）。
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("NEXT-07: verifier_gone——只有 CLI 面；按 acceptanceStatus 两支，均 ≤480", () => {
@@ -195,19 +215,23 @@ test("NEXT-07: verifier_gone——只有 CLI 面；按 acceptanceStatus 两支�
   );
 });
 
-test("NEXT-08: consult_seats_running——MCP 面不落任何具体 id；CLI 面列 runId 并带 consultId", () => {
+test("NEXT-08: consult_seats_running——MCP 面不落席位 id、只在 CLI 命令里带 consultId；CLI 面列 runId 并带 consultId", () => {
+  const consultId = "consult_20261029210000000abc123";
   const mcp = buildNextStep({
-    surface: "mcp", situation: "consult_seats_running", seatCount: 5, nonTerminalSeatCount: 3,
+    surface: "mcp", situation: "consult_seats_running", seatCount: 5, nonTerminalSeatCount: 3, consultId,
   });
   assert.match(mcp, /^3 of 5 seats are not terminal yet\./);
   assert.match(mcp, /call run_await_result repeatedly with its default waitMs/);
   assert.ok(!mcp.includes("270000"), "TD-364：不写 waitMs 上限数字");
   assert.match(mcp, /seats\[\]\.runId/);
-  assert.match(mcp, /re-read this consult with run_consult and its consultId/);
-  assert.ok(!mcp.includes(RUN_ID) && !/consult_\d/.test(mcp), "MCP 面不含 runId/consultId 字面");
+  assert.match(mcp, /re-read this consult with run_consult and its consultId\./);
+  // 第 136 批：MCP 写法在前、CLI 写法在后——宿主有后台命令行时一条命令等全部席位。
+  assert.match(mcp, new RegExp(
+    ` If your host has a background shell, you can instead run wao consult wait ${consultId} --until-settled there; one command waits for all seats\\.$`));
+  assert.ok(!mcp.includes(RUN_ID), "MCP 面不落席位 runId");
+  assert.equal(mcp.split(consultId).length - 1, 1, "consultId 只出现在那条 CLI 命令里");
   assert.ok(mcp.length <= NEXT_STEP_MAX_LEN);
 
-  const consultId = "consult_20261029210000000abc123";
   const cli = buildNextStep({
     surface: "cli", situation: "consult_seats_running", seatRunIds: [RUN_ID], consultId,
   });
@@ -256,6 +280,16 @@ test("NEXT-09: consult_seats_running CLI 超长回退——8 席不列 runId（�
     () => buildNextStep({ surface: "mcp", situation: "consult_seats_running", seatCount: 5 }),
     /seatCount and nonTerminalSeatCount/,
   );
+  // 第 136 批：MCP 面靠 consultId 渲染 CLI 命令——计数齐全但缺 consultId 抛错。
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "consult_seats_running", seatCount: 5, nonTerminalSeatCount: 1 }),
+    /consultId/,
+  );
+  // MCP 面的 dispatch_accepted 靠 runId 渲染 CLI 命令——缺 runId 抛错。
+  assert.throws(
+    () => buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }),
+    /runId/,
+  );
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -276,9 +310,21 @@ test("NEXT-10: delivery_continuable——两面 × 未决定/已拒收四句；a
   const mcpRejected = buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "rejected" });
   assert.match(mcpRejected, /^Delivery settled; the Lead decision is recorded: rejected\. Its lineage was dispatched continuable: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything\. Verification passed is not acceptance\.$/);
 
-  // CLI 未决定：带 runId（review 指向 + parentRunId）。
+  // CLI 未决定：带 runId（审查命令 + parentRunId）。第 136 批续修：审查命令让模板
+  // 长了 13 字符，别处改短 28 字符——同一长度的 runId 不比改动前更早触顶。
   const cliUndecided = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: null });
-  assert.match(cliUndecided, new RegExp(`^Settled\\. Delivery awaits the Lead's review: wao runs delivery ${RUN_ID}\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${RUN_ID}\\) can resume the same worker conversation; it checks eligibility before changing anything\\. An accepted delivery can no longer be continued\\. Verification passed is not acceptance\\.$`));
+  assert.equal(cliUndecided,
+    `Settled. Delivery awaits the Lead's review: wao runs delivery review ${RUN_ID} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${RUN_ID}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`);
+  // 76 字符的可续 runId（会审 sol 用 65 字符复现了触顶：改动前 469、改审查命令后
+  // 482）——现在整句仍在限内；再长仍照旧抛错（不改上限、不截断 id）。
+  const id76 = "run_" + "y".repeat(72);
+  const fits76 = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: id76, acceptanceStatus: null });
+  assert.ok(fits76.length <= NEXT_STEP_MAX_LEN, `${fits76.length} > ${NEXT_STEP_MAX_LEN}`);
+  assert.ok(fits76.includes(`wao runs delivery review ${id76} --all.`));
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: "run_" + "y".repeat(75), acceptanceStatus: null }),
+    /exceeds 480/,
+  );
 
   // CLI 已拒收。
   const cliRejected = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: "rejected" });
@@ -436,4 +482,76 @@ test("NEXT-14: delivery_superseded——两面同一句、点名被采纳的后�
     () => buildNextStep({ surface: "mcp", situation: "delivery_superseded", supersededByRunId: "r".repeat(500) }),
     /exceeds 480/,
   );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 136 批续修：MCP 面的 CLI 半句只在**最终上线的整句**（含调用方追加的后缀）
+// 不超上限时才加，放不下就不加——合法的长 id 不能让已经受理的结果变成报错
+//（派发已调用、续修已受理、会审记录已读到）。MCP 写法与后缀照旧；不改上限、
+// 不截断 id。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const DISPATCH_BASE = "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles.";
+const ADVISORIES_SUFFIX = " Review contractAdvisories in this receipt first; stop and re-dispatch if needed.";
+const INHERITED_SUFFIX = " Delivery contract inherited from the parent run.";
+const dispatchCliClause = (runId) =>
+  ` If your host has a background shell, you can instead run wao runs wait ${runId} --until-settled there; one command waits until settlement.`;
+
+const ofLength = (prefix, total, filler) => prefix + filler.repeat(total - prefix.length);
+const dispatchMcp = (runId, suffix) => buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId, suffix });
+
+test("NEXT-15: MCP 派发/续修——CLI 半句按整句（含后缀）定去留；长 runId 不抛错", () => {
+  // 短 id：半句与合同提醒后缀都放得下——顺序仍是 MCP 写法、CLI 半句、后缀。
+  assert.equal(dispatchMcp(RUN_ID, ADVISORIES_SUFFIX), DISPATCH_BASE + dispatchCliClause(RUN_ID) + ADVISORIES_SUFFIX);
+
+  // 边界（合同提醒后缀 81 字符）：111 字符恰好放得下（整句 480），112 字符就放不下。
+  const id111 = ofLength("run_", 111, "x");
+  const fits111 = dispatchMcp(id111, ADVISORIES_SUFFIX);
+  assert.equal(fits111, DISPATCH_BASE + dispatchCliClause(id111) + ADVISORIES_SUFFIX);
+  assert.equal(fits111.length, NEXT_STEP_MAX_LEN);
+  const id112 = ofLength("run_", 112, "x");
+  assert.equal(dispatchMcp(id112, ADVISORIES_SUFFIX), DISPATCH_BASE + ADVISORIES_SUFFIX, "放不下就不加 CLI 半句");
+  // 同一个 112 字符 id、没有后缀时放得下——半句的去留看的是整句，不是半句本身。
+  assert.equal(dispatchMcp(id112), DISPATCH_BASE + dispatchCliClause(id112));
+
+  // 120 字符（会审 kimi 复现的长度：旧实现先渲染半句得 408、再拼后缀成 489）：
+  // 现在一起算——整句 489 放不下，不加半句，MCP 写法与后缀照旧。
+  const id120 = ofLength("run_", 120, "x");
+  assert.equal(dispatchMcp(id120, ADVISORIES_SUFFIX), DISPATCH_BASE + ADVISORIES_SUFFIX);
+
+  // 150 字符 + 合同提醒后缀：同样不加；整句 ≤ 480。
+  const id150 = ofLength("run_", 150, "x");
+  const dropped = dispatchMcp(id150, ADVISORIES_SUFFIX);
+  assert.equal(dropped, DISPATCH_BASE + ADVISORIES_SUFFIX);
+  assert.ok(!dropped.includes("wao runs wait"), "放不下就不加 CLI 半句");
+  assert.ok(dropped.length <= NEXT_STEP_MAX_LEN, `${dropped.length}`);
+  // 150 字符 + 续修的继承后缀（51 字符）：整句 489，同样不加；141 字符恰好放得下。
+  assert.equal(dispatchMcp(id150, INHERITED_SUFFIX), DISPATCH_BASE + INHERITED_SUFFIX);
+  const id141 = ofLength("run_", 141, "x");
+  assert.equal(dispatchMcp(id141, INHERITED_SUFFIX), DISPATCH_BASE + dispatchCliClause(id141) + INHERITED_SUFFIX);
+  // 同一个 150 字符 id、没有后缀时放得下（438）。
+  assert.equal(dispatchMcp(id150), DISPATCH_BASE + dispatchCliClause(id150));
+
+  // 后缀只接受字符串（实现错误响亮失败）。
+  assert.throws(() => dispatchMcp(RUN_ID, 42), /suffix/);
+});
+
+test("NEXT-16: MCP 会审——128 字符 consultId（入参 schema 上限）不抛错；CLI 半句放不下就不加", () => {
+  const base = "1 of 2 seats are not terminal yet. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on each such seat's runId (seats[].runId) until it is terminal, then re-read this consult with run_consult and its consultId.";
+  const id128 = "consult_" + "c".repeat(120);
+  assert.equal(id128.length, 128);
+  const long = buildNextStep({
+    surface: "mcp", situation: "consult_seats_running", seatCount: 2, nonTerminalSeatCount: 1, consultId: id128,
+  });
+  assert.equal(long, base, "放不下就不加 CLI 半句——MCP 写法照旧");
+  assert.ok(long.length <= NEXT_STEP_MAX_LEN, `${long.length}`);
+  // 98 字符（会审复现区间的下沿）同样放不下；31 字符的真实 id 放得下。
+  const id98 = "consult_" + "c".repeat(90);
+  assert.equal(buildNextStep({
+    surface: "mcp", situation: "consult_seats_running", seatCount: 2, nonTerminalSeatCount: 1, consultId: id98,
+  }), base);
+  const real = "consult_20261030071437756abc123";
+  assert.equal(buildNextStep({
+    surface: "mcp", situation: "consult_seats_running", seatCount: 2, nonTerminalSeatCount: 1, consultId: real,
+  }), `${base} If your host has a background shell, you can instead run wao consult wait ${real} --until-settled there; one command waits for all seats.`);
 });

@@ -524,10 +524,11 @@ test("NS-M16: 收口交付已有被采纳的后代 → 即时查询与 waitMs �
 });
 
 // =====================================================================
-// run_dispatch / run_continue — accepted:true 附静态 nextStep；拒绝不给
+// run_dispatch / run_continue — accepted:true 附静态 nextStep；拒绝不给（第 136 批
+// 起 MCP 面的模板末尾多一句带受理 runId 的 CLI 写法）
 // =====================================================================
 
-test("NS-M7: run_dispatch accepted:true → nextStep（静态模板，无 runId）；accepted:false 不给", async () => {
+test("NS-M7: run_dispatch accepted:true → nextStep（MCP 写法在前、CLI 半句带受理的 runId）；accepted:false 不给", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-ns-m7-"));
   try {
     makeGitRepo(dir);
@@ -550,7 +551,10 @@ test("NS-M7: run_dispatch accepted:true → nextStep（静态模板，无 runId�
       assert.equal(res.isError, undefined);
       assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_await_result repeatedly with its default waitMs/);
       assert.ok(!res.structuredContent.nextStep.includes("270000"), "TD-364：不写 waitMs 上限数字");
-      assert.ok(!res.structuredContent.nextStep.includes("run_ns_m7_ok"), "静态模板不含 runId");
+      // 第 136 批：MCP 写法在前、CLI 半句在后——半句带这次受理的 runId（MCP 面
+      // 唯一落 id 的地方），宿主有后台命令行时一条命令等到收口。
+      assert.equal(res.structuredContent.nextStep,
+        "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. If your host has a background shell, you can instead run wao runs wait run_ns_m7_ok --until-settled there; one command waits until settlement.");
     } finally {
       await client.close(); await server.close();
     }
@@ -588,8 +592,12 @@ test("NS-M8: run_continue accepted:true → nextStep；拒收不给", async () =
         arguments: { parentRunId: "run_ns_m8_parent", prompt: "fix it", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] }, expectedWorkspaceRoot: dir },
       });
       assert.equal(res.isError, undefined, `continue must succeed: ${JSON.stringify(res.content?.[0]?.text ?? "")}`);
-      assert.match(res.structuredContent.nextStep, /keep a wait attached/);
-      assert.ok(!res.structuredContent.nextStep.includes("run_ns_m8_child"));
+      assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_await_result repeatedly with its default waitMs/);
+      // 第 136 批：末尾的 CLI 半句带子运行自己的 runId（不是 parentRunId），只出现一次。
+      assert.match(res.structuredContent.nextStep, new RegExp(
+        `wao runs wait run_ns_m8_child --until-settled there; one command waits until settlement\\.$`));
+      assert.equal(res.structuredContent.nextStep.split("run_ns_m8_child").length - 1, 1, "runId 只出现在那条 CLI 命令里");
+      assert.ok(!res.structuredContent.nextStep.includes("run_ns_m8_parent"), "不带 parentRunId");
     } finally {
       await client.close(); await server.close();
     }

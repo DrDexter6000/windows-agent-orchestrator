@@ -1437,8 +1437,8 @@ export function selectNonTerminalSeats(seats) {
  * fieldDiff/fieldValues/bricks（体积小且是 0039 不变式②标记机制本身）。回执
  * 不含任何正文摘录/预览（0039 不变式①：预览=有选择的截断）。
  *
- * 决定 0096：有未终态席位时附 MCP 面 nextStep（不带任何具体 id）；全部终态时
- * 不带该字段。席位分页视图不带。
+ * 决定 0096：有未终态席位时附 MCP 面 nextStep（不落席位 id；第 136 批起末尾的
+ * CLI 半句带这场会审的 consultId）；全部终态时不带该字段。席位分页视图不带。
  *
  * pageMeasure(seat, candidatePageText) 由调用方注入（与 seatPage 视图同一
  * 信封构造器）——回执里每席的 pages 与后续分页读同一把尺，计数不漂移。
@@ -1467,6 +1467,7 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
       situation: "consult_seats_running",
       seatCount: seats.length,
       nonTerminalSeatCount: nonTerminal.length,
+      consultId: result.consultId,
     })
     : null;
   return {

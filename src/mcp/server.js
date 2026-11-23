@@ -156,7 +156,8 @@ import { createRunSummaryCache } from "../application/runSummaryCache.js";
 // 批 119（A5）：MCP 长轮询等待工具真删除——runWait 服务与它的等待域常量只剩
 // CLI 面在用，server.js 不再 import。长等待指引改为重复 run_await_result。
 // 决定 0095：nextStep——等待族工具没等到收口时的一句固定英文模板（MCP 面只写
-// 工具名、不含 runId）。run_await_result 有意不加（它是取结果形态）。
+// 工具名；第 136 批起派发/续修与会审回执末尾的 CLI 半句带受理的 runId /
+// consultId）。run_await_result 有意不加（它是取结果形态）。
 import { buildNextStep } from "../application/runNextStep.js";
 import {
   runAwaitResult,
@@ -4995,15 +4996,21 @@ export function createWaoMcpServer({
           // opaque uuid / Lead id / workspace the dispatcher might also return are
           // NEVER forwarded (the handler selects exactly these keys).
           providerSessionRouting: result.providerSessionRouting,
-          // 决定 0095：受理成功的后台运行附 nextStep（静态模板，MCP 面不含
-          // runId）；accepted:false 不给。决定 0129：有 contractAdvisories 时
-          // nextStep 追加半句（先看提醒，需要就停掉重派）。
+          // 决定 0095：受理成功的后台运行附 nextStep（MCP 面模板；第 136 批起
+          // 末尾的 CLI 半句带本次受理的 runId）；accepted:false 不给。决定 0129：
+          // 有 contractAdvisories 时 nextStep 追加半句（先看提醒，需要就停掉重派）。
+          // 第 136 批续修：后缀交给 buildNextStep 与 CLI 半句一起算长度——合法的
+          // 长 runId 下整句放不下时只是不加半句，不让已受理的派发变成报错。
           ...(result.accepted === true
             ? {
-                nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" })
-                  + (contractAdvisories != null
+                nextStep: buildNextStep({
+                  surface: "mcp",
+                  situation: "dispatch_accepted",
+                  runId: result.runId,
+                  suffix: contractAdvisories != null
                     ? " Review contractAdvisories in this receipt first; stop and re-dispatch if needed."
-                    : ""),
+                    : "",
+                }),
               }
             : {}),
           // 决定 0129：受理回执携带就地预检的 advisory 码（零提醒 = 键缺省；
@@ -5596,12 +5603,21 @@ export function createWaoMcpServer({
           rootRunId: result.accepted ? result.rootRunId : null,
           state: result.accepted ? result.state : null,
           rejectionReason: result.accepted ? null : result.rejectionReason,
-          // 决定 0095：受理成功的后台续跑附 nextStep（静态模板）；拒收不给。
+          // 决定 0095：受理成功的后台续跑附 nextStep（MCP 面模板；第 136 批起末尾
+          // 的 CLI 半句带子运行自己的 runId）；拒收不给。
           // 第 135 批（决定 0130）：delivery 省略的受理回执在 nextStep 末尾补
           // 半句固定文案，写明这次用的是继承来的父运行合同（不新增 wire 字段）。
           ...(result.accepted === true
-            ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" })
-              + (delivery === undefined ? " Delivery contract inherited from the parent run." : "") }
+            ? {
+                // 第 136 批续修：继承合同那半句作为后缀交给 buildNextStep，与 CLI
+                // 半句一起算长度（放不下就只是不加半句，已受理的续修不变成报错）。
+                nextStep: buildNextStep({
+                  surface: "mcp",
+                  situation: "dispatch_accepted",
+                  runId: result.runId,
+                  suffix: delivery === undefined ? " Delivery contract inherited from the parent run." : "",
+                }),
+              }
             : {}),
           // 第 135 批续修 5：继承合同复验失败的拒绝带固定指路文案（只在
           // delivery 省略的 invalid_delivery 上；其余拒绝键缺席）。

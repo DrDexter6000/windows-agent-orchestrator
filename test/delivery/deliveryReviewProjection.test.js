@@ -960,6 +960,11 @@ test("M11-3B-PA-PATH-C1: validateProjectedPath rejects C0, C1, DEL control chars
       `path with control char U+${p.charCodeAt(4).toString(16)} must be rejected`,
     );
   }
+  // 复核续修：U+2028 / U+2029 是合法文件名字符，结构化投影保留原路径；
+  // 只有收口文本行做可见转义（见 runsWaitUntilSettled U-25）。
+  for (const p of ["src/\u2028x.js", "src/\u2029x.js"]) {
+    assert.equal(validateProjectedPath(p), p);
+  }
   // Control: a clean canonical path passes.
   assert.equal(validateProjectedPath("src/a.js"), "src/a.js");
 });

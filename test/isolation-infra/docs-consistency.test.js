@@ -2016,12 +2016,15 @@ test("M11-11D-DOC-04: token forecast is retired from current product surfaces", 
     "README no longer lists token forecasting as a current capability");
 });
 
-test("M11-12C-DOC-01: every delivery run queries delivery truth after terminal", () => {
+test("M11-12C-DOC-01: every delivery run reads delivery truth after terminal", () => {
   const skill = read("SKILL.md");
   // 127 批续修：原 /s 正则里的 "failed" 可被后文 isolation_failed 顶替命中——把
   // "including failed terminal states" 写成同句内必须按序出现的短语，删掉该短语即红。
-  assert.ok(/every run dispatched with a delivery block[^.]*run_delivery[^.]*after terminal[^.]*including failed terminal states/i.test(skill),
-    "SKILL queries run_delivery after every delivery run, including failed terminal states");
+  // 第 136 批续修：第 5 步与第 4 步一致——交付真相按面读：MCP 用 run_delivery，CLI
+  // 用 runs wait --until-settled 的收口行（Delivery: 行或它给的失败下一步）；不再
+  // 要求每个交付 run 终态后都另查一次 run_delivery。"失败终态也读"照旧钉住。
+  assert.ok(/Delivery truth\*\* for every delivery run[^.]*after terminal[^.]*including failed terminal states[^.]*`run_delivery` with `waitMs`[^.]*`runs wait --until-settled`[^.]*`Delivery:` or the failure next step/i.test(skill),
+    "SKILL reads delivery truth after every delivery run's terminal, failed terminal states included: MCP run_delivery with waitMs (it waits to settlement); CLI the settled lines of runs wait --until-settled");
   assert.ok(/deliveryAvailable=false.*deliveryFailure\.code.*do not call `?run_delivery_review`?.*`?run_delivery_decide`?/is.test(skill),
     "SKILL routes packaging failure through its structured code without review or decision");
   assert.ok(/run_diagnose.*does not replace.*run_delivery/is.test(skill),

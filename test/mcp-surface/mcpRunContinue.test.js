@@ -496,6 +496,11 @@ test("0130-MRC-1: delivery omitted → handler does NOT enforce inline verificat
       assert.equal(parsed.accepted, true);
       // 受理回执写明这次用的是继承来的合同（nextStep 半句，无新增 wire 字段）。
       assert.match(parsed.nextStep, /Delivery contract inherited from the parent run\./);
+      // 第 136 批：CLI 半句带子运行自己的 runId（不是 parentRunId），排在"继承合同"
+      // 那半句之前。
+      assert.match(parsed.nextStep, new RegExp(
+        `wao runs wait ${parsed.runId} --until-settled there; one command waits until settlement\\. Delivery contract inherited from the parent run\\.$`));
+      assert.ok(!parsed.nextStep.includes(parsed.parentRunId), "不带 parentRunId");
       // Explicit-delivery receipts do NOT carry the clause.
       const r2 = await client.callTool({
         name: "run_continue",
@@ -503,6 +508,50 @@ test("0130-MRC-1: delivery omitted → handler does NOT enforce inline verificat
       });
       assert.equal(r2.structuredContent.accepted, true);
       assert.ok(!r2.structuredContent.nextStep.includes("inherited"), "explicit delivery keeps the plain nextStep");
+      assert.match(r2.structuredContent.nextStep, new RegExp(
+        `wao runs wait ${r2.structuredContent.runId} --until-settled there; one command waits until settlement\\.$`));
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+// 第 136 批续修（会审 kimi 复现）：合法的长 runId 不能让已经受理的续修变成报错。
+// 继承合同的后缀要和 CLI 半句一起算——半句本身放得下、加上后缀放不下时，服务器
+// 若仍是"先渲染后半句再拼后缀"，整句会超 480 过不了出参校验。
+test("136-L3: 长子 runId 的续修（delivery 省略、继承合同后缀）→ 受理成功；nextStep ≤ 480、继承后缀在末尾", async () => {
+  const id140 = "run_" + "y".repeat(136); // 半句 + 继承后缀恰好放得下（479）
+  const id150 = "run_" + "x".repeat(146); // 半句本身放得下（438），加继承后缀放不下（489）
+  const id156 = "run_" + "z".repeat(152); // 同上：旧实现"先渲染半句再拼后缀"会得到 489、过不了出参校验
+  const base = "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles.";
+  const dir = makeGitDir("m136-mrc-longid-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const ids = [id140, id150, id156];
+    let served = 0;
+    const { server, calls } = makeServer({
+      dir,
+      serviceResult: (args) => ({ ...successResult(args), runId: ids[served] }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const args = { parentRunId: "run_parent_ok", prompt: "correct the bug", expectedWorkspaceRoot: dir };
+      const call = async (id) => {
+        const r = await client.callTool({ name: "run_continue", arguments: args });
+        served += 1;
+        assert.equal(calls.length, served, "续修服务已经受理");
+        assert.equal(r.isError, undefined, `${id.length} 字符：受理不能变成报错（实测：${JSON.stringify(r.content?.[0]?.text ?? "")}）`);
+        assert.equal(r.structuredContent.accepted, true);
+        assert.equal(r.structuredContent.runId, id);
+        assert.ok(r.structuredContent.nextStep.length <= 480, `${id.length} 字符整句 ${r.structuredContent.nextStep.length} ≤ 480`);
+        assert.ok(!r.structuredContent.nextStep.includes("run_parent_ok"), "不带 parentRunId");
+        return r.structuredContent.nextStep;
+      };
+      // 140 字符：整句放得下——CLI 半句（带子运行自己的 runId）在前，继承后缀在后。
+      assert.equal(await call(id140),
+        `${base} If your host has a background shell, you can instead run wao runs wait ${id140} --until-settled there; one command waits until settlement. Delivery contract inherited from the parent run.`);
+      // 150 与 156 字符：整句放不下——不加 CLI 半句，MCP 写法与继承后缀照旧。
+      for (const id of [id150, id156]) {
+        assert.equal(await call(id), `${base} Delivery contract inherited from the parent run.`);
+      }
     } finally { await client.close(); await server.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
