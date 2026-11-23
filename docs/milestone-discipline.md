@@ -132,6 +132,7 @@ milestone 级完成定义已无对象（M0–M13 全部完成，不再新增）�
 | ⑦ | `config/agents.json` 默认 registry | `config.registry` 默认 `config/agents.json` | 确认无测试裸用默认（registry 用例全部显式 `--registry`） | `config/default.json` 的 `registry`；`src/cli.js` 的 `hardcodedDefaults.registry` |
 | ⑧ | 写面边界声明 | `frictionLog.js` 写 `<runDir>/../.dev/friction-log/` 及同类写面 | 不测（写污染风险高于盲区收益；向真实环境做写注入的方案已否决）——表内明写一行防静默漏 | `src/frictionLog.js` 的 `frictionLogDirFromRunDir` |
 | ⑨ | 半 .wao 形状注记 | `.wao/decisions/` 被 git 跟踪；worktree 里只有 decisions；pipeline、handoff、会审组记录等本地状态经 `getWaoStateDir` 读写主工作树的 `.wao/`（决定 0111） | 环境差异以此为准——交付验证树与隔离工作树里，不带 `--cwd` 的本地状态读写面看到、写到的是主检出的真实 `.wao/`，测试照 ⑤ 注入 `--cwd <temp>` | `.gitignore` 的 `.wao/*` 与 `!.wao/decisions/` 两行 |
+| ⑩ | `harness-inventory` 缺省 registry | `npm run harness-inventory` 缺省读 live `config/agents.json`（Lead 的盘点命令；认证 runbook「harness 版本巡检」②） | 确认无测试裸用默认——用例全部显式 `--registry` temp 夹具，探针/npm 查询/更新器日志读取走注入缝 | `scripts/reliability/harness-inventory.mjs` 的 `parseArgs`（缺省值）与 `collectRows`（注入缝） |
 
 - 规则：每轮触碰环境读取面的 milestone，先重跑四个盘点 grep（reliability-summary / runDir 回落 / .wao 路径 / process.cwd()），枚举表可补不可漏；新面必须落行。
 

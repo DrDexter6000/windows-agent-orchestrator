@@ -348,6 +348,7 @@
       "process/genCertificationProbes.test.js",
       "process/genSurfaceEntry.test.js",
       "process/runtimeIdentityCli.test.js",
+      "process/harnessInventory.test.js",
       "process/kimiWebIdentityProbe.test.js",
       "isolation-infra/parseSmoke.test.js",
       "transcript/runCollectStdioSmoke.test.js",
