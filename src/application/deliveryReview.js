@@ -50,11 +50,8 @@ export function validateProjectedPath(p) {
   // character. C1 (e.g. NEL=0x85) is a real attack vector: it is invisible/
   // bidi-affecting in some editors and could smuggle content or break path
   // parsing. The previous regex only covered C0+DEL; C1 is now included.
-  // The Unicode line separators U+2028 / U+2029 are rejected the same way:
-  // they are not C0/C1 but split lines in JS and many renderers, so a file
-  // name carrying one would break the one-line output that quotes the path.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(p)) {
+  if (/[\x00-\x1f\x7f-\x9f]/.test(p)) {
     throw new Error("invalid changedPath: control character present");
   }
   // Backslash is non-canonical (Git uses forward slash); reject so the output

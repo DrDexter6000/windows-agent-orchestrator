@@ -57,4 +57,4 @@
 
 ## 修订条（第 136 批，2026-11-23）
 
-第 3 条"按面渲染"改一处：MCP `run_dispatch`、`run_continue` 的受理回执与 `run_consult` 的席位未终态回执，在工具名写法之后另给一条带真实 runId / consultId 的 CLI 等待命令（宿主有后台命令行时用）；整句连同服务端追加的后缀超过 480 字符时不加。其余 MCP 模板仍不含 runId。CLI 收口行在交付收口时多一行 `Delivery:`（提交、基线、文件数、前 3 个路径），续修子交付另有 `Land:` 行；未裁决时审查命令直接写 `runs delivery review <runId> --all`。理由：11-14 至 11-22 本机 Lead 会话里 369 次 `runs wait` 后紧跟 247 次 `runs delivery`，只为拿这几项事实。
+第 3 条"按面渲染"改一处：MCP `run_dispatch`、`run_continue` 的受理回执与 `run_consult` 的席位未终态回执，在工具名写法之后另给一条带真实 runId / consultId 的 CLI 等待命令（宿主有后台命令行时用）；整句连同服务端追加的后缀超过 480 字符时不加。其余 MCP 模板仍不含 runId。CLI 收口行在交付收口时多一行 `Delivery:`（提交、基线、文件数、前 3 个路径）；交付未裁决、未被取代时，审查命令直接写 `runs delivery review <runId> --all`，续修子交付另有 `Land:` 行。已拒收或已被取代的交付照旧用各自的模板（被取代见第 120 批）。理由：11-14 至 11-22 本机 Lead 会话里 369 次 `runs wait` 后紧跟 247 次 `runs delivery`，只为拿这几项事实。

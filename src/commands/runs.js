@@ -50,7 +50,7 @@ import { planProjectsMigration, applyProjectsMigration, verifyProjectsMigration 
 // TD-319：`runs wait` 的"报错 + 用法"两行有意分行——linesError 构造（.message
 // 与改前逐字一致），CLI 输出口按行转义。B92：accept 被拒的提示路径还要用
 // renderErrorText 在本命令里复刻顶层报错渲染（提示行接在既有输出之后）。
-import { linesError, renderErrorText } from "../safeText.js";
+import { escapeControlChars, linesError, renderErrorText } from "../safeText.js";
 // TD-250（A1b，决定 0056）：验收后线系上游会话卫生（kimi-web 能力位门控）。
 import { makeAcceptedSessionRelease } from "../application/upstreamSessionRelease.js";
 import { productionProjectIo } from "../projectIdentity.js";
@@ -753,10 +753,14 @@ function projectSettledDelivery(events, runId) {
   }
 }
 
-/** 第 136 批：交付要点的文本行（提交号与基线各前 12 位、文件总数、前几个路径）。 */
+/**
+ * 第 136 批：交付要点的文本行（提交号与基线各前 12 位、文件总数、前几个路径）。
+ * 路径经 escapeControlChars：U+2028/U+2029 这类合法文件名字符在文本行里写成
+ * 可见转义、不断行；JSON 与 run_delivery、审查面保留原路径（复核续修）。
+ */
 function deliveryTextLine(delivery) {
   const paths = delivery.changedPaths.length > 0
-    ? `: ${delivery.changedPaths.join(", ")}${delivery.changedFileCount > delivery.changedPaths.length ? "…" : ""}`
+    ? `: ${delivery.changedPaths.map((p) => escapeControlChars(p)).join(", ")}${delivery.changedFileCount > delivery.changedPaths.length ? "…" : ""}`
     : "";
   return `Delivery: ${shortCommit(delivery.deliveryCommit)} on ${shortCommit(delivery.baseCommit)}, ${delivery.changedFileCount} file(s)${paths}`;
 }

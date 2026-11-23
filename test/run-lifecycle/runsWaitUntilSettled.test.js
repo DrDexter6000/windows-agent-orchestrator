@@ -2023,8 +2023,8 @@ test("U-24: 76 字符的可续 runId → CLI 收口行不触顶（改动前触�
   }
 });
 
-test("U-25: 路径含 Unicode 行分隔符（U+2028 / U+2029 / U+0085）→ 按控制字符同样拒绝：不出 Delivery 行，输出不带出", async () => {
-  for (const [label, sep] of [["U2028", "\u2028"], ["U2029", "\u2029"], ["U0085", "\u0085"]]) {
+test("U-25: 路径含 Unicode 行分隔符 → 文本行可见转义、不断行，JSON 保留原路径；C1 的 U+0085 照旧不出 Delivery 行", async () => {
+  for (const [label, sep, escaped] of [["U2028", "\u2028", "\\u2028"], ["U2029", "\u2029", "\\u2029"]]) {
     const dir = makeRunDir();
     try {
       const runId = `run_u25_${label}`;
@@ -2032,16 +2032,31 @@ test("U-25: 路径含 Unicode 行分隔符（U+2028 / U+2029 / U+0085）→ 按�
       writeLines(dir, runId, settledDeliveryEvents(runId, ref));
       const r = await runWaitSettled({ dir, runId });
       assert.equal(r.exitCode, undefined, `${label}：收口判定不受影响`);
-      assert.deepEqual(r.outLines, [
-        `Run: ${runId} (completed)`,
-        "Settlement: settled (delivery_settled; verification passed)",
-        `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
-      ], `${label}：不出 Delivery 行`);
-      assert.ok(!r.out.includes(sep), `${label}：输出不带出该字符`);
-      assert.ok(!("delivery" in JSON.parse((await runWaitSettled({ dir, runId, asJson: true })).out)), `${label}：JSON 不带 delivery`);
+      assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a${escaped}b.js`, `${label}：文本行转义`);
+      assert.equal(r.outLines.length, 4, `${label}：不多出行`);
+      assert.ok(!r.out.includes(sep), `${label}：文本输出不带原字符`);
+      const j = JSON.parse((await runWaitSettled({ dir, runId, asJson: true })).out);
+      assert.deepEqual(j.delivery.changedPaths, [`src/a${sep}b.js`], `${label}：JSON 保留原路径`);
     } finally {
       cleanupDir(dir);
     }
+  }
+  const dir = makeRunDir();
+  try {
+    const runId = "run_u25_U0085";
+    const ref = makeRef(runId, { changedFiles: ["src/a\u0085b.js"] });
+    writeLines(dir, runId, settledDeliveryEvents(runId, ref));
+    const r = await runWaitSettled({ dir, runId });
+    assert.equal(r.exitCode, undefined);
+    assert.deepEqual(r.outLines, [
+      `Run: ${runId} (completed)`,
+      "Settlement: settled (delivery_settled; verification passed)",
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Verification passed is not acceptance.`,
+    ], "C1 控制字符照共用路径规则：不出 Delivery 行");
+    assert.ok(!r.out.includes("\u0085"));
+    assert.ok(!("delivery" in JSON.parse((await runWaitSettled({ dir, runId, asJson: true })).out)));
+  } finally {
+    cleanupDir(dir);
   }
 });
 
