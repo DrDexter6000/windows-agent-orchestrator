@@ -1938,8 +1938,9 @@ function assertNoIgnoredStagedAdds(cwd, canonicalBase) {
 /**
  * 第 135 批（决定 0130）+ 续修 1：worker 留下的暂存改动不再让打包失败。打包以
  * 工作树内容为准、只提交 allowedPaths 内的改动，因此打包前（工作树身份/分支/
- * 基线已证明之后）把索引**显式重置到已证明的基线**（`git reset -q` 混合模式到
- * canonicalBase——不隐式依赖 HEAD，不动工作树文件），以工作树为准继续打包。
+ * 基线已证明之后）把索引**显式重置到已证明的基线**（`git reset -q <canonicalBase>
+ * -- :/` 按路径重置——不隐式依赖 HEAD、不移动分支、不动工作树文件），以工作树为准
+ * 继续打包。
  * 返回重置掉的暂存路径（排序去重，有界），没有暂存改动时返回 null。
  *
  * Fail-closed：重置本身失败（含重置后缓存 diff 仍非空、HEAD 不在基线的验证
@@ -1958,7 +1959,9 @@ function resetPreStagedIndex(cwd, canonicalBase) {
   );
   if (staged.length === 0) return null;
   try {
-    git(["reset", "-q", "--end-of-options", canonicalBase], { cwd });
+    // Pathspec form: rewrites index entries only and never moves the branch,
+    // so the HEAD check below still detects a drift since the proof.
+    git(["reset", "-q", "--end-of-options", canonicalBase, "--", ":/"], { cwd });
     // Verify the reset landed on the proven baseline: HEAD there, cached diff
     // empty afterwards.
     const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
@@ -2007,8 +2010,9 @@ function resetPreStagedIndex(cwd, canonicalBase) {
  * 2. Fail closed on staged additions that the worktree would IGNORE — reset
  *    would silently drop their bytes, so this refuses (naming the paths)
  *    BEFORE the reset, index untouched (第 135 批续修 2).
- * 3. Reset worker-staged index entries to the PROVEN baseline (mixed reset to
- *    the canonical base — never implicit HEAD; working-tree files untouched)
+ * 3. Reset worker-staged index entries to the PROVEN baseline (pathspec reset to
+ *    the canonical base — never implicit HEAD, never moves the branch;
+ *    working-tree files untouched)
  *    and keep the reset paths for the fact (第 135 批续修 1/4).
  * 4. Re-run full inspection (inspectDelivery) — the change reads are
  *    index-independent (base-tree temp index), so the reset cannot skew them.
