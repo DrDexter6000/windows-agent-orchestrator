@@ -79,7 +79,7 @@ test("W5-2: 选择器错误→isError 固定文案（闭集码+合法全集+修�
   await withServer(async ({ dir, client, dispatches }) => {
     const unknownLane = await client.callTool({
       name: "run_dispatch",
-      arguments: { lane: "opus1", role: "auditor", prompt: "x" },
+      arguments: { lane: "opus1", role: "auditor", prompt: "x", expectedWorkspaceRoot: dir },
     });
     assert.equal(unknownLane.isError, true);
     const text = unknownLane.content[0].text;
@@ -90,7 +90,7 @@ test("W5-2: 选择器错误→isError 固定文案（闭集码+合法全集+修�
 
     const mixed = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "legacy_seat", lane: "opus", role: "auditor", prompt: "x" },
+      arguments: { agentId: "legacy_seat", lane: "opus", role: "auditor", prompt: "x", expectedWorkspaceRoot: dir },
     });
     assert.equal(mixed.isError, true);
     assert.match(mixed.content[0].text, /dispatch_selector_invalid/);

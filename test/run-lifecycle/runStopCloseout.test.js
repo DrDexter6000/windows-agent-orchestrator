@@ -121,7 +121,7 @@ test("RUNID-05: MCP run_stop rejects malicious runId — service count=0", async
     try {
       // The zod schema z.string().min(1) accepts "../victim", but the service
       // validates isValidRunId and throws → catch → "run_stop failed"
-      const res = await client.callTool({ name: "run_stop", arguments: { runId: "../victim", reason: TEST_STOP_REASON, observedSeq: 0 } });
+      const res = await client.callTool({ name: "run_stop", arguments: { runId: "../victim", reason: TEST_STOP_REASON, observedSeq: 0, expectedWorkspaceRoot: dir } });
       assert.ok(res.isError, "must be error");
       assert.equal(res.content[0].text, "run_stop failed");
       assert.equal(serviceCalls, 0, "service must not be called for invalid runId");
@@ -685,7 +685,7 @@ test("0069-M1: MCP run_stop —— 两项必填由 schema 拦；观察过时返�
     const client = await buildClient(server);
     try {
       const tool = (await client.listTools()).tools.find((t) => t.name === "run_stop");
-      assert.deepEqual([...tool.inputSchema.required].sort(), ["observedSeq", "reason", "runId"]);
+      assert.deepEqual([...tool.inputSchema.required].sort(), ["expectedWorkspaceRoot", "observedSeq", "reason", "runId"]);
 
       const missing = await client.callTool({ name: "run_stop", arguments: { runId: "run_0069_m1" } });
       assert.ok(missing.isError, "缺理由与位置 → schema 拒绝");
