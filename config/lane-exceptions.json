@@ -19,19 +19,6 @@
       "axes": {
         "backend": "zcode",
         "providerID": null,
-        "modelId": "bigmodel-api/GLM-5.4",
-        "providerKey": null
-      },
-      "ruling": "0037（2026-11-23 Owner 指示 glm-pro 升级 GLM-5.4，沿用；待 Owner 确认）",
-      "checks": [
-        "adversarialEscapeIntercepted"
-      ],
-      "scope": "delta"
-    },
-    {
-      "axes": {
-        "backend": "zcode",
-        "providerID": null,
         "modelId": "bigmodel-api/GLM-5.3-Flash",
         "providerKey": null
       },
