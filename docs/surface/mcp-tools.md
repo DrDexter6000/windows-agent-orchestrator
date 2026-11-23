@@ -42,7 +42,7 @@ Output:
 
 ## run_dispatch
 
-Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is REQUIRED and is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions against it. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
+Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -57,7 +57,7 @@ Input:
 | delivery | object | no |  |
 | expectedGitHead | string | no |  |
 | expectedDirty | boolean | no |  |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 | continuable | boolean | no |  |
 | correctable | boolean | no |  |
 | readOnly | boolean | no |  |
@@ -170,7 +170,7 @@ Output:
 
 ## run_continue
 
-Continue a terminal continuable delivery with ONE Lead-authorized correction turn: a new run resumes the parent's provider conversation in the retained worktree (no fresh worktree/session), shipping a child delivery. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the parent must belong to it. Eligibility: read-only, closed-set rejectionReason, before any mutation. WAO never infers correction, scope, verification, retry, or acceptance — the Lead reviews and decides.
+Continue a terminal continuable delivery with ONE Lead-authorized correction turn: a new run resumes the parent's provider conversation in the retained worktree (no fresh worktree/session), shipping a child delivery. expectedWorkspaceRoot (absolute Git worktree top-level); the parent must belong to it. Omit delivery to inherit the parent's effective contract. Eligibility: read-only, closed-set, before any mutation. WAO never infers correction, scope, verification, retry, or acceptance — the Lead reviews and decides.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -180,8 +180,8 @@ Input:
 | --- | --- | --- | --- |
 | parentRunId | string | yes |  |
 | prompt | string | yes |  |
-| delivery | object | yes |  |
-| expectedWorkspaceRoot | string | no |  |
+| delivery | object | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 
@@ -202,10 +202,11 @@ Output:
 | uncoveredInheritedPaths | array<string>\|null | no |  |
 | uncoveredInheritedCount | integer\|null | no |  |
 | uncoveredInheritedTruncated | boolean\|null | no |  |
+| guidance | string | no |  |
 
 ## run_correct
 
-Queue ONE follow-up correction turn to a RUNNING correctable worker: durable append, delivered to the live provider stdin. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Closed-set outcome queued/pending/delivered/rejected; queued = durably appended, NOT model-executed — run_activity later shows delivered/delivery_failed. WAO never auto-stops/retries/re-scopes/accepts; the prompt is never returned.
+Queue ONE follow-up correction turn to a RUNNING correctable worker: durable append, delivered to the live provider stdin. expectedWorkspaceRoot (absolute Git worktree top-level); the run must belong to it. Outcome queued/pending/delivered/rejected; queued = durably appended, NOT model-executed — run_activity later shows delivered/delivery_failed. WAO never auto-stops/retries/re-scopes/accepts; the prompt is never returned.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=true, openWorldHint=true
 
@@ -216,7 +217,7 @@ Input:
 | runId | string | yes |  |
 | correctionId | string | yes |  |
 | prompt | string | yes |  |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 
@@ -257,7 +258,7 @@ Output:
 
 ## run_collect
 
-Collect a run's worker output: bounded, redacted assistant text + evidence counts. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Each call appends one messages.collected audit event (not idempotent); cursor = prior nextCursor. mode=compact returns the last assistant text verbatim (<=4000 chars) + full evidence counts; no cursor, no semantic summary.
+Collect a run's worker output: bounded, redacted assistant text + evidence counts. expectedWorkspaceRoot (absolute Git worktree top-level); the run must belong to it. Each call appends one messages.collected audit event (not idempotent); cursor = prior nextCursor. mode=compact returns the last assistant text verbatim (<=4000 chars) + full evidence counts; no cursor, no semantic summary.
 
 Annotations: readOnlyHint=false, destructiveHint=false, idempotentHint=false, openWorldHint=true
 
@@ -268,7 +269,7 @@ Input:
 | runId | string | yes |  |
 | cursor | string | no |  |
 | mode | string | no | enum: full \| compact |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 
@@ -366,7 +367,7 @@ Output:
 
 ## run_delivery_decide
 
-Record a Lead decision (accepted/rejected) on a delivery. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. First durable decision wins. Expected-policy rejections return a normal outcome with a closed-set rejectionReason; a run of another project and unexpected internal failures are errors. Never decides correctness automatically; returns no decision reason or delivery details.
+Record a Lead decision on a delivery. expectedWorkspaceRoot (absolute Git worktree top-level); the run must belong to it. First durable decision wins. Expected-policy rejections return a normal outcome with a closed-set rejectionReason; another project's run and unexpected internal failures are errors. Never decides correctness automatically; returns no decision reason or delivery details.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -377,7 +378,7 @@ Input:
 | runId | string | yes |  |
 | decision | string | yes | enum: accepted \| rejected |
 | reason | string | yes |  |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 
@@ -392,7 +393,7 @@ Output:
 
 ## run_stop
 
-Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it, not to the default binding. Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded; worker events after observedSeq older than 2 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (process kill / backend abort); concurrent/late callers rejected, zero side effects. Not idempotent; after terminal a passing call writes only a rejection audit fact.
+Stop a run owned by this call's project (Lead-triggered). expectedWorkspaceRoot (absolute Git worktree top-level); the run must belong to it, not to the default binding. Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and reason (why stop) — both recorded; worker events after observedSeq older than 2 min reject the call, no side effect. Advice: do not stop within 10 min of a vital sign (any worker event) without a specific reason. first-terminal-wins: the first caller claims terminal 'aborted' and runs the destructive side effect (kill/abort); concurrent/late callers rejected, zero side effects. Not idempotent; after terminal a passing call writes only a rejection audit fact.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=false
 
@@ -403,7 +404,7 @@ Input:
 | runId | string | yes |  |
 | reason | string | yes |  |
 | observedSeq | integer | yes |  |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 
@@ -527,7 +528,7 @@ Output:
 
 ## run_delivery_repackage
 
-Re-package a retained delivery candidate after disallowed_path, verified-quiet backend failure, or process_missing (runner provably gone; settles the run failed, first-terminal-wins), reusing the original worktree, base commit, and verification config — no model, no resume, no path inference, no verification override. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. allowedPaths must cover the original scope and every actual changed path (sole scope authority); recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns accept/reject. Reentrant and crash-safe: one terminal fact, one commit, one outcome.
+Re-package a retained delivery candidate after disallowed_path, verified-quiet backend failure, or process_missing (runner provably gone; settles the run failed, first-terminal-wins), reusing the original worktree/base/verification config — no model, no resume, no path inference, no verification override. expectedWorkspaceRoot (absolute Git worktree top-level); the run must belong to it. allowedPaths must cover the original scope and every actual changed path (sole scope authority); recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns accept/reject. Reentrant and crash-safe: one terminal fact, one commit, one outcome.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -537,7 +538,7 @@ Input:
 | --- | --- | --- | --- |
 | runId | string | yes |  |
 | allowedPaths | array<string> | yes |  |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 
@@ -555,7 +556,7 @@ Output:
 
 ## run_delivery_reverify
 
-Re-verify the committed delivery artifact after the original verification outcome was invalidated (closed-set reason): re-runs the persisted verification commands against the SAME committed artifact, records one audited reverify chain, returns the closed-set outcome. attempt:2 requests the final re-verification after an eligible failed first chain. expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must belong to it. Reentrant — retries converge on the same commit, at most one outcome. The decision stays the Lead's (run_delivery_decide).
+Re-verify the committed delivery artifact after the original verification outcome was invalidated: re-runs the persisted verification commands against the SAME committed artifact, records one audited reverify chain, returns the closed-set outcome. attempt:2 is the final re-verification after an eligible failed first chain. expectedWorkspaceRoot (absolute Git worktree top-level); the run must belong to it. Reentrant — retries converge on the same commit. The decision stays the Lead's (run_delivery_decide).
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
@@ -568,7 +569,7 @@ Input:
 | attempt | integer | no |  |
 | setupCommands | array<string> | no |  |
 | timeoutMs | integer | no |  |
-| expectedWorkspaceRoot | string | no |  |
+| expectedWorkspaceRoot | string | yes |  |
 
 Output:
 

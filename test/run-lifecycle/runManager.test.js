@@ -2668,6 +2668,86 @@ test("TD-150-T1b: 打包失败无 marker ⇒ completionMarker absent（非 null�
   }
 });
 
+// ----- 第 135 批续修 4：重置事实随失败事件落转录 -----
+
+test("0130-续修4: 打包中途发生过索引重置时，run.delivery_failed 携带有界 stagedResetPaths（absent 非 null）", async () => {
+  // 复用 TD-150 直构 fixture 形状：注入的打包器按 delivery.js 真实产物的形状
+  // 抛错——错误对象带不可枚举 stagedResetPaths（不可枚举本身由 2A-16o 在
+  // 真实 packageDelivery 上钉住，这里钉 RunManager 把它读进失败事件的管道）。
+  const root = await makeTd150Dir("0130-reset-fact-");
+  const effectiveCwd = join(root, "wt");
+  const runDir = join(root, "runs");
+  const runId = "run_0130_reset_fact";
+  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  const transcript = new JsonlTranscript(transcriptPath, { runId, agentId: "coder_hq" });
+  await transcript.append("session.created", {
+    backend: "claude-code",
+    backendSessionId: "ses_0130",
+  });
+  const handle = {
+    backend: "claude-code",
+    backendSessionId: "ses_0130",
+    events: async function* () {
+      yield { kind: "metrics", tokens: { input: 1, output: 0 }, costUsd: 0 };
+      yield { kind: "done", reason: "completed" };
+    },
+    async abort() {},
+  };
+  const failingError = new Error("fixture: disallowed path after reset");
+  failingError.deliveryCode = "disallowed_path";
+  Object.defineProperty(failingError, "stagedResetPaths", {
+    value: ["README.md", "src/a.js"], enumerable: false,
+  });
+  const run = new Run({
+    runId,
+    agentId: "coder_hq",
+    agent: { id: "coder_hq", cwd: effectiveCwd },
+    backend: {},
+    handle,
+    transcript,
+    result: {
+      backend: "claude-code",
+      backendSessionId: "ses_0130",
+      messageId: "msg_0130",
+      admittedSeq: 1,
+    },
+    config: { runDir },
+    onRemove: () => {},
+    initialState: "submitted",
+    effectiveCwd,
+    scorecardRules: null,
+    deliveryContext: { runId },
+    packageDeliveryFn: async () => { throw failingError; },
+  });
+  try {
+    const result = await run.waitForCompletion({ pollInterval: 1 });
+    assert.equal(run.state, "failed");
+    assert.equal(result.failed, true);
+    assert.equal(result.deliveryError.code, "disallowed_path");
+    const events = await readTranscript(transcriptPath);
+    const df = events.find((e) => e.type === "run.delivery_failed");
+    assert.ok(df, "必须落 run.delivery_failed");
+    assert.deepEqual(df.stagedResetPaths, ["README.md", "src/a.js"], "失败事件带重置事实");
+    assert.equal(Object.hasOwn(df, "stagedResetTruncated"), false, "未截断时键缺席（absent 非 null）");
+  } finally {
+    cleanupTd150Dir(root);
+  }
+});
+
+test("0130-续修4b: 未发生重置的打包失败不带 stagedResetPaths 键（absent 非 null）", async () => {
+  const fx = await makeTd150DeliveryFixture({
+    events: [{ kind: "done", reason: "completed" }],
+  });
+  try {
+    const { events } = await finishTd150(fx);
+    const df = events.find((e) => e.type === "run.delivery_failed");
+    assert.ok(df);
+    assert.equal(Object.hasOwn(df, "stagedResetPaths"), false, "无重置无此键");
+  } finally {
+    cleanupTd150Dir(fx.root);
+  }
+});
+
 // ----- T2：checkScorecard 经合成事件读 marker -----
 
 test("TD-150-T2a: 合成 run.completed 携带闭集 marker ⇒ hasEvidence detail 升级，判定仍 false", async () => {

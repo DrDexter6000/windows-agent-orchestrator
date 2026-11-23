@@ -1164,10 +1164,12 @@ test("A-3: delivery spec 带 {\"delivery\":...} 外层包装 → SSOT 拒绝 + I
       delivery: { mode: "git_commit_v1", allowedPaths: ["x"], verificationCommands: ["true"] },
     }), "utf8");
     // 该路径在 loadDeliverySpec（registry/newRunManager 副作用之前）抛——纯检查。
+    // 第 135 批：mode 可省（缺省 git_commit_v1），包装形状的 SSOT 拒绝落在
+    // 缺顶层 allowedPaths 上；INNER 提示照旧追加，SSOT 仍是拒绝权威。
     await assert.rejects(
       () => runCommand(["coder_low", "--delivery-spec-file", f, "--isolate"], {}),
       (e) => {
-        assert.match(e.message, /delivery\.mode must be "git_commit_v1"/, "SSOT 错误原样保留");
+        assert.match(e.message, /allowedPaths/, "SSOT 错误原样保留（第 135 批起落在 allowedPaths）");
         assert.match(e.message, /INNER delivery object/, "外层包装形状必须追加 INNER 提示");
         return true;
       },
@@ -1185,7 +1187,7 @@ test("A-3: delivery spec 无外层包装的其它形状 → 仅 SSOT 错误（�
     await assert.rejects(
       () => runCommand(["coder_low", "--delivery-spec-file", f, "--isolate"], {}),
       (e) => {
-        assert.match(e.message, /delivery\.mode must be "git_commit_v1"/, "同一 SSOT 拒绝");
+        assert.match(e.message, /allowedPaths/, "同一 SSOT 拒绝（第 135 批起 mode 可省，形状错误落在 allowedPaths）");
         assert.doesNotMatch(e.message, /INNER/, "非包装形状不得追加 INNER 提示");
         return true;
       },

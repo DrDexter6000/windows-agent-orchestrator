@@ -187,6 +187,34 @@ test("3C1-02: invalid JSON fails before manager/backend start", async () => {
 /**
  * 3C1-03: valid JSON with invalid delivery schema fails through prepareDeliveryRequest before spawn.
  */
+// 第 135 批续修 6：显式 null mode 不冒充缺省（仅 undefined 取默认）。
+test("3C1-03b: --delivery-spec-file with explicit null mode refuses invalid_mode", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-3c1-03b-"));
+  try {
+    const specPath = join(dir, "null-mode.json");
+    writeFileSync(specPath, JSON.stringify({
+      mode: null,
+      allowedPaths: ["src"],
+      verificationCommands: ["echo ok"],
+    }), "utf8");
+
+    const config = makeConfig(dir, dir, createMockFetch());
+    await assert.rejects(
+      () => runCommand([
+        "test", "--prompt", "hi",
+        "--delivery-spec-file", specPath,
+        "--isolate",
+        "--run-dir", dir,
+      ], config),
+      // invalid_mode 是 deliveryCode 属性，不在 message 里；message 带 "got: null"。
+      (err) => err.deliveryCode === "invalid_mode" && /got: null/.test(err.message),
+      "explicit null mode is invalid_mode (got: null), never the default",
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
 test("3C1-03: valid JSON with invalid delivery schema fails through prepareDeliveryRequest", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-3c1-03-"));
   try {

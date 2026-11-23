@@ -1,5 +1,5 @@
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { existsSync, readdirSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
@@ -353,22 +353,382 @@ test("2A-15: base commit mismatch fails closed", async () => {
   }
 });
 
-test("2A-16: pre-staged worker changes fail closed", async () => {
+// ===== 2A Tests: worker-staged changes (第 135 批，决定 0130) =====
+//
+// 口径（决定 0130）：打包以工作树内容为准；worker 留下的暂存改动在打包前被
+// 混合重置（不动工作树文件），不再让整轮交付失败。必改面只有两个——"重置后
+// 交付内容与工作树不一致"（不可能：staging 的输入就是工作树读数）与"工作树
+// 文件被改动/丢失"（重置是 --mixed，下面逐形实测）。staged-only 字节（暂存后
+// 又从工作树删掉的文件）随索引条目一起消失，按工作树权威口径不算内容丢失，
+// 用 2A-16d 定格。
+
+test("2A-16: worker-staged changes no longer fail packaging — reset to baseline, worktree-authoritative", async () => {
   const { repo, baseCommit } = await makeRepo();
   const wtPath = makeWorktree(repo);
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
     execSync("git add src/a.js", { cwd: wtPath, stdio: "ignore" });
+    // Staged state must NOT show up in the worktree-authoritative diff.
+    const inspected = inspectDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(inspected.changedFiles, ["src/a.js"]);
+    // Packaging resets the index and proceeds; the fact rides on the ref.
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(ref.stagedResetPaths, ["src/a.js"]);
+    assert.equal("stagedResetTruncated" in ref, false, "no truncation flag under the cap");
+    // The commit carries the worktree content (not the staged bytes — same
+    // here), and the working-tree file was never touched by the reset.
+    const committed = execSync(`git show ${ref.deliveryCommit}:src/a.js`, {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    assert.equal(committed, "modified\n");
+    assert.equal(readFileSync(join(wtPath, "src", "a.js"), "utf8"), "modified\n");
+    const stagedLeft = execSync("git diff --name-only --cached -z", {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    assert.equal(stagedLeft.trim(), "", "index left clean after packaging");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16b: staged worktree content differing from index — worktree version is delivered, staged-only bytes are not", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Index holds "staged-only\n"; the worktree holds "worktree\n". Packaging
+    // is worktree-authoritative: the commit must contain "worktree\n".
+    await writeFile(join(wtPath, "src", "a.js"), "staged-only\n");
+    execSync("git add src/a.js", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "a.js"), "worktree\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(ref.stagedResetPaths, ["src/a.js"]);
+    const committed = execSync(`git show ${ref.deliveryCommit}:src/a.js`, {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    assert.equal(committed, "worktree\n", "commit matches the working tree, not the staged blob");
+    assert.equal(readFileSync(join(wtPath, "src", "a.js"), "utf8"), "worktree\n");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16c: staged new file still present in the worktree — delivered as untracked after the reset", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "new.js"), "brand new\n");
+    execSync("git add src/new.js", { cwd: wtPath, stdio: "ignore" });
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.changedFiles.includes("src/new.js"), "untracked-after-reset file is detected and delivered");
+    assert.deepEqual(ref.stagedResetPaths, ["src/new.js"]);
+    const committed = execSync(`git show ${ref.deliveryCommit}:src/new.js`, {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    assert.equal(committed, "brand new\n");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16d: staged-only blob (file staged then deleted from the worktree) is not delivered — worktree-authoritative loss surface, fixed by design", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Stage a NEW file, then delete it from the worktree. After the mixed
+    // reset the path is neither a tracked change nor untracked: the
+    // staged-only bytes are gone and the delivery carries no trace of them.
+    // A separate real worktree change keeps the diff non-empty.
+    await writeFile(join(wtPath, "src", "ghost.js"), "ghost\n");
+    execSync("git add src/ghost.js", { cwd: wtPath, stdio: "ignore" });
+    rmSync(join(wtPath, "src", "ghost.js")); // Windows 原生命令环境安全（续修 7）
+    await writeFile(join(wtPath, "src", "a.js"), "real change\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(ref.changedFiles, ["src/a.js"], "staged-only blob never reaches the delivery");
+    assert.deepEqual(ref.stagedResetPaths, ["src/ghost.js"], "the reset fact still names the path");
+    let ghostAbsent = false;
+    try {
+      execSync(`git show ${ref.deliveryCommit}:src/ghost.js`, {
+        cwd: repo, stdio: ["pipe", "pipe", "ignore"],
+      });
+    } catch {
+      ghostAbsent = true; // non-zero exit = path not in the commit (expected)
+    }
+    assert.ok(ghostAbsent, "ghost.js must not be in the delivery commit");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16e: staged change outside allowedPaths still fails disallowed_path after the reset (no scope widening)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "README.md"), "# hijacked\n");
+    execSync("git add README.md", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "a.js"), "legit\n");
     assertDeliveryError(
-      () => inspectDelivery(baseInput(wtPath, baseCommit)),
-      "pre_staged_changes",
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "disallowed_path",
     );
   } finally {
     await cleanupRepo(repo);
   }
 });
 
+test("2A-16f: reset failure fails closed with pre_staged_changes (held index lock)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const indexPath = execSync("git rev-parse --git-path index", {
+    cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+  const lockPath = resolve(wtPath, indexPath) + ".lock";
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    execSync("git add src/a.js", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(lockPath, "", "utf8");
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "pre_staged_changes",
+    );
+    // Fail-closed leaves everything as it was: index still staged, worktree
+    // file untouched.
+    const stagedLeft = execSync("git diff --name-only --cached", {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    assert.match(stagedLeft, /src\/a\.js/, "staged entry survives a failed reset");
+    assert.equal(readFileSync(join(wtPath, "src", "a.js"), "utf8"), "modified\n");
+  } finally {
+    try { execSync(`rm "${lockPath}"`, { stdio: "ignore" }); } catch { /* already gone */ }
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16g: bounded reset fact — 65 staged paths reset, fact lists 64 with truncation flag", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    for (let i = 0; i < 65; i += 1) {
+      await writeFile(join(wtPath, "src", `f${String(i).padStart(2, "0")}.js`), `x${i}\n`);
+    }
+    execSync("git add src", { cwd: wtPath, stdio: "ignore" });
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.equal(ref.stagedResetPaths.length, 64);
+    assert.equal(ref.stagedResetTruncated, true);
+    assert.equal(ref.changedFiles.length, 65, "all 65 worktree files delivered regardless of the fact cap");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2A Tests: 续修 1（先证明、后重置；显式基线）——任何拒绝前后索引不变 =====
+
+/** 快照 worktree 的暂存路径集（确定性形式，与生产读同款 --no-renames）。 */
+function stagedPaths(wtPath) {
+  return execSync("git diff --no-renames --name-only --cached -z", {
+    cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).split("\0").filter(Boolean).sort();
+}
+
+test("2A-16i: primary checkout refusal leaves the index untouched (proof runs before any reset)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  try {
+    await writeFile(join(repo, "src", "a.js"), "staged in primary\n");
+    execSync("git add src/a.js", { cwd: repo, stdio: "ignore" });
+    const before = stagedPaths(repo);
+    assertDeliveryError(
+      () => packageDelivery(baseInput(repo, baseCommit)),
+      "primary_checkout",
+    );
+    assert.deepEqual(stagedPaths(repo), before, "index unchanged after the refusal");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16j: wrong branch refusal leaves the index untouched", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = join(repo, ".wao-worktrees", "other-branch-tree");
+  try {
+    execSync(`git worktree add -b other-branch "${wtPath}"`, { cwd: repo, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "a.js"), "staged on wrong branch\n");
+    execSync("git add src/a.js", { cwd: wtPath, stdio: "ignore" });
+    const before = stagedPaths(wtPath);
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "wrong_branch",
+    );
+    assert.deepEqual(stagedPaths(wtPath), before, "index unchanged after the refusal");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16k: subdirectory worktreePath refusal leaves the real worktree index untouched", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "staged\n");
+    execSync("git add src/a.js", { cwd: wtPath, stdio: "ignore" });
+    const before = stagedPaths(wtPath);
+    assertDeliveryError(
+      () => packageDelivery(baseInput(join(wtPath, "src"), baseCommit)),
+      "worktree_path_mismatch",
+    );
+    assert.deepEqual(stagedPaths(wtPath), before, "index unchanged after the refusal");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16l: HEAD drift (base_commit_mismatch) refusal leaves the index untouched", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Move HEAD past the base on the delivery branch, then stage a separate file.
+    await writeFile(join(wtPath, "drift.txt"), "drift\n");
+    execSync("git add drift.txt && git commit -m drift", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "a.js"), "staged after drift\n");
+    execSync("git add src/a.js", { cwd: wtPath, stdio: "ignore" });
+    const before = stagedPaths(wtPath);
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "base_commit_mismatch",
+    );
+    assert.deepEqual(stagedPaths(wtPath), before, "index unchanged after the refusal");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2A Tests: 续修 2——被忽略的暂存新增 fail-closed（索引原样） =====
+
+test("2A-16m: staged rename onto an ignored path refuses and names the destination (git mv b.txt ignored.txt)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, ".gitignore"), "ignored.txt\n");
+    execSync("git add .gitignore && git commit -m ignore", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "b.txt"), "tracked content\n");
+    execSync("git add src/b.txt && git commit -m add-b", { cwd: wtPath, stdio: "ignore" });
+    const newBase = execSync("git rev-parse HEAD", { cwd: wtPath, encoding: "utf8" }).trim();
+    // sol 的原形态：git mv 到会被忽略的路径，两条路径都在 allowedPaths 内。
+    execSync("git mv src/b.txt src/ignored.txt", { cwd: wtPath, stdio: "ignore" });
+    const before = stagedPaths(wtPath);
+    assert.throws(
+      () => packageDelivery(baseInput(wtPath, newBase, { allowedPaths: ["src"] })),
+      (err) => {
+        assert.equal(err.deliveryCode, "pre_staged_changes");
+        assert.match(err.message, /src\/ignored\.txt/, "文案点名会被忽略的暂存新增");
+        return true;
+      },
+    );
+    assert.deepEqual(stagedPaths(wtPath), before, "index unchanged (refusal happens before the reset)");
+    // 工作树里 ignored.txt 的字节没有被丢弃。
+    assert.equal(readFileSync(join(wtPath, "src", "ignored.txt"), "utf8"), "tracked content\n");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16n: git add -f of an ignored file refuses with the same closed code", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, ".gitignore"), "ignored.txt\n");
+    execSync("git add .gitignore && git commit -m ignore", { cwd: wtPath, stdio: "ignore" });
+    const newBase = execSync("git rev-parse HEAD", { cwd: wtPath, encoding: "utf8" }).trim();
+    await writeFile(join(wtPath, "src", "ignored.txt"), "forced in\n");
+    execSync("git add -f src/ignored.txt", { cwd: wtPath, stdio: "ignore" });
+    const before = stagedPaths(wtPath);
+    assert.throws(
+      () => packageDelivery(baseInput(wtPath, newBase, { allowedPaths: ["src"] })),
+      (err) => err.deliveryCode === "pre_staged_changes" && err.message.includes("src/ignored.txt"),
+    );
+    assert.deepEqual(stagedPaths(wtPath), before, "index untouched");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2A Tests: 续修 4——重置事实随失败带出 =====
+
+test("2A-16o: post-reset packaging failure carries the bounded reset fact on the error", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "staged\n");
+    await writeFile(join(wtPath, "README.md"), "out of scope\n");
+    execSync("git add src/a.js README.md", { cwd: wtPath, stdio: "ignore" });
+    let caught = null;
+    try {
+      packageDelivery(baseInput(wtPath, baseCommit));
+    } catch (err) { caught = err; }
+    assert.ok(caught, "packaging failed");
+    assert.equal(caught.deliveryCode, "disallowed_path");
+    assert.deepEqual(caught.stagedResetPaths, ["README.md", "src/a.js"], "reset fact on the failure");
+    assert.equal(caught.stagedResetTruncated, undefined, "no truncation flag under the cap");
+    // 不可枚举：绝不经 JSON 序列化外漏（RunManager 显式读取）。
+    assert.ok(!Object.keys(caught).includes("stagedResetPaths"), "non-enumerable");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2A Tests: 续修 3——改动读取与真实索引无关（base 树临时索引） =====
+
+test("2A-16p: index-only deletion (git rm --cached) never enters the change reads or the delivery", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // .gitignore 在基线被跟踪；工作树一字节未动；只从索引删除它。
+    execSync("git rm --cached .gitignore", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "a.js"), "real change\n");
+    // 清点（候选清单同款读取）不含仅索引删除的路径。
+    assert.deepEqual(listWorktreeChangedPaths(wtPath, baseCommit), ["src/a.js"]);
+    const inspected = inspectDelivery(baseInput(wtPath, baseCommit, { allowedPaths: ["src", ".gitignore"] }));
+    assert.deepEqual(inspected.changedFiles, ["src/a.js"], "rm --cached path absent despite being allowed");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit, { allowedPaths: ["src", ".gitignore"] }));
+    assert.deepEqual(ref.changedFiles, ["src/a.js"]);
+    const names = execSync(`git show ${ref.deliveryCommit} --name-only --format=`, {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    assert.equal(names, "src/a.js", "the commit carries only the real change");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2A Tests: 续修 6——仅 undefined 取默认 mode =====
+
+test("2A-16q: delivery.mode null is invalid_mode, not the default", () => {
+  assert.throws(
+    () => prepareDeliveryRequest({
+      mode: null,
+      allowedPaths: ["src"],
+      verificationCommands: ["npm test"],
+    }),
+    (err) => err.deliveryCode === "invalid_mode" && /null/.test(err.message),
+  );
+});
+
 // ===== 2A Tests: allowedPaths validation =====
+
+test("2A-16h: delivery.mode is optional — omitted defaults to git_commit_v1; an explicit other value still refuses", () => {
+  const out = prepareDeliveryRequest({
+    allowedPaths: ["src"],
+    verificationCommands: ["npm test"],
+  });
+  assert.equal(out.mode, "git_commit_v1", "omitted mode defaults to the only supported mode");
+  assert.throws(
+    () => prepareDeliveryRequest({
+      mode: "commit",
+      allowedPaths: ["src"],
+      verificationCommands: ["npm test"],
+    }),
+    (err) => err.deliveryCode === "invalid_mode" && /git_commit_v1/.test(err.message),
+    "explicit wrong mode keeps the closed invalid_mode refusal naming the legal value",
+  );
+});
 
 test("2A-17a: invalid allowedPath — path traversal fails closed", () => {
   assertDeliveryError(

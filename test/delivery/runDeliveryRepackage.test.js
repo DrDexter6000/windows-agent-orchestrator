@@ -2332,16 +2332,27 @@ for (const kind of ["parent", "message", "dirty", "committed path after inventor
   });
 }
 
-test("TD-231 backend_failed worker staged changes before crashing", async () => {
+test("TD-231 backend_failed worker staged changes before crashing — reset to baseline, packaging proceeds (决定 0130)", async () => {
   const s = await setupBackendFailureScenario();
   try {
     git(["add", "src/a.js"], s.worktreePath);
-    const indexBefore = git(["diff", "--cached"], s.worktreePath);
-    const before = await readEvents(s.runDir);
-    await assert.rejects(runDeliveryRepackage({ ...td231Input(s), allowedPaths: ["src"] }), isCode("worktree_unusable"));
-    assertAuditDelta(before, await readEvents(s.runDir), "worktree_unusable");
-    assert.equal(git(["rev-parse", "HEAD"], s.worktreePath), s.baseCommit);
-    assert.equal(git(["diff", "--cached"], s.worktreePath), indexBefore);
+    // 第 135 批：打包不再拒绝暂存改动——先混合重置索引（不动工作树），以工作树
+    // 为准打包成功；worktree_unusable 只留给重置本身失败（fail-closed）。
+    const result = await runDeliveryRepackage({ ...td231Input(s), allowedPaths: ["src"] });
+    assert.equal(result.source, "packaged");
+    assert.equal(result.recoveryKind, "backend_failed");
+    assert.equal(result.created, true);
+    assert.equal(result.verificationStatus, "passed");
+    assert.equal(git(["rev-parse", "HEAD"], s.worktreePath), result.deliveryCommit);
+    assert.equal(
+      git(["show", result.deliveryCommit + ":src/a.js"], s.worktreePath),
+      readFileSync(join(s.worktreePath, "src", "a.js"), "utf8").replace(/\r?\n$/, ""),
+      "delivery commit carries the worktree content (git helper trims trailing newline)",
+    );
+    const after = await readEvents(s.runDir);
+    const created = after.filter((e) => e.type === "run.delivery_created").at(-1);
+    assert.deepEqual(created.delivery.stagedResetPaths, ["src/a.js"], "the reset fact rides on the created ref");
+    assert.ok(after.some((e) => e.type === "run.delivery_repackaged"), "provenance lands");
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });
 
@@ -2810,5 +2821,29 @@ test("B91-LEASE-RETRY-CREATED: a retry with created but no outcome takes the lea
     assert.equal(result.created, false);
     assert.equal(result.verificationStatus, "passed");
     assert.deepEqual(order, ["start", "verify", "stop:outcomes=1"]);
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+// 第 135 批续修 3（决定 0130 修订条）：清点与真实索引无关——仅索引删除
+// （git rm --cached）不再算成改动路径，重打包不再误报 scope_violation。
+test("0130-续修3: git rm --cached in the retained worktree is invisible to the repackage inventory (no scope_violation), commit carries only real changes", async () => {
+  const s = await setupDisallowedScenario();
+  try {
+    // 在原合同之外留一个"只删索引不删工作树"的形态：.gitignore 在基线被跟踪、
+    // 工作树字节未动、只从索引删除。清点必须看不见它（与重置后同一口径）。
+    git(["rm", "--cached", ".gitignore"], s.worktreePath);
+    const result = await runDeliveryRepackage({
+      ...td231Input(s),
+      allowedPaths: ["root.txt", "src"], // 不授权 .gitignore——它不是真实改动
+    });
+    assert.equal(result.source, "packaged");
+    assert.equal(result.recoveryKind, "disallowed_scope");
+    assert.equal(result.verificationStatus, "passed");
+    assert.equal(git(["rev-parse", "HEAD"], s.worktreePath), result.deliveryCommit);
+    const committed = git(["show", result.deliveryCommit, "--name-only", "--format="], s.worktreePath)
+      .split("\n").filter(Boolean).sort();
+    assert.deepEqual(committed, ["root.txt", "src/a.js"], "commit carries exactly the real changes");
+    // 工作树的 .gitignore 仍在（重置把索引带回了基线，工作树文件未被动过）。
+    assert.ok(readFileSync(join(s.worktreePath, ".gitignore"), "utf8").includes("node_modules/"));
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });

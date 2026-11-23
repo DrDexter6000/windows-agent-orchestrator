@@ -113,8 +113,9 @@ async function loadDeliverySpec(options) {
   }
   // Validate through SSOT — throws DeliveryError on schema violations.
   // A-3（friction 2026-08-15 #3）：带 {"delivery": ...} 外层包装的 spec 会在 SSOT
-  // 处因缺顶层 mode 被拒——catch-and-annotate：只在既有拒绝上追加 INNER 提示，
-  // 不接受任何新输入，SSOT 仍是拒绝权威。
+  // 处被拒（第 135 批起 mode 可省，包装形状通常先在 allowedPaths 上拒绝）——
+  // catch-and-annotate：只在既有拒绝上追加 INNER 提示，不接受任何新输入，
+  // SSOT 仍是拒绝权威。
   let validated;
   try {
     validated = prepareDeliveryRequest(parsed);
@@ -125,7 +126,7 @@ async function loadDeliverySpec(options) {
       // .message 与改前 join("\n") 逐字一致。
       throw linesError([
         error.message,
-        `(hint: --delivery-spec-file expects the INNER delivery object {"mode": "git_commit_v1", ...} — remove the outer {"delivery": ...} wrapper)`,
+        `(hint: --delivery-spec-file expects the INNER delivery object {"allowedPaths": [...], ...} — remove the outer {"delivery": ...} wrapper)`,
       ]);
     }
     throw error;

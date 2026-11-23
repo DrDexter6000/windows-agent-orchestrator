@@ -474,7 +474,18 @@ const RED_23_WIRE = 75492;
 // 输出增可选 certificationEvidence/recentRuns、run_dispatch 出参增可选
 // contractAdvisories：87157→76543（实测；Owner 硬顶 94532 内；仍低于 2a1875ac
 // 的 87157）。三条冻结线与 SHA 均按实测下调重冻。
-const FROZEN_17_WIRE_CEILING = 76543;
+// 第 135 批（决定 0130，Owner 2026-11-22 同意执行头脑风暴结论；本批任务书授权
+// 重冻，只降不升）：八个写类工具的 inputSchema 把 expectedWorkspaceRoot 标
+// required（run_dispatch 从与 contract_check 共享的基础对象派生严格版），
+// DELIVERY_INPUT 的 mode 可省（缺省 git_commit_v1）、run_continue 的 delivery
+// 可省（省略继承父运行已生效合同）；八工具描述同步精简抵消（"is required" 句、
+// 与 schema 重复的枚举句等）：76543→76532（实测；Owner 硬顶 94532 内）。
+// 第 135 批续修（两席会审 FIX_FIRST 后 Lead 裁定）：run_continue 出参增可选
+// guidance（仅继承合同复验失败的拒绝携带，+45B schema），run_collect 恢复
+// "cursor = prior nextCursor"、run_stop 恢复 "(any worker event)"（schema 表达
+// 不了的指路语义），同批压 reverify/repackage/stop/continue 的 schema 重复措辞
+// 抵消：76532→76535（实测；不高于 main 的 76543，Owner 硬顶 94532 内）。
+const FROZEN_17_WIRE_CEILING = 76535;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -738,8 +749,16 @@ test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", asyn
 // 0129 首轮（四删、20→16）后的冻结值；
 // b5abee2571f96bcbbeaa1742a54ab6be0bf21c1ef7cc9c2dcc2fbdc6665d3667 为
 // TD-354 后的冻结值。）
+// 第 135 批（决定 0130，本批任务书授权重冻）：八个写类工具 inputSchema 的
+// expectedWorkspaceRoot 标 required（run_dispatch 从共享基础对象派生严格版）、
+// DELIVERY_INPUT 的 mode 可省、run_continue 的 delivery 可省——SHA 如实翻新。
+// （历史值：d398828b8eef5da845ed66f579ab4906860303b3a7989556e8c2644ac70625b8
+// 为第 134 批后的冻结值。）
+// 第 135 批续修：run_continue 出参增可选 guidance——SHA 如实翻新。
+// （历史值：82b48f5bd1f7fa26c1d0685d61313c14e9f08d877fe3239104a83a7ca03a46fc
+// 为第 135 批首交付（cfbf522f）的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "d398828b8eef5da845ed66f579ab4906860303b3a7989556e8c2644ac70625b8";
+  "e3de9cbb1ba6720b0d6e750b267d841727fcbbafa31749c4aecc1f75ea8e7295";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。
@@ -861,7 +880,14 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // contract_check（其描述随之回面）、lead_preflight 描述加新选项说明与
 // unresolved 语义句：11291→10402（实测；Owner 硬顶 12347 内；仍低于 2a1875ac
 // 的 11291）。
-const FROZEN_17_DESC_CEILING = 10402;
+// 第 135 批（决定 0130，本批任务书授权重冻，只降不升）：八写类工具描述删
+// "is required" 句（schema 标必填后冗余），同批压 schema 重复的枚举句
+// （closed-set outcome、cursor=nextCursor、accepted/rejected）与 stop 的
+// "(any worker event)" 等：10402→10231（实测；Owner 硬顶 12347 内）。
+// 第 135 批续修：恢复 cursor=nextCursor 与 "(any worker event)" 两句（schema
+// 表达不了），同批压 reverify/repackage/stop/continue 的重复措辞净减：
+// 10231→10189（实测；不高于 main 的 10402，Owner 硬顶 12347 内）。
+const FROZEN_17_DESC_CEILING = 10189;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：12063→12219（实测；Owner 硬顶 12347 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 描述加一句"回执在有未终态
@@ -885,7 +911,12 @@ const FROZEN_17_DESC_CEILING = 10402;
 // contract_check、preflight 输入增 recentRuns 对象（limit/activeOnly）+ workers
 // 不设 max：22436→20870（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内；
 // 仍低于 2a1875ac 的 22436）。
-const FROZEN_17_HOSTVISIBLE_CEILING = 20870;
+// 第 135 批（决定 0130，本批任务书授权重冻，只降不升）：inputSchema 的
+// required 增八条、mode/delivery 必填项减少，描述精简抵消后按实测：
+// 20870→20859（hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
+// 第 135 批续修：guidance 字段进 inputSchema（+45B）、两句描述恢复与同批
+// 精简相抵后按实测：20859→20817（不高于 main 的 20870，wire 硬顶 94532 内）。
+const FROZEN_17_HOSTVISIBLE_CEILING = 20817;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：23270→23426（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句

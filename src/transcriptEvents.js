@@ -164,11 +164,11 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.delivery_created",
-    description: "delivery 打包成功，含完整 DeliveryRef。前台路径经 RunManager 终态批次的 attemptEvents（无论转移 accepted/rejected 都落盘，消除孤儿 delivery commit 窗口）；重打包路径与 run.delivery_repackaged 同批原子落盘。",
+    description: "delivery 打包成功，含完整 DeliveryRef。前台路径经 RunManager 终态批次的 attemptEvents（无论转移 accepted/rejected 都落盘，消除孤儿 delivery commit 窗口）；重打包路径与 run.delivery_repackaged 同批原子落盘。worker 暂存改动在打包前被混合重置（不动工作树文件）时，Ref 另携 stagedResetPaths（有界仓库相对路径清单）与超限标记 stagedResetTruncated（仅超限时出现）。",
   },
   {
     type: "run.delivery_failed",
-    description: "delivery 打包失败，含 deliveryCode + 脱敏摘要。completionMarker:\"completed_empty\"（闭集 DONE_MARKERS 成员）表示 worker 零产出；空 diff 且 worker 按交付合同上报越界停手时另携 workerDeclared:\"scope_expansion_required\"（闭集标记，不带路径/理由自由文本——路径与理由在 worker 最终回复里）；由错误对象结构化属性（status/code/syscall/signal，不读消息原文）分得出的打包环境类别另携 errorClass（闭集 git_index_locked/file_locked/permission_denied/disk_full/git_spawn_failed/git_timeout/git_command_failed，SSOT=src/deliveryErrorClass.js；分不出时键缺席，absent 非 null）。",
+    description: "delivery 打包失败，含 deliveryCode + 脱敏摘要。打包中途发生过索引重置（决定 0130）时另携 stagedResetPaths（有界仓库相对路径清单）与超限标记 stagedResetTruncated（仅超限时出现；absent 非 null）。completionMarker:\"completed_empty\"（闭集 DONE_MARKERS 成员）表示 worker 零产出；空 diff 且 worker 按交付合同上报越界停手时另携 workerDeclared:\"scope_expansion_required\"（闭集标记，不带路径/理由自由文本——路径与理由在 worker 最终回复里）；由错误对象结构化属性（status/code/syscall/signal，不读消息原文）分得出的打包环境类别另携 errorClass（闭集 git_index_locked/file_locked/permission_denied/disk_full/git_spawn_failed/git_timeout/git_command_failed，SSOT=src/deliveryErrorClass.js；分不出时键缺席，absent 非 null）。",
   },
   {
     type: "run.delivery_verification_passed",

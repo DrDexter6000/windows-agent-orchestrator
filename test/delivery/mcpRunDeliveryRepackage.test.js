@@ -401,7 +401,7 @@ test("TD-226-MCP-2: transport classification is TYPE-gated — plain Errors and 
   }
 });
 
-test("TD-231 MCP end-to-end: backend_failed staged worktree bridges to rejectionReason", async () => {
+test("TD-231 MCP end-to-end: backend_failed staged worktree — worker-staged changes are reset, packaging proceeds (决定 0130)", async () => {
   const dir = makeGitDir("td231-mcp-");
   const runId = "run_td231_mcp";
   const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true, stdio: ["pipe", "pipe", "ignore"] }).trim();
@@ -416,7 +416,7 @@ test("TD-231 MCP end-to-end: backend_failed staged worktree bridges to rejection
     const events = [
       { type: "run.background_submitted", cwd: dir, deliveryRequested: true },
       { type: "run.started", cwd: dir, worktreePath, worktreeBranch: "wao/" + runId,
-        delivery: { mode: "git_commit_v1", baseCommit, allowedPaths: ["src"], verificationCommands: ["npm test"] } },
+        delivery: { mode: "git_commit_v1", baseCommit, allowedPaths: ["src"], verificationCommands: ["node -e \"process.exit(3)\""] } },
       { type: "run.state_change", from: null, to: "pending", reason: "created" },
       { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
       { type: "run.state_change", from: "running", to: "failed", reason: "backend_error" },
@@ -425,18 +425,32 @@ test("TD-231 MCP end-to-end: backend_failed staged worktree bridges to rejection
     const filePath = join(runDir, runId + ".jsonl");
     writeFileSync(filePath, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
     writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }));
-    // No service injection: MCP -> real application -> real Git packaging error.
+    // No service injection: MCP -> real application -> real Git packaging.
     const server = createWaoMcpServer({ registryPath: join(dir, "agents.json"), runDir, workspaceRoot: dir });
     const client = await buildInMemoryClient(server);
     try {
       const result = await client.callTool({ name: "run_delivery_repackage", arguments: { runId, allowedPaths: ["src"], expectedWorkspaceRoot: dir } });
       assert.equal(result.isError, undefined);
-      assert.deepEqual(result.structuredContent, { status: "ok", runId, rejectionReason: "worktree_unusable" });
+      const sc = result.structuredContent;
+      assert.equal(sc.status, "ok");
+      assert.equal(sc.runId, runId);
+      assert.equal(sc.rejectionReason, null);
+      assert.equal(sc.source, "packaged");
+      assert.equal(sc.recoveryKind, "backend_failed");
+      assert.equal(sc.created, true);
+      // The staged bytes were worktree content too: the reset preserves them
+      // and the delivery commit carries exactly the worktree state.
+      assert.equal(
+        execFileSync("git", ["show", sc.deliveryCommit + ":src/a.js"], { cwd: dir, encoding: "utf8", windowsHide: true, stdio: ["pipe", "pipe", "ignore"] }),
+        "staged by failed worker\n",
+      );
       const after = readFileSync(filePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
       assert.deepEqual(after.slice(0, events.length), events);
-      assert.equal(after.length, events.length + 1);
-      assert.equal(after.at(-1).type, "run.delivery_repackage_rejected");
-      assert.equal(after.at(-1).rejectionReason, "worktree_unusable");
+      const newTypes = after.slice(events.length).map((e) => e.type);
+      assert.ok(newTypes.includes("run.delivery_created"), "delivery_created lands");
+      assert.ok(newTypes.includes("run.delivery_repackaged"), "repackage provenance lands");
+      const created = after.filter((e) => e.type === "run.delivery_created").at(-1);
+      assert.deepEqual(created.delivery.stagedResetPaths, ["src/a.js"], "the reset fact rides on the created ref");
       assert.ok(!JSON.stringify(result).includes(worktreePath));
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }

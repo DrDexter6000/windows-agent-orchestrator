@@ -131,3 +131,4 @@
 0127 | SKILL.md 保持单一入口，情形细节下沉到使用手册已有的节
 0128 | 会审结论的可靠获取：适配器按逻辑发言发事件，声明字段作为正式结论通道
 0129 | MCP 工具面 20 → 17：registry_list/runs_list/run_delivery_review_bundle 能力并进幸存者后删除；run_dispatch_contract_check 保留（check-only 无等价物）
+0130 | 规矩下沉——run_continue 合同可继承、八写类工具目标 schema 必填、delivery.mode 可省、worker 暂存改动重置后继续打包

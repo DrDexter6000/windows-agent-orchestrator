@@ -112,7 +112,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   | `run_stop` | destructive，workspace-bound | 停止失控 worker，委托共享 application service `runStop.js`（CLI `stop` 与 MCP 共用同一 service）。 |
   | `run_await_result` | 只读 composite | 终态/活性等待 + 终态 compact 结果（MCP 面的 run 终态等待工具，窗口区间见 `docs/usage/supervise.md`；CLI 长等待 `runs wait` 走共享 `runWait.js` 服务）。 |
   | `run_delivery_reverify` | 审计式重验证 | 委托共享 application service `runDeliveryReverify.js`（CLI `runs delivery reverify` 与 MCP 共用）：对同一未变 delivery commit 重跑原始 assertion 命令（逐字节不可改），Lead 只能追加 setup 命令；可重入/崩溃安全，每条链至多一条 outcome，一个交付至多两条链（第二条须 Lead 显式 `attempt: 2` 且第一条以可重验码失败）；永不自动 accept/reject；原始 verification 与 `run_delivery` 投影的 `originalVerificationStatus`/`effectiveVerificationStatus`/`reverify` 链事实一并保留。 |
-  | `run_continue` | delivery-only，Lead 显式授权 | 与 `run_dispatch` 共享 delivery-only 顶层 `continuable` 选项：Lead 对终态 continuable delivery 显式授权续 ONE 修正回合——新 run/transcript、复用父 run 的 retained worktree、以 `turn:resume` 续同一 provider-native 会话（谱系身份见 §4.10），并打包新 child delivery。`continuable:true` 在 dispatch 时以 `run_lineage`/`turn:first` 建立续谱根；explicit 车道+角色父档同样可续（子运行重建见 §4.2）。closed-set 只读资格检查覆盖输入与 delivery、父 run 身份/终态/acceptance、lineage/provider session、workspace/delivery、worker backend+model 配置、角色钉住、backend 能力、retained worktree 与并发占用，均先于 mutation；静态 argv/credential 亦先检查。retained-worktree 转换幂等且事务化，spawn 前失败恢复父 worktree、清理 child transcript 并释放 claim；外部漂移不覆盖（父 commit 对象永不删除，仍可按 SHA 审阅）。WAO 从不推断 correction/scope/verification/retry/acceptance——child delivery 的 review/accept/reject 仍归 Lead。 |
+  | `run_continue` | delivery-only，Lead 显式授权 | 与 `run_dispatch` 共享 delivery-only 顶层 `continuable` 选项：Lead 对终态 continuable delivery 显式授权续 ONE 修正回合——新 run/transcript、复用父 run 的 retained worktree、以 `turn:resume` 续同一 provider-native 会话（谱系身份见 §4.10），并打包新 child delivery。子 `delivery` 可省（决定 0130）：省略即继承父运行已生效的合同（只取父 `run.started` 落盘的合同事实；父若是续修取它自己那份）——不扩大 scope；显式给出行为不变，累计范围核照旧。`continuable:true` 在 dispatch 时以 `run_lineage`/`turn:first` 建立续谱根；explicit 车道+角色父档同样可续（子运行重建见 §4.2）。closed-set 只读资格检查覆盖输入与 delivery、父 run 身份/终态/acceptance、lineage/provider session、workspace/delivery、worker backend+model 配置、角色钉住、backend 能力、retained worktree 与并发占用，均先于 mutation；静态 argv/credential 亦先检查。retained-worktree 转换幂等且事务化，spawn 前失败恢复父 worktree、清理 child transcript 并释放 claim；外部漂移不覆盖（父 commit 对象永不删除，仍可按 SHA 审阅）。WAO 从不推断 correction/scope/verification/retry/acceptance——child delivery 的 review/accept/reject 仍归 Lead。 |
 
   opaque uuid、Lead id、workspace 路径、active lineage runId 永不出现在 MCP 输出。
 - **只读 run 声明（advisory + 运行中告警，无硬门）**：`run_dispatch` 顶层 `readOnly:true` / CLI `run --read-only` 是 Lead 的**声明**而非门——链路为"声明 → 强制隔离 → 观察"。`runDispatch.js` 与 `RunManager.start` 双层拒绝 `readOnly × delivery`（闭集理由码 `read_only_delivery_conflict`；`readOnly × continuable` 被既有 delivery-only 门自然拒绝；`readOnly × correctable` 共存）；声明强制 ephemeral 隔离（覆盖 isolate flag；非复用轮是源仓的私有克隆，显式写源仓路径挡不住；§4.3①，决定 0102）；readOnly×复用轮仍是 persistent 链接工作树（见 usage.md）；建树失败 fail-closed（typed `read_only_worktree_required`，**堵住**降级原 cwd 路径），并在 start 恰一次写 `run.read_only_declared` durable 事实（空 payload；`transcript.js` 幂等 append API 是唯一写入点，前台与 runner 汇聚于 `RunManager.start`）。控制面还给只读运行注入**只读执行合同**（`composeReadOnlyExecutionContract`，`src/application/roleContract.js`）：start 与 resume 都在角色合同组装之后把它前置进 `task.roleContract`（与交付合同同一拼法；resume 只认本 run 绑定的声明事件，后端不声明 `supportsRoleContract` 时同样 fail closed），只读 resume 在 `run.started` 记下的隔离树里执行；合同不进 `rolePin.sha256` 或会话复用的角色哈希。`runReadOnlyObservation.js` 在同一冻结快照上投影 advisory `readOnlyObservation`（闭集 `no_writes_observed | writes_observed | unknown`，`source:"transcript_file_events"`，`observedFileCount`、`writtenPaths`（脱敏后的安全 repo-relative 路径，上限 25 条）、`writtenPathCount`、`writtenPathsTruncated`）——权威 = 恰一条绑定 `run.started`（绝对 worktreePath）+ 恰一条绑定声明事件；任一 `file_written` 路径不可求值、权威缺失或歧义、声明缺失/重复/跨 run → 整体 `unknown`（fail-closed）。**诚实口径**：status 报当前快照观察（非终态也可 `writes_observed`——运行中告警，呈现≠动作）；`no_writes_observed` 是"未观察到写"（工具上报证据），非"没写"；`complete:true` 仅当快照终态且全部可求值。**Owner 约束**：越界写不停止、不失败、不改写自然终态——纯 advisory，终审归 Lead。观察只在快照含绑定声明事件时挂载（未声明 run 的 `run_activity` 输出字节不变）。
@@ -651,7 +651,7 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 1. **观察到的**写路径位于 isolated worktree **之外** → `run.isolation_violation(code=workdir_escape)`，在 packaging **之前**转 failed（readiness `isolation_failed`，无 packaging/decision 面）。
 2. 位于 worktree **之内**但与 `delivery.allowedPaths` 不匹配或越出 path-segment boundary → packaging **期间**以 `disallowed_path` 拒绝（retained candidate 保留，`run_delivery_repackage` 无模型重封装）。
 
-**Packaging ownership**：worker 不创建 delivery commit。`packageDelivery` 重新 inspect 后只 stage inspected 授权路径（`git add -A -- <changedFiles...>`），再用 Git **plumbing** 创建 commit：`git write-tree` 捕获 staged index tree → `git commit-tree <tree> -p <baseCommit>`（message 经 stdin，identity 经子进程 env 传 `WAO Delivery <wao-delivery@local>`）→ `git update-ref refs/heads/<branch> <candidate> <baseCommit>` 原子 CAS 更新 branch ref（expected-old-value 防并发）。
+**Packaging ownership**：worker 不创建 delivery commit。打包前索引先混合重置到基线（`git reset -q`，不动工作树；重置失败照旧 `pre_staged_changes` fail-closed），重置的暂存路径清单（有界，截断如实标注）作 DeliveryRef 的 `stagedResetPaths` 随 `run.delivery_created` 落转录（决定 0130）——打包始终以工作树内容为准。随后重新 inspect 只 stage inspected 授权路径（`git add -A -- <changedFiles...>`），再用 Git **plumbing** 创建 commit：`git write-tree` 捕获 staged index tree → `git commit-tree <tree> -p <baseCommit>`（message 经 stdin，identity 经子进程 env 传 `WAO Delivery <wao-delivery@local>`）→ `git update-ref refs/heads/<branch> <candidate> <baseCommit>` 原子 CAS 更新 branch ref（expected-old-value 防并发）。
 
 **Hooks 不参与机械打包**：`commit-tree` + `update-ref` 是 plumbing 命令，**不执行任何 repository hooks**（pre-commit / prepare-commit-msg / commit-msg / post-commit 均不运行）。Git hooks 属于项目验证策略，由 `DeliveryRef.verification.commands` 显式执行；机械 packager 确定性地把已检查的 index tree 变成 commit。不修改 repo-local/global git config；GPG signing 不适用（plumbing 路径不走 signing）。
 
@@ -659,14 +659,14 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 
 **Packaging failure cleanup**（三类失败路径）：
 - **staging mismatch**：`git reset -q --` 恢复 index 到 base，保留 working-tree；验证 HEAD 在 base、index 为空。
-- **commit-tree / update-ref CAS 失败**：`git reset -q --` 恢复 index（branch 未移动——CAS 保护），保留 working-tree；验证 HEAD 在 base、index 为空。candidate object 不可达但不影响 branch。
+- **commit-tree / update-ref CAS 失败**：同上恢复 index（branch 未移动——CAS 保护），验证 HEAD 在 base、index 为空；candidate object 不可达但不影响 branch。
 - **post-update-ref integrity 失败**：`git reset --mixed -q --end-of-options <canonicalBase>` 把 branch HEAD 移回 base（不用 `--hard`、不用 `clean`），保留所有 working-tree 文件内容，重新验证 HEAD === baseCommit 且 cached diff 为空；只有验证成功才声称 restored。
 
 rollback 本身失败时抛 `deliveryCode=cleanup_failed`（保留原始失败类别/摘要，不吞错误、不虚报恢复）。
 
 重复 packaging（HEAD 已在 delivery commit）被 base mismatch 拦截，不创建第二个 commit。
 
-**Fail-closed**（inspection + packaging 均适用）：empty diff、dirty base（pre-staged changes）、disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout（非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（空 segment/重复分隔符/根 "/"、"."、".."、绝对或盘符路径；**单个尾分隔符在写入口归一化放行**，段边界前缀语义见 isPathAllowed）、invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification — 均拒绝，不静默改写。
+**Fail-closed**（inspection + packaging 均适用）：empty diff、disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout（非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（空 segment/重复分隔符/根 "/"、"."、".."、绝对或盘符路径；**单个尾分隔符在写入口归一化放行**，段边界前缀语义见 isPathAllowed）、invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification — 均拒绝，不静默改写。仅 packaging 另拒 pre-staged changes（决定 0130 起仅指索引重置失败）。
 
 **生命周期**：
 ```
@@ -680,7 +680,7 @@ worker 进程完成 ≠ code delivery 完成。
 
 ```js
 delivery: {
-  mode: "git_commit_v1",             // 目前唯一支持的模式
+  mode: "git_commit_v1",             // 可省：唯一支持的模式，缺省即它（决定 0130）
   allowedPaths: ["src", "test/"],     // 文件或目录，按字面匹配，目录放行其下全部；含 * ? 的条目被拒（不是通配）
   verificationCommands: ["npm test"], // 或 verificationUnavailableReason: "..."
   verificationSetupCommands: ["..."], // 可选：assertion 前顺序执行的环境准备命令
@@ -689,10 +689,10 @@ delivery: {
 ```
 
 `delivery` 缺席：不产生任何 delivery Git 调用或事件，行为与普通 run 一致。
-`delivery` present：`mode` 必须为 `git_commit_v1`，并要求 `{type:"worktree", strategy:"persistent"}` 隔离。
-worktree 创建前先经 `prepareDeliveryRequest()` 验证（SSOT 在 `src/delivery.js`）：`allowedPaths`、`verificationCommands`/`verificationUnavailableReason`、`verificationSetupCommands`、`verificationTimeoutMs`（闭界整数 ms，常量在同一文件，与 MCP zod 同源）。非法值在任何副作用前拒绝：`allowedPaths` 为 `invalid_allowed_paths`，其余为 `invalid_verification`。CLI `run --delivery-spec-file` 的文件内容是**内层 delivery 对象本身**，不带 `{"delivery": ...}` 外层包装（那是 MCP `run_dispatch` 工具参数的形状）；同一 SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
+`delivery` present：`mode` 缺省 `git_commit_v1`，并要求 `{type:"worktree", strategy:"persistent"}` 隔离。
+worktree 创建前先经 `prepareDeliveryRequest()` 验证（SSOT 在 `src/delivery.js`，上块字段与闭界、MCP zod 同源）。非法值在任何副作用前拒绝：`allowedPaths` 为 `invalid_allowed_paths`，其余为 `invalid_verification`。CLI `run --delivery-spec-file` 的文件内容是**内层 delivery 对象本身**，不带 `{"delivery": ...}` 外层包装（那是 MCP `run_dispatch` 工具参数的形状）；同一 SSOT 解析，带外层包装被拒并附 INNER 提示。
 worktree 创建后、backend spawn 前捕获 base commit（full hash）。
-`run.started` 扩展 `delivery: {mode, baseCommit, allowedPaths, verificationCommands|verificationUnavailableReason, verificationSetupCommands?, verificationTimeoutMs?}`（`verificationSetupCommands`/`verificationTimeoutMs` 仅当 Lead 声明时出现）。
+`run.started` 扩展 `delivery: {mode, baseCommit, allowedPaths, verificationCommands|verificationUnavailableReason, verificationSetupCommands?, verificationTimeoutMs?}`（后两项仅当 Lead 声明时出现）。
 `resume()` 从 `run.started.delivery` 重建 deliveryContext，并重新经同一 SSOT 校验。
 
 **Packaging 时序**（`waitForCompletion` completed 路径内）：
@@ -784,7 +784,7 @@ author + committer 身份的比较只有一处（`assertWaoIdentityFields`）：
 
 ### 4.9 Lead Acceptance Record
 
-**公开 CLI**：`runs delivery <runId>`（只读查询）、`(--accept | --reject) --reason-file FILE`（Lead 决策）；前台 `run` 以 `--delivery-spec-file FILE` 声明 delivery（文件形状见 §4.7）。另见只读 bounded wait（`--wait-ms N`）与 `review` / `reverify` 子命令；参数与输出形状见 `docs/usage/delivery.md` 和生成层 `docs/surface/`。本节只定义验收决策合同。
+**公开 CLI**：`runs delivery` 只读查询 / `--accept | --reject` / bounded wait / `review` / `reverify` 子命令，参数与输出形状见 `docs/usage/delivery.md` 和生成层 `docs/surface/`；本节只定义验收决策合同。
 
 **只读查询**返回从 transcript 事件重建的结构化视图：runId、终态、最新 DeliveryRef、verification 状态/failureCode、acceptance 状态及已有决策事件（如有）。Transcript 是 SSOT，不创建额外 current-state 文件。
 

@@ -162,7 +162,7 @@ Kimi 车道模型策略：registry 用结构化 `model.id` 与 `reasoning.effort
 }
 ```
 
-`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`（隔离不是可选输入）。delivery run 的包容在未声明 OS 写沙箱的车道是侦测不是沙箱（写后侦测非写前阻止；codex 车道例外——见 `docs/02-architecture.md` §4.6）。registry certification 的定位（advisory 证据、非 permission gate、显式 CLI `--require-certified` opt-in 门与 MCP 差异）见 `docs/certification-runbook.md` §认证与当前就绪（单向链接；唯一权威）。
+`delivery` 可选。`delivery.mode` 可省（决定 0130：缺省 `git_commit_v1`，显式别的值照旧拒绝）。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`（隔离不是可选输入）。delivery run 的包容在未声明 OS 写沙箱的车道是侦测不是沙箱（写后侦测非写前阻止；codex 车道例外——见 `docs/02-architecture.md` §4.6）。registry certification 的定位（advisory 证据、非 permission gate、显式 CLI `--require-certified` opt-in 门与 MCP 差异）见 `docs/certification-runbook.md` §认证与当前就绪（单向链接；唯一权威）。
 
 单条 verification 命令的执行预算（可选 `verificationTimeoutMs`）：整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 仅在字段缺失时应用；它不是 `runs wait` / `run_await_result` 的观察窗口——只约束 exact verifier 的逐条 setup/assertion 命令。非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn。仅在显式声明时持久化（事件/ref 零漂移）；持久值贯穿 resume / profile 折叠 / 转发 / repackage / reverify 继承的完整合同见[架构](../02-architecture.md) §4.8 第 6 条。超时结果如实投影为闭集 `command_timeout` / `setup_timeout`，无自动加宽、无自动重试、无超时自动 stop/decision。
 
@@ -176,7 +176,7 @@ continuable 续谱根（delivery-only 可选）：`run_dispatch` 顶层可带 `"
 
 verification 环境合同：可选声明 `verificationSetupCommands: string[]`——在 assertion 命令（`verificationCommands`）之前顺序执行的环境准备命令（如 `npm ci` 安装依赖、生成构建产物）。exact-artifact verifier 运行在独立的 per-attempt 临时环境，依赖不继承：selected / worker worktree 的 `node_modules` 等 ignored / untracked 依赖不会自动出现在 exact verifier 环境——需要 Lead 声明 `verificationSetupCommands` 来准备。setup/assertion 的分开验证与投影闭集、逐命令后 re-proof、漂移即 `artifact_mutated`、per-attempt temp 注入等完整合同见[架构](../02-architecture.md) §4.8 第 5 条。
 
-派发目标只来自本次调用：`run_dispatch` 必传 `expectedWorkspaceRoot`（本项目 Git 顶层的绝对路径），经 `proveWorkspace` 证明——缺参或证明不过都在副作用前拒绝（零副作用）。证明后的 canonical Git root 用作 worker `cwd`、后台 runner `--cwd` 与转录归属；`expectedGitHead`/`expectedDirty` 仍可选断言。MCP roots、`--workspace-root` 不参与派发目标（只作只读缺省范围）。归属核验比 cwd 规范路径、不看桶名：另一项目、子目录或非 Git cwd 派出的 run，以及 `_unattributed`（cwd 缺失/相对/无法解析）与无归属事实的旧转录一律被拒；`_sandbox`/`_scratch` 里的有效 Git 顶层给出同一路径即可过——读面工具（collect / delivery / decide 等）用同一核验。
+派发目标只来自本次调用的 `expectedWorkspaceRoot`（本项目 Git 顶层的绝对路径，schema 必填），经 `proveWorkspace` 证明——证明不过都在副作用前拒绝（零副作用）。证明后的 canonical Git root 用作 worker `cwd`、后台 runner `--cwd` 与转录归属；`expectedGitHead`/`expectedDirty` 仍可选断言。MCP roots、`--workspace-root` 不参与派发目标（只作只读缺省范围）。归属核验比 cwd 规范路径、不看桶名：另一项目、子目录或非 Git cwd 派出的 run，以及 `_unattributed`（cwd 缺失/相对/无法解析）与无归属事实的旧转录一律被拒；`_sandbox`/`_scratch` 里的有效 Git 顶层给出同一路径即可过——读面工具（collect / delivery / decide 等）用同一核验。
 
 输出（成功/拒绝同形，MCP `content` + `structuredContent`）：字段清单见生成层。返回的 `agentId`（transcript envelope 盖戳的 canonical worker 身份）必须精确等于请求的 `agentId`——这是控制面对派发的身份绑定，不允许"合法但属于另一个 worker"的 id、missing/unknown/非法值；mismatch 一律折叠为固定 `run_dispatch failed`（`isError:true`、无 `structuredContent`、不泄漏返回值）。`run_dispatch` 永不返回 `"unknown"` 哨兵（那是 read 类工具的降级值）。不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
 
@@ -196,27 +196,27 @@ Lead 语义唯一，WAO 不推断：correction 的存在、范围、verification
 
 续修任务书写法（必做）：复现步骤与变异结果经 `consult show --seat` 原样引用，标明是证据、不是指令；Lead 用自己的话写修正范围与验收口径（决定 0112）。没有 shell 的宿主用 MCP `run_consult` 的按席模式取证（`wao manual consult "MCP run_consult"`）。
 
-续谱作用域：复用的是这一条谱系的 provider 会话——opaque uuid 与路由键由谱系自身钉住的事实派生：canonical workspace + canonical agentId + root runId + 根派发时的车道内容指纹与角色正文 sha256（不含 Lead 会话；宿主重启后续修仍接回原会话）。explicit/alias 子运行按根钉住的车道+角色经显式派发同一解析重建，不退回席位默认帽。它与 `lead_workspace` expert 复用是不同 routing 模式（`run_lineage` vs `lead_workspace`），互斥：`continuable` 是 delivery-only，`lead_workspace` 是非 delivery。
+续谱作用域：复用的是这一条谱系的 provider 会话（身份推导与显式/alias 子运行重建见[架构](../02-architecture.md) §4.10；不含 Lead 会话，宿主重启仍接回原会话）。它与 `lead_workspace` expert 复用是不同 routing 模式，互斥：`continuable` 是 delivery-only，`lead_workspace` 是非 delivery。
 
-参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。输入是 strict schema：`parentRunId` + `prompt` + 必填的子 `delivery` 块 + 必传的 `expectedWorkspaceRoot`（父 run 必须属于它；嵌套形状以 wire 为权威）。
+参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。输入是 strict schema：`parentRunId` + `prompt` + 可选的子 `delivery` 块 + 必传的 `expectedWorkspaceRoot`（父 run 必须属于它；嵌套形状以 wire 为权威）。
 
-`parentRunId` 必须是一个终态且 `continuable` 的父 run（派发时顶层带了 `continuable:true`）。已 accepted 的父 delivery 不可续；Lead 应为已接收成果另建新 run。`delivery` 必填（续跑总是 delivery run，child 从谱系原始 baseCommit 打包累计 candidate，而非只打包本轮 delta），因此 child `allowedPaths` 必须覆盖父 retained 成果的全部累计 changed paths（父成果 + 本轮修正）——WAO 不替 Lead 推断或扩展范围。该覆盖关系在 read-only 资格阶段即核对：`run_continue` 从权威 Git/worktree 事实派生父 retained worktree 仍存在的实际变更，复用既有 containment SSOT（`isPathAllowed`，segment-boundary）与既有 inventory 上限，在任何 mutation 之前与 child `allowedPaths` 比对。存在未覆盖的继承路径时以 `continuation_scope_incomplete` 拒绝，并返回有界的仓库相对事实（`inheritedChanged*` / `uncoveredInherited*` 各三字段，排序去重、按 inventory cap 截断），供 Lead 显式批准累计范围后重试。WAO 绝不自动扩展范围、恢复文件、重试或接受，不暴露绝对路径/prompt/command/provider/session 数据或任意 Git 错误。被授权用于 correction 的路径随后可被 restore 回 base 并从最终 delivery 消失——WAO 不解读该选择；child 最终 diff 仍由 packaging containment（`disallowed_path`）治理，本检查未削弱 packaging。模型不能传 registry/runDir/cert。
+`parentRunId` 必须是一个终态且 `continuable` 的父 run（派发时顶层带了 `continuable:true`）。已 accepted 的父 delivery 不可续；Lead 应为已接收成果另建新 run。`delivery` 可省（决定 0130）：省略即继承父运行**已生效**的交付合同——只取父转录 `run.started` 已落盘的合同事实（父若是续修，取它自己已生效的那份）；继承的是 Lead 先前已批准的范围，不扩大 scope。显式给出 `delivery` 时行为完全不变（含漏路径时拒绝并列出未覆盖路径——M12-22 的明确批准原则）。续跑总是 delivery run，child 从谱系原始 baseCommit 打包累计 candidate（父成果 + 本轮修正），生效合同（显式或继承）的 `allowedPaths` 必须覆盖父 retained 成果的全部累计 changed paths——WAO 不替 Lead 推断或扩展范围。该覆盖在 read-only 资格阶段即核对（从权威 Git/worktree 事实派生 retained 变更，复用 `isPathAllowed` 与既有 inventory 上限）：存在未覆盖的继承路径时以 `continuation_scope_incomplete` 拒绝，并返回有界的仓库相对事实（`inheritedChanged*` / `uncoveredInherited*` 各三字段，排序去重、按 inventory cap 截断），供 Lead 显式批准累计范围后重试。WAO 绝不自动扩展范围、恢复文件、重试或接受，不暴露绝对路径/prompt/command/provider/session 数据或任意 Git 错误。被授权用于 correction 的路径随后可被 restore 回 base 并从最终 delivery 消失——WAO 不解读该选择；child 最终 diff 仍由 packaging containment（`disallowed_path`）治理，本检查未削弱 packaging。模型不能传 registry/runDir/cert。
 
 资格检查（read-only，先于任何 mutation）：WAO 在 claim 续谱槽 / 转换 worktree / 写 transcript / fork 之前，以 closed-set `rejectionReason` 拒绝不合格的续跑：`malformed_input` / `invalid_delivery` / `parent_not_found` / `parent_not_terminal` / `parent_accepted` / `lineage_closed`（Lead 已显式关闭该线系）/ `not_continuable`（父 run 非 lineage 续谱根，legacy 不可续）/ `no_provider_session` / `workspace_mismatch`（父 run 不属于本次调用给出的项目）/ `no_delivery`（父 run 缺 delivery 上下文）/ `worker_configuration_changed`（当前 backend/model/provider 配置已与父 `run.started` 不同）/ `role_contract_drift`（根钉住的角色正文与当前文件不一致/无法加载，或显式谱系的角色来源/钉住不符）/ `legacy_dispatch_continuable_unsupported`（父 run 的 agentId 是重键之前的席位名）/ `unsupported_backend`（backend 未声明 session reuse）/ `missing_worktree` / `worktree_drift`（retained worktree 丢失或 base/分支漂移）/ `continuation_scope_incomplete`（child `allowedPaths` 未覆盖父 retained 累计变更）/ `busy`（同一谱系已有非终态 owner 在跑）。静态 argv/credential 检查也在 mutation 前；开始转换后若 transcript/spawn 失败，WAO 恢复父 worktree、删 orphan child transcript 并释放 claim。第二次 worktree 证明若发现外部漂移，只报告事实，不覆盖外部状态。这些 closed-set refusal 是正常结构化结果（`accepted:false` + `rejectionReason`），不是 MCP error；环境/内部执行错误仍保持既有固定安全错误边界。
 
-`no_provider_session` 覆盖完整可续接检查：在 registry 身份与 backend 支持检查之后、claim/worktree/child transcript/spawn 之前，`run_continue` 用与 spawn 权威（`RunManager.start`）相同的共享读取器 + backend 可用性钩子判定父转录是否持有可续接的真实 provider 会话 id。codex 父 run 只有 `proc_<pid>` 占位而无 `run.provider_session_bound` 绑定事实时以 `no_provider_session` 拒绝且零副作用；症状分形与 claude-code/ACP 差异见 `docs/troubleshooting.md` §1.6（绑定合同见[架构](../02-architecture.md) §4.10）。
+`no_provider_session` 覆盖完整可续接检查：经与 spawn 权威（`RunManager.start`）相同的共享读取器 + backend 可用性钩子判定，父转录无可续接的真实 provider 会话 id（如 codex 只有 `proc_<pid>` 占位而无 `run.provider_session_bound`）时拒绝且零副作用；症状分形与 claude-code/ACP 差异见 `docs/troubleshooting.md` §1.6（绑定合同见[架构](../02-architecture.md) §4.10）。
 
 输出（成功/拒绝同形）：字段清单见生成层。成功返回新 child 的 dispatch 身份 + 谱系事实（`parentRunId` + `continuation:true` + `rootRunId`）。拒绝时 `accepted:false`、`rejectionReason` 为闭集码、其余成功字段为 `null`；`continuation_scope_incomplete` 是唯一额外携带上文六个累计范围字段的拒绝形状，仅在该码中出现，畸形/不安全路径整体省略（reason 仍保留）。`busy` 只回 label，不回 active runId——opaque provider uuid、Lead id、workspace 路径、active lineage runId、transcript 路径永不出现在 MCP 输出（与 `run_dispatch` reuse-busy 脱敏合同一致）。
 
-retained-worktree 转换（幂等、崩溃安全）：把父的 retained worktree 重新钉到 base 上、切到 child 分支 `wao/<childRunId>`，把父的 delivery/candidate 字节保留为 unstaged 工作改动；父 commit 对象永不删除，仍可按 SHA 审阅。child 从 base 打包自己的 delivery。
+retained-worktree 转换（幂等、崩溃安全）：worktree 重新钉到 base 与 child 分支 `wao/<childRunId>`，父 delivery/candidate 字节保留为 unstaged 工作改动，父 commit 对象永不删除、仍可按 SHA 审阅；child 从 base 打包自己的 delivery。
 
-目标必传 `expectedWorkspaceRoot`；父 run 不属于它即 `workspace_mismatch`（归属核验见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`；`run_collect`/`decide` 用同一核验，以固定文案拒绝）。
+父 run 不属于 `expectedWorkspaceRoot` 即 `workspace_mismatch`（归属核验见 `wao manual dispatch "MCP run_dispatch（受监督的后台派发）"`；`run_collect`/`decide` 用同一核验）。
 
 ## MCP `run_correct`（运行中显式纠正）
 
 `run_correct` 让 Lead 对一条仍在执行、且派发时显式声明 `correctable:true` 的 run 发送一条有界纠正消息。它与 `run_continue` 不同：`run_correct` 不创建 child run、不切换 worktree、不重新派发 worker，而是把 Lead 明确提供的纠正写入原 run 的 durable transcript 队列，再由原 runner 串行投递给同一 provider 进程。普通 `run_dispatch` 省略 `correctable` 时保持原行为；backend 未声明 in-flight correction 能力时，`correctable:true` 在创建 run 前 fail closed（固定原因码 `correctable_backend_unsupported`；能力列见生成层 `docs/surface/certification.md`）。
 
-输入是严格对象：参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。`correctionId` 为 1..64 字符的 `[A-Za-z0-9_-]` 幂等键，`prompt` 为 1..15000 字符。相同 `correctionId` + 相同 prompt 可安全重查；同一 id 配不同 prompt 固定拒绝。目标必传 `expectedWorkspaceRoot`（run 必须属于它）；run 须处于 submitted/running 阶段；pending 尚未可投递，终态 run、未 opt-in run、跨项目 run 或不支持的 backend 均返回闭集拒绝事实，不自动 retry、stop、continue 或改状态。
+输入是严格对象：参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。`correctionId` 为 1..64 字符的 `[A-Za-z0-9_-]` 幂等键，`prompt` 为 1..15000 字符。相同 `correctionId` + 相同 prompt 可安全重查；同一 id 配不同 prompt 固定拒绝。目标 `expectedWorkspaceRoot`（run 必须属于它）；run 须处于 submitted/running 阶段；pending 尚未可投递，终态 run、未 opt-in run、跨项目 run 或不支持的 backend 均返回闭集拒绝事实，不自动 retry、stop、continue 或改状态。
 
 输出 `outcome` 是 `queued | pending | delivered | rejected` 的闭集。语义逐层区分：
 

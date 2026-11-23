@@ -5,7 +5,8 @@
 //
 // Coverage:
 //   - tool discovery (current tool count, run_continue present) + annotations +
-//     strict input (parentRunId/prompt/delivery required; extra keys rejected)
+//     strict input (parentRunId/prompt required; delivery optional-inherits,
+//     expectedWorkspaceRoot schema-required — 决定 0130; extra keys rejected)
 //   - workspace-bound authorization (no binding → service never called)
 //   - service threading: authorizedWorkspaceRoot = bound root, advisory
 //     requireCertified:false (certification is recorded reliability evidence,
@@ -111,7 +112,7 @@ test("M12-7-MRC-M1: run_continue registered; total tools = TOOLS.length (toolSur
       assert.equal(t.annotations.readOnlyHint, false);
       assert.equal(t.annotations.idempotentHint, false);
       assert.equal(t.annotations.openWorldHint, true);
-      // Strict input: parentRunId + prompt + required delivery.
+      // Strict input: parentRunId + prompt required; delivery optional-inherits（决定 0130）.
       assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ["delivery", "expectedWorkspaceRoot", "parentRunId", "prompt"]);
       assert.equal(t.inputSchema.additionalProperties, false);
       assert.ok(t.outputSchema, "output schema present");
@@ -133,7 +134,9 @@ test("M12-7-MRC-M2: extra key / missing fields rejected before service", async (
         { args: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY, requireCertified: true }, label: "client cannot force requireCertified" },
         { args: { parentRunId: "run_p", delivery: DELIVERY }, label: "missing prompt" },
         { args: { prompt: "fix", delivery: DELIVERY }, label: "missing parentRunId" },
-        { args: { parentRunId: "run_p", prompt: "fix" }, label: "missing delivery" },
+        // 第 135 批续修：delivery 可省——原 "missing delivery" 用例已移除：省略
+        // delivery 是合法继承请求（0130-MRC-1 用注入服务钉住成功路径），且旧用例
+        // 不带 expectedWorkspaceRoot，真实拒因是 wire 必填目标。
         { args: { parentRunId: "run_p", prompt: "fix", delivery: { mode: "git_commit_v1", allowedPaths: ["src"] } }, label: "delivery without verification" },
         { args: { parentRunId: "run_p", prompt: "fix", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: [], verificationUnavailableReason: "x" } }, label: "both verification fields" },
       ];
@@ -468,5 +471,138 @@ test("M12-7-MRC-M9: a malformed path inside the cumulative arrays fails closed �
       const dumped = JSON.stringify(r);
       assert.ok(!dumped.includes("/etc/passwd"), "absolute path never leaks");
     } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+// =====================================================================
+// 第 135 批（决定 0130）：delivery 可省——省略时继承父运行已生效的合同
+// =====================================================================
+
+test("0130-MRC-1: delivery omitted → handler does NOT enforce inline verification; service receives undefined; accepted receipt's nextStep names the inherited contract", async () => {
+  const dir = makeGitDir("m127-mrc-0130-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server, calls } = makeServer({ dir, serviceResult: successResult });
+    const client = await buildInMemoryClient(server);
+    try {
+      const r = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent_ok", prompt: "correct the bug", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(r.isError, undefined, "omitted delivery is a valid request (inheritance)");
+      assert.equal(calls.length, 1, "service called once");
+      assert.equal(calls[0].delivery, undefined, "service sees the omission (inherits in the service)");
+      const parsed = r.structuredContent;
+      assert.equal(parsed.accepted, true);
+      // 受理回执写明这次用的是继承来的合同（nextStep 半句，无新增 wire 字段）。
+      assert.match(parsed.nextStep, /Delivery contract inherited from the parent run\./);
+      // Explicit-delivery receipts do NOT carry the clause.
+      const r2 = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent_ok", prompt: "correct the bug", delivery: DELIVERY, expectedWorkspaceRoot: dir },
+      });
+      assert.equal(r2.structuredContent.accepted, true);
+      assert.ok(!r2.structuredContent.nextStep.includes("inherited"), "explicit delivery keeps the plain nextStep");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+test("0130-MRC-2: an EXPLICIT delivery without inline verification is still refused (the 0130 relaxation is inheritance-only)", async () => {
+  const dir = makeGitDir("m127-mrc-0130b-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server, calls } = makeServer({ dir, serviceResult: successResult });
+    const client = await buildInMemoryClient(server);
+    try {
+      const r = await client.callTool({
+        name: "run_continue",
+        arguments: {
+          parentRunId: "run_parent_ok", prompt: "fix",
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
+          expectedWorkspaceRoot: dir,
+        },
+      });
+      assert.equal(r.isError, true, "explicit delivery without verification refused");
+      const text = (r.content ?? []).map((c) => c.text ?? "").join("");
+      assert.match(text, /must declare inline verification/, "fixed actionable refusal retained");
+      assert.equal(calls.length, 0, "service never called");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+test("0130-MRC-3: run_continue input schema — delivery optional, expectedWorkspaceRoot required (wire-advertised)", async () => {
+  const dir = makeGitDir("m127-mrc-0130c-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server } = makeServer({ dir, serviceResult: successResult });
+    const client = await buildInMemoryClient(server);
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "run_continue");
+      const required = t.inputSchema.required;
+      assert.ok(required.includes("parentRunId") && required.includes("prompt"), "parentRunId + prompt stay required");
+      assert.ok(required.includes("expectedWorkspaceRoot"), "expectedWorkspaceRoot is schema-required (第 135 批)");
+      assert.ok(!required.includes("delivery"), "delivery is no longer schema-required");
+      // 第 135 批续修：查 delivery 子对象自己的 required（顶层从不含 mode，
+      // 旧断言是空断言）。
+      assert.ok(Array.isArray(t.inputSchema.properties.delivery.required)
+        && !t.inputSchema.properties.delivery.required.includes("mode"),
+        "delivery.mode not required within the delivery object (defaults to git_commit_v1)");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+// =====================================================================
+// 第 135 批续修 5：继承合同复验失败的拒绝带 guidance（仅 delivery 省略时）
+// =====================================================================
+
+test("0130-续修5: invalid_delivery on an omitted (inherited) contract carries the fixed guidance; explicit-delivery refusal and other refusals do not", async () => {
+  const dir = makeGitDir("m127-mrc-0130g-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    // 1) omitted delivery + invalid_delivery → guidance 在场（固定文案，指路显式 delivery）。
+    const { server: s1 } = makeServer({
+      dir,
+      serviceResult: () => ({ accepted: false, parentRunId: "run_x", continuation: true, rejectionReason: "invalid_delivery" }),
+    });
+    const c1 = await buildInMemoryClient(s1);
+    try {
+      const r1 = await c1.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_x", prompt: "fix", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(r1.structuredContent.rejectionReason, "invalid_delivery");
+      assert.equal(
+        r1.structuredContent.guidance,
+        "the inherited delivery contract failed revalidation; pass an explicit delivery to override it.",
+        "拒绝文案告诉 Lead 显式传 delivery",
+      );
+    } finally { await c1.close(); await s1.close(); }
+    // 2) 显式 delivery + invalid_delivery → guidance 键缺席（继承语义不适用）。
+    const { server: s2 } = makeServer({
+      dir,
+      serviceResult: () => ({ accepted: false, parentRunId: "run_x", continuation: true, rejectionReason: "invalid_delivery" }),
+    });
+    const c2 = await buildInMemoryClient(s2);
+    try {
+      const r2 = await c2.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_x", prompt: "fix", delivery: DELIVERY, expectedWorkspaceRoot: dir },
+      });
+      assert.equal(r2.structuredContent.guidance, undefined);
+    } finally { await c2.close(); await s2.close(); }
+    // 3) 省略 delivery + 其它拒因 → guidance 键缺席。
+    const { server: s3 } = makeServer({
+      dir,
+      serviceResult: () => ({ accepted: false, parentRunId: "run_x", continuation: true, rejectionReason: "not_continuable" }),
+    });
+    const c3 = await buildInMemoryClient(s3);
+    try {
+      const r3 = await c3.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_x", prompt: "fix", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(r3.structuredContent.guidance, undefined);
+    } finally { await c3.close(); await s3.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });

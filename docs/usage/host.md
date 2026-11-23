@@ -54,7 +54,7 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 
 - `command` 必须是数组（`["node", "<wao-node.cjs 绝对路径>", "<stdio.js 绝对路径>", ...]`）。写成单个字符串会被拒绝。第一项是 `node`，第二项是 v22 shim `scripts/wao-node.cjs`（避免系统默认 node 是 v24 触发 WAO versionGuard），第三项起是 stdio entrypoint 与 server-owned 参数。
 - `enabled` 是官方 schema 的 optional 项；显式写 `"enabled": true` 消除配置继承歧义（省略不必然禁用，实际行为取决于 OpenCode 版本与继承链）。
-- `--workspace-root` 指向**目标项目**根（不是 WAO repo），是**只读工具的缺省范围**来源之一；会动工作区的调用只认各自调用里的 `expectedWorkspaceRoot`。
+- `--workspace-root` 指向**目标项目**根（不是 WAO repo），是**只读工具的缺省范围**来源之一；会动工作区的调用只认各自调用里的 `expectedWorkspaceRoot`（写类工具的 schema 已把该字段标为必填）。
 - 这是 host-local 配置，含绝对路径时**默认不建议 commit**；Owner 可把它放进 `.git/info/exclude`（本地忽略，不污染 `.gitignore`）。
 - **验证**：在**目标项目**根执行 `opencode --pure mcp list`，期待看到 `wao connected`。`--pure` 会禁用 OpenCode 插件（如 oh-my-openagent），用于排除插件干扰；它**不**保证禁用全局 MCP 配置，也不自动移除全局 MCP。
 - **重启边界**：修改配置后，**必须启动新的 OpenCode 进程**。`opencode --pure mcp list` 显示 `wao connected` 不等于已运行的旧进程工具已热加载——旧进程仍看不到 WAO tools。
