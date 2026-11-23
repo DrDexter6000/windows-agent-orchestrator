@@ -544,7 +544,7 @@ test("ADR32-MCP-7: evidence service throw / malformed rows fail closed to the fi
 
 // =====================================================================
 // 8. wire 面声明（决定 0129 后的形态）：detail 作为 lead_preflight 的可选
-//    闭集输入成员；certificationEvidence 作为其可选输出成员；16 工具闭集；
+//    闭集输入成员；certificationEvidence 作为其可选输出成员；17 工具闭集；
 //    详情不得复制进 run_await_result / run_status。
 // =====================================================================
 
@@ -556,8 +556,8 @@ test("ADR32-MCP-8: lead_preflight declares the detail member; evidence NOT copie
     const client = await buildInMemoryClient(server);
     try {
       const tools = (await client.listTools()).tools;
-      // 工具闭集：数量与顺序仍是冻结 SSOT（决定 0129 后为 16 工具）。
-      assert.deepEqual(tools.map((t) => t.name), TOOLS, "frozen 16-tool surface unchanged");
+      // 工具闭集：数量与顺序仍是冻结 SSOT（决定 0129 会审修正后为 17 工具）。
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "frozen 17-tool surface unchanged");
 
       const pf = tools.find((t) => t.name === "lead_preflight");
       // 输入：detail 是可选闭集枚举成员（与 expectedWorkspaceRoot/recentRuns 并列）。

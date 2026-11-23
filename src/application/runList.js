@@ -248,7 +248,7 @@ function summaryWindowMs(facts) {
  *   keep the historic last-event-ts reading; a run whose updatedAt cannot be
  *   placed in time (null/unparseable) is excluded — fail-closed, same choice
  *   as the history window.
- * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount?: number, scanScope?: string}>}
+ * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount?: number, scanScope?: string, workspaceAuthorizationUnavailable?: true}>}
  *   - runs: array of {runId, agentId, state, terminal, updatedAt,
  *             activityStatus, activityBasis}
  *   - matchedCount: eligible runs AFTER the activeOnly / active-scope /
@@ -260,6 +260,11 @@ function summaryWindowMs(facts) {
  *     scanned in active; history reports a bounded window, not full health).
  *   - scanScope: ONLY for scanScope "active"|"history" (echoes the input so a
  *     client can guard mode/epoch races). ABSENT in the default scope.
+ *   - workspaceAuthorizationUnavailable: true ONLY when a non-null
+ *     authorizedWorkspaceRoot could not be re-proven (the root vanished / is no
+ *     longer a canonical Git top-level, or the proof failed). Callers MUST treat
+ *     this as an unreadable listing (never as "zero runs"); the TD-256 `null`
+ *     authority keeps its deliberate fail-closed empty shape without this flag.
  */
 // projectFilter 的每候选分类器：读文件头一小块切首行；identity 经共享
 // identityOfFirstEvent（在档事实优先，与迁移计划器同语义）。
@@ -354,11 +359,24 @@ export async function listRuns(input) {
     try {
       workspaceVerifier = createVerifier(authorizedWorkspaceRoot);
     } catch {
-      // Invalid/unprovable authority yields no visible runs, matching the prior
-      // per-run fail-closed behavior without repeating the same failed proof.
-      // Echo scanScope for active/history so a client always knows the mode.
-      if (scanScope === undefined) return { runs: [], matchedCount: 0 };
-      return { runs: [], matchedCount: 0, scanScope };
+      // 决定 0129（第 134 批会审修）：工作区权威的**复证**失败不能伪装成
+      // "没有可见运行"——那会让 lead_preflight 把 recentRuns/activeRuns 投影成
+      // 零条并 complete:true，违反"请求了但读不出就是 null"的承诺。如实把失败
+      // 交给调用方：返回明确标记，由调用方决定如何投影（preflight → null +
+      // unknown；CLI runs list 本来就不带 authorizedWorkspaceRoot，不受影响）。
+      // TD-256 的 `null` 是刻意的"门禁关闭"死形状（调用方必须省略该键），
+      // 保持原样的 fail-closed 空集，不标成读失败。
+      if (scanScope === undefined) {
+        return authorizedWorkspaceRoot === null
+          ? { runs: [], matchedCount: 0 }
+          : { runs: [], matchedCount: 0, workspaceAuthorizationUnavailable: true };
+      }
+      return {
+        runs: [],
+        matchedCount: 0,
+        scanScope,
+        ...(authorizedWorkspaceRoot === null ? {} : { workspaceAuthorizationUnavailable: true }),
+      };
     }
   }
 

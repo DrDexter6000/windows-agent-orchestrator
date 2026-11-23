@@ -751,11 +751,48 @@ test("CT-11: run_consult read follows the call's target; create never reads the 
   }
 });
 
-// 决定 0129：run_dispatch_contract_check 已删——"按调用目标检查并报告
-// workspaceScope"的行为随工具消亡（scope 报告是 check-only 载荷的形状）。
-// 等价边界仍被覆盖：run_dispatch 的就地预检消费同一调用目标（见
-// mcpRunDispatch.test.js 的 contractAdvisories 用例——referenced_path_probe_miss
-// 探针按调用目标根探测）；按调用目标拒绝语义由 CT-13 的 run_dispatch 族承载。
+test("CT-12: run_dispatch_contract_check honours the call's target and reports the scope used", async () => {
+  const x = mkdtempSync(join(tmpdir(), "wao-ct12-x-"));
+  const y = mkdtempSync(join(tmpdir(), "wao-ct12-y-"));
+  const aux = mkdtempSync(join(tmpdir(), "wao-ct12-aux-"));
+  try {
+    makeGitRepo(x);
+    makeGitRepo(y);
+    const registryPath = makeRegistry(aux, { w: { backend: "claude-code", cwd: x } });
+    const server = createWaoMcpServer({ registryPath, runDir: join(aux, "runs"), workspaceRoot: x });
+    const client = await buildClient(server);
+    try {
+      // 决定 0129：run_dispatch_contract_check 保留，按调用目标检查并在出参
+      // workspaceScope 如实标注所用范围。
+      const withTarget = JSON.parse((await client.callTool({
+        name: "run_dispatch_contract_check",
+        arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: y },
+      })).content.find((b) => b.type === "text").text);
+      assert.equal(withTarget.workspaceScope.source, "call_target", "the check names the scope it used");
+      assert.equal(withTarget.sections.workspace, "observed", "the target itself proves, so it is observed");
+      assert.equal(withTarget.issueCodes.includes("workspace_unbound"), false);
+      // Without a target the binding remains the default scope.
+      const noTarget = JSON.parse((await client.callTool({
+        name: "run_dispatch_contract_check",
+        arguments: { agentId: "w", prompt: "p" },
+      })).content.find((b) => b.type === "text").text);
+      assert.equal(noTarget.workspaceScope.source, "server_config", "no target → binding scope");
+      // An unprovable target refuses with the shared fixed target text.
+      const bad = await client.callTool({
+        name: "run_dispatch_contract_check",
+        arguments: { agentId: "w", prompt: "p", expectedWorkspaceRoot: "relative/path" },
+      });
+      assert.equal(bad.isError, true, "an unprovable target is refused");
+      assert.match((bad.content ?? []).map((b) => b.text ?? "").join(" "), /workspace target invalid/);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(x); cleanupDir(y); cleanupDir(aux);
+  }
+});
+
 
 // ===== 9: read-only tools accept a per-call workspace target =====
 
@@ -767,7 +804,7 @@ const CT13_INVALID_TEXT =
 // 决定 0129：runs_list → lead_preflight recentRuns（列表过滤分支）；bundle 删除。
 const CT13_CASES = [
   { name: "run_delivery", arguments: { runId: CT13_RUN_ID } },
-  { name: "lead_preflight", arguments: { recentRuns: 10 } },
+  { name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } },
   { name: "run_await_result", arguments: { runId: CT13_RUN_ID, waitMs: 0 } },
   { name: "run_activity", arguments: { runId: CT13_RUN_ID } },
   { name: "run_delivery_review", arguments: { runId: CT13_RUN_ID, fileIndex: 0 } },

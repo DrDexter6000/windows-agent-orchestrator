@@ -1815,8 +1815,10 @@ test("run_dispatch 输入形状契约：executionProfileId 顶层、verification
     "docs/usage/host.md 必须把 executionProfileId 记为顶层（与 delivery 同级）");
   // Inline verification uses the real delivery-level field names.
   assert.ok(/verificationCommands/.test(host), "docs/usage/host.md 必须记录 delivery.verificationCommands");
-  // 0129：contract_check 工具已删，contractValid 字段随之消亡；守卫改钉就地
-  // 预检的等价边界（只看机械合同、不预评 expectations、advisory 进回执）。
+  // 0129 会审修正：contract_check 工具保留（只预检不派发），contractValid 仍在；
+  // 同时 run_dispatch 的就地预检把提醒写进受理回执的 contractAdvisories。
+  assert.ok(/contractValid/.test(host), "docs/usage/host.md 必须记录 contractValid（保留的预检工具）");
+  assert.ok(/run_dispatch_contract_check/.test(host), "docs/usage/host.md 必须记录保留的 run_dispatch_contract_check");
   assert.ok(/就地.*预检|in-place precheck/.test(host), "docs/usage/host.md 必须记录 run_dispatch 的就地预检（0129）");
   assert.ok(/contractAdvisories/.test(host), "docs/usage/host.md 必须记录 contractAdvisories");
   assert.ok(/不预评.*expectedGitHead|expectedGitHead.*不预评/.test(host),
@@ -2576,11 +2578,11 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
 
 test("README 是新读者入口：当前工具计数 / 快速开始节地图指针 / 链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
-  // 当前工具计数（0129：16）与陈旧计数（18/20/23）负向。
-  assert.ok(/16 MCP tools|16 tools/.test(readme),
-    "README 必须声明当前 16 MCP tools（决定 0129）");
-  assert.ok(!/18 MCP tools|20-tool|20 MCP tools|23 MCP tools|23 tools/.test(readme),
-    "README 不得再声称 18/20/23-tool（当前 16 always-registered MCP tools）");
+  // 当前工具计数（0129：17，会审修正保留 contract_check）与陈旧计数（16/18/20/23）负向。
+  assert.ok(/17 MCP tools|17 tools/.test(readme),
+    "README 必须声明当前 17 MCP tools（决定 0129）");
+  assert.ok(!/18 MCP tools|16-tool|16 MCP|20-tool|20 MCP tools|23 MCP tools|23 tools/.test(readme),
+    "README 不得再声称 16/18/20/23-tool（当前 17 always-registered MCP tools）");
   // 里程碑进度只做负向：不得再标 in progress。
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");

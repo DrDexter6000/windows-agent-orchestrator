@@ -79,7 +79,7 @@ test("KNOWN-AGENT-01: known agentId 'coder_low' preserved through MCP runs_list"
     const client = await buildClient(server);
     try {
       // 决定 0129：runs_list 已删，经 lead_preflight recentRuns。
-      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
       const parsed = JSON.parse(res.content[0].text);
       const run = parsed.recentRuns.runs.find((r) => r.runId === "run_known");
       assert.ok(run, "run must appear in list");
@@ -103,7 +103,7 @@ test("KNOWN-AGENT-02: unknown agentId still maps to 'unknown'", async () => {
     });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
       const parsed = JSON.parse(res.content[0].text);
       const run = parsed.recentRuns.runs.find((r) => r.runId === "run_unknown_agent");
       assert.ok(run);
@@ -139,7 +139,7 @@ test("KNOWN-AGENT-03: default partial-inventory service preserves known agentId 
     const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: dir });
     const client = await buildClient(server);
     try {
-      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      const res = await client.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
       assert.equal(res.isError, undefined, "recentRuns must succeed for a valid registry");
       const parsed = JSON.parse(res.content[0].text);
       const run = parsed.recentRuns.runs.find((r) => r.runId === "run_default_service");

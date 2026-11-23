@@ -5,11 +5,12 @@
 // This is the agent-facing MCP adapter. It exposes WAO application services as
 // MCP tools so an MCP host can preflight the workspace/worker inventory
 // (lead_preflight) and dispatch supervised background runs (run_dispatch) over
-// the MCP protocol. 决定 0129（第 134 批）：registry_list 与 runs_list 的能力
-// 并入 lead_preflight（workers 全量条目 + detail/recentRuns 可选项），
-// run_dispatch_contract_check 并入 run_dispatch 的就地预检（advisory 进受理
-// 回执），run_delivery_review_bundle 由 run_delivery + run_delivery_review 两次
-// 调用等价替代——工具面 20 → 16。
+// the MCP protocol. 决定 0129（第 134 批，会审修正）：registry_list 与 runs_list
+// 的能力并入 lead_preflight（workers 全量条目 + detail/recentRuns 可选项），
+// run_delivery_review_bundle 由 run_delivery + run_delivery_review 两次调用
+// 替代——而 run_dispatch_contract_check **保留**：它独有的"只预检不派发"在 MCP
+// 面没有等价物。run_dispatch 派发前另就地跑同一份预检（提醒进受理回执的
+// contractAdvisories，规矩下沉，与独立预检不冲突）——工具面 20 → 17。
 //
 // Architectural contract (see docs/02-architecture.md):
 //   - This module imports the MCP SDK + zod (the ONLY place allowed besides tests).
@@ -179,10 +180,10 @@ import {
 } from "../application/runObservationProjection.js";
 // M12-9 Package B: the shared execution-profile resolver + the advisory
 // dispatch-contract precheck. The resolver is the SINGLE authority used by
-// run_dispatch (profile vs inline mutual exclusivity,
-// known/unknown/conflict/non-delivery). 决定 0129：原 run_dispatch_contract_check
-// 工具已删；预检服务保留，由 run_dispatch 在派发前就地调用，advisory 码进受理
-// 回执的 contractAdvisories。
+// run_dispatch and run_dispatch_contract_check (profile vs inline mutual
+// exclusivity, known/unknown/conflict/non-delivery). 决定 0129（会审修正）：
+// 预检工具**保留**（"只预检不派发"没有 MCP 等价物）；run_dispatch 派发前也
+// 就地调用同一服务，advisory 码进受理回执的 contractAdvisories。
 import {
   resolveDeliveryVerification,
   EXECUTION_PROFILE_IDS,
@@ -190,6 +191,10 @@ import {
 import {
   runDispatchContractCheck,
   CONTRACT_CHECK_ADVISORY_CODES,
+  // 决定 0129：恢复的 run_dispatch_contract_check 工具输出边界由服务层闭集
+  // 派生（issueCodes 上限 = 码集大小、observations/可用画像各自上限）。
+  CONTRACT_CHECK_ISSUE_CODES,
+  CONTRACT_CHECK_SECTIONS,
 } from "../application/runDispatchContract.js";
 // M13-r2 (decision 0039): multi-seat read-only council consult (Agent Union) on
 // the MCP face. The service layer owns fan-out/collect/snapshot semantics; this
@@ -321,7 +326,9 @@ import { readWindowsUserEnv } from "../application/credentialReadiness.js";
 import {
   aggregateLeadPreflight,
   ACTIVE_RUNS_CAP,
-  WORKERS_CAP,
+  // 决定 0129：recentRuns 的 limit 上限与原 runs_list 同值——wire schema 与
+  // 聚合器从同一 SSOT 派生，不各写一份数字（缺省 50 在聚合器解析）。
+  RECENT_RUNS_LIMIT_MAX,
   WORKSPACE_UNBOUND_REASONS,
   // 0087: lane-profile projection SSOT caps/closed sets (home:
   // src/application/laneProfile.js; re-exported by the aggregator so this
@@ -902,9 +909,9 @@ const RUN_DISPATCH_INPUT = z.object({
   // deliberately weakened assertion vs the full 40/64-hex exact form; regex
   // serializes to JSON Schema and rides this inputSchema);
   // expectedDirty is a boolean. expectedWorkspaceRoot is the dispatch
-  // TARGET — required by the run_dispatch HANDLER (决定 0129 起本 schema 不再与
-  // 已删的 contract_check 工具共享；schema 保持 optional 是既有 wire 形状，
-  // handler 固定文案强制必传) — proved via proveWorkspace;
+  // TARGET — required by the run_dispatch HANDLER, while the shared
+  // run_dispatch_contract_check tool consumes the same optional field as its
+  // check target (schema stays optional for that reason) — proved via proveWorkspace;
   // the session/MCP-root/server-config binding is NOT consulted for the
   // dispatch target. Absence or an unprovable value refuses with a fixed text
   // before any side effect.
@@ -968,7 +975,7 @@ const RUN_DISPATCH_INPUT = z.object({
   // continuable lineages — refused by the service with the typed
   // ModelOverrideConflictError collapsed to its fixed text below); requireCertified
   // is server-owned false here, so the certified-conflict door is unreachable
-  // over MCP by construction. The in-place contract precheck intentionally
+  // over MCP by construction. The contract precheck intentionally
   // IGNORES the field (it advises on the delivery contract only).
   model: z.string().min(1).max(MODEL_OVERRIDE_MAX).regex(new RegExp(MODEL_OVERRIDE_WIRE_PATTERN)).optional(),
   // R11-1 (Owner 2026-08-17): optional per-dispatch reasoning effort override
@@ -1007,8 +1014,8 @@ const WORKSPACE_PROOF = z.object({
   expectedWorkspaceRootMatch: z.boolean().nullable(),
 }).strict();
 
-// ===== 决定 0129：run_dispatch 受理回执的 contractAdvisories（原
-// run_dispatch_contract_check 工具的就地承接） =====
+// ===== 决定 0129：run_dispatch 受理回执的 contractAdvisories（预检的规矩
+// 下沉；原 run_dispatch_contract_check 工具同时保留，两者并存） =====
 //
 // run_dispatch 在派发前就地跑同一份预检服务（runDispatchContractCheck，同一
 // 函数不复制）。会让派发被拒的合同级问题照旧在任何副作用之前拒绝（权威仍是
@@ -1019,6 +1026,11 @@ const CONTRACT_ADVISORY_ENTRY = z.object({
   code: z.enum([...CONTRACT_CHECK_ADVISORY_CODES]),
   note: z.string().max(512),
 }).strict();
+// 决定 0129 修：提醒数组在派发**之前**用同一 schema 严格预校验（见 handler）。
+// 畸形/超限 ⇒ 整组丢弃（不带该键），绝不在 run 已启动后让输出 parse 折成
+// isError——那会让宿主以为派发失败而实际已启动。
+const CONTRACT_ADVISORIES_SCHEMA = z.array(CONTRACT_ADVISORY_ENTRY)
+  .max(CONTRACT_CHECK_ADVISORY_CODES.length);
 
 // run_dispatch output: runId + agentId + accepted + state + additive workspaceProof
 // + additive providerSessionRouting. No paths, PID, prompt, argv, opaque session
@@ -1068,6 +1080,97 @@ const RUN_DISPATCH_DESCRIPTION =
   "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
   "keeps one live process so run_correct can queue an in-flight turn. WAO never infers " +
   "continuation, correction delivery, scope, retry, or acceptance.";
+
+// ===== run_dispatch_contract_check (M12-9 advisory precheck) constants =====
+//
+// An OPTIONAL read-only / ADVISORY precheck that folds the mechanical facts a
+// Lead might want BEFORE run_dispatch — workspace binding, worker registry
+// presence, and the delivery contract (inline verification OR a frozen execution
+// profile) — into ONE bounded result. 决定 0129（第 134 批会审修正）：这个工具
+// **保留**，因为"只预检不派发"（在 worker 启动前看 contractValid/issueCodes/
+// 节状态/路径提醒并据此改请求）与"省略 executionProfileId 时列出
+// availableProfiles"在 MCP 面没有等价物。run_dispatch 派发前另就地跑同一份
+// 预检（提醒进受理回执的 contractAdvisories）——规矩下沉，与独立预检不冲突。
+//
+// It is NOT a gate: warning/unknown/contractValid=false do NOT auto-block an
+// independent run_dispatch (the Lead decides; run_dispatch keeps its own real
+// structural validation).
+//
+// It shares run_dispatch's INPUT schema (RUN_DISPATCH_INPUT) and the SAME
+// application validators (the shared resolveDeliveryVerification resolver +
+// prepareDeliveryRequest). Output is bounded/strict/closed-set/safe; the
+// service's internal precheck extras (advisories/deliveryErrorCode) are NOT
+// forwarded here — issueCodes already carries every code, contract-level or
+// advisory.
+const CONTRACT_CHECK_ERROR_TEXT = "run_dispatch_contract_check failed";
+
+// Closed-set section status (each section settles independently; read failure
+// is "unknown", never faked observed).
+const CONTRACT_SECTION_STATUS = z.enum(["observed", "unknown"]);
+
+// Selected profile projection: id + COUNTS only — never command text. Counts are
+// bounded by the same delivery command cap (DELIVERY_VERIFICATION_COMMANDS_MAX).
+const CONTRACT_SELECTED_PROFILE = z.object({
+  id: z.enum([...EXECUTION_PROFILE_IDS]),
+  setupCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+  assertionCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+}).strict();
+
+// Bounded catalog summary, surfaced ONLY when no profile is selected. id +
+// counts + a short FIXED summary — never command text.
+const CONTRACT_AVAILABLE_PROFILE = z.object({
+  id: z.enum([...EXECUTION_PROFILE_IDS]),
+  setupCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+  assertionCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+  summary: z.string().min(1).max(160),
+}).strict();
+
+const RUN_DISPATCH_CONTRACT_CHECK_OUTPUT = z.object({
+  advisory: z.literal(true),
+  contractValid: z.boolean(),
+  sections: z.object({
+    workspace: CONTRACT_SECTION_STATUS,
+    registry: CONTRACT_SECTION_STATUS,
+    contract: CONTRACT_SECTION_STATUS,
+  }).strict(),
+  // Explicit maxima derived from the frozen closed set / catalog / section SSOT
+  // — no second hand-maintained allowlist: issueCodes can never exceed the code
+  // set; observations never exceed one-per-section (CONTRACT_CHECK_SECTIONS);
+  // availableProfiles never exceeds the catalog. A malformed/oversized service
+  // object is rejected by the .parse() in the handler and collapses to
+  // CONTRACT_CHECK_ERROR_TEXT.
+  issueCodes: z.array(z.enum([...CONTRACT_CHECK_ISSUE_CODES])).max(CONTRACT_CHECK_ISSUE_CODES.length),
+  observations: z.array(z.string()).max(CONTRACT_CHECK_SECTIONS.length),
+  profile: CONTRACT_SELECTED_PROFILE.nullable(),
+  availableProfiles: z.array(CONTRACT_AVAILABLE_PROFILE).max(EXECUTION_PROFILE_IDS.length).optional(),
+  // Which scope this check ran against: call_target when the call supplied
+  // expectedWorkspaceRoot (proved and used for the path probes), otherwise the
+  // resolved default binding. source + non-absolute project label only — never
+  // an absolute path (same contract as the preflight workspace projection).
+  workspaceScope: z.object({
+    source: z.enum(["call_target", "server_config", "mcp_root"]).nullable(),
+    projectBucket: z.string().nullable(),
+  }).strict(),
+}).strict();
+
+const RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
+  // 必须保留：ADVISORY、NOT a gate、check-only（决定 0129 保留理由）——
+  // contractValid 从不自动拦截；省略 executionProfileId 时列出可选画像。
+  "Optional read-only ADVISORY precheck of a run_dispatch — check-only, it never " +
+  "dispatches: resolves the delivery contract (inline verification or a frozen execution " +
+  "profile) and observes the workspace scope + worker presence into one bounded closed-set " +
+  "result; omitting executionProfileId also lists the available profiles (id + command " +
+  "counts). The optional expectedWorkspaceRoot (absolute Git worktree top-level) checks " +
+  "against that proved project instead of the default binding; workspaceScope in the result " +
+  "names the scope actually used. NOT a gate — contractValid never auto-blocks; run_dispatch " +
+  "stays authoritative.";
 
 // ===== run_consult (M13-r2 multi-seat read-only council consult) constants =====
 //
@@ -2878,9 +2981,14 @@ const LEAD_PREFLIGHT_INPUT = z.object({
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
   // 决定 0129：原 registry_list 的可选 detail 选择器（同一闭集）。
   detail: z.enum([...PREFLIGHT_DETAIL_VALUES]).optional(),
-  // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点）——请求的条数上限。
-  // 不传 = 不扫描、输出无 recentRuns 键。
-  recentRuns: z.number().int().min(1).max(50).optional(),
+  // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点），补齐原工具的两种
+  // 查询：limit 1..100（原 runs_list 上限；缺省 50）、activeOnly 只列经证明
+  // 活动的运行（先筛活动、再截断，与原工具同一 listRuns 语义）。不传该键 =
+  // 不扫描、输出无 recentRuns；传了（哪怕 {}）= 请求该节。
+  recentRuns: z.object({
+    limit: z.number().int().min(1).max(RECENT_RUNS_LIMIT_MAX).optional(),
+    activeOnly: z.boolean().optional(),
+  }).strict().optional(),
 }).strict();
 
 // 0087: lane-profile compact projection — ONE closed sub-schema used BOTH for
@@ -2977,8 +3085,10 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   // workers/activeRuns are null when unreadable (unknown), NOT when known-empty.
   // Array bounds share the application-layer SSOT caps so they cannot drift.
   // 决定 0129：条目与原 registry_list 的 AGENT_ENTRY 同一 schema 对象（同一份
-  // 定义，不再各写一份）；preflight 的 workers 上限与截断语义照旧。
-  workers: z.array(AGENT_ENTRY).max(WORKERS_CAP).nullable(),
+  // 定义，不再各写一份）；workers **不另设上限**——原 registry_list 返回全部
+  // 有效席位，registry 本身也没有条目数上限（readRegistry 逐条读 agents），
+  // 所以这里同样不设 max（会审修正：不设比原工具更紧的边界）。
+  workers: z.array(AGENT_ENTRY).nullable(),
   // M12-25: bounded safe per-entry issues from the partial inventory projection.
   // Non-empty ⇒ checkStatus.workers="warning" (→ complete=false), but the VALID
   // workers above are still returned. Empty when observed-clean or unknown.
@@ -3004,8 +3114,9 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   unresolvedRunCount: z.number().int().nullable(),
   // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点）——条目与原
   // runs_list.runs[] 同形（含 activityStatus/activityBasis 闭集），另带
-  // returnedCount/truncated/unresolvedCount 事实。不请求 = 键缺席；请求而读不出
-  // 或未绑定 = null（unknown，绝不伪造空清单）；不进 checkStatus/complete。
+  // returnedCount/truncated/unresolvedCount 事实（limit 1..100、缺省 50；
+  // activeOnly 先筛活动再截断，与原工具同一 listRuns 语义）。不请求 = 键缺席；
+  // 请求而读不出或未绑定 = null（unknown，绝不伪造空清单）；不进 checkStatus/complete。
   recentRuns: z.object({
     runs: z.array(z.object({
       runId: z.string(),
@@ -3053,7 +3164,8 @@ const LEAD_PREFLIGHT_DESCRIPTION =
   "model, certification, credentials, dispatchHold), active runs, lane profiles " +
   "(per-dimension star ratings, not routing rules; wao lanes has full profiles). " +
   "Optional detail=certificationEvidence adds per-seat evidence rows (advisory, never " +
-  "a gate); optional recentRuns (1..50) lists that many recent runs — activityStatus " +
+  "a gate); optional recentRuns (limit 1..100, default 50; activeOnly keeps proven-active " +
+  "runs, filter first then truncate) lists runs — activityStatus " +
   "unresolved (non-terminal, no fresh heartbeat) is never inferred failed/dead/stopped. " +
   "Optional expectedWorkspaceRoot proves that project on the spot and " +
   "scopes ONLY this call (source call_target; no shared session state); when omitted " +
@@ -3727,9 +3839,10 @@ const DELIVERY_REVIEW_DESCRIPTION =
   "Read-only, idempotent, workspace-bound.";
 
 // 决定 0129：run_delivery_review_bundle（M12-3B 组合）已删（Owner 批准的真删除
-// 式减面，20→16）。它是 run_delivery（带 waitMs 的一次等待）+ run_delivery_review
-//（一页审查）的组合，两次调用就是等价物；README/SKILL/手册里指向它的地方已同批
-// 改指这两个原子工具。
+// 式减面，20→17）。它由 run_delivery（带 waitMs 的一次等待）+ run_delivery_review
+//（一页审查）两次调用替代；两次调用没有组合工具的跨结果保证，Lead 自行对照
+// deliveryCommit/changedFileCount。README/SKILL/手册里指向它的地方已同批改指
+// 这两个原子工具。
 
 export function createWaoMcpServer({
   registryPath,
@@ -4132,9 +4245,10 @@ export function createWaoMcpServer({
     return { binding: await resolveWorkspaceBinding() };
   }
 
-  // 决定 0129：registry_list 工具已删（Owner 批准的真删除式减面，20→16）。
-  // 能力并入下方 lead_preflight：workers[] 条目与原 AGENT_ENTRY 同一 schema、
-  // 可选 detail=certificationEvidence 返回证据行、CLI `wao registry list` 照旧。
+  // 决定 0129：registry_list 工具已删（Owner 批准的真删除式减面，20→17）。
+  // 能力并入下方 lead_preflight：workers[] 条目与原 AGENT_ENTRY 同一 schema
+  //（不设比原工具更紧的上限）、可选 detail=certificationEvidence 返回证据行、
+  // CLI `wao registry list` 照旧。
 
   // 批 119：MCP 绑定状态查询与会话级项目选择两个工具已真删除（Owner 批准的
   // 减面，23→20）。绑定事实改由 lead_preflight.workspace 投影；每实例共享的
@@ -4238,8 +4352,9 @@ export function createWaoMcpServer({
             ? (args) => listRunsService({ ...args, knownAgentIds, readSummaryFn: cachedRunFactsReader })
             : undefined,
           // 决定 0129：按需 recentRuns 节（原 runs_list 的承接）——不传 = 聚合器
-          // 不扫描、输出无该键。
-          ...(recentRuns !== undefined ? { recentRunsLimit: recentRuns } : {}),
+          // 不扫描、输出无该键；传了（哪怕 {}）= 请求，聚合器按 limit/activeOnly
+          // 解析（limit 缺省 50、上限 100；activeOnly 先筛活动再截断）。
+          ...(recentRuns !== undefined ? { recentRuns } : {}),
           // TD-341：runner 缺席证明（unresolved 候选 → open item 行）的读器、
           // 缓存与测试注入缝（preflight 级 probe 桩；缺省走共享证明入口）。
           runnerGoneDeps,
@@ -4292,6 +4407,9 @@ export function createWaoMcpServer({
           ],
           checkStatus: { workspace: "unknown", workers: "unknown", activeRuns: "unknown" },
           complete: false,
+          // 决定 0129（会审修正）：请求了 recentRuns 就如实给 null（读不出），
+          // 让 Lead 能区分"没请求"（键缺席）与"请求了但读不出"（null）。
+          ...(recentRuns !== undefined ? { recentRuns: null } : {}),
         };
         // 请求了详情且证据已成功读出 ⇒ fallback 也如实带上（伪省略同样不可接受）。
         if (certEvidence != null) {
@@ -4510,10 +4628,10 @@ export function createWaoMcpServer({
         workspaceProofBinding = binding;
       }
 
-      // 决定 0129（原 run_dispatch_contract_check 的就地承接）：派发前就地跑同一份
-      // 预检服务（runDispatchContractCheck —— 同一函数，不复制）。合同级问题照旧
-      // 在任何副作用之前拒绝（dispatcher 调用计数为 0），且映射到既有固定文案，
-      // 拒绝语义不变：
+      // 决定 0129：派发前就地跑同一份预检服务（runDispatchContractCheck ——
+      // 同一函数，不复制），与独立的 run_dispatch_contract_check 工具并存。
+      // 合同级问题照旧在任何副作用之前拒绝（dispatcher 调用计数为 0），且映射
+      // 到既有固定文案，拒绝语义不变：
       //   - invalid_verification_path      → 既有专属文案（与 dispatcher typed
       //     DeliveryError 同一条）；
       //   - delivery_invalid + typed 码
@@ -4521,11 +4639,16 @@ export function createWaoMcpServer({
       //   - 其余合同级码（profile_unknown / profile_requires_delivery /
       //     profile_inline_conflict / delivery_invalid）→ 通用 DISPATCH_ERROR_TEXT
       //     （与下方 resolver !ok 分支同一文案）。
+      // 只有**原本就会拒**的合同缺陷才产出合同级码：预检服务内部把
+      // prepareDeliveryRequest 的 typed DeliveryError 当合同缺陷，其余意外异常
+      // 不产出合同级码（contract 节 unknown；其它 advisory 照旧）——绝不误拦可
+      // 派发的调用。
       // 只是提醒、不拦截的 advisory 码（CONTRACT_CHECK_ADVISORY_CODES 闭集，如
       // referenced_path_probe_miss / verification_dir_test_form /
       // verification_bare_node）随受理回执的 contractAdvisories 给出；预检服务
-      // 自身意外抛错时按 advisory 缺席处理——绝不把一次可派发的调用折成失败
-      // （权威是本 handler 自己的结构校验，不是预检）。
+      // 自身意外抛错时同样按 advisory 缺席处理（权威是本 handler 自己的结构校验）。
+      // 提醒数组在这里用 CONTRACT_ADVISORIES_SCHEMA 严格预校验：畸形/超限整组
+      // 丢弃（回执不带该键），保证 host 绝不会在 run 已启动后才收到 isError。
       let contractAdvisories = null;
       {
         let precheck = null;
@@ -4563,7 +4686,8 @@ export function createWaoMcpServer({
             };
           }
           if (Array.isArray(precheck.advisories) && precheck.advisories.length > 0) {
-            contractAdvisories = precheck.advisories;
+            const checked = CONTRACT_ADVISORIES_SCHEMA.safeParse(precheck.advisories);
+            contractAdvisories = checked.success ? checked.data : null;
           }
         }
       }
@@ -4859,8 +4983,8 @@ export function createWaoMcpServer({
               }
             : {}),
           // 决定 0129：受理回执携带就地预检的 advisory 码（零提醒 = 键缺省；
-          // accepted:false 不给）。收据 parse 经 CONTRACT_ADVISORY_ENTRY 闭集校验，
-          // 越界码整次折成固定 dispatch 错误（不部分输出）。
+          // accepted:false 不给）。数组已在派发前用同一 schema 严格预校验过：
+          // 畸形/超限整组丢弃，绝不出现"run 已启动、宿主却收到 isError"。
           ...(result.accepted === true && contractAdvisories != null
             ? { contractAdvisories }
             : {}),
@@ -4885,12 +5009,100 @@ export function createWaoMcpServer({
     },
   );
 
-  // 决定 0129：run_dispatch_contract_check 工具已删（Owner 批准的真删除式减面，
-  // 20→16）。同一份预检服务（contractCheckService）由上方 run_dispatch 在派发前
-  // 就地调用：合同级拒绝照旧发生在任何副作用之前（映射既有固定文案），advisory
-  // 码随受理回执的 contractAdvisories 给出。"只预检不派发"不再有独立入口——它
-  // 的用途（派发前发现合同问题）由"拒绝照旧在派发前 + 提醒在回执里当场给出"
-  // 覆盖（见决定 0129 不采纳一节）。
+  // 决定 0129（第 134 批会审修正）：run_dispatch_contract_check **保留**——它
+  // 独有的"只预检不派发"（worker 启动前看 contractValid/issueCodes/节状态/路径
+  // 提醒并据此改请求）在 MCP 面没有等价物；省略 executionProfileId 时列出
+  // availableProfiles 也只在它这里。run_dispatch 派发前的就地预检是"规矩下沉"，
+  // 与独立预检并存、不互相依赖。
+
+  register(
+    "run_dispatch_contract_check",
+    {
+      description: RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION,
+      // Shares run_dispatch's INPUT schema — the same agentId/prompt/delivery/
+      // executionProfileId surface, validated identically. Known/unknown/
+      // conflict for the profile is decided downstream by the shared resolver.
+      inputSchema: RUN_DISPATCH_INPUT,
+      outputSchema: RUN_DISPATCH_CONTRACT_CHECK_OUTPUT,
+      annotations: RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS,
+    },
+    async ({ agentId, prompt, delivery, executionProfileId, expectedWorkspaceRoot }) => {
+      // Read-only advisory precheck. Resolve the workspace scope so the result
+      // can report it, but — unlike run_dispatch — a binding failure is NOT a
+      // hard refusal: it surfaces as the closed-set "unknown" workspace section
+      // (never faked observed/unbound). The service never dispatches, forks, or
+      // writes a transcript; it only reads the registry and consumes the
+      // resolved scope. A call that supplies expectedWorkspaceRoot is checked
+      // against THAT proved project (call_target) instead of the default
+      // binding; an unprovable target is refused with the fixed target text
+      // before any registry read.
+      let workspaceBinding = null;
+      let workspaceScope = { source: null, projectBucket: null };
+      if (expectedWorkspaceRoot !== undefined) {
+        const target = proveCallWorkspaceRoot(expectedWorkspaceRoot);
+        if (target.error) {
+          return { isError: true, content: [{ type: "text", text: target.error }] };
+        }
+        workspaceBinding = { bound: true, source: "call_target", ...target.proof };
+        workspaceScope = {
+          source: "call_target",
+          projectBucket: projectBucketLabel(target.proof.root),
+        };
+      } else {
+        try {
+          workspaceBinding = await resolveWorkspaceBinding();
+        } catch {
+          workspaceBinding = null;
+        }
+        workspaceScope = workspaceBinding?.bound
+          ? {
+              source: workspaceBinding.source ?? null,
+              projectBucket: projectBucketLabel(workspaceBinding.root),
+            }
+          : { source: null, projectBucket: null };
+      }
+      try {
+        const result = await contractCheckService({
+          agentId,
+          prompt,
+          delivery,
+          executionProfileId,
+          workspaceBinding,
+          registryPath,
+        });
+        // Output boundary: project EXACTLY the published fields and parse them
+        // through RUN_DISPATCH_CONTRACT_CHECK_OUTPUT, so the service's internal
+        // precheck extras (advisories/deliveryErrorCode) never cross the wire
+        // and an oversized or malformed service object collapses to the fixed
+        // error text below. issueCodes already carries every code (contract
+        // level or advisory). workspaceScope states which project this check
+        // actually used.
+        const parsed = RUN_DISPATCH_CONTRACT_CHECK_OUTPUT.parse({
+          advisory: result.advisory,
+          contractValid: result.contractValid,
+          sections: result.sections,
+          issueCodes: result.issueCodes,
+          observations: result.observations,
+          profile: result.profile,
+          ...(result.availableProfiles !== undefined ? { availableProfiles: result.availableProfiles } : {}),
+          workspaceScope,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        // The service is fail-closed internally and should never throw, but a
+        // defensive collapse keeps the tool contract (bounded result or fixed
+        // safe text — never an unstructured error). This also catches any
+        // output-schema parse failure (unknown or oversized fields).
+        return {
+          isError: true,
+          content: [{ type: "text", text: CONTRACT_CHECK_ERROR_TEXT }],
+        };
+      }
+    },
+  );
 
   register(
     "run_consult",
@@ -6166,9 +6378,10 @@ export function createWaoMcpServer({
     },
   );
 
-  // 决定 0129：runs_list 工具已删（Owner 批准的真删除式减面，20→16）。能力并入
-  // lead_preflight 的可选 recentRuns 输入（同一 listRuns 服务、条目同形、含截断
-  // 与 unresolvedCount 事实）；CLI `wao runs list` 照旧。
+  // 决定 0129：runs_list 工具已删（Owner 批准的真删除式减面，20→17）。能力并入
+  // lead_preflight 的可选 recentRuns 输入（同一 listRuns 服务、条目同形、limit
+  // 1..100 与 activeOnly 都保留、含截断与 unresolvedCount 事实）；CLI
+  // `wao runs list` 照旧。
 
   // ===== run_await_result (M12-3 read-only composite; 批 119 起是 MCP 面唯一的
   // 等待工具——重复调用（单次 waitMs 用缺省值，TD-364）直到终态；长等待走 CLI

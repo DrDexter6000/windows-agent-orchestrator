@@ -84,7 +84,7 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
     });
     const client1 = await buildClient(server1);
     try {
-      const res = await client1.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      const res = await client1.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
       const parsed = JSON.parse(res.content[0].text);
       const section = parsed.recentRuns;
       const ids = section.runs.map((r) => r.runId);
@@ -117,7 +117,7 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
     });
     const client2 = await buildClient(server2);
     try {
-      const res = await client2.callTool({ name: "lead_preflight", arguments: { recentRuns: 10 } });
+      const res = await client2.callTool({ name: "lead_preflight", arguments: { recentRuns: { limit: 10 } } });
       const parsed = JSON.parse(res.content[0].text);
       const ids = parsed.recentRuns.runs.map((r) => r.runId);
       // Same runIds recovered after restart

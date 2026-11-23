@@ -7,8 +7,9 @@
 // result. 决定 0129（第 134 批）：原 `registry_list` 与 `runs_list` 两个只读
 // MCP 工具的能力并入本聚合器——workers[] 条目与原 registry_list 的
 // AGENT_ENTRY 同形（cwd/sessionReuse/missingCredentialEnvNames/dispatchHold
-// 随全量透传），可选 recentRunsLimit 返回最近运行清单（与原 runs_list.runs[]
-// 同形、同一 listRuns 服务，含截断与 unresolvedCount 事实）。
+// 随全量透传、不设比原工具更紧的上限），可选 recentRuns 返回最近运行清单
+//（limit 1..100 且支持 activeOnly；与原 runs_list.runs[] 同形、同一 listRuns
+// 服务，含截断与 unresolvedCount 事实）。
 //
 // This is an OPTIONAL ADVISORY aggregator, NOT an authorization gate:
 //   - It never produces permit/token/approval/preflightPassed state.
@@ -150,8 +151,14 @@ export {
 // separately as activeRunCount + activeRunsTruncated.
 // Exported so the MCP output schema enforces the SAME bound (single SSOT).
 export const ACTIVE_RUNS_CAP = 10;
-// Cap on workers returned (defensive against a pathological registry).
-export const WORKERS_CAP = 64;
+// 决定 0129（第 134 批会审修正）：workers **不设上限**。原 `registry_list`
+// 工具返回全部有效席位，registry 本身也没有条目数上限（readRegistry 逐条读
+// agents）；preflight 的 workers 用同一边界，schema 也不设 max——不制造比原
+// 工具更紧的上限。
+// 决定 0129：recentRuns 的请求上限与原 runs_list 一致（该工具缺省 50、上限
+// 100）；activeOnly 缺省 false。MCP schema 与这里同值，聚合器对越界值回落缺省。
+export const RECENT_RUNS_LIMIT_DEFAULT = 50;
+export const RECENT_RUNS_LIMIT_MAX = 100;
 // TD-341（第 89 批 C2）：runner 缺席证明的 unresolved 候选上限（listRuns 同一
 // 次扫描里有界保留，按 updatedAt 新到旧）。超出上限的照旧只计入
 // unresolvedRunCount，不做证明、不进 open item 行。
@@ -311,8 +318,10 @@ function renderGateStatusLine(lease, knownAgentIds) {
  *   application-layer use / tests), the real getRegistryInventory is used — but
  *   the MCP path always passes an explicit resolver to guarantee one read.
  * @param {Function} [input.listRunsFn] — injectable; signature matches listRuns
- * @param {number} [input.recentRunsLimit] — 决定 0129：请求 recentRuns 节时传入
- *   （1..50 的整数；MCP 层 schema 校验）。不传 = 不扫描、输出无 recentRuns 键。
+ * @param {{limit?:number, activeOnly?:boolean}} [input.recentRuns] — 决定 0129：
+ *   请求 recentRuns 节时传入（limit 1..100，缺省 50；activeOnly 先筛活动再
+ *   截断，与原 runs_list 同一 listRuns 语义）。不传 = 不扫描、输出无 recentRuns
+ *   键；传了（哪怕 {}）= 请求，读不出/未绑定输出 null。
  * @param {Function} [input.serverBuildFactsFn] — injectable server-build facts
  *   reader (serverBuildFacts.readServerBuildFacts; the MCP handler passes the
  *   real one). When provided, one advisory server-build line is derived from the
@@ -372,7 +381,7 @@ export async function aggregateLeadPreflight({
   userEnvReader,
   getRegistryInventoryFn,
   listRunsFn,
-  recentRunsLimit,
+  recentRuns,
   serverBuildFactsFn,
   gateStatusFn,
   laneProfilesFn,
@@ -534,8 +543,9 @@ export async function aggregateLeadPreflight({
     registryIssuesTruncated = projected.issuesTruncated;
     // 决定 0129：workers 条目与原 registry_list 的 AGENT_ENTRY 同形——全量透传
     //（cwd/sessionReuse/missingCredentialEnvNames/dispatchHold 随行），legacy 注入
-    // 缺字段时按各自 null/[] 兜底（同 reasoningEffort 惯例），绝不编造。
-    workers = agents.slice(0, WORKERS_CAP).map((a) => ({
+    // 缺字段时按各自 null/[] 兜底（同 reasoningEffort 惯例），绝不编造。会审修正：
+    // **不截断**——原 registry_list 返回全部有效席位，registry 本身无条目数上限。
+    workers = agents.map((a) => ({
       id: a.id,
       backend: a.backend,
       model: a.model,
@@ -560,9 +570,6 @@ export async function aggregateLeadPreflight({
       dispatchHold: a.dispatchHold ?? null,
     }));
     checkStatus.workers = "observed";
-    if (agents.length > WORKERS_CAP) {
-      warnings.push(`worker inventory truncated to ${WORKERS_CAP} (registry has ${agents.length}) — use the CLI (wao registry list) for the full list`);
-    }
     // M12-25: partial inventory — valid workers are returned, but the workers
     // section is a WARNING (→ complete=false) when any entry was omitted. This
     // keeps "registry had a bad entry" distinct from an observed-clean list and
@@ -618,6 +625,11 @@ export async function aggregateLeadPreflight({
         // 注入的 listRunsFn 不识别该选项时不返回该字段，本节自然 no-op）。
         unresolvedCandidatesCap: UNRESOLVED_RUNNER_GONE_CANDIDATES_CAP,
       });
+      // 决定 0129（第 134 批会审修）：工作区权威复证失败 ≠ 零条活动运行。
+      // 按"读不出"处理（catch 会把本节记 unknown / null），绝不伪造空清单。
+      if (result.workspaceAuthorizationUnavailable === true) {
+        throw new Error("workspace authorization could not be proven for the active-run query");
+      }
       unresolvedCandidates = Array.isArray(result.unresolvedCandidates)
         ? result.unresolvedCandidates
         : null;
@@ -663,24 +675,38 @@ export async function aggregateLeadPreflight({
   }
 
   // --- Section 3c: recent runs on demand (决定 0129；advisory, independent) ---
-  // 原 runs_list 工具的承接点：仅在调用方显式给 recentRunsLimit 时才扫描（不
-  // 请求 = 输出无 recentRuns 键、零额外扫描），复用同一个 listRuns 服务（含
-  // activityStatus/activityBasis 的诚实语义与 unresolvedCount 的事实）。范围与
-  // activeRuns 同一绑定（调用目标或缺省绑定）。与 lanes 同判法：不进
-  // checkStatus、不影响 complete；读不出 → null + warning（unknown，绝不伪造
-  // 空清单）；未绑定时同样 null（无可扫描的范围）。
-  let recentRuns = null;
-  if (Number.isInteger(recentRunsLimit) && recentRunsLimit >= 1) {
+  // 原 runs_list 工具的承接点：仅在调用方显式传 recentRuns（哪怕 {}）时才扫描
+  //（不请求 = 输出无该键、零额外扫描），复用同一个 listRuns 服务（含
+  // activityStatus/activityBasis 的诚实语义与 unresolvedCount 的事实）。会审
+  // 修正：补齐原工具的两种查询——limit 1..100（缺省 50）、activeOnly 先筛活动
+  // 再截断（同一 listRuns 语义）。范围与 activeRuns 同一绑定（调用目标或缺省
+  // 绑定）。与 lanes 同判法：不进 checkStatus、不影响 complete；读不出 → null +
+  // warning（unknown，绝不伪造空清单）；未绑定时同样 null（无可扫描的范围）。
+  const recentRunsRequested = recentRuns !== undefined;
+  let recentRunsSection = null;
+  if (recentRunsRequested) {
+    const limit = Number.isInteger(recentRuns?.limit)
+      && recentRuns.limit >= 1
+      && recentRuns.limit <= RECENT_RUNS_LIMIT_MAX
+      ? recentRuns.limit
+      : RECENT_RUNS_LIMIT_DEFAULT;
+    const activeOnly = recentRuns?.activeOnly === true;
     if (workspace && workspace.bound && typeof listRunsFn === "function") {
       try {
         const result = await listRunsFn({
           runDir,
-          latest: recentRunsLimit,
+          latest: limit,
+          activeOnly,
           authorizedWorkspaceRoot: workspaceBinding.root,
           knownAgentIds,
         });
+        // 决定 0129（第 134 批会审修）：复证失败 → 下面 catch 投影为
+        // recentRuns:null + warning（绝不投影成零条空清单）。
+        if (result.workspaceAuthorizationUnavailable === true) {
+          throw new Error("workspace authorization could not be proven for the recent-run query");
+        }
         const rows = Array.isArray(result.runs) ? result.runs : [];
-        recentRuns = {
+        recentRunsSection = {
           runs: rows.map((r) => ({
             runId: r.runId,
             agentId: r.agentId,
@@ -696,14 +722,14 @@ export async function aggregateLeadPreflight({
           unresolvedCount: typeof result.unresolvedCount === "number" ? result.unresolvedCount : 0,
         };
       } catch {
-        recentRuns = null;
+        recentRunsSection = null;
         warnings.push("recent-run query could not be read — retry, or use the CLI (wao runs list)");
       }
     } else if (workspace && !workspace.bound) {
-      recentRuns = null;
+      recentRunsSection = null;
       observations.push("recent-run listing skipped (workspace not bound)");
     }
-    // workspace unknown（resolver 抛错）→ recentRuns 保持 null（无可扫描范围）。
+    // workspace unknown（resolver 抛错）→ 保持 null（无可扫描范围）。
   }
 
   // --- Section 3b: proven runner-gone unresolved runs (TD-341; advisory, read-only) ---
@@ -914,7 +940,7 @@ export async function aggregateLeadPreflight({
     unresolvedRunCount,
     // 决定 0129：按需 recentRuns 节（原 runs_list 的承接点）。仅在调用方请求时
     // 存在；未请求时为 undefined（键缺省），读不出/未绑定为 null（unknown）。
-    ...(recentRunsLimit !== undefined ? { recentRuns } : {}),
+    ...(recentRunsRequested ? { recentRuns: recentRunsSection } : {}),
     // 0087: compact lane-profile projection ({scale, dimensionLabels, rows});
     // null in a worker context, when the file/lanes table is unreadable, or
     // (at the MCP boundary) when the sub-schema validation fails. Advisory

@@ -1246,7 +1246,7 @@ test("R10-A-MCP-1: run_dispatch input gains the additive `model` member; tool co
       // SSOT); re-assert from the toolSurface SSOT that adding a property
       // changed NEITHER the count NOR the set.
       const { TOOLS } = await import("../../src/mcp/toolSurface.js");
-      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 16-tool SSOT (0129)");
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 17-tool SSOT (0129)");
       const rd = tools.find((t) => t.name === "run_dispatch");
       const props = rd.inputSchema.properties ?? {};
       // The canonical property list = the prior closed set PLUS model (pure
@@ -1422,7 +1422,7 @@ test("R11-1-MCP-1: run_dispatch input gains the additive `reasoning` enum member
       // SSOT); re-assert from the toolSurface SSOT that adding a property
       // changed NEITHER the count NOR the set.
       const { TOOLS } = await import("../../src/mcp/toolSurface.js");
-      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 16-tool SSOT (0129)");
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 17-tool SSOT (0129)");
       const rd = tools.find((t) => t.name === "run_dispatch");
       const props = rd.inputSchema.properties ?? {};
       // The canonical property list = the prior closed set PLUS reasoning

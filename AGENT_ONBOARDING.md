@@ -314,7 +314,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 |---|---|
 | `delivery/` | 交付投影、验证、审查 |
 | `run-lifecycle/` | run 生命周期、续谱、sessionReuse |
-| `mcp-surface/` | 16-tool 冻结工具面与 MCP wire 契约（0129） |
+| `mcp-surface/` | 17-tool 冻结工具面与 MCP wire 契约（0129 会审修正：contract_check 保留） |
 | `transcript/` | 事件解析、summary、collect 投影 |
 | `registry-roles/` | registry schema、角色与车道 |
 | `backends/` | 各 backend 适配 |

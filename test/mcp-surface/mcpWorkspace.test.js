@@ -252,15 +252,23 @@ test("WSB-01: removed binding tools absent; lead_preflight input is strict (targ
     for (const removed of ["workspace_status", "workspace_select", "run_wait"]) {
       assert.ok(!names.includes(removed), `${removed} must NOT be on the surface (v0.10.0)`);
     }
-    // 决定 0129：四个只读工具并入幸存者，同样不得回到工具面。
-    for (const removed of ["registry_list", "runs_list", "run_dispatch_contract_check", "run_delivery_review_bundle"]) {
+    // 决定 0129：三个只读工具并入幸存者后删除，不得回到工具面；预检工具保留。
+    for (const removed of ["registry_list", "runs_list", "run_delivery_review_bundle"]) {
       assert.ok(!names.includes(removed), `${removed} must NOT be on the surface (decision 0129 fold-in)`);
     }
+    // 决定 0129 会审修正：run_dispatch_contract_check 保留（check-only 无等价物）。
+    assert.ok(names.includes("run_dispatch_contract_check"), "run_dispatch_contract_check stays on the surface (decision 0129)");
     const pre = tools.tools.find((t) => t.name === "lead_preflight");
     assert.ok(pre, "lead_preflight tool exists");
     const inputKeys = Object.keys(pre.inputSchema.properties ?? {}).sort();
     // 决定 0129：输入在 expectedWorkspaceRoot 之外新增可选 detail / recentRuns。
     assert.deepEqual(inputKeys, ["detail", "expectedWorkspaceRoot", "recentRuns"], "input schema is the optional per-call target + the two 0129 options");
+    // 决定 0129（会审修正）：recentRuns 补齐原 runs_list 的两种查询——limit 1..100
+    // 与 activeOnly（先筛活动再截断）。上限来自应用层 SSOT，不另写一份数字。
+    const recent = pre.inputSchema.properties.recentRuns;
+    assert.equal(recent.properties.limit.maximum, 100, "recentRuns.limit max = 100 (runs_list parity)");
+    assert.equal(recent.properties.activeOnly.type, "boolean", "recentRuns.activeOnly is a boolean");
+    assert.equal(recent.additionalProperties, false, "recentRuns strict");
     assert.equal(pre.inputSchema.additionalProperties, false, "strict additionalProperties");
     // 批 119（A3）：聚合器只读（证明与读，不写共享状态）。
     assert.equal(pre.annotations.readOnlyHint, true, "read-only");

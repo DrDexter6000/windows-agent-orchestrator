@@ -25,8 +25,8 @@ export const RUN_STATUS_OUTPUT_KEYS = Object.freeze([
 // R11-1-MCP-1 / B1). agentId + prompt required; the rest optional additive
 // members (delivery, M12-6 expectations, M12-9 executionProfileId, M12-7
 // continuable, M12-16 correctable, Round-4 readOnly, R10-A model, R11-1
-// reasoning). 决定 0129：原 run_dispatch_contract_check 共享该 schema 的第二
-// 载体已随工具删除（就地预检复用同一 resolver，不另立输入面）。
+// reasoning). 决定 0129（会审修正）：run_dispatch_contract_check 保留并**继续
+// 共享该 schema**（只预检不派发是它独有的入口）。
 // 0045 §1.4 第 5 步（2026-10-05）：+lane/+role（agentId 转可选——{agentId} 或
 // {lane, role} 二选一闭集，选择器校验在 handler 经 dispatchResolution）。
 // 0052（2026-10-10）：+fresh（复用会话逃生口——强制 first+epoch+1，Lead 裁量）。

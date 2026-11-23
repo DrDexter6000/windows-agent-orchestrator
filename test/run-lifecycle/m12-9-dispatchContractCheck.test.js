@@ -27,6 +27,7 @@ import { join } from "node:path";
 import {
   runDispatchContractCheck,
   CONTRACT_CHECK_ISSUE_CODES,
+  CONTRACT_CHECK_SECTIONS,
   extractReferencedRelativePaths,
 } from "../../src/application/runDispatchContract.js";
 import { EXECUTION_PROFILE_IDS } from "../../src/application/executionProfiles.js";
@@ -828,3 +829,73 @@ test("b108-PROBE-GLOB-BASE: a refused glob entry is still probed by its concrete
   const parentOnly = await probe(["lib-typo"]);
   assert.ok(!parentOnly.issueCodes.includes("referenced_path_probe_miss"), "the /** suffix is stripped before probing");
 });
+
+// 决定 0129（第 134 批会审修）：预检自身的**意外**异常绝不折成 delivery_invalid
+// ——那会让 run_dispatch 在派发前误拦一次本会放行的调用。此时 contract 节记
+// unknown（诚实地说"没验成"）、不产出该节合同级码、contractValid=false；
+// run_dispatch 照旧走自己的权威结构校验。
+test("0129: an unexpected precheck exception is advisory-absent, never a fabricated delivery_invalid", async () => {
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    workspaceBinding: BOUND,
+    registryPath: "ignored",
+    readRegistryFn: fakeRegistry(["coder_low"]),
+    prepareDeliveryRequestFn: () => { throw new Error("unexpected internal failure"); },
+    // Neutralize the TD-157 path probe so the only possible issueCode source is
+    // the contract section under test.
+    pathExistsFn: () => true,
+  });
+  assert.equal(r.advisory, true, "still an advisory result");
+  assert.equal(r.sections.contract, "unknown", "unvalidated, not observed-invalid");
+  assert.deepEqual(r.issueCodes, [], "no contract-level code → run_dispatch will not block");
+  assert.equal(r.contractValid, false, "cannot claim validity without validating");
+  assert.deepEqual(r.advisories, [], "no advisory fabricated");
+  assert.ok(r.observations.some((o) => /could not be validated/.test(o)), "honest observation line");
+});
+
+// 决定 0129（第 134 批会审修）：四类问题同时出现（未绑定、registry 不可读、
+// 结构校验意外异常、lint 提醒）时，observation 仍必须有界（输出 schema 上限 =
+// 每节一条），绝不能让四条 observations 把整次预检折成固定失败。
+test("0129: four simultaneous issue categories stay within the observation bound", async () => {
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src"],
+      verificationCommands: ["node --test test/some-dir"],
+    },
+    workspaceBinding: { bound: false },
+    registryPath: "ignored",
+    readRegistryFn: async () => { throw new Error("unreadable registry"); },
+    prepareDeliveryRequestFn: () => { throw new Error("unexpected internal failure"); },
+    pathExistsFn: () => false,
+  });
+  assert.equal(r.advisory, true);
+  assert.ok(r.observations.length <= CONTRACT_CHECK_SECTIONS.length,
+    `observations bounded (${r.observations.length} <= ${CONTRACT_CHECK_SECTIONS.length})`);
+  const joined = r.observations.join(" ");
+  for (const needle of [
+    "not bound",
+    "could not be read",
+    "could not be validated",
+    "directory argument",
+  ]) {
+    assert.ok(joined.includes(needle), `all four facts survive in bounded form: ${needle}`);
+  }
+  // All four advisory codes survive; the unexpected validation exception adds no
+  // contract-level code (run_dispatch stays authoritative).
+  for (const code of [
+    "workspace_unbound",
+    "registry_unreadable",
+    "verification_dir_test_form",
+    "verification_bare_node",
+  ]) {
+    assert.ok(r.issueCodes.includes(code), `${code} reported`);
+  }
+  assert.equal(r.contractValid, false, "contract could not be validated");
+  assert.equal(r.sections.contract, "unknown", "precheck did not complete — not a contract defect");
+});
+

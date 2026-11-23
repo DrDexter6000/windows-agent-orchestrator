@@ -143,9 +143,9 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 
 `--all` 与 `--file-index`/`--cursor` 互斥；`--out FILE` 把全文写进文件、stdout 只打一行摘要（回显路径经同一秘密脱敏）；`--since-parent` 只对续修子运行可用，父交付提交由谱系事实证明（“已证明”指提交已证明存在，不要求其验证通过），不可传入提交号，无父运行、跨工作区、跨谱系、父无已证明交付或本轮无增量均以固定文案拒绝。
 
-## 交付首屏查询（原 `run_delivery_review_bundle` 的等价两步，决定 0129）
+## 交付首屏查询（原 `run_delivery_review_bundle` 的两步替代，决定 0129）
 
-原组合工具已删：它等价于 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用。首屏查交付就先 `run_delivery`（省略 `waitMs` 即时读；带 `waitMs` 等收口，区间与何时返回见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再用 `run_delivery_review` 读指定文件页。两个原子工具的安全边界不变：workspace/runId-bound、非 reviewable 时携带 cursor 会 fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment、不判定 binary/diff-too-large 是否可接受，也不 stop/retry/repackage/accept/reject；任何服务异常固定返回各自的固定失败文案，无 partial structured output、动态错误、路径或 secret 泄漏。Lead 仍须审查 `0..changedFileCount-1` 的全部文件和全部页面，然后独立调用 `run_delivery_decide`。
+原组合工具已删，改由 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用：先 `run_delivery`（`waitMs` 区间与返回时机见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再 `run_delivery_review`。**两次调用没有组合工具的跨结果保证**：Lead 要把 `run_delivery_review` 回执的 `deliveryCommit`/`changedFileCount` 与先前 `run_delivery` 结果对照，不一致就重读重审；例外是已裁决但验证仍 pending——此时 `run_delivery_review` 给 `available:false`、`unavailableReason:"verification_pending"`，这是正常形态，不是两次回执不一致。两个原子工具的边界不变：workspace/runId-bound、非 reviewable 带 cursor fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment，也不 stop/retry/repackage/accept/reject；失败回各自固定文案、无 partial 输出或泄漏。Lead 仍须审查全部页面后独立调用 `run_delivery_decide`。
 
 ## MCP `run_delivery_reverify`（未变工件重验证）
 
@@ -161,7 +161,7 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 
 Lead 仍须在 decision 前完整 review（`run_delivery_review`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
 
-规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。派发前看受理回执的 `contractAdvisories`（决定 0129：预检随派发就地运行，引用路径探针的提醒当场给出）；验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
+规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。受理后立即看回执里的 `contractAdvisories`（引用路径等提醒当场给出），需要就停掉重派；要**派发前**预检，用 `run_dispatch_contract_check`（只预检不派发）。验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
 
 CLI 等价（同一 service 与安全投影，不是 raw 通道，不能改断言命令）：
 

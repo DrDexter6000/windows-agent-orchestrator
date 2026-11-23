@@ -2,7 +2,7 @@
 //
 // M12-10 progressive-disclosure correction — the FROZEN tool surface SSOT.
 //
-// WAO exposes EXACTLY 16 always-registered MCP tools. There is NO tool-profile
+// WAO exposes EXACTLY 17 always-registered MCP tools. There is NO tool-profile
 // model, NO startup flag, and NO restart-to-recover: every operational tool is
 // independently callable for the lifetime of the connection. The built-in
 // playbook catalog moved OFF the tool surface (it is presented as MCP resources
@@ -14,11 +14,12 @@
 // wait tools — per-call `expectedWorkspaceRoot` replaces the shared session
 // selection, and repeated `run_await_result` replaces the long-poll — taking
 // the surface from 23 to 20. Batch 134 (decision 0129, Owner-approved) folded
-// four more read-only tools into their survivors: `registry_list` and
-// `runs_list` into `lead_preflight` (workers carry the full agent entry;
-// optional detail/recentRuns), `run_dispatch_contract_check` into
-// `run_dispatch` (in-place precheck; advisories ride the receipt), and
-// `run_delivery_review_bundle` into `run_delivery` + `run_delivery_review`.
+// three read-only tools into their survivors — `registry_list` and `runs_list`
+// into `lead_preflight` (workers carry the full agent entry; optional
+// detail/recentRuns), `run_delivery_review_bundle` into `run_delivery` +
+// `run_delivery_review` — while KEEPING `run_dispatch_contract_check`: its
+// check-only (preview without dispatch) and availableProfiles listing have no
+// MCP equivalent (batch-134 review correction). The surface is 20 → 17.
 //
 // This module is the single frozen definition of that surface (names + the exact
 // registration order emitted by tools/list). server.js registers these tools
@@ -33,12 +34,13 @@
 // mid-conversation. Progressive disclosure is RESPONSE-DRIVEN via
 // availableDrilldowns on tool results, not via hiding tools.
 
-// The 16 always-registered tools, in the exact registration order emitted by
-// tools/list. Batch 134 (decision 0129): the former 20-tool set MINUS the four
-// read-only tools folded into their survivors = 16 (see the header note).
+// The 17 always-registered tools, in the exact registration order emitted by
+// tools/list. Batch 134 (decision 0129, review correction): the former 20-tool
+// set MINUS the three folded read-only tools = 17 (see the header note).
 export const TOOLS = Object.freeze([
   "lead_preflight",
   "run_dispatch",
+  "run_dispatch_contract_check",
   "run_consult",
   "run_continue",
   "run_correct",
@@ -66,14 +68,15 @@ export const TOOLS = Object.freeze([
     }
     seen.add(name);
   }
-  if (TOOLS.length !== 16) {
-    throw new Error(`toolSurface: TOOLS must contain exactly 16 tools (got ${TOOLS.length})`);
+  if (TOOLS.length !== 17) {
+    throw new Error(`toolSurface: TOOLS must contain exactly 17 tools (got ${TOOLS.length})`);
   }
   if (TOOLS.includes("playbook_list") || TOOLS.includes("playbook_get")) {
     throw new Error("toolSurface: playbook tools must not be on the tool surface (catalog is resources)");
   }
-  // 决定 0129（第 134 批）：四个只读工具的能力并进留下的工具后删除——防误加回。
-  for (const folded of ["registry_list", "runs_list", "run_dispatch_contract_check", "run_delivery_review_bundle"]) {
+  // 决定 0129（第 134 批，会审修正）：三个只读工具的能力并进留下的工具后删除
+  // （run_dispatch_contract_check 保留）——防误加回。
+  for (const folded of ["registry_list", "runs_list", "run_delivery_review_bundle"]) {
     if (TOOLS.includes(folded)) {
       throw new Error(`toolSurface: ${folded} was folded into its survivor (decision 0129) and must not return`);
     }

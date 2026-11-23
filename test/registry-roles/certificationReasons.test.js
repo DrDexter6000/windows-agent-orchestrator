@@ -370,8 +370,8 @@ test("TD-111-R3: AGENT_ENTRY/lead_preflight 的 certificationReasonCode enum 派
     (src.match(/certificationReasonCode:\s*z\.enum\(\[\.\.\.CERTIFICATION_REASON_CODES\]\)/g) ?? []).length >= 1,
     "AGENT_ENTRY（lead_preflight.workers 复用同一对象）的 enum 从 SSOT 派生",
   );
-  assert.match(src, /workers:\s*z\.array\(AGENT_ENTRY\)\.max\(WORKERS_CAP\)\.nullable\(\)/,
-    "LEAD_PREFLIGHT_OUTPUT.workers 直接复用 AGENT_ENTRY（同一 schema，决定 0129）");
+  assert.match(src, /workers:\s*z\.array\(AGENT_ENTRY\)\.nullable\(\)/,
+    "LEAD_PREFLIGHT_OUTPUT.workers 直接复用 AGENT_ENTRY（同一 schema，决定 0129；无人工上限）");
   assert.match(src, /certificationLastHealthyAt:\s*z\.string\(\)\.nullable\(\)/);
 
   // 5. 无第二份手工清单：SSOT 码值不得以字符串字面量形式再出现在 server.js。

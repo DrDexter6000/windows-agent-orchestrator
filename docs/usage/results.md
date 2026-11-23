@@ -194,9 +194,9 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 ## MCP 运行清单：`lead_preflight` 的 `recentRuns`（原 `runs_list` 承接）
 
-决定 0129：原 `runs_list` 工具已删——`lead_preflight` 的可选输入 `recentRuns`（整数 1..50）让输出多一个 `recentRuns` 节，列出本次调用范围内最近的 run。只读、幂等：不修改任何持久状态、不追加 transcript event；不请求该输入就没有这个键、不多扫描。其它项目的 run 不可见，不跨 workspace 探测；既没给 `expectedWorkspaceRoot` 又没有缺省绑定时该节为 `null`（workspace 节如实报未绑定，不伪造成空清单）。
+决定 0129：原 `runs_list` 工具已删——`lead_preflight` 的可选输入 `recentRuns`（对象 `{limit?: 1..100, activeOnly?: boolean}`，缺省 limit 50、activeOnly false）让输出多一个 `recentRuns` 节。只读幂等：不改持久状态、不追加事件；不请求该输入就没有这个键、不多扫描。其它项目的 run 不可见，不跨 workspace 探测；既没给 `expectedWorkspaceRoot` 又没有缺省绑定时该节为 `null`（workspace 节如实报未绑定），请求了但读不出也为 `null` + warning——绝不伪造空清单。
 
-范围与 `lead_preflight` 自身一致：`expectedWorkspaceRoot` 给了就当场证明、只作用于本次调用；省略时用缺省绑定（MCP roots → 启动配置）。条目按新到旧返回，请求的数字即条数上限。`runDir`、registry、`agentId`、`cwd` 等 server-owned。
+范围与 `lead_preflight` 自身一致：`expectedWorkspaceRoot` 给了就当场证明、只作用于本次调用；省略时用缺省绑定。条目按新到旧返回；`activeOnly:true` 先筛"经证明 active"的运行、再按 `limit` 截断（与原 `runs_list` 同一 `listRuns` 语义）。`runDir`、registry 等 server-owned。
 
 `recentRuns.runs` 每个元素与原 `runs_list.runs[]` 同形——`runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
 
@@ -211,7 +211,7 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 `recentRuns` 节内绝不出现：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量、messages、evidence、异常 message/stack（workspace 节的 `workspaceRoot` 是 preflight 自己的证明事实，批 119 起有意在面）；读不出时该节为 `null` + warning（unknown，不伪造空清单）。
 
-CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`（含 `activeOnly` 过滤）。
+CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N] [--active]`（`--active` 只留经证明 active；服务侧 `activeOnly`）。
 
 ## MCP resources `wao://playbooks`：Lead Playbook Catalog
 

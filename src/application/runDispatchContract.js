@@ -1,11 +1,12 @@
 // src/application/runDispatchContract.js
 //
 // M12-9 Package B: the OPTIONAL read-only / ADVISORY dispatch-contract precheck
-// service. 决定 0129（第 134 批）：原 `run_dispatch_contract_check` MCP 工具已
-// 删除；本服务保留并由 run_dispatch 在派发前**就地**调用（同一函数，不复制）——
-// 会让派发被拒的合同问题照旧在任何副作用之前拒绝（权威仍是 run_dispatch 的
-// 固定文案），只是提醒、不拦截的 advisory 码随受理回执的 contractAdvisories
-// 给出（本服务结果的 advisories 数组，闭集码 + 固定说明）。
+// service. 决定 0129（第 134 批，会审修正）：`run_dispatch_contract_check` 这个
+// MCP 工具**保留**（它独有的"只预检不派发"在 MCP 面没有等价物），本服务同
+// 一份函数也由 run_dispatch 在派发前**就地**调用——会让派发被拒的合同问题照旧
+// 在任何副作用之前拒绝（权威仍是 run_dispatch 的固定文案），只是提醒、不拦截
+// 的 advisory 码随受理回执的 contractAdvisories 给出（本服务结果的 advisories
+// 数组，闭集码 + 固定说明）。
 //
 // This is NOT a gate. It folds the mechanical facts a Lead might want around a
 // dispatch — workspace binding, worker registry presence, and the delivery
@@ -498,6 +499,11 @@ export async function runDispatchContractCheck({
 
   // ===== Section 3: contract (resolver + prepareDeliveryRequest SSOT) =====
   let contractObservation = null;
+  // 决定 0129（第 134 批会审修）：contract 节的所有 observation 先收在这里，
+  // 最后合成**一条**再入列——输出 schema 只允许每节一条（上限 =
+  // CONTRACT_CHECK_SECTIONS.length），四类问题叠加时不能因观测量超限把整次
+  // 预检折成 `run_dispatch_contract_check failed`。
+  const contractObservations = [];
   // The resolver is the shared authority with run_dispatch: profile vs inline
   // mutual exclusivity, known/unknown/conflict/non-delivery. It never throws.
   const resolved = resolveVerification({ delivery, executionProfileId });
@@ -509,9 +515,19 @@ export async function runDispatchContractCheck({
     sections.contract = "observed";
   } else {
     selectedProfileId = resolved.profileId;
-    // Structural validation via the SAME SSOT run_dispatch uses. A DeliveryError
-    // here is an observed contract defect (delivery_invalid / invalid path),
-    // NOT an unknown — the section stays observed.
+    // Structural validation via the SAME SSOT run_dispatch uses. A typed
+    // DeliveryError here is an observed contract defect (delivery_invalid /
+    // invalid path), NOT an unknown — the section stays observed, and
+    // run_dispatch would reject the same contract anyway (it calls the same
+    // prepareDeliveryRequest downstream), so refusing early never blocks a
+    // dispatch that would have succeeded.
+    //
+    // 决定 0129（第 134 批会审修正）：预检自身的**意外**异常（非 typed
+    // DeliveryError）绝不转化成 delivery_invalid 去提前拒绝派发——那会误拦一次
+    // run_dispatch 本会放行的调用。此类异常一律按本节的"提醒缺席"处理：contract
+    // 节记 unknown、不产出该节的合同级码、contractValid=false（诚实地说"没验成"）；
+    // 其它节（workspace/registry/lint/路径探针）的 advisory 与观察照旧保留，
+    // run_dispatch 照旧走它自己的权威结构校验。
     try {
       const effective = buildEffectiveDelivery(delivery, resolved.verification);
       if (effective) {
@@ -519,16 +535,20 @@ export async function runDispatchContractCheck({
       }
       sections.contract = "observed";
     } catch (e) {
-      sections.contract = "observed";
-      if (e && e.name === "DeliveryError" && typeof e.deliveryCode === "string") {
-        deliveryErrorCode = e.deliveryCode;
-      }
-      if (e && e.name === "DeliveryError" && e.deliveryCode === "invalid_verification_path") {
-        issueCodes.push("invalid_verification_path");
+      const typedDeliveryDefect = e && e.name === "DeliveryError" && typeof e.deliveryCode === "string";
+      if (!typedDeliveryDefect) {
+        sections.contract = "unknown";
+        contractObservations.push("contract could not be validated by this precheck — run_dispatch still runs its own structural validation");
       } else {
-        issueCodes.push("delivery_invalid");
-        if (e && e.name === "DeliveryError" && e.deliveryCode === "invalid_allowed_paths") {
-          contractObservation = ALLOWED_PATHS_RULE_TEXT;
+        sections.contract = "observed";
+        deliveryErrorCode = e.deliveryCode;
+        if (e.deliveryCode === "invalid_verification_path") {
+          issueCodes.push("invalid_verification_path");
+        } else {
+          issueCodes.push("delivery_invalid");
+          if (e.deliveryCode === "invalid_allowed_paths") {
+            contractObservation = ALLOWED_PATHS_RULE_TEXT;
+          }
         }
       }
     }
@@ -536,7 +556,10 @@ export async function runDispatchContractCheck({
 
   // One contract observation preserves the MCP one-per-section output bound,
   // including when both TD-227 codes and the TD-157 path probe fire together.
-  const verificationObservations = contractObservation ? [contractObservation] : [];
+  const verificationObservations = [
+    ...(contractObservation ? [contractObservation] : []),
+    ...contractObservations,
+  ];
   const verificationCommands = resolved.ok ? [
     ...(resolved.verification.commands ?? []),
     ...(resolved.verification.setupCommands ?? []),
@@ -592,6 +615,17 @@ export async function runDispatchContractCheck({
     observations.push(verificationObservations.join(" "));
   }
 
+  // Hard output bound. The published schema allows at most one observation per
+  // section (CONTRACT_CHECK_SECTIONS.length); the section assembly above already
+  // yields at most that many. This final guard keeps that true by construction:
+  // a future extra line is truncated with a count marker instead of making the
+  // whole advisory tool collapse to `run_dispatch_contract_check failed`.
+  const boundedObservations = observations.slice(0, CONTRACT_CHECK_SECTIONS.length);
+  if (observations.length > boundedObservations.length) {
+    const omitted = observations.length - boundedObservations.length;
+    boundedObservations[boundedObservations.length - 1] += ` …（另有 ${omitted} 条观察未展开）`;
+  }
+
   // contractValid reflects ONLY contract-level issue codes. workspace/registry
   // advisory codes are separate sections and do not gate the contract verdict.
   const contractValid = sections.contract === "observed"
@@ -602,7 +636,7 @@ export async function runDispatchContractCheck({
     contractValid,
     sections,
     issueCodes,
-    observations,
+    observations: boundedObservations,
     // 决定 0129：advisory 码 + 同一句固定说明（零提醒 = 空数组；run_dispatch
     // 受理回执仅在非空时携带 contractAdvisories）。
     advisories,

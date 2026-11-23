@@ -475,7 +475,7 @@ test("MAR-14: repeated terminal calls append ZERO audits (idempotent read-only)"
   } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
-test("MAR-15: current tool count is 16 (batch 134 folded four read-only tools, decision 0129)", async () => {
+test("MAR-15: current tool count is 17 (batch 134 folded three read-only tools and kept contract_check, decision 0129)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mar15-"));
   try {
     makeGitRepo(dir);
@@ -484,7 +484,7 @@ test("MAR-15: current tool count is 16 (batch 134 folded four read-only tools, d
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_await_result"), "run_await_result present");
-      assert.equal(tools.tools.length, 16, "exactly 16 tools (batch 134 folded four read-only tools, decision 0129)");
+      assert.equal(tools.tools.length, 17, "exactly 17 tools (batch 134 folded three read-only tools and kept contract_check, decision 0129)");
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); }
 });

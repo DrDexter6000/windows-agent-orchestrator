@@ -455,18 +455,19 @@ test("M11-8-FBA: registry failure → exactly ONE read, workers=null (no fallbac
 });
 
 // FB-C: schema enforces maxItems via shared SSOT (prove caps are consistent).
-test("M11-8-FBC: ACTIVE_RUNS_CAP and WORKERS_CAP are exported and finite", async () => {
+test("M11-8-FBC: ACTIVE_RUNS_CAP is exported and finite (workers has no artificial cap)", async () => {
   const { ACTIVE_RUNS_CAP, WORKERS_CAP } = await import("../../src/application/leadPreflight.js");
   assert.equal(typeof ACTIVE_RUNS_CAP, "number");
-  assert.equal(typeof WORKERS_CAP, "number");
   assert.ok(ACTIVE_RUNS_CAP > 0 && ACTIVE_RUNS_CAP <= 50, "reasonable cap");
-  assert.ok(WORKERS_CAP > 0 && WORKERS_CAP <= 256, "reasonable cap");
+  // 决定 0129（会审修正）：workers 不设比原 registry_list 更紧的上限——原工具
+  // 返回全部有效席位，registry 本身也没有条目数上限。
+  assert.equal(WORKERS_CAP, undefined, "no WORKERS_CAP export (no artificial worker cap)");
 });
 
-// FB-C2: workers truncated at WORKERS_CAP.
-test("M11-8-FBC2: workers truncated at WORKERS_CAP", async () => {
-  const { WORKERS_CAP } = await import("../../src/application/leadPreflight.js");
-  const many = Array.from({ length: WORKERS_CAP + 10 }, (_, i) => ({
+// FB-C2: workers are NOT truncated (same boundary as the former registry_list).
+test("M11-8-FBC2: workers are returned in full — no artificial truncation", async () => {
+  const TOTAL = 100;
+  const many = Array.from({ length: TOTAL }, (_, i) => ({
     id: `w${i}`, backend: "claude-code", model: "m", certification: null,
     credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [],
   }));
@@ -475,8 +476,8 @@ test("M11-8-FBC2: workers truncated at WORKERS_CAP", async () => {
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => many,
   });
-  assert.equal(result.workers.length, WORKERS_CAP, "workers capped");
-  assert.ok(result.warnings.some((w) => /truncated/i.test(w)), "truncation warning");
+  assert.equal(result.workers.length, TOTAL, "every valid worker is returned");
+  assert.equal(result.warnings.some((w) => /truncated/i.test(w)), false, "no truncation warning");
 });
 
 // ===== Final evidence: real MCP handler behavior (not just application-layer) =====
@@ -506,8 +507,8 @@ test("M11-8-FE1: MCP handler reads registry exactly ONCE on failure (real transp
   } finally { cleanupDir(dir); cleanupDir(ws); }
 });
 
-test("M11-8-FE4: lead_preflight outputSchema maxItems matches SSOT caps", async () => {
-  const { ACTIVE_RUNS_CAP, WORKERS_CAP } = await import("../../src/application/leadPreflight.js");
+test("M11-8-FE4: lead_preflight outputSchema maxItems matches SSOT caps (workers uncapped)", async () => {
+  const { ACTIVE_RUNS_CAP } = await import("../../src/application/leadPreflight.js");
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe4-"));
   try {
@@ -520,13 +521,63 @@ test("M11-8-FE4: lead_preflight outputSchema maxItems matches SSOT caps", async 
       assert.ok(t.outputSchema, "output schema declared");
       const schema = t.outputSchema;
       // .nullable() serializes as anyOf; the array branch is anyOf[0].
+      // 决定 0129（会审修正）：workers 与原 registry_list 同边界——schema 不设 max。
       const workersSchema = schema.properties?.workers;
       const workersArr = workersSchema?.anyOf ? workersSchema.anyOf[0] : workersSchema;
-      assert.equal(workersArr?.maxItems, WORKERS_CAP, `workers.maxItems === WORKERS_CAP (${WORKERS_CAP})`);
+      assert.equal(workersArr?.maxItems, undefined, "workers array has no artificial maxItems");
       const activeRunsSchema = schema.properties?.activeRuns;
       const activeRunsArr = activeRunsSchema?.anyOf ? activeRunsSchema.anyOf[0] : activeRunsSchema;
       assert.equal(activeRunsArr?.maxItems, ACTIVE_RUNS_CAP, `activeRuns.maxItems === ACTIVE_RUNS_CAP (${ACTIVE_RUNS_CAP})`);
     } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+// 决定 0129（第 134 批会审修正）：workers 与原 registry_list 同边界——MCP 面
+// 真实调用返回全部有效席位（此例 70 > 旧 WORKERS_CAP=64），无截断 warning。
+test("M11-8-FE5: real MCP lead_preflight returns EVERY valid worker (no 64 cap over the wire)", async () => {
+  const { createWaoMcpServer } = await import("../../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe5-"));
+  try {
+    makeGitRepo(dir);
+    const many = Object.fromEntries(Array.from({ length: 70 }, (_, i) => [
+      `w${i}`, { backend: "claude-code", cwd: dir },
+    ]));
+    const reg = makeRegistry(dir, many);
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "lead_preflight", arguments: { expectedWorkspaceRoot: dir } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.workers.length, 70, "every valid worker is returned over the wire");
+      assert.equal(parsed.warnings.some((w) => /truncated/i.test(w)), false, "no truncation warning");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+// 决定 0129（第 134 批会审修）：listRuns 的工作区复证失败必须被 preflight
+// 投影为 null/unknown（绝不零条 + complete:true）。这里走真实 listRuns 的
+// 失败标记路径（仅注入一个必抛的 verifier 工厂）。
+test("M11-8-FE6: real listRuns authority failure → activeRuns/recentRuns null (never an empty list)", async () => {
+  const { aggregateLeadPreflight } = await import("../../src/application/leadPreflight.js");
+  const { listRuns } = await import("../../src/application/runList.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe6-"));
+  try {
+    const result = await aggregateLeadPreflight({
+      workspaceBinding: { bound: true, source: "call_target", root: dir, gitHead: "a".repeat(40), dirty: false },
+      registryPath: join(dir, "agents.json"),
+      runDir: dir,
+      getRegistryInventoryFn: async () => [],
+      listRunsFn: (args) => listRuns({
+        ...args,
+        createWorkspaceVerifierFn: () => { throw new Error("unprovable authority"); },
+      }),
+      recentRuns: { limit: 5 },
+    });
+    assert.equal(result.activeRuns, null, "active-run section is unknown, not empty");
+    assert.equal(result.checkStatus.activeRuns, "unknown");
+    assert.equal(result.recentRuns, null, "requested but unreadable → null (never an empty list)");
+    assert.ok(result.warnings.filter((w) => /could not be read/.test(w)).length >= 2,
+      "both sections report the read failure honestly");
   } finally { cleanupDir(dir); }
 });
 
