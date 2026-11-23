@@ -237,8 +237,11 @@ test("CT-3: missing / relative / non-Git / subdirectory targets refuse with zero
         assert.equal(res.isError, true, `${label}: refused`);
         const text = res.content.map((b) => b.text ?? "").join(" ");
         if (label === "missing") {
+          // 第 135 批：expectedWorkspaceRoot 在 schema 上必填——缺参现在先被
+          // wire 校验拒绝（SDK InvalidParams 点名参数），处理器固定文案保留为
+          // 兜底（wire 上不可达，本测试不经过它）。
           assert.match(text, /expectedWorkspaceRoot/, "missing: names the parameter");
-          assert.match(text, /Git worktree top-level/, "missing: says what to pass");
+          assert.match(text, /Required|invalid_type/, "missing: wire-level required rejection");
         } else {
           assert.match(text, /workspace target invalid/, `${label}: fixed target-invalid refusal`);
         }

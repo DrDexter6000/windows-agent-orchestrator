@@ -92,7 +92,7 @@ LLM 编排器或外部脚本的最短驱动闭环：
 
 ### 续读
 
-结果超过单页边界（8 条 message、4000 字符/条、或 12000 字符总 cap）时，输出携带 `nextCursor` 而非 `null`。用同一工具传 `{runId, cursor}` 继续读取下一页，直到 `nextCursor === null`。跨页拼接后完整、按序、无漏项、无重复；长单条 message 会在页内中途切分，下页从同一 message 的字符偏移继续；Unicode/CJK/emoji 不会在页边界拆坏 code point。
+结果超过单页边界（8 条 message、4000 字符/条、或 12000 字符总 cap）时，输出携带 `nextCursor` 而非 `null`。同一调用参数加上 `cursor` 继续读取下一页，直到 `nextCursor === null`。跨页拼接后完整、按序、无漏项、无重复；长单条 message 会在页内中途切分，下页从同一 message 的字符偏移继续；Unicode/CJK/emoji 不会在页边界拆坏 code point。
 
 cursor 是 server-opaque 的 base64url token（≤192 字符），只含 runId 摘要、snapshot 摘要和位置索引，绝不携带 raw runId/sessionId/path/prompt/secret 或任何 worker 文本。跨 run、跨 snapshot、跨位置重放都 fail-closed 为固定 `run_collect failed`；失效后重取无 cursor 的第一页，重建续读链。cursor 是纯数据，无进程内 session 状态：Host/MCP 进程重启后仍可续读。
 

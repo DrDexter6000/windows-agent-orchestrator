@@ -1177,11 +1177,16 @@ test("TD-319: withToolErrorTextEscape——抛错收敛为 SDK 同形 isError，
 test("TD-319: run_dispatch 选择器拒绝经包装层上 wire——多行文本、行内控制字符不再伪造一行", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcp-td319-"));
   try {
+    // 第 135 批：expectedWorkspaceRoot 是 schema 必填（wire 先拒缺参）。选择器
+    // 拒绝在处理器内先于 workspace 证明——给一个可证明的 Git 顶层，让断言落在
+    // 选择器错误而不是缺参校验错误上。
+    execSync("git init", { cwd: dir, stdio: "ignore" });
+    execSync('git -C "' + dir + '" config user.email t@t.com && git -C "' + dir + '" config user.name t && git -C "' + dir + '" commit --allow-empty -m init', { stdio: "ignore" });
     const registryPath = makeRegistry(dir, {});
     const server = createWaoMcpServer({ registryPath, runDir: join(dir, "runs") });
     const client = await buildInMemoryClient(server);
     try {
-      const res = await client.callTool({ name: "run_dispatch", arguments: { lane: "no_such_lane_td319", role: "auditor", prompt: "t" } });
+      const res = await client.callTool({ name: "run_dispatch", arguments: { lane: "no_such_lane_td319", role: "auditor", prompt: "t", expectedWorkspaceRoot: dir } });
       assert.equal(res.isError, true, "未知 lane 被拒");
       const text = res.content.map((b) => (b.type === "text" ? b.text : "")).join("");
       const rows = text.split("\n");

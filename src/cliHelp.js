@@ -153,7 +153,8 @@ Flags:
 
 Notes:
   - The file given to --delivery-spec-file must contain the INNER delivery object
-    itself ({"mode":"git_commit_v1",...}), WITHOUT an outer {"delivery": ...} wrapper.
+    itself ({"allowedPaths":[...],...}; "mode" is optional and defaults to
+    "git_commit_v1"), WITHOUT an outer {"delivery": ...} wrapper.
   - A --background delivery run additionally requires an explicit --cwd: the
     delivery ownership record (run.background_submitted.cwd) is built from it,
     and the dispatch is refused before any side effect when it is missing.

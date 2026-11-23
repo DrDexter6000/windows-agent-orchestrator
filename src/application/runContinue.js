@@ -371,7 +371,15 @@ function lineageIdentityFromStarted(started) {
  * @param {object} input
  * @param {string} input.parentRunId — the terminal run being continued
  * @param {string} input.prompt — Lead-authored correction prompt (bounded)
- * @param {object} input.delivery — child delivery contract (git_commit_v1 shape)
+ * @param {object} [input.delivery] — child delivery contract (git_commit_v1
+ *   shape). OPTIONAL (第 135 批，决定 0130): omitted → the child inherits the
+ *   parent run's OWN effective delivery contract (the persisted run.started
+ *   delivery facts — for a continuation parent that is exactly the contract
+ *   its own run started with). This never widens scope: what is inherited is
+ *   the contract the Lead already approved for this lineage. An EXPLICIT
+ *   delivery keeps the historical behavior byte-for-byte (including the
+ *   continuation_scope_incomplete listing). The cumulative-scope check (11b)
+ *   still runs on the effective contract either way.
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {string} input.registryPath — path to agents.json
  * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding (canonical git root)
@@ -436,13 +444,19 @@ export async function continueRun({
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return refuse("malformed_input");
 
   // 2. Child delivery contract (the Lead's scope authority for the correction).
-  let validatedDelivery;
-  try {
-    validatedDelivery = prepareDeliveryRequest(delivery);
-  } catch {
-    return refuse("invalid_delivery");
+  //    第 135 批：an EXPLICIT contract validates HERE, before the parent read —
+  //    refusal order unchanged. An OMITTED contract is inherited from the
+  //    parent's persisted run.started delivery facts AFTER the parent transcript
+  //    proves out (step 7b) — the inheritance target only exists once the
+  //    parent does.
+  let validatedDelivery = null;
+  if (delivery !== undefined) {
+    try {
+      validatedDelivery = prepareDeliveryRequest(delivery);
+    } catch {
+      return refuse("invalid_delivery");
+    }
   }
-  const publicDelivery = toPublicDelivery(validatedDelivery);
 
   // 3. Parent transcript must exist and every envelope must bind the requested
   //    runId + one canonical agentId. A single cross-run/corrupt event invalidates
@@ -618,6 +632,48 @@ export async function continueRun({
   }
   const worktreePath = started.worktreePath;
   const baseCommit = started.delivery.baseCommit;
+
+  // 7b. 第 135 批（决定 0130）+ 续修 5：delivery 省略时继承父运行**已生效**的
+  //     交付合同——只取父转录 run.started 已落盘的合同事实（mode/allowedPaths/
+  //     verification 全份），不从别处推断；父运行若是续修，run.started 记的就
+  //     是它自己启动时生效的那份。继承的是 Lead 先前已批准的范围，不扩大
+  //     scope；11b 的累计范围核对照旧执行。
+  //     续修 5：继承合同按子运行启动的同一套规则校验（非 persisted——通配
+  //     allowedPaths 照旧拒绝），且持久化的 mode 必须逐字是 "git_commit_v1"
+  //     （SSOT 会把 undefined 当缺省，这里先拒；显式 null/别的值同样损坏）。
+  //     持久化合同里每个出现的字段都原样交给 SSOT，不补值、不丢字段：两种
+  //     verification 声明恰好出现一种，出现的字段类型不对即拒（SSOT 对两者
+  //     同存是"commands 赢"，这里先拒）。校验不过拒绝 invalid_delivery（闭集
+  //     既有成员），MCP 回执对该拒绝带 guidance：显式传 delivery 可覆盖。
+  if (validatedDelivery === null) {
+    const d = started.delivery;
+    const present = (key) => d[key] !== undefined;
+    if (d.mode !== "git_commit_v1"
+      || present("verificationCommands") === present("verificationUnavailableReason")
+      || (present("verificationCommands") && !Array.isArray(d.verificationCommands))
+      || (present("verificationUnavailableReason") && typeof d.verificationUnavailableReason !== "string")
+      || (present("verificationSetupCommands") && !Array.isArray(d.verificationSetupCommands))) {
+      return refuse("invalid_delivery");
+    }
+    try {
+      validatedDelivery = prepareDeliveryRequest({
+        mode: d.mode,
+        allowedPaths: d.allowedPaths,
+        ...(present("verificationCommands")
+          ? { verificationCommands: [...d.verificationCommands] }
+          : { verificationUnavailableReason: d.verificationUnavailableReason }),
+        ...(present("verificationSetupCommands")
+          ? { verificationSetupCommands: [...d.verificationSetupCommands] }
+          : {}),
+        ...(present("verificationTimeoutMs")
+          ? { verificationTimeoutMs: d.verificationTimeoutMs }
+          : {}),
+      });
+    } catch {
+      return refuse("invalid_delivery");
+    }
+  }
+  const publicDelivery = toPublicDelivery(validatedDelivery);
 
   // 8. Parent delivery commit (committed) or null (backend-failed / uncommitted).
   let deliveryCommit = null;

@@ -808,7 +808,9 @@ function dispatchExpectationMismatchText(field) {
 const DELIVERY_VERIFICATION_COMMANDS_MAX = 32;
 
 const DELIVERY_INPUT = z.object({
-  mode: z.literal("git_commit_v1"),
+  // 第 135 批（决定 0130）：git_commit_v1 是唯一交付模式，schema 可省、缺省即它；
+  // 显式给了别的值照旧在 wire 拒绝（prepareDeliveryRequest 同款闭集拒绝兜底）。
+  mode: z.literal("git_commit_v1").optional(),
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64),
   verificationCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(DELIVERY_VERIFICATION_COMMANDS_MAX).optional(),
   verificationUnavailableReason: z.string().trim().min(1).max(512).optional(),
@@ -909,12 +911,12 @@ const RUN_DISPATCH_INPUT = z.object({
   // deliberately weakened assertion vs the full 40/64-hex exact form; regex
   // serializes to JSON Schema and rides this inputSchema);
   // expectedDirty is a boolean. expectedWorkspaceRoot is the dispatch
-  // TARGET — required by the run_dispatch HANDLER, while the shared
-  // run_dispatch_contract_check tool consumes the same optional field as its
-  // check target (schema stays optional for that reason) — proved via proveWorkspace;
-  // the session/MCP-root/server-config binding is NOT consulted for the
-  // dispatch target. Absence or an unprovable value refuses with a fixed text
-  // before any side effect.
+  // TARGET — optional HERE because run_dispatch_contract_check shares this
+  // base object (its default binding is legal); run_dispatch itself registers
+  // the DERIVED strict variant below with this field REQUIRED on the wire
+  // (第 135 批) — proved via proveWorkspace; the session/MCP-root/
+  // server-config binding is NOT consulted for the dispatch target. Absence
+  // or an unprovable value refuses with a fixed text before any side effect.
   expectedGitHead: z.string().regex(EXPECTED_GIT_HEAD_RE).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
@@ -995,6 +997,15 @@ const RUN_DISPATCH_INPUT = z.object({
   reasoning: z.enum([...REASONING_EFFORTS]).optional(),
 }).strict();
 
+// 第 135 批（决定 0130）：run_dispatch 的派发目标在 wire 上就是必填——schema
+// 标 required（模型看 schema 即知，缺参不再要被拒一次才知道）。不复制整份：
+// 从与 run_dispatch_contract_check 共享的 RUN_DISPATCH_INPUT 派生，只把这一个
+// 字段改成必填；后者可用缺省绑定，保持 optional 不动。处理器里原有的缺参
+// 固定文案拒绝保留（schema 校验在前，处理器兜底不删）。
+const RUN_DISPATCH_INPUT_STRICT = RUN_DISPATCH_INPUT.extend({
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
+});
+
 // M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
 // Exposes the binding source, canonical head, dirty flag, and nullable booleans
 // proving which expectations were supplied and matched. NEVER exposes the
@@ -1074,8 +1085,8 @@ const RUN_DISPATCH_DESCRIPTION =
   // never-infers 边界。参数表由 strict inputSchema 表达。
   "Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns " +
   "runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git " +
-  "worktree top-level) is REQUIRED and is this call's target — the default binding is " +
-  "not consulted; expectedGitHead/expectedDirty are optional assertions against it. " +
+  "worktree top-level) is this call's target — the default binding is " +
+  "not consulted; expectedGitHead/expectedDirty are optional assertions. " +
   "continuable roots a lineage run_continue can " +
   "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
   "keeps one live process so run_correct can queue an in-flight turn. WAO never infers " +
@@ -1456,26 +1467,34 @@ const CONTINUE_CREDENTIAL_MISSING_TEXT =
   "then set them in the current process or Windows User environment and retry.";
 
 // run_continue input: the terminal parent run to continue + the Lead's correction
-// prompt + the child delivery contract (required — a continuation is always a
-// delivery run). Same DELIVERY_INPUT SSOT as run_dispatch. runDir/registry/cert/
-// workspace/Lead-session are server-owned (never model-supplied).
+// prompt + the OPTIONAL child delivery contract (第 135 批决定 0130：省略时继承
+// 父运行已生效的合同——父转录 run.started 已落盘的合同事实；继承的是 Lead 先前
+// 已批准的范围，不扩大 scope；显式给出时行为不变). Same DELIVERY_INPUT SSOT as
+// run_dispatch. runDir/registry/cert/workspace/Lead-session are server-owned
+// (never model-supplied).
 // M12-9 Package B: DELIVERY_INPUT no longer enforces inline verification itself
 // (a profile can supply it for run_dispatch). run_continue does NOT support
-// profiles, so its delivery MUST still declare inline verification. That rule is
+// profiles, so an EXPLICIT delivery must still declare inline verification —
+// an omitted (inherited) contract skips this handler check, because the
+// inherited contract carries its own verification declaration. That rule is
 // enforced in the run_continue HANDLER (below), NOT as a top-level .refine()
 // here — a top-level .refine() on an inputSchema breaks its JSON-schema property
 // serialization in tools/list (the same root cause fixed for RUN_DISPATCH_INPUT;
-// see M9-2B-01). The handler rejects a profile-less delivery carrying no inline
-// verification before the service is called, so the service call count stays 0.
+// see M9-2B-01). The handler rejects an explicit profile-less delivery carrying
+// no inline verification before the service is called, so the service call
+// count stays 0.
 const RUN_CONTINUE_INPUT = z.object({
   parentRunId: z.string().min(1),
   prompt: z.string().min(1),
-  delivery: DELIVERY_INPUT,
+  // 第 135 批（决定 0130）：可省——省略时子运行继承父运行已生效的交付合同
+  // （父转录 run.started 已落盘的合同事实，不从别处推断；继承的是 Lead 先前
+  // 已批准的范围，不扩大 scope）。显式给出时行为完全不变。
+  delivery: DELIVERY_INPUT.optional(),
   // the continuation target comes from THIS call (proved via
-  // proveWorkspace; required by the handler with a fixed refusal). The parent
-  // run must belong to this target (verifyRunWorkspaceOwnership inside the
-  // shared service) — the default binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // proveWorkspace). The parent run must belong to this target
+  // (verifyRunWorkspaceOwnership inside the shared service) — the default
+  // binding is not consulted. 第 135 批：wire 必填（schema 标 required）。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 // run_continue output: one strict object spanning the accepted and refused variants.
@@ -1515,6 +1534,10 @@ const RUN_CONTINUE_OUTPUT = z.object({
   uncoveredInheritedPaths: z.array(z.string().min(1).max(512)).max(INVENTORY_PATHS_LIMIT).nullable().optional(),
   uncoveredInheritedCount: z.number().int().nonnegative().nullable().optional(),
   uncoveredInheritedTruncated: z.boolean().nullable().optional(),
+  // 第 135 批续修 5：拒绝文案通道——仅 invalid_delivery 且 delivery 省略（继承
+  // 合同复验失败）时携带的固定安全文案，指路 Lead 显式传 delivery。其余拒绝与
+  // 成功一律键缺席（absent 非 null；静态文本，不带任何动态内容）。
+  guidance: z.string().max(160).optional(),
 }).strict();
 
 // M12-22: validate an untrusted service-level cumulative-scope refusal for the wire.
@@ -1590,8 +1613,9 @@ const RUN_CONTINUE_DESCRIPTION =
   "Continue a terminal continuable delivery with ONE Lead-authorized correction turn: a " +
   "new run resumes the parent's provider conversation in the retained worktree (no fresh " +
   "worktree/session), shipping a child delivery. expectedWorkspaceRoot (absolute Git " +
-  "worktree top-level) is required — the parent must belong to it. Eligibility: read-only, " +
-  "closed-set rejectionReason, before any mutation. WAO never infers correction, scope, " +
+  "worktree top-level); the parent must belong to it. Omit delivery to inherit the " +
+  "parent's effective contract. Eligibility: read-only, " +
+  "closed-set, before any mutation. WAO never infers correction, scope, " +
   "verification, retry, or acceptance — the Lead reviews and decides.";
 
 // ===== run_correct (M12-16 queued in-flight correction) constants =====
@@ -1615,9 +1639,9 @@ const RUN_CORRECT_INPUT = z.object({
   runId: z.string().min(1),
   correctionId: z.string().min(1).max(CORRECTION_ID_MAX_LEN).regex(CORRECTION_ID_PATTERN),
   prompt: z.string().min(1).max(CORRECTION_PROMPT_MAX_LEN),
-  // per-call target (proved; required by the handler). The run must
-  // belong to it — the default binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // per-call target (proved; the run must belong to it — the default binding
+  // is not consulted). 第 135 批：wire 必填（schema 标 required）。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 // run_correct output: one strict object with a closed-set outcome that spans the
@@ -1652,7 +1676,7 @@ const RUN_CORRECT_DESCRIPTION =
   // delivery_failed）、never auto-* 边界、prompt 永不回显。
   "Queue ONE follow-up correction turn to a RUNNING correctable worker: durable append, " +
   "delivered to the live provider stdin. expectedWorkspaceRoot (absolute Git worktree " +
-  "top-level) is required — the run must belong to it. Closed-set outcome " +
+  "top-level); the run must belong to it. Outcome " +
   "queued/pending/delivered/rejected; queued = durably appended, NOT model-executed — " +
   "run_activity later shows delivered/delivery_failed. WAO never auto-stops/retries/" +
   "re-scopes/accepts; the prompt is never returned.";
@@ -1881,10 +1905,10 @@ const RUN_COLLECT_INPUT = z.object({
   // service call). compact is NOT a semantic summary and does NOT decide
   // whether full output is needed.
   mode: z.enum(["full", "compact"]).optional(),
-  // per-call target (proved; required by the handler — run_collect
-  // appends an audit event to the run's transcript, so it is an A-class
-  // call). The run must belong to it; the default binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // per-call target (proved — run_collect appends an audit event to the
+  // run's transcript, so it is an A-class call). The run must belong to it;
+  // the default binding is not consulted. 第 135 批：wire 必填。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 const COLLECTED_MESSAGE = z.object({
@@ -1950,7 +1974,7 @@ const RUN_COLLECT_ANNOTATIONS = {
 const RUN_COLLECT_DESCRIPTION =
   // 必须保留：not idempotent（M12-10-G 钉，审计追加副作用）；compact 语义。
   "Collect a run's worker output: bounded, redacted assistant text + evidence counts. " +
-  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level); the run must " +
   "belong to it. Each call appends one messages.collected audit event (not idempotent); " +
   "cursor = prior nextCursor. mode=compact returns the last assistant text verbatim " +
   "(<=4000 chars) + full evidence counts; no cursor, no semantic summary.";
@@ -2727,10 +2751,10 @@ const RUN_DELIVERY_DECIDE_INPUT = z.object({
   runId: z.string().min(1),
   decision: z.enum(["accepted", "rejected"]),
   reason: z.string().trim().min(1).max(2000),
-  // per-call target (proved; required by the handler — the decision
-  // durably writes the transcript). The run must belong to it; the session
-  // binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // per-call target (proved — the decision durably writes the transcript).
+  // The run must belong to it; the session binding is not consulted.
+  // 第 135 批：wire 必填。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 // M12-6 Package 3B2a: EXPECTED policy rejections (verification not passed,
@@ -2760,10 +2784,10 @@ const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
 const RUN_DELIVERY_DECIDE_DESCRIPTION =
   // 必须保留：first decision wins（M12-10-G 钉 /first/）；expected-policy 拒绝
   // 走正常回执 + 闭集 rejectionReason；never decides（M9-6B-11 禁用词）。
-  "Record a Lead decision (accepted/rejected) on a delivery. " +
-  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must " +
+  "Record a Lead decision on a delivery. " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level); the run must " +
   "belong to it. First durable decision wins. Expected-policy rejections return a " +
-  "normal outcome with a closed-set rejectionReason; a run of another project and " +
+  "normal outcome with a closed-set rejectionReason; another project's run and " +
   "unexpected internal failures are errors. Never decides correctness automatically; " +
   "returns no decision reason or delivery details.";
 
@@ -2805,9 +2829,9 @@ const RUN_DELIVERY_REVERIFY_INPUT = z.object({
   ).max(REVERIFY_SETUP_COMMANDS_LIMIT).optional(),
   // Bounded optional timeout (bound by the exported SSOT constants).
   timeoutMs: z.number().int().min(REVERIFY_TIMEOUT_MS_MIN).max(REVERIFY_TIMEOUT_MS_MAX).optional(),
-  // per-call target (proved; required by the handler). The run must
-  // belong to it; the default binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // per-call target (proved; the run must belong to it; the default binding
+  // is not consulted). 第 135 批：wire 必填。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 // ===== TD-241 C2b：pending 回执的闭集指引（kimi+opus 裁定会审
@@ -2857,12 +2881,12 @@ const RUN_DELIVERY_REVERIFY_DESCRIPTION =
   // decision 归 run_delivery_decide（3B2a-RV-09 禁用词：auto-accept/merge/
   // push/worktree path/stderr）。
   "Re-verify the committed delivery artifact after the original verification outcome was " +
-  "invalidated (closed-set reason): re-runs the persisted verification commands against " +
+  "invalidated: re-runs the persisted verification commands against " +
   "the SAME committed artifact, records one audited reverify chain, returns the closed-set " +
-  "outcome. attempt:2 requests the final re-verification after an eligible failed first chain. " +
-  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the " +
-  "run must belong to it. Reentrant — retries converge on the same commit, at most one " +
-  "outcome. The decision stays the Lead's (run_delivery_decide).";
+  "outcome. attempt:2 is the final re-verification after an eligible failed first chain. " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level); the " +
+  "run must belong to it. Reentrant — retries converge on the same commit. " +
+  "The decision stays the Lead's (run_delivery_decide).";
 
 // ===== run_delivery_repackage (model-free repackage) constants =====
 // M12-1S2: when a delivery run terminally failed with packaging code
@@ -2879,9 +2903,9 @@ const DELIVERY_REPACKAGE_ERROR_TEXT = "run_delivery_repackage failed";
 const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
   runId: z.string().min(1),
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(REPACKAGE_ALLOWED_PATHS_LIMIT),
-  // per-call target (proved; required by the handler). The run must
-  // belong to it; the default binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // per-call target (proved; the run must belong to it; the default binding
+  // is not consulted). 第 135 批：wire 必填。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
@@ -2914,9 +2938,9 @@ const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
   // recovery≠acceptance / decide 归属。
   "Re-package a retained delivery candidate after disallowed_path, verified-quiet backend " +
   "failure, or process_missing (runner provably gone; settles the run failed, " +
-  "first-terminal-wins), reusing the original worktree, base commit, and verification " +
+  "first-terminal-wins), reusing the original worktree/base/verification " +
   "config — no model, no resume, no path inference, no verification override. " +
-  "expectedWorkspaceRoot (absolute Git worktree top-level) is required — the run must " +
+  "expectedWorkspaceRoot (absolute Git worktree top-level); the run must " +
   "belong to it. allowedPaths " +
   "must cover the original scope and every actual changed path (sole scope authority); " +
   "recovery provenance is recorded, never semantic acceptance — run_delivery_decide owns " +
@@ -3195,9 +3219,9 @@ const RUN_STOP_INPUT = z.object({
   runId: z.string().min(1),
   reason: z.string().min(STOP_REASON_MIN_LEN).max(STOP_REASON_MAX_LEN),
   observedSeq: z.number().int().nonnegative(),
-  // per-call target (proved; required by the handler). The run must
-  // belong to it; the default binding is not consulted.
-  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // per-call target (proved; the run must belong to it; the default binding
+  // is not consulted). 第 135 批：wire 必填。
+  expectedWorkspaceRoot: z.string().min(1).max(1024),
 }).strict();
 
 const RUN_STOP_OUTPUT = z.object({
@@ -3235,16 +3259,16 @@ const RUN_STOP_DESCRIPTION =
   // 必须保留（决定 0069 + M12-10-G 钉）：先读 run_activity、observedSeq/reason
   // 协议、观察过时即拒、"10 分钟内有生命体征不建议中止"、destructive、
   // first-terminal-wins。
-  "Stop a run owned by the project given in THIS call (Lead-triggered). expectedWorkspaceRoot " +
-  "(absolute Git worktree top-level) is required — the run must belong to it, not to the " +
+  "Stop a run owned by this call's project (Lead-triggered). expectedWorkspaceRoot " +
+  "(absolute Git worktree top-level); the run must belong to it, not to the " +
   "default binding. " +
   "Read run_activity first; pass observedSeq (its newest entry's seq; 0 if none) and " +
   "reason (why stop) — both " +
   `recorded; worker events after observedSeq older than ${STOP_OBSERVATION_MAX_AGE_SECONDS / 60} min ` +
   "reject the call, no side effect. Advice: do not stop within 10 min of a vital sign " +
   "(any worker event) without a specific reason. first-terminal-wins: the first caller " +
-  "claims terminal 'aborted' and runs the destructive side effect (process kill / backend " +
-  "abort); concurrent/late callers rejected, zero side effects. Not idempotent; " +
+  "claims terminal 'aborted' and runs the destructive side effect (kill/abort); " +
+  "concurrent/late callers rejected, zero side effects. Not idempotent; " +
   "after terminal a passing call writes only a rejection audit fact.";
 
 // ===== observation/termination facts（等待族共享投影）constants =====
@@ -4431,7 +4455,7 @@ export function createWaoMcpServer({
     "run_dispatch",
     {
       description: RUN_DISPATCH_DESCRIPTION,
-      inputSchema: RUN_DISPATCH_INPUT,
+      inputSchema: RUN_DISPATCH_INPUT_STRICT,
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
@@ -5470,12 +5494,16 @@ export function createWaoMcpServer({
       }
 
       // M12-9 Package B: run_continue does NOT support execution profiles, so
-      // the delivery MUST declare inline verification (commands OR unavailable
-      // reason). Enforced HERE — before the service is called — and NOT as a
-      // top-level schema .refine() (which would break this tool's inputSchema
-      // property serialization in tools/list). Rejecting here keeps the service
-      // call count at 0 for malformed input.
-      if (!delivery?.verificationCommands && !delivery?.verificationUnavailableReason) {
+      // an EXPLICIT delivery must declare inline verification (commands OR
+      // unavailable reason). Enforced HERE — before the service is called —
+      // and NOT as a top-level schema .refine() (which would break this tool's
+      // inputSchema property serialization in tools/list). 第 135 批：delivery
+      // 可省——省略时子运行继承父运行已生效的合同（其 inline verification 随
+      // 合同继承），所以这条 inline-verification 门只对显式 delivery 生效。
+      // Rejecting here keeps the service call count at 0 for malformed input.
+      if (delivery !== undefined
+        && !delivery?.verificationCommands
+        && !delivery?.verificationUnavailableReason) {
         return {
           isError: true,
           content: [{ type: "text", text: CONTINUE_VERIFICATION_REQUIRED_TEXT }],
@@ -5569,8 +5597,16 @@ export function createWaoMcpServer({
           state: result.accepted ? result.state : null,
           rejectionReason: result.accepted ? null : result.rejectionReason,
           // 决定 0095：受理成功的后台续跑附 nextStep（静态模板）；拒收不给。
+          // 第 135 批（决定 0130）：delivery 省略的受理回执在 nextStep 末尾补
+          // 半句固定文案，写明这次用的是继承来的父运行合同（不新增 wire 字段）。
           ...(result.accepted === true
-            ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" }) }
+            ? { nextStep: buildNextStep({ surface: "mcp", situation: "dispatch_accepted" })
+              + (delivery === undefined ? " Delivery contract inherited from the parent run." : "") }
+            : {}),
+          // 第 135 批续修 5：继承合同复验失败的拒绝带固定指路文案（只在
+          // delivery 省略的 invalid_delivery 上；其余拒绝键缺席）。
+          ...(!result.accepted && result.rejectionReason === "invalid_delivery" && delivery === undefined
+            ? { guidance: "the inherited delivery contract failed revalidation; pass an explicit delivery to override it." }
             : {}),
           ...(projectedScope ? {
             inheritedChangedPaths: projectedScope.inheritedChangedPaths,

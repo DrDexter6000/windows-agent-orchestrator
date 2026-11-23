@@ -86,3 +86,9 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
   - 三条天花板按实测下调重冻：`FROZEN_17_WIRE_CEILING` 87157→76543，`FROZEN_17_DESC_CEILING` 11291→10402，`FROZEN_17_HOSTVISIBLE_CEILING` 22436→20870（均仍低于 2a1875ac 的冻结值：只降不升）；
   - `DESC_STRIPPED_CONTRACT_SHA` 重测重冻为 `d398828b8eef5da845ed66f579ab4906860303b3a7989556e8c2644ac70625b8`；
   - m12-10 注释链如实记录。
+
+## 追加记录：2026-11-23 schema 收窄 + 缺省化（第 135 批，决定 0130；Owner 2026-11-22 同意执行头脑风暴结论）
+
+- **收窄**：八个写类工具（`run_dispatch`、`run_continue`、`run_correct`、`run_stop`、`run_collect`、`run_delivery_decide`、`run_delivery_reverify`、`run_delivery_repackage`）的 inputSchema 把 `expectedWorkspaceRoot` 从 optional 改为 required（2026-10-15 追加记录里"handler 内必传、schema optional"的状态收口——schema 标必填后模型看 schema 即知，缺参在 wire 校验即被拒；处理器固定文案保留为兜底）。`run_dispatch` 与 `run_dispatch_contract_check` 共享输入对象，从共享基础对象派生 run_dispatch 严格版，不复制整份；contract_check 与 `run_consult` 的读取/分页模式、其余只读工具保持 optional。
+- **缺省化**：`DELIVERY_INPUT.mode`（`z.literal("git_commit_v1")` → optional literal；缺省值在 `prepareDeliveryRequest` SSOT 落地）与 `run_continue` 的顶层 `delivery`（省略即继承父运行已生效的合同，决定 0130）改为可省——required 数组删 `mode`/`delivery`，属性形状不变。
+- **手续执行**：三条天花板按实测重冻，均不高于 main 的冻结值（76543/10402/20870）：首交付 76543→76532/10402→10231/20870→20859；续修（两席会审后 Lead 裁定）出参增可选 guidance（+45B schema）、恢复 cursor=nextCursor 与 "(any worker event)" 两句描述、同批压 reverify/repackage/stop/continue 的重复措辞，终值 76543→76535、10402→10189、20870→20817；`DESC_STRIPPED_CONTRACT_SHA` 随 schema 如实翻新为 `e3de9cbb1ba6720b0d6e750b267d841727fcbbafa31749c4aecc1f75ea8e7295`（首交付值 82b48f5b…）；m12-10 注释链如实记录。

@@ -110,7 +110,7 @@ export const REPACKAGE_REJECTION_CODES = Object.freeze([
   "candidate_ineligible",
   // The persisted run.started delivery contract is unusable (not exactly one bound run.started; missing worktreePath/baseCommit/allowedPaths/verification declaration; malformed verificationTimeoutMs).
   "candidate_contract_malformed",
-  // The worktree is missing/unprovable, its index is non-empty, or its HEAD has left the original base WITHOUT being a provable WAO delivery commit for this run (recover proof: wao/<runId> branch, single parent == base, exact message/identity, clean tree). A provable drifted HEAD is RECOVERED (source:"recovered"), not rejected (TD-233).
+  // The worktree is missing/unprovable, its index reset to the proven baseline failed (决定 0130: worker-staged entries are reset before packaging — only a failed reset or a staged addition the worktree ignores lands here), or its HEAD has left the original base WITHOUT being a provable WAO delivery commit for this run (recover proof: wao/<runId> branch, single parent == base, exact message/identity, clean tree). A provable drifted HEAD is RECOVERED (source:"recovered"), not rejected (TD-233).
   "worktree_unusable",
   // The candidate inventory read failed — the candidate cannot be enumerated.
   "inventory_unavailable",

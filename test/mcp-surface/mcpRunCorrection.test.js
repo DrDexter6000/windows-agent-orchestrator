@@ -245,7 +245,8 @@ test("M12-16-MCP-5: no session binding at all → the call's target still author
       assert.equal(calls, 1, "service called once on the call's own target");
       assert.equal(res.isError, undefined, "no error: the call is self-authorized");
       // Follow-up (same server): a call WITHOUT the target is refused before
-      // the service — fixed text naming what to pass.
+      // the service — 第 135 批起 wire 校验先行（schema 标必填，SDK InvalidParams
+      // 点名参数）；处理器固定文案保留为兜底（wire 上不可达，此处不经过）。
       const noTarget = await safeCall(client, {
         name: "run_correct",
         arguments: { runId: RUN_ID, correctionId: "c1", prompt: "x" },
@@ -254,7 +255,7 @@ test("M12-16-MCP-5: no session binding at all → the call's target still author
       assert.equal(noTarget.res.isError, true, "missing target refused");
       const noTargetText = (noTarget.res.content ?? []).map((c) => c.text || "").join("");
       assert.match(noTargetText, /expectedWorkspaceRoot/, "refusal names the parameter");
-      assert.match(noTargetText, /Git worktree top-level/, "refusal says what to pass");
+      assert.match(noTargetText, /Required|invalid_type/, "wire-level required rejection");
     } finally {
       await client.close();
       await server.close();

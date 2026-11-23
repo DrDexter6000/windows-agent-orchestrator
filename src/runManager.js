@@ -727,8 +727,9 @@ export class RunManager {
       requireCertified = false,
       certFreshnessDays = 30,
       // TD-103 Phase 3A：delivery mode。absent = 普通运行（无 delivery Git 调用/事件）。
-      // present = mode 必须为 "git_commit_v1"，要求 persistent worktree 隔离，
-      // worker 完成后控制面打包 delivery commit。
+      // present = mode 缺省 "git_commit_v1"（唯一模式，显式别的值照旧拒绝，
+      // 决定 0130），要求 persistent worktree 隔离，worker 完成后控制面打包
+      // delivery commit。
       delivery = null,
       // M11-11C: opaque provider-session reuse routing
       // {mode, opaqueUuid, turn[, priorRunId]}, resolved by dispatchRun from
@@ -3471,6 +3472,12 @@ export class Run {
                   ...(doneMarker ? { completionMarker: doneMarker } : {}),
                   ...(workerDeclared ? { workerDeclared } : {}),
                   ...(errorClass ? { errorClass } : {}),
+                  // 第 135 批续修 4：打包中途发生过索引重置时，失败事件也带这份
+                  // 有界事实（仓库相对路径；absent 非 null）。
+                  ...(deliveryResult.error.stagedResetPaths
+                    ? { stagedResetPaths: deliveryResult.error.stagedResetPaths,
+                        ...(deliveryResult.error.stagedResetTruncated ? { stagedResetTruncated: true } : {}) }
+                    : {}),
                 },
               },
             ],
@@ -3679,9 +3686,21 @@ export class Run {
       const errorClass = classifyDeliveryError(err, {
         worktreePath: this.deliveryContext?.worktreePath,
       })?.errorClass ?? null;
+      // 第 135 批续修 4（决定 0130 修订条）：重置发生在打包中途时，失败路径也
+      // 要把这份有界事实带进 run.delivery_failed——随 delivery.js 以不可枚举
+      // 属性挂在错误对象上（绝不经 JSON 序列化外漏），此处显式读出。
+      const stagedResetPaths = Array.isArray(err?.stagedResetPaths)
+        ? err.stagedResetPaths
+        : null;
+      const stagedResetTruncated = stagedResetPaths && err.stagedResetTruncated === true;
       return {
         success: false,
-        error: { code, message, ...(errorClass ? { errorClass } : {}) },
+        error: {
+          code,
+          message,
+          ...(errorClass ? { errorClass } : {}),
+          ...(stagedResetPaths ? { stagedResetPaths, ...(stagedResetTruncated ? { stagedResetTruncated: true } : {}) } : {}),
+        },
       };
     }
   }

@@ -42,7 +42,7 @@ import { join } from "node:path";
  * @param {object} baseEnv
  * @returns {{GIT_CONFIG_PARAMETERS: string}}
  */
-function splitIndexOffEnv(baseEnv) {
+export function splitIndexOffEnv(baseEnv) {
   const inherited = (baseEnv.GIT_CONFIG_PARAMETERS ?? "").trim();
   const entry = "'core.splitIndex=false'";
   return { GIT_CONFIG_PARAMETERS: inherited === "" ? entry : `${inherited} ${entry}` };

@@ -21,7 +21,7 @@ read_when: delivery 模式派发、审查、重验证、验收或拒收、重打
 npm run cli -- run glm-flash --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
 ```
 
-Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。
+Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。`mode` 可省（缺省 `git_commit_v1`，显式别的值照旧拒绝）。worker 留下的暂存改动打包前会被重置到基线（不动工作树），以工作树内容为准继续打包；重置路径清单随 `run.delivery_created` 的 DeliveryRef（`stagedResetPaths`）落转录。重置失败或暂存新文件会被忽略时拒为 `pre_staged_changes`（决定 0130）。
 
 写入只在授权 worktree 内（越界即 `failed(workdir_escape)`）、scratch 放 `.wao/runs/`：控制面注入的交付执行合同已写明，任务书不必重复。仍建议任务书写明：
 
@@ -229,7 +229,7 @@ expected policy rejection 是正常结构化结果，不是错误：资格/合�
 - `workspace_not_authorized`：run 不属于授权 workspace。
 - `candidate_ineligible`：资格闭集外——终态非 failed / 恢复事实不合格 / 原始 delivery 未请求 / 已有 Lead 决策。
 - `candidate_contract_malformed`：`run.started` 持久化合同残缺——含持久化 allowedPaths 非法或 `verificationTimeoutMs` 越界；既有 DeliveryRef 结构损坏归入 `durable_chain_inconsistent`。
-- `worktree_unusable`：持久化 worktree 缺失/不可证明、暂存区非空，或 HEAD 已离开原始 base 且不是本 run 可证明的 WAO 交付提交。漂移本身不拒绝：可证明者（单父==base、精确消息/身份、净树、范围）按 `source:"recovered"` 救回；recover 证明只证格式与内容，不证提交者身份。
+- `worktree_unusable`：持久化 worktree 缺失/不可证明、暂存区重置失败（暂存改动本身已被重置后照常打包——决定 0130），或 HEAD 已离开原始 base 且不是本 run 可证明的 WAO 交付提交。漂移本身不拒绝：可证明者（单父==base、精确消息/身份、净树、范围）按 `source:"recovered"` 救回；recover 证明只证格式与内容，不证提交者身份。
 - `inventory_unavailable` / `inventory_incomplete` / `inventory_empty`：候选清单读取失败 / 截断 / 为空。
 - `scope_violation`：新 allowedPaths 收窄原合同，或未覆盖全部实际改动/既有 delivery。
 - `durable_chain_inconsistent`：既有 delivery 链孤儿/歧义/未绑定。

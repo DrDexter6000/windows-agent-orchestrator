@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve, isAbsolute, join, normalize as posixNormalize } from "node:path";
+import { existsSync, lstatSync, unlinkSync } from "node:fs";
+import { resolve, isAbsolute, join, dirname, normalize as posixNormalize } from "node:path";
 import { posix } from "node:path";
-import { createPrivateIndexCopy } from "./gitPrivateIndex.js";
+import { createPrivateIndexCopy, splitIndexOffEnv } from "./gitPrivateIndex.js";
 
 /**
  * Coder Delivery Contract v1 — deterministic Git delivery packager (Phase 2).
@@ -809,18 +809,78 @@ export function assertCommittedDeliveryRef(deliveryRef) {
   };
 }
 
-// ===== Change detection (read-only) =====
+// ===== Change detection (read-only, index-independent) =====
+
+// 第 135 批续修 3（决定 0130 修订条）：所有"列出改动"的读取都与真实索引无关。
+// `git diff <base>` 的 tracked 集合由索引决定、`ls-files --others` 的 others
+// 集合也由索引决定——仅索引的删除/新增（如 `git rm --cached`、暂存新文件）会
+// 改变两者。做法：建一个**持有 base 树的临时索引**（真实索引的私有副本上
+// `read-tree --reset <base>`，GIT_INDEX_FILE 指向它，用完即删），两条读取都跑在
+// 它上面——tracked = base 树里的路径、others = 工作树里不在 base 树且未被忽略
+// 的路径。这与"重置回基线之后的真实索引"给出的集合逐值相同，于是清点与
+// 打包天然同口径，重置前的清点也不会被暂存状态带偏。
+
+let _baseTreeIndexSeq = 0;
+
+/**
+ * Run `fn(env)` with GIT_INDEX_FILE pointing at a temporary index that holds
+ * exactly the baseCommit tree: a private copy of the real index (gitPrivateIndex)
+ * reset to the base, or a fresh file in this worktree's git dir when no copy
+ * can be made; deleted in all cases. The real index is never written. Git
+ * failures (rev-parse/read-tree) propagate — callers keep their own failure
+ * semantics. core.splitIndex is off for these commands so writing/deleting the
+ * temp index can never touch shared index files of the real one.
+ *
+ * @param {string} cwd — worktree path
+ * @param {string} baseCommit — canonical full hash
+ * @param {(env: object) => unknown} fn
+ * @returns {unknown} fn's return value
+ */
+function withBaseTreeIndex(cwd, baseCommit, fn) {
+  // linked worktree 下 --git-path 输出已是绝对路径，否则按 cwd resolve；其
+  // 目录就是本工作树自己的 git 目录。
+  const indexRaw = String(git(["rev-parse", "--git-path", "index"], { cwd })).trim();
+  const realIndex = resolve(cwd, indexRaw);
+  // Seed from a private copy of the real index: `read-tree --reset` keeps the
+  // stat data of entries whose blob matches the base, so unchanged files are
+  // not re-hashed on every inventory. No copy → a fresh empty temp index.
+  const priv = createPrivateIndexCopy(realIndex);
+  let tmpIndex = null;
+  let env;
+  if (priv) {
+    env = { ...process.env, ...priv.env };
+  } else {
+    _baseTreeIndexSeq += 1;
+    tmpIndex = join(
+      dirname(realIndex),
+      `wao-inspect-${process.pid}-${_baseTreeIndexSeq}-${Math.random().toString(36).slice(2, 8)}.tmp-index`,
+    );
+    env = { ...process.env, GIT_INDEX_FILE: tmpIndex, ...splitIndexOffEnv(process.env) };
+  }
+  try {
+    git(["read-tree", "--reset", "--end-of-options", baseCommit], { cwd, env });
+    return fn(env);
+  } finally {
+    priv?.dispose();
+    if (tmpIndex) {
+      try { unlinkSync(tmpIndex); } catch { /* 尽力而为：用完即删 */ }
+    }
+  }
+}
 
 /**
  * M12-1S1: read-only change listing for the no-model-salvage candidate
  * inventory. Tracked changes relative to baseCommit PLUS non-ignored
  * untracked files — the same two reads detectChanges performs, but WITHOUT
- * the pre-staged rejection and WITHOUT the empty-diff failure: the inventory
- * reports facts (including a truthful empty set), it does not package.
+ * the empty-diff failure: the inventory reports facts (including a truthful
+ * empty set), it does not package.
+ *
+ * 第 135 批续修 3：两条读取都跑在持有 base 树的临时索引上（见
+ * withBaseTreeIndex）——真实索引状态（含仅索引的删除/新增）不影响结果。
  *
  * BOTH required Git reads must succeed; returns null when either fails —
  * never partial truth. Strictly read-only: no staging, no reset, no writes;
- * branch/HEAD/index/worktree contents are untouched.
+ * branch/HEAD/real index/worktree contents are untouched.
  *
  * @param {string} cwd — worktree path
  * @param {string} baseCommit — canonical full hash (callers validate via
@@ -830,31 +890,21 @@ export function assertCommittedDeliveryRef(deliveryRef) {
  *   when either required Git read failed
  */
 export function listWorktreeChangedPaths(cwd, baseCommit) {
-  // 真实索引路径（linked worktree 下输出已是绝对路径，否则按 cwd resolve）。
-  // 取路径失败 → null（与两条 git 读失败同一语义，绝不出半真相）。
-  const indexRaw = gitSafe(["rev-parse", "--git-path", "index"], { cwd });
-  if (indexRaw === null) return null;
   // Tracked changes (modified/deleted) relative to base. --no-renames keeps the
   // path set as RAW repository path identity: rename detection (diff.renames)
   // would collapse a delete+similar-add into one rename pair and drop the
-  // deleted source from containment checks. 工作树 diff 会经 diff.autoRefreshIndex
-  // 刷新并写回索引（--no-optional-locks 也拦不住）：改在私有索引副本上跑，真实
-  // 索引字节不动。
-  const priv = createPrivateIndexCopy(resolve(cwd, String(indexRaw).trim()));
+  // deleted source from containment checks.
   let tracked;
+  let untracked;
   try {
-    tracked = gitSafe(
-      ["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"],
-      priv === null ? { cwd } : { cwd, env: { ...process.env, ...priv.env } },
-    );
-  } finally {
-    priv?.dispose();
+    ({ tracked, untracked } = withBaseTreeIndex(cwd, baseCommit, (env) => ({
+      tracked: gitSafe(["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"], { cwd, env }),
+      untracked: gitSafe(["ls-files", "--others", "--exclude-standard", "-z"], { cwd, env }),
+    })));
+  } catch {
+    return null; // rev-parse/read-tree failure — same semantics as a failed read
   }
-  if (tracked === null) return null;
-
-  // Non-ignored untracked files
-  const untracked = gitSafe(["ls-files", "--others", "--exclude-standard", "-z"], { cwd });
-  if (untracked === null) return null;
+  if (tracked === null || untracked === null) return null;
 
   // Combine, deduplicate, sort
   return [...new Set([...parseNul(tracked), ...parseNul(untracked)])].sort();
@@ -862,7 +912,12 @@ export function listWorktreeChangedPaths(cwd, baseCommit) {
 
 /**
  * Detect all changes in the worktree relative to baseCommit.
- * Rejects pre-staged changes (packager must own staging).
+ * Worktree-authoritative AND index-independent (第 135 批续修 3): both reads
+ * run against a temporary index holding the baseCommit tree, so the real
+ * index state — index-only deletions or additions included — can never skew
+ * the result. The real index is the PACKAGER's concern: packageDelivery
+ * proves the worktree first, then resets it to the PROVEN baseline before
+ * staging; this leaf stays read-only.
  *
  * @param {string} cwd — worktree path
  * @param {string} baseCommit — canonical full hash
@@ -870,41 +925,15 @@ export function listWorktreeChangedPaths(cwd, baseCommit) {
  * @throws {DeliveryError}
  */
 function detectChanges(cwd, baseCommit) {
-  // Reject pre-staged changes first. --no-renames: nonempty-truth check, but
-  // kept in the same deterministic (rename-free) form as every path-set read.
-  const staged = parseNul(
-    git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
-  );
-  if (staged.length > 0) {
-    throw new DeliveryError(
-      "pre_staged_changes",
-      `worktree has pre-staged changes (${staged.join(", ")}); packager must own staging`,
-    );
-  }
-
   // Tracked changes (modified/deleted) relative to base. --no-renames: raw
   // path identity — rename detection must not hide a deleted source from the
-  // allowedPaths containment check below. 工作树 diff 会经 diff.autoRefreshIndex
-  // 刷新并写回索引（--no-optional-locks 也拦不住）：改在私有索引副本上跑，真实
-  // 索引字节不动。rev-parse --git-path index 失败照常抛出（detectChanges 的
-  // 失败语义本就是抛）。
-  const indexRaw = String(git(["rev-parse", "--git-path", "index"], { cwd })).trim();
-  const priv = createPrivateIndexCopy(resolve(cwd, indexRaw));
-  let trackedOut;
-  try {
-    trackedOut = git(
-      ["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"],
-      priv === null ? { cwd } : { cwd, env: { ...process.env, ...priv.env } },
-    );
-  } finally {
-    priv?.dispose();
-  }
+  // allowedPaths containment check below.
+  const { trackedOut, untrackedOut } = withBaseTreeIndex(cwd, baseCommit, (env) => ({
+    trackedOut: git(["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"], { cwd, env }),
+    untrackedOut: git(["ls-files", "--others", "--exclude-standard", "-z"], { cwd, env }),
+  }));
   const tracked = parseNul(trackedOut);
-
-  // Non-ignored untracked files
-  const untracked = parseNul(
-    git(["ls-files", "--others", "--exclude-standard", "-z"], { cwd }),
-  );
+  const untracked = parseNul(untrackedOut);
 
   // Combine, deduplicate, sort
   const all = [...new Set([...tracked, ...untracked])];
@@ -1297,8 +1326,12 @@ export function prepareDeliveryRequest(delivery, { persisted = false } = {}) {
     throw new DeliveryError("invalid_input", "delivery must be an object");
   }
 
-  // mode
-  if (delivery.mode !== "git_commit_v1") {
+  // mode — optional; ONLY undefined defaults to the only supported mode
+  // (第 135 批续修 6：显式 null 是坏值，照旧 invalid_mode，不冒充缺省). An
+  // explicit other value keeps the same closed refusal (the message names the
+  // one legal value). 第 135 批规矩下沉：git_commit_v1 是唯一模式，缺省即它。
+  const mode = delivery.mode === undefined ? "git_commit_v1" : delivery.mode;
+  if (mode !== "git_commit_v1") {
     throw new DeliveryError(
       "invalid_mode",
       `delivery.mode must be "git_commit_v1", got: ${JSON.stringify(delivery.mode)}`,
@@ -1383,7 +1416,8 @@ export function inspectDelivery(input) {
   // Prove persistent linked worktree at correct branch/base
   const proof = proveLinkedWorktree(validated);
 
-  // Detect changes (rejects pre-staged)
+  // Detect changes (worktree-authoritative; the index state is the packager's
+  // concern — see resetPreStagedIndex)
   const changedFiles = detectChanges(validated.worktreePath, proof.canonicalBase);
 
   // Empty diff fails closed
@@ -1850,6 +1884,151 @@ function verifyPostCommitIntegrity(cwd, candidateCommit, canonicalBase, expected
   }
 }
 
+// ===== Index reset for pre-staged worker changes (第 135 批规矩下沉) =====
+
+/**
+ * Bounded fact list for the reset transcription fact (DeliveryRef
+ * stagedResetPaths). Paths beyond the cap are still reset (the reset is a
+ * single `git reset -q`); the fact only lists the first slice and flags it.
+ */
+export const STAGED_RESET_PATHS_LIMIT = 64;
+
+/**
+ * 第 135 批续修 2（决定 0130 修订条）：staged additions whose bytes the
+ * worktree would IGNORE must refuse instead of being silently reset away.
+ * Exactly the ruling's three conditions — staged as an addition vs the proven
+ * base, present in the working tree, and matched by the worktree's ignore
+ * rules (`git mv b.txt ignored.txt`, `git add -f ignored.txt`). The reset
+ * never runs when this refuses: the index is untouched.
+ *
+ * Runs AFTER the worktree proof (paths are read against the proven base) and
+ * BEFORE the reset. Reads only — no staging, no reset, no writes.
+ *
+ * @param {string} cwd — worktree path (already proven)
+ * @param {string} canonicalBase — the proven baseline commit
+ * @returns {void}
+ * @throws {DeliveryError} code "pre_staged_changes" naming the offending paths
+ */
+function assertNoIgnoredStagedAdds(cwd, canonicalBase) {
+  // Staged additions vs the proven base. --no-renames keeps RAW path identity:
+  // a staged rename (`git mv`) decomposes into A + D instead of collapsing
+  // into one rename pair, so the ignored destination is always named.
+  // --ita-visible-in-index: `git add -N` entries count as staged additions.
+  const added = parseNul(
+    git(["diff", "--cached", "--ita-visible-in-index", "--no-renames", "--name-only",
+      "--diff-filter=A", "-z", "--end-of-options", canonicalBase], { cwd }),
+  );
+  if (added.length === 0) return;
+  // lstat, not existsSync: a dangling symlink is still a worktree entry.
+  const inWorktree = added.filter((p) => {
+    try { lstatSync(join(cwd, p)); return true; } catch { return false; }
+  });
+  if (inWorktree.length === 0) return;
+  let ignored;
+  try {
+    // Batch check-ignore over NUL-delimited stdin. --no-index is REQUIRED:
+    // staged paths are in the index, and default check-ignore reports tracked
+    // paths as not-ignored (the git add -f case would be missed). Exit 1 =
+    // none ignored (a normal, successful answer — not a Git failure).
+    ignored = parseNul(
+      git(["check-ignore", "--no-index", "--stdin", "-z"], { cwd, input: inWorktree.map((p) => `${p}\0`).join("") }),
+    );
+  } catch (err) {
+    if (err && err.status === 1) {
+      ignored = []; // none of the paths is ignored
+    } else {
+      throw err; // real Git failure — packaging fails closed anyway
+    }
+  }
+  if (ignored.length === 0) return;
+  const named = ignored.slice(0, STAGED_RESET_PATHS_LIMIT).join(", ");
+  throw new DeliveryError(
+    "pre_staged_changes",
+    `staged additions would be ignored by the worktree's ignore rules and their bytes would be lost by the index reset: [${named}]`
+      + (ignored.length > STAGED_RESET_PATHS_LIMIT ? " …[truncated]" : "")
+      + "; unstage them (or adjust .gitignore) and retry — the index was left untouched",
+  );
+}
+
+/**
+ * 第 135 批（决定 0130）+ 续修 1：worker 留下的暂存改动不再让打包失败。打包以
+ * 工作树内容为准、只提交 allowedPaths 内的改动，因此打包前（工作树身份/分支/
+ * 基线已证明之后）把索引**显式重置到已证明的基线**（`git reset -q <canonicalBase>
+ * -- :/` 按路径重置——不隐式依赖 HEAD、不移动分支、不动工作树文件），以工作树为准
+ * 继续打包。
+ * 返回重置掉的暂存路径（排序去重，有界），没有暂存改动时返回 null。
+ *
+ * Fail-closed：重置本身失败（含重置后缓存 diff 仍非空、HEAD 不在基线的验证
+ * 失败）照旧按 `pre_staged_changes` 拒绝——打包绝不带着不受控的索引继续。
+ *
+ * @param {string} cwd — worktree path (already proven)
+ * @param {string} canonicalBase — the proven baseline commit
+ * @returns {{paths: string[], truncated: boolean}|null}
+ * @throws {DeliveryError} code "pre_staged_changes" when the reset fails
+ */
+function resetPreStagedIndex(cwd, canonicalBase) {
+  // --no-renames: same deterministic (rename-free) path-set form as every
+  // other path-set read in this file. --ita-visible-in-index: `git add -N`
+  // entries are index state too and must be reset.
+  const listStaged = () => parseNul(
+    git(["diff", "--ita-visible-in-index", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
+  );
+  const staged = listStaged();
+  if (staged.length === 0) return null;
+  const sorted = [...new Set(staged)].sort();
+  const fact = {
+    paths: sorted.slice(0, STAGED_RESET_PATHS_LIMIT),
+    truncated: sorted.length > STAGED_RESET_PATHS_LIMIT,
+  };
+  let resetRan = false;
+  try {
+    // Pathspec form: rewrites index entries only and never moves the branch,
+    // so the HEAD check below still detects a drift since the proof.
+    git(["reset", "-q", "--end-of-options", canonicalBase, "--", ":/"], { cwd });
+    resetRan = true;
+    // Verify the reset landed on the proven baseline: HEAD there, cached diff
+    // empty afterwards.
+    const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+    if (head !== canonicalBase) {
+      throw new DeliveryError(
+        "pre_staged_changes",
+        `index reset verification failed: HEAD (${head}) is not the proven baseline (${canonicalBase})`,
+      );
+    }
+    const stagedAfter = listStaged();
+    if (stagedAfter.length > 0) {
+      throw new DeliveryError(
+        "pre_staged_changes",
+        `index reset verification failed: index not clean; staged=[${stagedAfter.join(",")}]`,
+      );
+    }
+  } catch (err) {
+    const out = err instanceof DeliveryError
+      ? err
+      : new DeliveryError(
+        "pre_staged_changes",
+        `index reset to the proven baseline failed; packager must own staging (working-tree files were not touched)`,
+      );
+    // Once the reset itself ran, the index changed: the fact rides on the
+    // failure too (续修 4).
+    if (resetRan) attachResetFact(out, fact);
+    throw out;
+  }
+  return {
+    paths: fact.paths,
+    truncated: fact.truncated,
+  };
+}
+
+// Non-enumerable, so it never leaks through JSON serialization; RunManager
+// reads it explicitly for the run.delivery_failed payload (第 135 批续修 4).
+function attachResetFact(err, fact) {
+  Object.defineProperty(err, "stagedResetPaths", { value: fact.paths, enumerable: false });
+  if (fact.truncated) {
+    Object.defineProperty(err, "stagedResetTruncated", { value: true, enumerable: false });
+  }
+}
+
 // ===== Public API: packageDelivery =====
 
 /**
@@ -1859,27 +2038,65 @@ function verifyPostCommitIntegrity(cwd, candidateCommit, canonicalBase, expected
  * Hooks belong to project verification policy, not mechanical packaging.
  *
  * Sequence:
- * 1. Re-run full inspection (inspectDelivery) — fail closed before touching anything.
- * 2. Stage exact inspected authorized changed files (`git add -A -- <files...>`).
- * 3. Re-read staged paths, require exact set equality with proposed changedFiles.
- * 4. Capture expected tree: `git write-tree`.
- * 5. Create commit object: `git commit-tree <expectedTree> -p <baseCommit>`
+ * 1. Prove worktree identity / branch / base FIRST (read-only) — every refusal
+ *    here (not_a_git_repo / worktree_path_mismatch / primary_checkout /
+ *    detached_head / wrong_branch / base_commit_mismatch) leaves the index
+ *    exactly as found (第 135 批续修 1：先证明、后重置).
+ * 2. Fail closed on staged additions that the worktree would IGNORE — reset
+ *    would silently drop their bytes, so this refuses (naming the paths)
+ *    BEFORE the reset, index untouched (第 135 批续修 2).
+ * 3. Reset worker-staged index entries to the PROVEN baseline (pathspec reset to
+ *    the canonical base — never implicit HEAD, never moves the branch;
+ *    working-tree files untouched)
+ *    and keep the reset paths for the fact (第 135 批续修 1/4).
+ * 4. Re-run full inspection (inspectDelivery) — the change reads are
+ *    index-independent (base-tree temp index), so the reset cannot skew them.
+ * 5. Stage exact inspected authorized changed files (`git add -A -- <files...>`).
+ * 6. Re-read staged paths, require exact set equality with proposed changedFiles.
+ * 7. Capture expected tree: `git write-tree`.
+ * 8. Create commit object: `git commit-tree <expectedTree> -p <baseCommit>`
  *    with message via stdin, author/committer identity via process env.
  *    (No hooks run — plumbing commands bypass pre-commit/commit-msg/post-commit.)
- * 6. Atomic CAS update: `git update-ref refs/heads/<branch> <candidate> <baseCommit>`.
+ * 9. Atomic CAS update: `git update-ref refs/heads/<branch> <candidate> <baseCommit>`.
  *    If branch ref is not at baseCommit (concurrent change), update fails → branch
  *    does not move, candidate object becomes unreachable.
- * 7. Post-commit integrity gate: verify HEAD/parent/count/tree/files/message/
- *    identity/worktree-clean.
- *    On failure: rollback branch to base (git reset --mixed), preserve working-tree.
- * 8. Only return DeliveryRef when all checks pass.
+ * 10. Post-commit integrity gate: verify HEAD/parent/count/tree/files/message/
+ *     identity/worktree-clean.
+ *     On failure: rollback branch to base (git reset --mixed), preserve working-tree.
+ * 11. Only return DeliveryRef when all checks pass.
  *
  * @param {object} input — same shape as inspectDelivery
- * @returns {object} committed DeliveryRef (deliveryCommit: full hash)
- * @throws {DeliveryError} on any contract violation or commit failure
+ * @returns {object} committed DeliveryRef (deliveryCommit: full hash); carries
+ *   `stagedResetPaths` (+ `stagedResetTruncated`) exactly when worker-staged
+ *   index entries were reset before packaging
+ * @throws {DeliveryError} on any contract violation or commit failure; failures
+ *   AFTER the reset carry the non-enumerable `stagedResetPaths` fact (read by
+ *   RunManager for the run.delivery_failed payload — 第 135 批续修 4)
  */
 export function packageDelivery(input) {
-  // 1. Re-inspect (read-only, fail-closed) before touching Git state
+  // 1. Prove worktree identity/branch/base FIRST (read-only). validateInput
+  //    runs first so the worktreePath/baseCommit are contract-checked; the
+  //    proof gives the canonical base the reset below targets explicitly.
+  const validated = validateInput(input);
+  const proof = proveLinkedWorktree(validated);
+  // 2. Ignored staged additions refuse BEFORE the reset — the reset would
+  //    silently drop their bytes (第 135 批续修 2; index untouched on refusal).
+  assertNoIgnoredStagedAdds(validated.worktreePath, proof.canonicalBase);
+  // 3. Reset to the PROVEN baseline (第 135 批续修 1：显式基线，不隐式依赖 HEAD).
+  const stagedReset = resetPreStagedIndex(validated.worktreePath, proof.canonicalBase);
+  try {
+    return packageDeliveryAfterReset(input, stagedReset);
+  } catch (err) {
+    // 第 135 批续修 4: the reset fact rides on ANY post-reset failure.
+    if (stagedReset && err instanceof Error) attachResetFact(err, stagedReset);
+    throw err;
+  }
+}
+
+// Steps 4-11: everything after the (already-proven, already-reset) index reset.
+// Kept as a separate function so the reset fact can wrap every failure shape.
+function packageDeliveryAfterReset(input, stagedReset) {
+  // 4. Re-inspect (read-only, fail-closed) — index-independent reads
   const proposed = inspectDelivery(input);
   const cwd = proposed.worktreePath;
   const changedFiles = proposed.changedFiles;
@@ -1982,7 +2199,9 @@ export function packageDelivery(input) {
     );
   }
 
-  // 8. All checks passed — build and return committed DeliveryRef
+  // 8. All checks passed — build and return committed DeliveryRef. The reset
+  //    fact rides on the ref: it lands in the transcript via run.delivery_created
+  //    (bounded repo-relative paths; truncated flag only when the cap bit).
   return {
     schemaVersion: 1,
     kind: "git_commit",
@@ -1995,6 +2214,10 @@ export function packageDelivery(input) {
     verification: proposed.verification,
     acceptance: { ...proposed.acceptance },
     integration: { ...proposed.integration },
+    ...(stagedReset ? {
+      stagedResetPaths: stagedReset.paths,
+      ...(stagedReset.truncated ? { stagedResetTruncated: true } : {}),
+    } : {}),
   };
 }
 
