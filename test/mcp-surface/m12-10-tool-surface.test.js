@@ -914,7 +914,7 @@ const FROZEN_17_DESC_CEILING = 10189;
 // 第 135 批（决定 0130，本批任务书授权重冻，只降不升）：inputSchema 的
 // required 增八条、mode/delivery 必填项减少，描述精简抵消后按实测：
 // 20870→20859（hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
-// 第 135 批续修：guidance 字段进 inputSchema（+45B）、两句描述恢复与同批
+// 第 135 批续修：guidance 字段进 outputSchema（+45B）、两句描述恢复与同批
 // 精简相抵后按实测：20859→20817（不高于 main 的 20870，wire 硬顶 94532 内）。
 const FROZEN_17_HOSTVISIBLE_CEILING = 20817;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item

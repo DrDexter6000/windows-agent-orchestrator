@@ -651,7 +651,7 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 1. **观察到的**写路径位于 isolated worktree **之外** → `run.isolation_violation(code=workdir_escape)`，在 packaging **之前**转 failed（readiness `isolation_failed`，无 packaging/decision 面）。
 2. 位于 worktree **之内**但与 `delivery.allowedPaths` 不匹配或越出 path-segment boundary → packaging **期间**以 `disallowed_path` 拒绝（retained candidate 保留，`run_delivery_repackage` 无模型重封装）。
 
-**Packaging ownership**：worker 不创建 delivery commit。打包前索引先混合重置到基线（`git reset -q`，不动工作树；重置失败照旧 `pre_staged_changes` fail-closed），重置的暂存路径清单（有界，截断如实标注）作 DeliveryRef 的 `stagedResetPaths` 随 `run.delivery_created` 落转录（决定 0130）——打包始终以工作树内容为准。随后重新 inspect 只 stage inspected 授权路径（`git add -A -- <changedFiles...>`），再用 Git **plumbing** 创建 commit：`git write-tree` 捕获 staged index tree → `git commit-tree <tree> -p <baseCommit>`（message 经 stdin，identity 经子进程 env 传 `WAO Delivery <wao-delivery@local>`）→ `git update-ref refs/heads/<branch> <candidate> <baseCommit>` 原子 CAS 更新 branch ref（expected-old-value 防并发）。
+**Packaging ownership**：worker 不创建 delivery commit。打包前索引先重置到基线（`git reset -q`，不动工作树；重置失败照旧 `pre_staged_changes` fail-closed），重置的暂存路径清单（有界，截断如实标注）作 DeliveryRef 的 `stagedResetPaths` 随 `run.delivery_created` 落转录（决定 0130）——打包始终以工作树内容为准。随后重新 inspect 只 stage inspected 授权路径（`git add -A -- <changedFiles...>`），再用 Git **plumbing** 创建 commit：`git write-tree` 捕获 staged index tree → `git commit-tree <tree> -p <baseCommit>`（message 经 stdin，identity 经子进程 env 传 `WAO Delivery <wao-delivery@local>`）→ `git update-ref refs/heads/<branch> <candidate> <baseCommit>` 原子 CAS 更新 branch ref（expected-old-value 防并发）。
 
 **Hooks 不参与机械打包**：`commit-tree` + `update-ref` 是 plumbing 命令，**不执行任何 repository hooks**（pre-commit / prepare-commit-msg / commit-msg / post-commit 均不运行）。Git hooks 属于项目验证策略，由 `DeliveryRef.verification.commands` 显式执行；机械 packager 确定性地把已检查的 index tree 变成 commit。不修改 repo-local/global git config；GPG signing 不适用（plumbing 路径不走 signing）。
 
@@ -666,7 +666,7 @@ rollback 本身失败时抛 `deliveryCode=cleanup_failed`（保留原始失败�
 
 重复 packaging（HEAD 已在 delivery commit）被 base mismatch 拦截，不创建第二个 commit。
 
-**Fail-closed**（inspection + packaging 均适用）：empty diff、disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout（非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（空 segment/重复分隔符/根 "/"、"."、".."、绝对或盘符路径；**单个尾分隔符在写入口归一化放行**，段边界前缀语义见 isPathAllowed）、invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification — 均拒绝，不静默改写。仅 packaging 另拒 pre-staged changes（决定 0130 起仅指索引重置失败）。
+**Fail-closed**（inspection + packaging 均适用）：empty diff、disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout（非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（空 segment/重复分隔符/根 "/"、"."、".."、绝对或盘符路径；**单个尾分隔符在写入口归一化放行**，段边界前缀语义见 isPathAllowed）、invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification — 均拒绝，不静默改写。仅 packaging 另拒 pre-staged changes（决定 0130：重置失败或被忽略的暂存新增）。
 
 **生命周期**：
 ```

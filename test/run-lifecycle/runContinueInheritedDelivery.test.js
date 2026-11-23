@@ -342,6 +342,24 @@ test("INH-04e: inherited contract with a null mode refuses (第 135 批续修 6�
   assert.equal(calls.length, 0);
 });
 
+// Lead close-out after the recheck seat: every PRESENT field goes to the SSOT
+// as it is — a blank or null second declaration, or a non-array commands
+// field next to a valid reason, refuses instead of being dropped.
+for (const [id, extra] of [
+  ["INH-04f", { verificationCommands: ["node --test"], verificationUnavailableReason: " " }],
+  ["INH-04g", { verificationCommands: ["node --test"], verificationUnavailableReason: null }],
+  ["INH-04h", { verificationCommands: "node --test", verificationUnavailableReason: "no runner" }],
+]) {
+  test(`${id}: inherited contract with a malformed second verification field refuses (never dropped)`, async () => {
+    const { r, calls } = await inhBadContract((parent) => ({
+      mode: "git_commit_v1", baseCommit: parent.base, allowedPaths: ["src"], ...extra,
+    }), id.toLowerCase().replace("-", ""));
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "invalid_delivery");
+    assert.equal(calls.length, 0);
+  });
+}
+
 test("INH-05: continuation parent inherits ITS OWN effective contract, not the lineage root's", async () => {
   const repo = makeRepo();
   const parent = buildCommittedParent(repo, "run_parent_inh5");

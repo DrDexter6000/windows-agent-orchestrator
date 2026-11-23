@@ -164,7 +164,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.delivery_created",
-    description: "delivery 打包成功，含完整 DeliveryRef。前台路径经 RunManager 终态批次的 attemptEvents（无论转移 accepted/rejected 都落盘，消除孤儿 delivery commit 窗口）；重打包路径与 run.delivery_repackaged 同批原子落盘。worker 暂存改动在打包前被混合重置（不动工作树文件）时，Ref 另携 stagedResetPaths（有界仓库相对路径清单）与超限标记 stagedResetTruncated（仅超限时出现）。",
+    description: "delivery 打包成功，含完整 DeliveryRef。前台路径经 RunManager 终态批次的 attemptEvents（无论转移 accepted/rejected 都落盘，消除孤儿 delivery commit 窗口）；重打包路径与 run.delivery_repackaged 同批原子落盘。worker 暂存改动在打包前被重置（不动工作树文件）时，Ref 另携 stagedResetPaths（有界仓库相对路径清单）与超限标记 stagedResetTruncated（仅超限时出现）。",
   },
   {
     type: "run.delivery_failed",

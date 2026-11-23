@@ -1,5 +1,5 @@
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
@@ -645,6 +645,89 @@ test("2A-16n: git add -f of an ignored file refuses with the same closed code", 
       (err) => err.deliveryCode === "pre_staged_changes" && err.message.includes("src/ignored.txt"),
     );
     assert.deepEqual(stagedPaths(wtPath), before, "index untouched");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2A Tests: 复核后 Lead 收口——`git add -N` 条目与悬空符号链接 =====
+
+// `git diff --cached` hides intent-to-add entries; the whole index listing does not.
+const indexEntries = (wt) => execSync("git ls-files -s", { cwd: wt, encoding: "utf8" });
+
+test("2A-16r: an intent-to-add entry alone is reset and the file ships with its worktree bytes", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "new.js"), "new file\n");
+    execSync("git add -N src/new.js", { cwd: wtPath, stdio: "ignore" });
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(ref.changedFiles, ["src/new.js"]);
+    assert.deepEqual(ref.stagedResetPaths, ["src/new.js"], "the -N entry is a reset fact");
+    const shipped = execSync(`git show ${ref.deliveryCommit}:src/new.js`, { cwd: repo, encoding: "utf8" });
+    assert.equal(shipped, "new file\n");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16s: an intent-to-add entry whose file was deleted is reset, not a commit_integrity failure", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "gone.js"), "short-lived\n");
+    execSync("git add -N src/gone.js", { cwd: wtPath, stdio: "ignore" });
+    rmSync(join(wtPath, "src", "gone.js"));
+    await writeFile(join(wtPath, "src", "a.js"), "real change\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(ref.changedFiles, ["src/a.js"]);
+    assert.deepEqual(ref.stagedResetPaths, ["src/gone.js"]);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16t: an intent-to-add entry on an ignored path refuses and leaves the index as found", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "late.txt"), "kept\n");
+    execSync("git add -N src/late.txt", { cwd: wtPath, stdio: "ignore" });
+    // The ignore rule arrives in the worktree only after the -N entry.
+    await writeFile(join(wtPath, ".gitignore"), "late.txt\n");
+    const before = indexEntries(wtPath);
+    assert.throws(
+      () => packageDelivery(baseInput(wtPath, baseCommit, { allowedPaths: ["src", ".gitignore"] })),
+      (err) => err.deliveryCode === "pre_staged_changes" && err.message.includes("src/late.txt"),
+    );
+    assert.equal(indexEntries(wtPath), before, "index untouched");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2A-16u: a force-added dangling symlink on an ignored path refuses (lstat, not existsSync)", async (t) => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, ".gitignore"), "ignored/\n");
+    execSync("git add .gitignore && git commit -m ignore", { cwd: wtPath, stdio: "ignore" });
+    const newBase = execSync("git rev-parse HEAD", { cwd: wtPath, encoding: "utf8" }).trim();
+    mkdirSync(join(wtPath, "src", "ignored"), { recursive: true });
+    try {
+      symlinkSync("missing-target.txt", join(wtPath, "src", "ignored", "dangling.txt"));
+    } catch {
+      t.skip("symlink creation not permitted on this machine");
+      return;
+    }
+    execSync("git add -f src/ignored/dangling.txt", { cwd: wtPath, stdio: "ignore" });
+    await writeFile(join(wtPath, "src", "a.js"), "real change\n");
+    const before = indexEntries(wtPath);
+    assert.throws(
+      () => packageDelivery(baseInput(wtPath, newBase, { allowedPaths: ["src"] })),
+      (err) => err.deliveryCode === "pre_staged_changes" && err.message.includes("src/ignored/dangling.txt"),
+    );
+    assert.equal(indexEntries(wtPath), before, "index untouched");
   } finally {
     await cleanupRepo(repo);
   }

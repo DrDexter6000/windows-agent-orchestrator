@@ -21,7 +21,7 @@ read_when: delivery 模式派发、审查、重验证、验收或拒收、重打
 npm run cli -- run glm-flash --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
 ```
 
-Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。`mode` 可省（缺省 `git_commit_v1`，显式别的值照旧拒绝）。worker 留下的暂存改动打包前会被混合重置到基线（`git reset -q`，不动工作树文件），以工作树内容为准继续打包；重置路径清单随 `run.delivery_created` 的 DeliveryRef（`stagedResetPaths`）落转录，重置失败照旧 `pre_staged_changes` 拒绝（决定 0130）。
+Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。`mode` 可省（缺省 `git_commit_v1`，显式别的值照旧拒绝）。worker 留下的暂存改动打包前会被重置到基线（不动工作树），以工作树内容为准继续打包；重置路径清单随 `run.delivery_created` 的 DeliveryRef（`stagedResetPaths`）落转录。重置失败或暂存新文件会被忽略时拒为 `pre_staged_changes`（决定 0130）。
 
 写入只在授权 worktree 内（越界即 `failed(workdir_escape)`）、scratch 放 `.wao/runs/`：控制面注入的交付执行合同已写明，任务书不必重复。仍建议任务书写明：
 

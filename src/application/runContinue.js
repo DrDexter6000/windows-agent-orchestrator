@@ -641,37 +641,31 @@ export async function continueRun({
   //     续修 5：继承合同按子运行启动的同一套规则校验（非 persisted——通配
   //     allowedPaths 照旧拒绝），且持久化的 mode 必须逐字是 "git_commit_v1"
   //     （SSOT 会把 undefined 当缺省，这里先拒；显式 null/别的值同样损坏）。
-  //     commands 与 unavailableReason 互斥在 SSOT 里是"commands 赢"，对持久化
-  //     合同必须拒——不静默丢字段。校验不过拒绝 invalid_delivery（闭集既有
-  //     成员），MCP 回执对该拒绝带 guidance：显式传 delivery 可覆盖。
+  //     持久化合同里每个出现的字段都原样交给 SSOT，不补值、不丢字段：两种
+  //     verification 声明恰好出现一种，出现的字段类型不对即拒（SSOT 对两者
+  //     同存是"commands 赢"，这里先拒）。校验不过拒绝 invalid_delivery（闭集
+  //     既有成员），MCP 回执对该拒绝带 guidance：显式传 delivery 可覆盖。
   if (validatedDelivery === null) {
     const d = started.delivery;
-    const hasCommands = Array.isArray(d.verificationCommands)
-      && d.verificationCommands.length > 0;
-    const hasReason = typeof d.verificationUnavailableReason === "string"
-      && d.verificationUnavailableReason.trim().length > 0;
-    // PRESENT-but-malformed persisted setup commands refuse (never dropped):
-    // a string / null / number is contract damage, same discipline as the
-    // persisted timeout. Absent (key missing or undefined) stays absent.
-    const hasSetupKey = Object.prototype.hasOwnProperty.call(d, "verificationSetupCommands");
-    if (hasSetupKey && d.verificationSetupCommands !== undefined
-      && !Array.isArray(d.verificationSetupCommands)) {
-      return refuse("invalid_delivery");
-    }
-    if (d.mode !== "git_commit_v1" || (hasCommands && hasReason)) {
+    const present = (key) => d[key] !== undefined;
+    if (d.mode !== "git_commit_v1"
+      || present("verificationCommands") === present("verificationUnavailableReason")
+      || (present("verificationCommands") && !Array.isArray(d.verificationCommands))
+      || (present("verificationUnavailableReason") && typeof d.verificationUnavailableReason !== "string")
+      || (present("verificationSetupCommands") && !Array.isArray(d.verificationSetupCommands))) {
       return refuse("invalid_delivery");
     }
     try {
       validatedDelivery = prepareDeliveryRequest({
         mode: d.mode,
         allowedPaths: d.allowedPaths,
-        ...(hasCommands
+        ...(present("verificationCommands")
           ? { verificationCommands: [...d.verificationCommands] }
           : { verificationUnavailableReason: d.verificationUnavailableReason }),
-        ...(hasSetupKey
-          ? { verificationSetupCommands: d.verificationSetupCommands }
+        ...(present("verificationSetupCommands")
+          ? { verificationSetupCommands: [...d.verificationSetupCommands] }
           : {}),
-        ...(d.verificationTimeoutMs !== undefined
+        ...(present("verificationTimeoutMs")
           ? { verificationTimeoutMs: d.verificationTimeoutMs }
           : {}),
       });

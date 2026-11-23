@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, unlinkSync } from "node:fs";
 import { resolve, isAbsolute, join, dirname, normalize as posixNormalize } from "node:path";
 import { posix } from "node:path";
-import { splitIndexOffEnv } from "./gitPrivateIndex.js";
+import { createPrivateIndexCopy, splitIndexOffEnv } from "./gitPrivateIndex.js";
 
 /**
  * Coder Delivery Contract v1 — deterministic Git delivery packager (Phase 2).
@@ -814,8 +814,8 @@ export function assertCommittedDeliveryRef(deliveryRef) {
 // 第 135 批续修 3（决定 0130 修订条）：所有"列出改动"的读取都与真实索引无关。
 // `git diff <base>` 的 tracked 集合由索引决定、`ls-files --others` 的 others
 // 集合也由索引决定——仅索引的删除/新增（如 `git rm --cached`、暂存新文件）会
-// 改变两者。做法：在该工作树自己的 git 目录里建一个**持有 base 树的临时索引**
-// （GIT_INDEX_FILE 指向它，read-tree <base> 写入，用完即删），两条读取都跑在
+// 改变两者。做法：建一个**持有 base 树的临时索引**（真实索引的私有副本上
+// `read-tree --reset <base>`，GIT_INDEX_FILE 指向它，用完即删），两条读取都跑在
 // 它上面——tracked = base 树里的路径、others = 工作树里不在 base 树且未被忽略
 // 的路径。这与"重置回基线之后的真实索引"给出的集合逐值相同，于是清点与
 // 打包天然同口径，重置前的清点也不会被暂存状态带偏。
@@ -823,9 +823,10 @@ export function assertCommittedDeliveryRef(deliveryRef) {
 let _baseTreeIndexSeq = 0;
 
 /**
- * Run `fn(env)` with GIT_INDEX_FILE pointing at a fresh temporary index that
- * holds exactly the baseCommit tree. The temp file is created in THIS
- * worktree's own git dir (never os.tmpdir) and deleted in all cases. Git
+ * Run `fn(env)` with GIT_INDEX_FILE pointing at a temporary index that holds
+ * exactly the baseCommit tree: a private copy of the real index (gitPrivateIndex)
+ * reset to the base, or a fresh file in this worktree's git dir when no copy
+ * can be made; deleted in all cases. The real index is never written. Git
  * failures (rev-parse/read-tree) propagate — callers keep their own failure
  * semantics. core.splitIndex is off for these commands so writing/deleting the
  * temp index can never touch shared index files of the real one.
@@ -839,21 +840,31 @@ function withBaseTreeIndex(cwd, baseCommit, fn) {
   // linked worktree 下 --git-path 输出已是绝对路径，否则按 cwd resolve；其
   // 目录就是本工作树自己的 git 目录。
   const indexRaw = String(git(["rev-parse", "--git-path", "index"], { cwd })).trim();
-  const gitDir = dirname(resolve(cwd, indexRaw));
-  _baseTreeIndexSeq += 1;
-  const tmpIndex = join(
-    gitDir,
-    `wao-inspect-${process.pid}-${_baseTreeIndexSeq}-${Math.random().toString(36).slice(2, 8)}.tmp-index`,
-  );
-  git(["read-tree", "--end-of-options", baseCommit], {
-    cwd,
-    env: { ...process.env, GIT_INDEX_FILE: tmpIndex, ...splitIndexOffEnv(process.env) },
-  });
-  const env = { ...process.env, GIT_INDEX_FILE: tmpIndex, ...splitIndexOffEnv(process.env) };
+  const realIndex = resolve(cwd, indexRaw);
+  // Seed from a private copy of the real index: `read-tree --reset` keeps the
+  // stat data of entries whose blob matches the base, so unchanged files are
+  // not re-hashed on every inventory. No copy → a fresh empty temp index.
+  const priv = createPrivateIndexCopy(realIndex);
+  let tmpIndex = null;
+  let env;
+  if (priv) {
+    env = { ...process.env, ...priv.env };
+  } else {
+    _baseTreeIndexSeq += 1;
+    tmpIndex = join(
+      dirname(realIndex),
+      `wao-inspect-${process.pid}-${_baseTreeIndexSeq}-${Math.random().toString(36).slice(2, 8)}.tmp-index`,
+    );
+    env = { ...process.env, GIT_INDEX_FILE: tmpIndex, ...splitIndexOffEnv(process.env) };
+  }
   try {
+    git(["read-tree", "--reset", "--end-of-options", baseCommit], { cwd, env });
     return fn(env);
   } finally {
-    try { unlinkSync(tmpIndex); } catch { /* 尽力而为：用完即删 */ }
+    priv?.dispose();
+    if (tmpIndex) {
+      try { unlinkSync(tmpIndex); } catch { /* 尽力而为：用完即删 */ }
+    }
   }
 }
 
@@ -1902,12 +1913,16 @@ function assertNoIgnoredStagedAdds(cwd, canonicalBase) {
   // Staged additions vs the proven base. --no-renames keeps RAW path identity:
   // a staged rename (`git mv`) decomposes into A + D instead of collapsing
   // into one rename pair, so the ignored destination is always named.
+  // --ita-visible-in-index: `git add -N` entries count as staged additions.
   const added = parseNul(
-    git(["diff", "--cached", "--no-renames", "--name-only", "--diff-filter=A", "-z",
-      "--end-of-options", canonicalBase], { cwd }),
+    git(["diff", "--cached", "--ita-visible-in-index", "--no-renames", "--name-only",
+      "--diff-filter=A", "-z", "--end-of-options", canonicalBase], { cwd }),
   );
   if (added.length === 0) return;
-  const inWorktree = added.filter((p) => existsSync(join(cwd, p)));
+  // lstat, not existsSync: a dangling symlink is still a worktree entry.
+  const inWorktree = added.filter((p) => {
+    try { lstatSync(join(cwd, p)); return true; } catch { return false; }
+  });
   if (inWorktree.length === 0) return;
   let ignored;
   try {
@@ -1953,15 +1968,24 @@ function assertNoIgnoredStagedAdds(cwd, canonicalBase) {
  */
 function resetPreStagedIndex(cwd, canonicalBase) {
   // --no-renames: same deterministic (rename-free) path-set form as every
-  // other path-set read in this file.
-  const staged = parseNul(
-    git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
+  // other path-set read in this file. --ita-visible-in-index: `git add -N`
+  // entries are index state too and must be reset.
+  const listStaged = () => parseNul(
+    git(["diff", "--ita-visible-in-index", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
   );
+  const staged = listStaged();
   if (staged.length === 0) return null;
+  const sorted = [...new Set(staged)].sort();
+  const fact = {
+    paths: sorted.slice(0, STAGED_RESET_PATHS_LIMIT),
+    truncated: sorted.length > STAGED_RESET_PATHS_LIMIT,
+  };
+  let resetRan = false;
   try {
     // Pathspec form: rewrites index entries only and never moves the branch,
     // so the HEAD check below still detects a drift since the proof.
     git(["reset", "-q", "--end-of-options", canonicalBase, "--", ":/"], { cwd });
+    resetRan = true;
     // Verify the reset landed on the proven baseline: HEAD there, cached diff
     // empty afterwards.
     const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
@@ -1971,9 +1995,7 @@ function resetPreStagedIndex(cwd, canonicalBase) {
         `index reset verification failed: HEAD (${head}) is not the proven baseline (${canonicalBase})`,
       );
     }
-    const stagedAfter = parseNul(
-      git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
-    );
+    const stagedAfter = listStaged();
     if (stagedAfter.length > 0) {
       throw new DeliveryError(
         "pre_staged_changes",
@@ -1981,17 +2003,30 @@ function resetPreStagedIndex(cwd, canonicalBase) {
       );
     }
   } catch (err) {
-    if (err instanceof DeliveryError) throw err;
-    throw new DeliveryError(
-      "pre_staged_changes",
-      `index reset to the proven baseline failed; packager must own staging (working-tree files were not touched)`,
-    );
+    const out = err instanceof DeliveryError
+      ? err
+      : new DeliveryError(
+        "pre_staged_changes",
+        `index reset to the proven baseline failed; packager must own staging (working-tree files were not touched)`,
+      );
+    // Once the reset itself ran, the index changed: the fact rides on the
+    // failure too (续修 4).
+    if (resetRan) attachResetFact(out, fact);
+    throw out;
   }
-  const paths = [...new Set(staged)].sort();
   return {
-    paths: paths.slice(0, STAGED_RESET_PATHS_LIMIT),
-    truncated: paths.length > STAGED_RESET_PATHS_LIMIT,
+    paths: fact.paths,
+    truncated: fact.truncated,
   };
+}
+
+// Non-enumerable, so it never leaks through JSON serialization; RunManager
+// reads it explicitly for the run.delivery_failed payload (第 135 批续修 4).
+function attachResetFact(err, fact) {
+  Object.defineProperty(err, "stagedResetPaths", { value: fact.paths, enumerable: false });
+  if (fact.truncated) {
+    Object.defineProperty(err, "stagedResetTruncated", { value: true, enumerable: false });
+  }
 }
 
 // ===== Public API: packageDelivery =====
@@ -2052,15 +2087,8 @@ export function packageDelivery(input) {
   try {
     return packageDeliveryAfterReset(input, stagedReset);
   } catch (err) {
-    // 第 135 批续修 4: the reset fact rides on ANY post-reset failure
-    // (non-enumerable — RunManager reads it explicitly for the
-    // run.delivery_failed payload; it never leaks through JSON serialization).
-    if (stagedReset && err instanceof Error) {
-      Object.defineProperty(err, "stagedResetPaths", { value: stagedReset.paths, enumerable: false });
-      if (stagedReset.truncated) {
-        Object.defineProperty(err, "stagedResetTruncated", { value: true, enumerable: false });
-      }
-    }
+    // 第 135 批续修 4: the reset fact rides on ANY post-reset failure.
+    if (stagedReset && err instanceof Error) attachResetFact(err, stagedReset);
     throw err;
   }
 }

@@ -40,4 +40,4 @@
 4. **重置事实随失败落转录**：重置后打包失败时，事实随 DeliveryError 带出、写进 `run.delivery_failed`。
 5. **继承合同按子运行启动同款规则校验**（非 persisted），持久化 mode 须逐字 `git_commit_v1`；commands 与 unavailableReason 同存、字符串 setup 等"补值或丢字段"一律 `invalid_delivery`，MCP 回执对该拒绝带固定 guidance（显式传 delivery 可覆盖）；`delivery.mode` 仅 undefined 取默认，`null` 照旧 `invalid_mode`。
 
-**威胁模型补充（已知局限）**：重置不改变交付内容，事实只作审计。崩溃窗口（提交已生成、`run.delivery_created` 落盘前）里事实可能随恢复路径丢失（不重放、不加持久化机制）；重打包拒绝审计事件保持既有固定形状（仅 rejectionReason）。
+**威胁模型补充（已知局限）**：重置不改变交付内容，事实只作审计。崩溃窗口（提交已生成、`run.delivery_created` 落盘前）里事实可能随恢复路径丢失；证明后分支被外部移动时，拒绝前索引已重置；重打包拒绝审计事件保持既有固定形状。
