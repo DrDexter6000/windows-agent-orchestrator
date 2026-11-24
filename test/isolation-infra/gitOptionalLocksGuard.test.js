@@ -299,6 +299,11 @@ const NON_GIT_STATUS_ARRAYS = Object.freeze([
     anchor: /COMPOSITION_RESERVED_KEYS\s*=\s*$/,
     why: "组件台账组合层保留键名清单：\"status\" 是被禁用的 JSON 键名，不是 git 参数",
   },
+  {
+    file: "scripts/reliability/componentDrills.mjs",
+    anchor: /\bstatusOut\s*=\s*runCli\(\s*$/,
+    why: "serve 停止演练发停前先跑 wao status 取 observedSeq：runCli 调的是 WAO 自己的 CLI（node src/cli.js），\"status\" 是 wao 子命令名，不是 git 参数",
+  },
 ]);
 
 function nonGitListMatch(rel, code, open) {
