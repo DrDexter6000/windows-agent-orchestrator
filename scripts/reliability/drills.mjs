@@ -147,7 +147,7 @@ export function createDrills(deps) {
 
   function runCli(cmdArgs, options = {}) {
     // 用 spawnSync 而非 execFileSync：execFileSync 在 Windows 上退出时会清理整个进程树，
-    // 连 detached background runner（spawn 命令路径）都被回收，stop drill 拿不到 transcript。
+    // 连 detached background runner（run --background 路径）都被回收，stop drill 拿不到 transcript。
     // spawnSync 直接 spawn 不带进程树清理，detached runner 能真脱离存活（TD-51 解）。
     const r = spawnSync(nodeBin, [resolve(root, "src", "cli.js"), ...cmdArgs], {
       encoding: "utf8",

@@ -1842,7 +1842,7 @@ const STUB_CLI_SOURCE = [
   "  appendFileSync(file, events.map((e) => JSON.stringify({ ...e, seq: (seq += 1), runId, ts: new Date().toISOString() })).join(\"\\n\") + \"\\n\", \"utf8\");",
   "};",
   "const cmd = args[0];",
-  "if (cmd === \"spawn\") {",
+  "if (cmd === \"run\" && args.includes(\"--background\")) {",
   "  const runId = \"run_stub_serve\";",
   "  writeFileSync(join(runDir, runId + \".jsonl\"), \"\", \"utf8\");",
   "  appendEvents(runId, [",
@@ -1851,12 +1851,21 @@ const STUB_CLI_SOURCE = [
   "    { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
   "  ]);",
   "  say({ runId, background: true });",
+  "} else if (cmd === \"status\") {",
+  "  say({ observedSeq: 3 });",
+  "  if (process.env.STUB_STATUS_FAIL) process.exitCode = 1;",
   "} else if (cmd === \"stop\") {",
-  "  appendEvents(args[1], [",
-  "    { type: \"run.aborted\" },",
-  "    { type: \"run.state_change\", from: \"running\", to: \"aborted\" },",
-  "  ]);",
-  "  say({ stopped: true });",
+  "  if (!args.includes(\"--observed-seq\") || !args.includes(\"--reason\")) {",
+  "    process.stderr.write(\"stop 需要 --observed-seq 与 --reason。\\n\");",
+  "    process.exitCode = 1;",
+  "  } else {",
+  "    appendEvents(args[1], [",
+  "      { type: \"run.aborted\" },",
+  "      { type: \"run.state_change\", from: \"running\", to: \"aborted\" },",
+  "    ]);",
+  "    say({ stopped: true });",
+  "    if (process.env.STUB_STOP_FAIL) process.exitCode = 1;",
+  "  }",
   "} else if (cmd === \"daemon\" && args[1] === \"start\") {",
   "  writeFileSync(join(runDir, \"daemon.json\"), JSON.stringify({ pid: 1, pipe: opts.pipe, heartbeatAt: Date.now() }), \"utf8\");",
   "  say({ ok: true, started: true });",
@@ -1880,7 +1889,7 @@ const STUB_CLI_SOURCE = [
   "}",
 ].join("\n");
 
-test("glue【集成 dry】: stop 按执行形态分车道——serve 走 spawn+`wao stop`，进程式走 daemon 车道（stub CLI，零 token）", () => {
+test("glue【集成 dry】: stop 按执行形态分车道——serve 走 run --background+`wao stop`，进程式走 daemon 车道（stub CLI，零 token）", () => {
   const tmp = mkdtempSync(join(tmpdir(), "wao-cc-stoplane-"));
   const fakeRoot = join(tmp, "root");
   mkdirSync(join(fakeRoot, "src"), { recursive: true });
@@ -1908,16 +1917,41 @@ test("glue【集成 dry】: stop 按执行形态分车道——serve 走 spawn+`
       return { checks: out.checks, argv: readFileSync(argvLog, "utf8") };
     };
 
-    // serve 形（kimi-web 装配）：spawn 托管 + `wao stop` serve abort 车道——
+    // serve 形（kimi-web 装配）：run --background 托管 + `wao stop` serve abort 车道——
     // 既有语义保持，三断言全绿，绝不触碰 daemon。
     const serve = runLane({ backend: "kimi-web", serveUrl: "http://127.0.0.1:4297", cwd: "." });
     const serveBy = new Map(serve.checks.map((c) => [c.name, c]));
-    assert.match(serve.argv, /spawn a1 /, "serve 形经 spawn 托管派发");
+    assert.match(serve.argv, /run a1 .*--background/, "serve 形经 run --background 托管派发");
+    assert.match(serve.argv, /status run_stub_serve --format json --run-dir /, "stop 前先读 status 取 observedSeq");
     assert.match(serve.argv, /stop run_stub_serve /, "serve 形经 `wao stop` serve abort 车道");
+    assert.match(serve.argv, /stop run_stub_serve --observed-seq 3 --reason component drill: serve stop --run-dir /,
+      "stop 携带 status 给出的 observedSeq 与固定 reason");
     assert.doesNotMatch(serve.argv, /daemon/, "serve 形不进 daemon 车道");
     assert.equal(serveBy.get("stopAcknowledged").pass, true);
     assert.equal(serveBy.get("stopStateAborted").pass, true);
     assert.equal(serveBy.get("stopSeqMonotonic").pass, true);
+
+    // 复核（sol）：status 打印了序号却非零退出 → 不发 stop、判红；stop 打印 stopped:true
+    // 却非零退出 → 不算确认（与进程形同口径）。
+    const serveAssembly = { backend: "kimi-web", serveUrl: "http://127.0.0.1:4297", cwd: "." };
+    process.env.STUB_STATUS_FAIL = "1";
+    const statusFail = runLane(serveAssembly);
+    delete process.env.STUB_STATUS_FAIL;
+    assert.doesNotMatch(statusFail.argv, /stop run_stub_serve /, "status 非零退出时不发 stop");
+    assert.equal(new Map(statusFail.checks.map((c) => [c.name, c])).get("stopAcknowledged").pass, false);
+    process.env.STUB_STOP_FAIL = "1";
+    const stopFail = runLane(serveAssembly);
+    delete process.env.STUB_STOP_FAIL;
+    assert.match(stopFail.argv, /stop run_stub_serve --observed-seq 3 /);
+    assert.equal(new Map(stopFail.checks.map((c) => [c.name, c])).get("stopAcknowledged").pass, false,
+      "stop 非零退出不算确认");
+
+    const refused = spawnSync(process.execPath, [
+      join(fakeRoot, "src", "cli.js"), "stop", "run_stub_serve", "--run-dir", tmp,
+    ], { cwd: fakeRoot, encoding: "utf8", env: { ...process.env, STUB_LOG: argvLog } });
+    assert.equal(refused.status, 1, "缺 observed-seq/reason 时桩必须像真实 CLI 一样退出 1");
+    assert.match(refused.stderr, /--observed-seq/);
+    assert.match(refused.stderr, /--reason/);
 
     // 进程形（deepseek-acp 装配形态，无 serveUrl）：daemon 车道（start/run/stop，
     // --pipe 每轮唯一），不再进 `wao stop` 的 "no serveUrl" 车道；三断言全绿。

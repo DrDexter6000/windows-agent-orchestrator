@@ -1466,7 +1466,7 @@ test("P4-T4 决策C: 不带 mode（默认 gate）证据不满足 → 仍 failed�
 // ---------------------------------------------------------------------------
 // M8-1：默认 scorecard（warn 模式 + 升级开关）
 //
-// 设计：run/spawn 不传任何 scorecard 参数时，默认带 { requireEvidence:true, mode:"warn" }。
+// 设计：run 不传任何 scorecard 参数时，默认带 { requireEvidence:true, mode:"warn" }。
 // 这是把"防伪完成"从 opt-in 升级为默认行为——但用 warn（不阻塞完成，只记留痕）做渐进引导，
 // 不用 hard（回归风险高）。Lead 用 --scorecard-mode 在三个状态间切：
 //   warn（默认）| hard（升级硬闸，无证据→failed）| off（完全关闭，恢复旧 opt-in 行为）

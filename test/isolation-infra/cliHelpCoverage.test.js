@@ -124,7 +124,14 @@ const SUBCOMMAND_SPECS = [
   { command: "daemon supervisor", module: "src/commands/daemon.js", dispatcher: "daemonSupervisorCommand" },
   { command: "mcp", module: "src/commands/mcp.js", dispatcher: "mcpCommand" },
   { command: "skill", module: "src/commands/skill.js", dispatcher: "skillCommand" },
-  { command: "wao", module: "src/commands/wao.js", dispatcher: "waoCommand" },
+  {
+    command: "wao",
+    module: "src/commands/wao.js",
+    dispatcher: "waoCommand",
+    excluded: {
+      ask: "已退役命令的墓碑分支（固定报错指向 run / run --read-only，帮助不列）",
+    },
+  },
   { command: "wao decision", module: "src/commands/wao.js", dispatcher: "waoDecisionCommand" },
   { command: "wao handoff", module: "src/commands/wao.js", dispatcher: "waoHandoffCommand" },
 ];
@@ -215,7 +222,6 @@ function internalFlagsLine() {
 // 该模块读取的 options.<key> 只要出现在其中任一命令的帮助行（或下方补充面/
 // 内部旗标行）即算覆盖。新命令族拆进 src/commands/ 时在此登记。
 const FLAG_MODULE_COMMANDS = {
-  "src/cli.js": ["wao ask"], // waoAskCommand（askHandler 注入 wao.js）
   "src/commands/consult.js": ["consult run", "consult show", "consult wait"],
   "src/commands/daemon.js": [
     "daemon start", "daemon run", "daemon stop", "daemon status",
@@ -232,7 +238,7 @@ const FLAG_MODULE_COMMANDS = {
   "src/commands/onboarding.js": ["wao onboarding"],
   "src/commands/playbook.js": ["playbook list", "playbook show"],
   "src/commands/registry.js": ["registry list", "registry validate", "registry align"],
-  "src/commands/run.js": ["run", "spawn"],
+  "src/commands/run.js": ["run"],
   "src/commands/runs.js": [
     "runs list", "runs summary", "runs prune", "runs migrate-projects", "runs grep",
     "runs lineage-close", "runs settle", "runs metrics", "runs scorecard",
@@ -241,10 +247,10 @@ const FLAG_MODULE_COMMANDS = {
     "dashboard", // runDashboardWeb 同时服务顶层 dashboard 启动器（--port/--run-dir）
   ],
   "src/commands/serve.js": ["serve status", "serve sweep", "serve recycle"],
-  // shared.js 的解析 helper 被 run/spawn/retry/resume/status/tail/collect/stop/
+  // shared.js 的解析 helper 被 run/retry/resume/status/tail/collect/stop/
   // consult run/registry list/mcp/wao doctor/onboarding/runs dashboard 的处理器调用。
   "src/commands/shared.js": [
-    "run", "spawn", "retry", "resume", "status", "tail", "collect", "stop",
+    "run", "retry", "resume", "status", "tail", "collect", "stop",
     "consult run", "registry list", "mcp status", "mcp bind", "mcp unbind",
     "wao doctor", "wao onboarding", "runs dashboard",
   ],
@@ -253,7 +259,7 @@ const FLAG_MODULE_COMMANDS = {
   "src/commands/worktree.js": ["worktree list", "worktree remove", "worktree reclaim"],
   "src/commands/wao.js": [
     "wao init", "wao decision add", "wao decision list", "wao decision show",
-    "wao declare", "wao stage", "wao ask", "wao handoff write", "wao handoff read",
+    "wao declare", "wao stage", "wao handoff write", "wao handoff read",
     "wao doctor", "wao onboarding", "wao accept", "wao sweep-claude-config", "wao lanes",
   ],
 };

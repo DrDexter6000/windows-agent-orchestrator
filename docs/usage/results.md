@@ -29,13 +29,13 @@ WAO 可被任何调用方平等驱动：bash 脚本、LLM 编排器、CI。
 
 `--format json` 不是全局开关，支持面以命令为准（本页只列常用面，不维护全量清单）：
 
-- 恒为 JSON、无需 flag：`spawn`（含 runId + transcript 路径）；裸 `collect <runId>`（raw ops JSON）。`status` 缺省 JSON；`json` 同缺省，`line` 单行（自由文本带引号、空串照写，null/缺失=unknown），集外报错。
+- 恒为 JSON、无需 flag：`run --background`（含 runId + transcript 路径）；裸 `collect <runId>`（raw ops JSON）。`status` 缺省 JSON；`json` 同缺省，`line` 单行（自由文本带引号、空串照写，null/缺失=unknown），集外报错。
 - `--format json` 显式开启：`run`（JSON 输出含 messages + metrics）；查询族（registry validate / runs list / runs summary / runs grep / wao decision list / wao handoff read，形状见下）；runs 族多数子命令（wait / gate / metrics / scorecard / diagnose / dashboard / delivery）。
 - 已知例外：`collect --final` 接受 `--format json`，但 stdout 恒为四态文本，不输出 JSON 信封（该组合 stderr 警告一次）。机器可读请去掉 `--final`，用分页 `collect <runId> --format json`。
 
 ```powershell
-# spawn 返回 JSON（含 runId + transcript 路径）
-npm run --silent cli -- spawn glm-flash --prompt "..." | ConvertFrom-Json
+# run --background 返回 JSON（含 runId + transcript 路径）
+npm run --silent cli -- run glm-flash --prompt "..." --background | ConvertFrom-Json
 
 # run 的 JSON 输出含 messages + metrics
 npm run --silent cli -- run glm-flash --prompt "..." --format json | ConvertFrom-Json
@@ -62,7 +62,7 @@ npm run --silent cli -- wao handoff read lead --format json
 
 LLM 编排器或外部脚本的最短驱动闭环：
 
-1. `spawn` 启动 run，拿 runId
+1. `run --background` 启动 run，拿 runId
 2. `runs wait <runId> --until-settled` 等到收口（`status <runId>` 只做即时查询）
 3. `collect <runId>` 或读 transcript 拿产出
 4. `runs metrics <runId>` 拿成本

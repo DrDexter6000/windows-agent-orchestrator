@@ -22,7 +22,7 @@
 //     尝试也确定性失败。
 //
 // 门的三处消费点（同一判定，零分叉）：
-//   RunManager.start（一切派发的单一咽喉：CLI run/spawn、MCP run_dispatch、
+//   RunManager.start（一切派发的单一咽喉：CLI run、MCP run_dispatch、
 //   consult 扇出、resume）；MCP run_dispatch/run_consult/run_continue 处理器头
 //   （worker 会话拉起的 MCP 服务实例在 side effect 之前被拒）。
 //   TD-240 追加第四处：runs verify-commit 服务头（src/application/

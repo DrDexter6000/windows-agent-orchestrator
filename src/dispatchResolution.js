@@ -98,7 +98,7 @@ export function validDispatchHold(value) {
 
 /**
  * 从 lanesDoc 取某车道的 dispatchHold（纯函数）：表不可用（ok:false 或缺
- * lanes 数组）、无该车道、形状不合法 → null。CLI run/spawn 与会审席位的
+ * lanes 数组）、无该车道、形状不合法 → null。CLI run 与会审席位的
  * 派发 advisory 共用本读取面。
  */
 export function laneDispatchHold(lanesDoc, laneId) {
@@ -122,7 +122,7 @@ export function dispatchHoldsByLane(lanesDoc) {
 }
 
 /**
- * 派发面的 stderr advisory 行（run/spawn/consult 席位共用同一文案；形制同
+ * 派发面的 stderr advisory 行（run/consult 席位共用同一文案；形制同
  * dispatchResourceAdvisory 的 `[wao] advisory:` 行）。只提示，永不拦截。
  */
 export function dispatchHoldAdvisoryLine(laneId, hold) {

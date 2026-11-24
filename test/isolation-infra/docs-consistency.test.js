@@ -3217,8 +3217,8 @@ test("R10-A: 认证 runbook（原 usage 场景 1b）记录 --model 用法、合�
   // 失败模式：打错模型名在 provider 期才报错 → 回显 effective model。
   assert.match(runbook, /effective model/, "必须记录 effective model 回显");
   // 排除边界。
-  assert.match(runbook, /spawn[\s\S]{0,120}(不支持|不携带|没有|排除|不在)|--model[\s\S]{0,160}spawn/,
-    "必须记录 spawn/daemon 排除边界");
+  assert.match(runbook, /daemon 派发不解析该 flag/,
+    "必须记录 daemon 排除边界");
 });
 
 test("R10-A: 生成层事件清单的 run.started 行携带 modelOverride 字段", () => {
@@ -3355,9 +3355,8 @@ test("R11-1: RUN_USAGE_TEXT 用法页携带 --reasoning（CLI 面；生成层字
   assert.match(RUN_USAGE_TEXT, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集值域说明");
   assert.match(RUN_USAGE_TEXT, /mutually exclusive with\s+--require-certified/, "认证互斥");
   assert.match(RUN_USAGE_TEXT, /provider-session reuse agents/, "复用互斥");
-  assert.match(RUN_USAGE_TEXT, /only on run and retry \(not\s+spawn\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag；spawn/daemon 不支持）");
-  // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮（TD-126）。
-  assert.doesNotMatch(RUN_USAGE_TEXT, /only on run \(not\s+spawn\/daemon\)/, "TD-126 旧句不得回潮");
+  assert.match(RUN_USAGE_TEXT, /only on run and retry \(not\s+daemon\)/, "仅 run 与 retry 面（retry 自 R12 起接受两 flag；daemon 不支持）");
+  assert.doesNotMatch(RUN_USAGE_TEXT, /spawn\/daemon/, "退役入口不得留在旗标边界说明");
   assert.match(RUN_USAGE_TEXT, /effective reasoning/, "回显失败模式说明（advisory）");
   // 生成层 run_dispatch input 表的 "| reasoning | string | no | enum: minimal"
   // 行内容钉与 docsSurface-1 字节钉重复，已删（TD-168 清扫）。

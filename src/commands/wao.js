@@ -2,7 +2,7 @@
 //
 // TD-98 阶段 2d：wao command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
-// 命令族：wao init | decision | handoff | declare | stage | ask | doctor |
+// 命令族：wao init | decision | handoff | declare | stage | doctor |
 //         onboarding | sweep-claude-config | accept | lanes
 //
 // 依赖：
@@ -12,11 +12,6 @@
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd）
 //   - doctor 子命令：./doctor.js（waoDoctorCommand）
 //   - node built-in：fs/promises（readFile）、path（resolve/join）、os（tmpdir）
-//
-// 注意：wao.js 不持有也不直接调用 runCommand（runCommand 由 commands/run.js 持有）。
-// wao ask 子命令通过依赖注入接收 askHandler：cli.js 把 waoAskCommand 作为 deps.askHandler
-// 注入 waoCommand，waoAskCommand 留在 cli.js 内部调用 commands/run.js 导出的 runCommand。
-// DI 的目的：避免 wao.js 反向 import ../cli.js，保持依赖方向 cli.js -> wao.js。
 //
 // 本模块内部 helper：resolveArtifactPath（wao stage 的 run 路径解析，随 stage 搬迁）。
 
@@ -37,7 +32,7 @@ import { onboardingCommand } from "./onboarding.js";
 import { lanesCommand } from "./lanes.js";
 // TD-260（0062 B8）：反向 Unknown 提示的数据源——顶层命令名闭集（cliHelp 是
 // 共享叶子，did-you-mean 同源；单向指路 TD-191④ 的对称补全）。
-import { COMMAND_NAMES } from "../cliHelp.js";
+import { COMMAND_NAMES, WAO_ASK_RETIRED_MESSAGE } from "../cliHelp.js";
 // TD-219 第一步：Lead 侧验收落盘（非 delivery run 的 acceptance 审计事件追加进
 // run transcript）。数据逻辑委托 ../application/acceptanceRecord.js，本命令只做
 // argv/console 适配——与 consult/playbook 同款分层。
@@ -462,24 +457,15 @@ async function waoSweepClaudeConfigCommand(args) {
   }, null, 2));
 }
 
-/**
- * wao 命令族派遣器。
- *
- * @param {string[]} args
- * @param {object} config
- * @param {{ askHandler?: (args: string[], config: object) => Promise<void> }} [deps]
- *   ask 子命令依赖注入——cli.js 注入 waoAskCommand（它内部调 commands/run.js 的 runCommand）。
- *   wao.js 不 import ../cli.js，故 askHandler 由 cli.js 注入，保持依赖方向。
- */
 // wao 命名空间子命令闭集：顶层命令名命中它时直接按 `wao <sub>` 执行（src/cli.js）。
-// 与下方 waoCommand 的 dispatch 同步（cli-registry.test.js 有同步守卫）。
+// 正式子命令与下方 dispatch 同步；ask 等退役墓碑不进入本集合。
 // 0064：+lanes（车道画像只读查询面）。
 export const WAO_SUBCOMMANDS = [
-  "init", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
+  "init", "decision", "handoff", "declare", "stage", "doctor", "onboarding",
   "sweep-claude-config", "accept", "lanes",
 ];
 
-export async function waoCommand(args, config, deps = {}) {
+export async function waoCommand(args, config) {
   const [sub, ...tail] = args;
   if (sub === "init") {
     await waoInitCommand(tail, config);
@@ -502,11 +488,7 @@ export async function waoCommand(args, config, deps = {}) {
     return;
   }
   if (sub === "ask") {
-    // ask 通过依赖注入调 waoAskCommand（cli.js 注入），waoAskCommand 内部调 commands/run.js 的 runCommand。
-    // wao.js 不直接持有 runCommand，避免反向 import cli.js。
-    if (!deps.askHandler) throw new Error("wao ask requires runCommand (deps.askHandler not injected)");
-    await deps.askHandler(args.slice(1), config);
-    return;
+    throw new Error(WAO_ASK_RETIRED_MESSAGE);
   }
   if (sub === "doctor") {
     await waoDoctorCommand(tail, config);

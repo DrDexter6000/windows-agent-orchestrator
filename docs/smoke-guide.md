@@ -41,8 +41,8 @@ Copy-Item config/agents.example.json config/agents.json
 # 单次 run（等完成，打印 assistant 文本）
 npm run cli -- run glm-flash --prompt "Say hello in one sentence." --cwd <目标项目> --registry config/agents.json
 
-# spawn 后台 + 看状态
-npm run cli -- spawn deepseek-flash --prompt "List files in cwd." --cwd <目标项目> --registry config/agents.json
+# run 后台 + 看状态
+npm run cli -- run deepseek-flash --prompt "List files in cwd." --cwd <目标项目> --registry config/agents.json --background
 npm run cli -- runs list
 npm run cli -- status <runId>
 

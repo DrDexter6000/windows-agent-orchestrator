@@ -1,12 +1,12 @@
 // src/commands/run.js
 //
-// TD-98 阶段 2e-3（TD-98 收尾）：run/spawn 命令族从 cli.js 拆出（行为不变，纯搬迁）。
+// TD-98 阶段 2e-3（TD-98 收尾）：run 命令族从 cli.js 拆出。
 //
-// 命令族：run <agentId> / spawn <agentId> [agentId2 ...]
+// 命令族：run <agentId>
 // 这是核心派工闭环——RunManager 驱动、background fork、scorecard 门控、失败诊断注入。
 //
-// 对外导出：spawnCommand / runCommand / runAndWait
-// 模块内部 helper（不导出）：parseAgentList / loadScorecardRules / parseScorecardRules /
+// 对外导出：runCommand / runAndWait
+// 模块内部 helper（不导出）：loadScorecardRules / parseScorecardRules /
 //   loadScorecardFromTranscript / spawnBackgroundRunner
 //
 // 依赖：
@@ -60,20 +60,6 @@ import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
 // TD-319：报错输出口渲染 + 有意分行的报错构造（派发选择器拒绝 / delivery-spec
 // 内层提示），行内控制字符可见化、行数不变。
 import { linesError, renderErrorText } from "../safeText.js";
-
-function parseAgentList(args) {
-  const agents = [];
-  let i = 0;
-  while (i < args.length && !args[i].startsWith("--")) {
-    agents.push(args[i]);
-    i += 1;
-  }
-  const options = parseOptions(args.slice(i));
-  if (agents.length === 0) {
-    throw new Error("requires at least one <agentId>");
-  }
-  return { agents, options };
-}
 
 async function loadScorecardRules(options) {
   if (options.scorecardRules && options.scorecardRulesFile) {
@@ -304,107 +290,6 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     ...(result.effectiveReasoning ? { reasoning: result.effectiveReasoning } : {}),
     note: "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Wait to settlement: `wao runs wait <runId> --until-settled`.",
   }, null, 2));
-}
-
-export async function spawnCommand(args, config) {
-  const { agents, options } = parseAgentList(args);
-  if (options.deliverySpecFile) {
-    throw new Error("delivery mode is only supported on `run`, not `spawn`");
-  }
-  // R10-A: --model is a `run`-only surface. Fail-fast refusal rather than a
-  // silent ignore: spawnCommand's single-agent background path reuses
-  // spawnBackgroundRunner, which WOULD thread the override — an explicit
-  // boundary keeps the exclusion honest (multi-seat uniform-model semantics
-  // are ambiguous, and the Owner scenario is a single dispatch). Daemon
-  // dispatches are excluded for the same reason: a declarative surface's
-  // model belongs in the declaration itself.
-  if (options.model !== undefined) {
-    throw new Error(
-      "--model is only supported on `run`, not `spawn` "
-      + "(per-dispatch model override is a single-dispatch surface; put a persistent model "
-      + "change in the agent's registry model policy instead)",
-    );
-  }
-  // R11-1: --reasoning is a `run`-only surface, exactly like --model above —
-  // spawnCommand's single-agent background path reuses spawnBackgroundRunner,
-  // which WOULD thread the override, so the boundary must keep the exclusion
-  // honest. Daemon dispatches are excluded for the
-  // same reason: a declarative surface's reasoning belongs in the declaration.
-  if (options.reasoning !== undefined) {
-    throw new Error(
-      "--reasoning is only supported on `run`, not `spawn` "
-      + "(per-dispatch reasoning effort override is a single-dispatch surface; put a persistent "
-      + "reasoning change in the agent's registry reasoning policy instead)",
-    );
-  }
-  const manager = newRunManager(config);
-  // TD-283：spawn 按裸 agentId 派发（无解析块）——目标本身是带 Owner 暂停说明
-  // 的车道键时，同样给 stderr 一行 advisory（只提示不拦截）。非默认 --registry
-  // 时车道表停用（lanesDocForCall），不提示。
-  {
-    // loadLanesConfigFn：测试缝（夹具车道表注入；生产路径缺省真实表）。
-    const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
-    for (const id of agents) {
-      const line = dispatchHoldAdvisoryLine(id, laneDispatchHold(lanesDoc, id));
-      if (line) console.error(line);
-    }
-  }
-  // P2（M7）：单 agent spawn 不带 --wait = 后台托管（detached runner）。
-  // 替代旧 TD-39 "拒绝裸 spawn"——现在不拒，而是托管：runner 拥有 handle 驱动 wait+gate+abort，
-  // 不再产生孤儿会话（06-18 事故架构洞的正解）。多 agent spawn 仍要求 --wait（并行 background 留 P3 daemon）。
-  if (agents.length === 1 && !options.wait) {
-    options.prompt = await loadPrompt(options);
-    await loadScorecardRules(options);
-    return spawnBackgroundRunner(agents[0], options, config);
-  }
-  await loadScorecardRules(options);
-  if (agents.length === 1) {
-    const run = await manager.start(agents[0], {
-      prompt: await loadPrompt(options),
-      registry: options.registry,
-      runDir: options.runDir,
-      tags: options.tag,
-      cwd: options.cwd,
-      isolate: resolveIsolateFlag(options),
-      ...(options.scorecardRules ? { scorecard: { rules: parseScorecardRules(options.scorecardRules, options.scorecardRulesSource) } } : {}),
-      // P0-1 护栏：不带 --wait = fire-and-forget。遇 sessionOutlivesProcess 的 backend 会被
-      // RunManager.start 拒绝（06-18 事故防线）。带 --wait 时 fireAndForget=false，护栏放行。
-      fireAndForget: !options.wait,
-    });
-    console.log(JSON.stringify({ runId: run.transcript.context.runId, transcript: run.transcript.filePath, ...run.result }, null, 2));
-    if (options.wait) {
-      const waitResult = await runAndWait(run, options);
-      console.log(JSON.stringify(waitResult, null, 2));
-    }
-    return;
-  }
-  const prompt = await loadPrompt(options);
-  const spawned = await Promise.all(agents.map((id) =>
-    manager.start(id, {
-      prompt,
-      registry: options.registry,
-      runDir: options.runDir,
-      tags: options.tag,
-      cwd: options.cwd,
-      isolate: resolveIsolateFlag(options),
-      ...(options.scorecardRules ? { scorecard: { rules: parseScorecardRules(options.scorecardRules, options.scorecardRulesSource) } } : {}),
-      fireAndForget: !options.wait, // P0-1 护栏（同单 agent 路径）
-    }),
-  ));
-  for (const run of spawned) {
-    console.log(JSON.stringify({ runId: run.transcript.context.runId, transcript: run.transcript.filePath, ...run.result }, null, 2));
-  }
-  if (options.wait) {
-    const results = await Promise.all(spawned.map((run) =>
-      runAndWait(run, options).then((w) => ({ run, ...w })),
-    ));
-    console.log("--- parallel wait complete ---");
-    for (const r of results) {
-      const status = r.failed ? "failed" : (r.completed ? "completed" : "timed out");
-      const detail = r.failed ? ` (${r.error})` : "";
-      console.log(`${r.run.transcript.context.runId}: ${status}${detail}`);
-    }
-  }
 }
 
 export async function runCommand(args, config) {
@@ -657,7 +542,7 @@ export async function runCommand(args, config) {
     throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
   }
   // Round 4 Bundle B 的两个 --read-only 冲突拒绝已上移至解析块前（DC-5/A-3
-  // 反劫持同款）；此处仅保留声明解析供下方 spawn 面使用。
+  // 反劫持同款）；此处仅保留声明解析供下方前后台派发面使用。
   const readOnly = resolveReadOnlyFlag(options);
   // ADR 0035 S3（fail-open advisory）：派发启动时向 Lead 报一行仓库资源存量
   // （注册 worktree 总数 + wao/run_* 分支总数，RAW 计数、无阈值；详情走
@@ -687,7 +572,7 @@ export async function runCommand(args, config) {
   // forwarded through the shared dispatchRun service to the detached runner.
   // P2（M7）：--background = detached runner 托管。CLI 预生成 runId、fork runner、立即返回。
   // runner 拥有 worker handle，驱动 waitForCompletion（含 token 闸门/超时/兜底 abort），
-  // 写共享 transcript。这是 06-18 事故架构洞的正解——把"拒绝裸 spawn"换"托管生命周期"。
+  // 写共享 transcript；派发进程退出后生命周期仍由 runner 接管。
   if (options.background) {
     options.prompt = await loadPrompt(options);
     await loadScorecardRules(options);

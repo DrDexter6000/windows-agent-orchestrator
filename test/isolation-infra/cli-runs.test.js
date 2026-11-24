@@ -1,7 +1,7 @@
 // cli-runs.test.js
 //
 // cli.test.js 拆分（TD-138 全量提速批，2026-11-01）——本文件承载 run 派发与
-// 读侧面：run --background / 裸 spawn、status scorecard（TD-150 批B）、collect
+// 读侧面：run --background、status scorecard（TD-150 批B）、collect
 // （TD-77A / M11-4-B4 --cursor）、R10/R11 model·reasoning 覆盖、R12 retry 继承、
 // runs gate（B3）、runs list·wait 窗口与过滤（TD-137 / TD-153）、--isolate /
 // --tag 后台全链。共用辅助见 _cliTestHelpers.mjs；用例原样搬运自 cli.test.js
@@ -17,17 +17,15 @@ import { join, resolve } from "node:path";
 import { runCommand, statusCommand, collectCommand } from "../../src/cli.js";
 import { getRunStatus } from "../../src/application/runStatus.js";
 import { readTranscript, findState } from "../../src/transcript.js";
-import { spawnCommand } from "../../src/commands/run.js";
 import { readRegistry as readRegistryFile } from "../../src/registry.js";
 import { retryCommand } from "../../src/commands/lifecycle.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 import { COMMAND_NAMES, HELP_TEXT } from "../../src/cliHelp.js";
 import { captureLog, runCliOnPathNode, makeRetryInheritFixture, parseRetryJson, writeRetrySource } from "./_cliTestHelpers.mjs";
 
-test("P2: 裸 spawn（不带 --wait）路由到 background runner 托管（06-18 架构洞正解）", () => {
-  // P0-1 旧护栏（拒绝裸 spawn）已被 P2 替换：现在不拒，而是 fork detached runner 托管。
+test("P2: run --background 路由到 detached runner 托管", () => {
   // runner 拥有 worker handle，驱动 waitForCompletion（token 闸门/超时/兜底 abort 都生效），
-  // 不再产生孤儿 session。这是 06-18 事故架构洞的正解（把"拒绝"换"接管生命周期"）。
+  // 派发进程退出后不产生无人接管的会话。
   const dir = mkdtempSync(join(tmpdir(), "wao-fireandforget-"));
   try {
     const registryPath = join(dir, "agents.json");
@@ -44,19 +42,18 @@ test("P2: 裸 spawn（不带 --wait）路由到 background runner 托管（06-18
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "spawn", "bg_worker",
+      "run", "bg_worker",
       "--prompt", "do anything",
+      "--background",
       "--registry", registryPath,
       "--run-dir", runDir,
-      // 故意不带 --wait → 应路由到 background runner（不再拒绝）
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
       timeout: 10000,
     });
 
-    // 不再拒绝（status 0）；返回 background:true JSON，说明托管给 detached runner。
-    assert.equal(result.status, 0, "裸 spawn 应路由到 background（不再拒绝）");
+    assert.equal(result.status, 0, "run --background 应交给 detached runner");
     const out = result.stdout || "";
     assert.match(out, /"background":\s*true/, "应标记 background:true（托管给 runner）");
     assert.match(out, /"runId":\s*"/, "应返回 runId（runner 用它驱动生命周期）");
@@ -258,9 +255,8 @@ test("run --background: malformed --scorecard-rules-file fail-fast，不返回 r
   }
 });
 
-test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制（进程死即会话死）", () => {
-  // 进程式 backend 的 session = 子进程；WAO 进程退出时子进程也会被回收
-  // （taskkill /T 兜底 + 进程死即会话死的核心假设）。裸 spawn 对它们是安全的。
+test("P0-1: 进程式 backend 的 run --background 不受 fire-and-forget 护栏限制", () => {
+  // 进程式 backend 的 session = 子进程；detached runner 接管其生命周期。
   // 护栏不得误伤进程式 backend —— 这是 runtime-agnostic 的体现
   // （护栏按 backend 属性 sessionOutlivesProcess 判定，不按 runtime 名分支）。
   const dir = mkdtempSync(join(tmpdir(), "wao-procsafe-"));
@@ -279,11 +275,11 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "spawn", "codex_worker",
+      "run", "codex_worker",
       "--prompt", "x",
+      "--background",
       "--registry", registryPath,
       "--run-dir", runDir,
-      // 不带 --wait —— 对进程式 backend 应放行（不报 fire-and-forget 拒绝）
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -297,7 +293,7 @@ test("P0-1: 裸 spawn 进程式 backend（claude-code/codex）不受护栏限制
     assert.ok(!/06-18|fire-and-forget|session.*outlive/i.test(out),
       "进程式 backend 不应被 fire-and-forget 护栏拦截（sessionOutlivesProcess=false）");
   } finally {
-    // 不带 --wait 时 runner 经 WMI 启动桥起、不是本进程的子进程，CLI 退出后它还要再写
+    // --background 的 runner 经 WMI 启动桥起、不是本进程的子进程，CLI 退出后它还要再写
     // 2–3 秒：先等它释放认领（.claims 下出现 .released，最多 30 秒），再带重试清理
     //（2026-11-12 全量三次在清理处 ENOTEMPTY）。
     const claims = join(dir, "runs", ".claims");
@@ -1392,70 +1388,6 @@ test("R10-A-CLI-5: --model × --require-certified → 无条件互斥 fail-fast�
   }
 });
 
-test("R10-A-CLI-6: spawn --model → 明确拒绝（--model 是 run 专属表面）", async () => {
-  await assert.rejects(
-    () => spawnCommand(["researcher", "--prompt", "hi", "--model", "glm-5.3"], {}),
-    (e) => {
-      assert.match(e.message, /--model is only supported on `run`, not `spawn`/);
-      assert.match(e.message, /registry model policy/, "指引持久化模型应改注册表");
-      return true;
-    },
-  );
-});
-
-// 多 agent spawn 与单 agent 同样经 loadPrompt 读 --prompt / --prompt-file：每个 worker
-// 收到同一份任务；两者都没给时报错，不派出没有任务的 worker。
-test("spawn 多 agent：--prompt-file 的内容送到每个 worker；没有任务时拒绝派发", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-spawn-multi-prompt-"));
-  try {
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({ agents: {
-      a: { backend: "claude-code", cwd: dir },
-      b: { backend: "claude-code", cwd: dir },
-    } }), "utf8");
-    const promptPath = join(dir, "task.txt");
-    writeFileSync(promptPath, "line one\nfrom the prompt file", "utf8");
-    const prompts = [];
-    const backend = {
-      supportsRoleContract: true, sessionOutlivesProcess: false,
-      async spawn(agent, task) {
-        prompts.push(task.prompt);
-        return {
-          backend: "zcode", backendSessionId: `s-${agent.id}`, messageId: "m1", admittedSeq: 1,
-          async *events() { yield { kind: "done", reason: "completed" }; },
-          abort: async () => {},
-        };
-      },
-      defaultBinary() { return "node"; }, credentialEnvNames: () => [],
-    };
-    const cfg = {
-      registry: registryPath,
-      runDir: join(dir, "runs"),
-      readRegistry: async () => readRegistryFile(registryPath),
-      backendFor: () => backend,
-      loadLanesConfigFn: () => ({ lanes: [], sha256: null, issues: [], rolesHint: [] }),
-    };
-    const origLog = console.log;
-    console.log = () => {};
-    try {
-      await spawnCommand(["a", "b", "--prompt-file", promptPath, "--wait"], cfg);
-    } finally {
-      console.log = origLog;
-    }
-    assert.equal(prompts.length, 2, "两个 worker 都派出");
-    for (const p of prompts) {
-      assert.ok(String(p).includes("from the prompt file"), `worker 收到 prompt 文件内容（实得 ${JSON.stringify(p)}）`);
-    }
-    await assert.rejects(
-      () => spawnCommand(["a", "b", "--wait"], cfg),
-      /Provide --prompt or --prompt-file/,
-    );
-    assert.equal(prompts.length, 2, "没有任务时零派发");
-  } finally {
-    rmrfRetry(dir);
-  }
-});
-
 test("R10-A-CLI-7: run --help 用法页含 --model（形状门 + 两道互斥 + 失败模式）", async () => {
   const out = await captureLog(() => runCommand(["--help"], {}));
   assert.match(out, /--model ID/, "flag 行存在");
@@ -1700,26 +1632,14 @@ test("R11-1-CLI-5: --reasoning × --require-certified → 互斥 fail-fast（闭
   }
 });
 
-test("R11-1-CLI-6: spawn --reasoning → 明确拒绝（--reasoning 是 run 专属表面）", async () => {
-  await assert.rejects(
-    () => spawnCommand(["researcher", "--prompt", "hi", "--reasoning", "high"], {}),
-    (e) => {
-      assert.match(e.message, /--reasoning is only supported on `run`, not `spawn`/);
-      assert.match(e.message, /registry reasoning policy/, "指引持久化 effort 应改注册表");
-      return true;
-    },
-  );
-});
-
 test("R11-1-CLI-7: run --help 用法页含 --reasoning（闭集 + 互斥 + 仅 run 面）", async () => {
   const out = await captureLog(() => runCommand(["--help"], {}));
   assert.match(out, /--reasoning EFFORT/, "flag 行存在");
   assert.match(out, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集说明");
   assert.match(out, /mutually exclusive with\s+--require-certified/, "认证互斥说明");
   assert.match(out, /provider-session reuse agents/, "复用互斥说明");
-  assert.match(out, /only on run and retry \(not\s+spawn\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag）");
-  // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮。
-  assert.doesNotMatch(out, /only on run \(not\s+spawn\/daemon\)/, "TD-126 旧句不得回潮");
+  assert.match(out, /only on run and retry \(not\s+daemon\)/, "仅 run 与 retry 面（retry 自 R12 起接受两 flag）");
+  assert.doesNotMatch(out, /spawn\/daemon/, "退役入口不得留在旗标边界说明");
   assert.match(out, /effective reasoning/, "回显说明（advisory）");
 });
 
@@ -2974,7 +2894,7 @@ test("TD-153 runs list --state/--since 过滤与组合正交：行集叠加、JS
 });
 
 //
-// 后台派发（run --background、不带 --wait 的单 agent spawn）与前台一样遵守
+// 后台派发（run --background）与前台一样遵守
 // --isolate/--no-isolate/--tag。全链钉法（R10-A-CLI-8 先例）：真实 CLI 子进程 + 不存在 binary（runner 快速
 // failed，零 provider），从 run.started 读 RunManager.start 实收的隔离/标签事实。
 
@@ -3031,36 +2951,6 @@ test("CLI 全链: run --background --isolate 的非交付运行真隔离（run.s
     assert.ok(events.length > 0, "runner 必须写 transcript");
     const started = events.find((e) => e.type === "run.started");
     assert.ok(started?.worktreePath, "--isolate 的非交付后台运行在 worktree 里跑（isolate:true 传到了 RunManager.start）");
-  } finally {
-    rmrfRetry(dir);
-  }
-});
-
-test("CLI 全链: 不带 --wait 的单 agent spawn --isolate 同样在 worktree 里跑", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-cli-spawn-iso-"));
-  try {
-    makeGitRepo(dir);
-    const registryPath = join(dir, "agents.json");
-    writeFileSync(registryPath, JSON.stringify({
-      agents: { sp_iso: { backend: "claude-code", binary: "nonexistent-binary-spawn-iso", cwd: dir } },
-    }), "utf8");
-    const runDir = join(dir, "runs");
-
-    const result = spawnSync(process.execPath, [
-      "src/cli.js", "spawn", "sp_iso",
-      "--prompt", "x",
-      "--isolate",
-      "--registry", registryPath,
-      "--run-dir", runDir,
-      "--wait-timeout", "2000",
-    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
-    assert.equal(result.status, 0, `不带 --wait 的 spawn 应立即返回: ${result.stderr}`);
-    const parsed = JSON.parse(result.stdout.slice(result.stdout.indexOf("{"), result.stdout.lastIndexOf("}") + 1));
-    assert.equal(parsed.background, true);
-
-    const events = await awaitTerminalEvents(resolveTranscriptPath(runDir, parsed.runId));
-    const started = events.find((e) => e.type === "run.started");
-    assert.ok(started?.worktreePath, "不带 --wait 的 spawn 走后台路径，--isolate 同样生效");
   } finally {
     rmrfRetry(dir);
   }

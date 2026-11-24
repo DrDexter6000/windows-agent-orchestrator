@@ -22,7 +22,7 @@ kimi-web run 的 collect 从转录事件重建（与 process backend 同路）�
 ## 场景 1：让 agent 做一件事并等结果
 
 ```powershell
-# run = spawn + wait，打印 assistant 文本
+# run 前台等待完成，打印 assistant 文本
 npm run cli -- run glm-flash --prompt "总结这个项目的 README"
 
 # JSON 输出（含完整 messages + metrics）
@@ -34,7 +34,7 @@ npm run cli -- run glm-flash --prompt "..." --format json
 - 等待窗（`--wait-timeout`，或 agent / global 配置，三源）到期只通知不终止：前台 CLI 打一行指引后继续等到自然终态，`--background` 同样只记事实、继续监督。到期即通知的机制与三钟分离（派发侧等待窗 ≠ Lead 观察等待 ≠ 后端请求超时）见[架构](../02-architecture.md)的「三钟分离」；等待的读数与边界见 `wao manual supervise "MCP 等待"`。
 - 终止 worker 只有两个来源：Lead 显式 `stop`；硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。
 - 有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。
-- 前台等到失败终态时（`run`、`spawn --wait`）不抛裸错误，返回 `{runId, completed:false, failed:true, timedOut:false, error, transcript, diagnosis?}`：`error` 超过 500 字符时截断并注明总长，`diagnosis` 是同一 runId 的诊断（同 `runs diagnose`）。
+- 前台 `run` 等到失败终态时不抛裸错误，返回 `{runId, completed:false, failed:true, timedOut:false, error, transcript, diagnosis?}`：`error` 超过 500 字符时截断并注明总长，`diagnosis` 是同一 runId 的诊断（同 `runs diagnose`）。
 
 派发前看目标车道有没有 `dispatchHold`：那是 Owner 的暂停派发原话，只提示、不拦截，派不派由 Lead 决定；在哪里看得到见[车道](lanes.md)。
 
@@ -55,8 +55,8 @@ npm run cli -- run glm-flash --prompt "..." --format json
 ## 场景 2：后台跑（fire-and-forget）
 
 ```powershell
-# spawn 不带 --wait，立即返回 runId
-npm run cli -- spawn <agentId> --prompt "分析 auth 模块并列出风险文件"
+# run --background 立即返回 runId
+npm run cli -- run <agentId> --prompt "分析 auth 模块并列出风险文件" --background
 
 # 之后查看状态
 npm run cli -- status <runId>
@@ -72,7 +72,7 @@ npm run cli -- runs wait <runId> --until-settled     # 轮询到收口才退出�
 
 runId 内嵌时间戳为 UTC；本地时间需自行换算。
 
-`runs wait` 与 MCP 等待（`run_await_result`）共用同一族等待服务（只读长轮询，不写 transcript；区间、缺省与到期语义的家见 `wao manual supervise "MCP 等待"`）：默认 `--format text`，`--format json` 输出完整服务结果并附 `semanticNotes`（与 MCP 同一目录）与 `nextStep`（模板见监督页）。窗口到期是正常结果——正常打印、exit 0；Ctrl-C 打印中断快照后非零退出。`--wait-ms` 越界/非整数由服务边界原样报错（exit 1）；非数字值（`--wait-ms abc`）在 CLI 层以固定文案拒绝（不回显原值，service 不被调用）。`--until-settled` 的收口定义、退出码与诚实边界见 `wao manual supervise "等待到收口"`。未知子命令（如 `runs waitx`）fail-closed 报错并列出全部合法子命令；裸 `runs` 列出 run 列表。
+`runs wait` 的窗口与 JSON 字段见 `wao manual supervise "MCP 等待"`；退出码、`--until-settled` 收口与多目标重挂规则见 `wao manual supervise "等待到收口"`。未知子命令报错并列出合法子命令；裸 `runs` 列出 run。
 
 工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）必须是已存在的目录。不存在（或是文件）时，派发/执行在任何副作用之前被拒绝——typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，零 transcript、零 fork、零 worktree）。检查按 backend 能力划分（capability 键 `preflightInvocation`：本地进程式 backend 两层都查，HTTP serve backend——kimi-web 豁免）；两层=前台执行通道（RunManager start/resume）与后台派发通道（dispatchRun，在 transcript 写入与 fork 之前）。判读与旧 transcript 的排障见 `docs/troubleshooting.md` §3.2。
 
@@ -95,8 +95,12 @@ node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent glm-pro --p
 ## 场景 3：并行跑多个 agent
 
 ```powershell
-# 同时启动多个，--wait 等全部完成
-npm run cli -- spawn glm-pro glm-flash --prompt "审查这个函数" --wait
+# 分别后台启动，每条命令立即返回一个 runId
+npm run cli -- run glm-pro --prompt "审查这个函数" --background
+npm run cli -- run glm-flash --prompt "审查这个函数" --background
+
+# 多目标等待：先到收口的 run 先返回，按输出重挂其余 runId
+npm run cli -- runs wait <runId1> <runId2> --until-settled
 ```
 
 ## 场景 4：worktree 隔离（每个 run 独立工作树）
@@ -170,7 +174,7 @@ continuable 续谱根（delivery-only 可选）：`run_dispatch` 顶层可带 `"
 
 `continuable` 的后端资格以后端类声明（`supportsSessionReuse`）为准（人读投影见生成层 `docs/surface/certification.md`；registry 的 `sessionReuse` 是路由配置，不是能力证明）。资格拒绝携带固定原因码 `continuable_backend_unsupported`，缺 delivery 拒绝携带 `continuable_delivery_only`（不回显席位/workspace/backend 名）。
 
-只读声明（可选 `readOnly`）：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`）；控制面另注入只读执行合同（见[架构](../02-architecture.md) §1）。声明链路是"声明 → 强制隔离 → 观察"：非复用轮强制 ephemeral 私有克隆（席位**默认**作用于当前仓库的 git 写入落在克隆里；显式写源仓路径挡不住；停止确认且没有新提交才删，规则见[架构](../02-architecture.md) §4.3①）；sessionReuse 复用轮仍是 persistent 链接工作树（kimi 会话 server 侧 cwd 钉在首轮树）；建树失败时 fail-closed 拒绝派发（`read_only_worktree_required`，不降级原 cwd）。start 时恰一次写入 `run.read_only_declared` durable 事实（事件表见[transcript 格式](transcript.md)），此后 `run_activity` 附带 advisory `readOnlyObservation`（怎么读见 `wao manual supervise "MCP run_activity（活动时间线下钻）"`）。`readOnly` 与 `delivery` 互斥（拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧同样拒绝）；与 `correctable` 可共存；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。诚实上限：观察只基于上报的 `file_written`（`no_writes_observed` 是"未观察到写"，不是"没写"），advisory 非门——观察到越界写不自动停止、不改写自然终态，终审归 Lead；未声明 OS 写沙箱的车道是侦测非沙箱（codex 例外）。与 `wao ask` 的 prompt 级只读边界不同：那是无法验证、无持久事实的 prompt 约定，控制面声明有 durable 事实 + 上报证据投影。完整口径与 fail-closed 机制见[架构](../02-architecture.md)的只读声明段。
+只读声明（可选 `readOnly`）：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`）；控制面另注入只读执行合同（见[架构](../02-architecture.md) §1）。声明链路是"声明 → 强制隔离 → 观察"：非复用轮强制 ephemeral 私有克隆（席位**默认**作用于当前仓库的 git 写入落在克隆里；显式写源仓路径挡不住；停止确认且没有新提交才删，规则见[架构](../02-architecture.md) §4.3①）；sessionReuse 复用轮仍是 persistent 链接工作树（kimi 会话 server 侧 cwd 钉在首轮树）；建树失败时 fail-closed 拒绝派发（`read_only_worktree_required`，不降级原 cwd）。start 时恰一次写入 `run.read_only_declared` durable 事实（事件表见[transcript 格式](transcript.md)），此后 `run_activity` 附带 advisory `readOnlyObservation`（怎么读见 `wao manual supervise "MCP run_activity（活动时间线下钻）"`）。`readOnly` 与 `delivery` 互斥（拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧同样拒绝）；与 `correctable` 可共存；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。诚实上限：观察只基于上报的 `file_written`（`no_writes_observed` 是"未观察到写"，不是"没写"），advisory 非门——观察到越界写不自动停止、不改写自然终态，终审归 Lead；未声明 OS 写沙箱的车道是侦测非沙箱（codex 例外）。这里的只读不是 prompt 里的约定：控制面声明有 durable 事实 + 上报证据投影。完整口径与 fail-closed 机制见[架构](../02-architecture.md)的只读声明段。
 
 单次模型覆盖（`model`）与单次推理力度覆盖（`reasoning`）的 MCP 特有规则见 `docs/certification-runbook.md` §场景 1b / §场景 1c（与 CLI 覆盖正文合并维护；单向链接；唯一权威）。
 
