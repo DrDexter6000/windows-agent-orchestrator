@@ -178,3 +178,8 @@
 | TD-362 | WAO 驱动不了 kimi 2.7：会话详情不再带 `busy`/`main_turn_active`，运行启动即失败 | 2026-11-21 第 128 批：读取边界把 2.7 的 `activity` 投影回原来那一对，停止验证改读 turns，2.6 与 2.7 都支持；第 129 批：工具执行中转入的纠偏按住等待（最长 30 分钟）；本机升到 2.7.2 并实测（认证手册 kimi-web 行） |
 | TD-364 | 派发与会审回执的 nextStep、SKILL.md 与手册叫 Lead 用 "waitMs up to 270000" 或较长窗口反复调 `run_await_result`；桌面宿主的 MCP 请求约 60 秒超时 | 2026-11-21 第 132 批：回执、SKILL.md 第 4 步、手册 supervise/host 改成用缺省 waitMs 反复调用；取值范围的参数说明保留 |
 | TD-365 | `collect --final --out` 指向本运行转录时先覆盖了转录 | 2026-11-21 第 132 批：写文件前取目标真实路径（不存在时取最近存在的祖先），落在运行存储里一律拒绝，junction 与大小写也拦；防失手不防有意绕过（UNC 别名、硬链接）。试过按文件身份判断加临时文件改名，两席实测 Windows 下身份不可靠、改名有回归，已撤回 |
+| TD-108 | evidence fallback 调用未按 expectedRunId 过滤，跨 run 证据污染仍是理论风险 | 2026-11-24 复审（kimi）：R20（TD-128 M4，b4deae5b）起诊断入口先按 expectedRunId 绑定事件再进 evidence fallback（src/diagnosis.js diagnoseFailureInner），原跨 run 污染路径已封 |
+| TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 2026-11-24 复审：docs/testing.md 与决定 0077、0118 已把合入前在最终候选上跑全量、并行先更新到当前 main 定为合入门，终验时机由制度保证 |
+| TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 2026-11-24 复审：fa09792f 已从活转录重跑会话复用 drill 并经独立席复核，071fda97 再刷新证据；不再依赖已回收的历史转录 |
+| TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 2026-11-24 复审：第 104 批起几十批 glm-pro（zcode 后端）真实交付里 run_activity 在途展示命令与写入、scopeObservation 判写域（如第 137a 批）；越界写入拦截按决定 0084 实测认证 |
+| TD-222 | workspace 绑定下 readOnly 席位建隔离 worktree 确定性失败，consult 不可用 | 2026-11-24 复审（sol）：与 TD-269 同因，d5751560 修席位 cwd、bcb40220 改用调用指定的 Git 根；决定 0102 起只读席位用私有克隆，11 月几十场会审都正常建树 |

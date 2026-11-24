@@ -15,15 +15,14 @@
 | TD-41 | abort 测试在全量高负载下偶发失败，缺确定性的子进程退出因果判定 | 开放 | 等样本：再次稳定复现时改用 child exit 事件建立因果 |  |
 | TD-45 | daemon 自愈已落地，但 supervisor 自身被杀后无法自动重启 | 开放 | 择机：supervisor 重生引导（Windows 服务/计划任务）留 v2 | src/daemonSupervisor.js |
 | TD-46 | daemon 长跑累积子进程残留与句柄泄漏的根因未修，仅监控告警就位 | 开放 | 等样本：health warn 实际触发后针对性修 |  |
-| TD-47 | daemon IPC 仅请求-响应，tail 依赖文件轮询，无流式推送 | 开放 | 等样本：真实流式需求出现（SSE 式推送或保留文件轮询） |  |
+| TD-47 | daemon IPC 仅请求-响应，tail 依赖文件轮询，无流式推送：决定 0012 有意选的窄协议 | 设计性约束 | 出现真实流式需求时重议（daemon 去留见 TD-368） |  |
 | TD-50 | 失败分类是启发式信号匹配，边缘 case 降级 unknown，刻意只给证据不给处方 | 设计性约束 | 新增 provider 错误格式时扩充 AUTH_SIGNAL 即可 | src/diagnosis.js |
 | TD-84 | 目标项目未 init 时 `wao declare` / `wao stage` 以 ENOENT 崩溃 | 开放 | 等样本：跨项目派工再次撞到 | src/cli.js |
 | TD-96 | `wao stage` 每个阶段要手拼 task、artifacts、cwd；按 run 自动填充（`--from-run`）登记了没做 | 开放 | 等样本：真实使用里再次需要自动填充 |  |
 | TD-97 | scorecard 的 requireCommands/requireFiles 证据判定独立于统一评估模块 | 设计性约束 | 刻意边界：核心证据事实已统一于 runEvidenceAssessment，requireCommands/requireFiles 因需 I/O 与复杂匹配留在 scorecard；两套判据漂移实证再重开 | src/runEvidenceAssessment.js |
 | TD-104 | 同一 OS identity 下 worker 仍可读取分配的凭据文件，credential broker 未落地 | 开放 | 择机：无人值守、多租户或强隔离发布前做 credential broker 或独立身份 | 0016 docs/incidents/2026-07-12-worker-credential-exposure.md |
 | TD-106 | Tester 上下文效率属 Codex 产品与订阅配额问题，WAO 刻意不吸收该职责 | 设计性约束 | 未定 |  |
-| TD-108 | evidence fallback 调用未按 expectedRunId 过滤，跨 run 证据污染仍是理论风险 | 开放 | 等样本：跨 run 证据污染实证，或需接受混合历史 transcript |  |
-| TD-115 | lastHealthyRunAt 非 sticky，重跑失败后新鲜度归空，失败场景拿不到上次健康时间 | 开放 | 等样本：Lead 实际需要失败场景的历史新鲜度 |  |
+| TD-115 | lastHealthyRunAt 非 sticky：重跑失败后新鲜度归空，失败场景拿不到上次健康时间；重跑覆盖同 case、失败归 null 是已接受的新鲜度语义 | 设计性约束 | Lead 需要失败场景的上次健康时间时另立 sticky 字段，不改本字段 |  |
 | TD-118 | 技能安装是指向仓库根的 junction，改动写盘即生效于所有会话，无提交闸门 | 设计性约束 | fresh clone 后需重新安装 | SKILL.md |
 | TD-123 | 全行扫描正则对注释/字符串有假阳性面，application 的 bare 包出边未入方向矩阵 | 开放 | 等样本：首次全行扫描假红实证；触碰 layering 矩阵时顺带补 bare 包出边 |  |
 | TD-124 | 静态规则可被单行 join 逃逸、白名单非行内容锚定、深度2写者未覆盖 | 开放 | 等样本：首次真实逃逸实证；触碰守卫/白名单时顺带收紧 | src/application/sessionReuse.js |
@@ -31,12 +30,11 @@
 | TD-128 | 读绑定清扫大部分已修，但维持清单仍有约十处无绑定读面：写侧 CAS 三门、seq 水位族、events[0] 类等，外 run 伪造行仍可污染观测或锁死交付决策 | 开放 | 等样本：触发条件入册（非人调用方、程序化消费输出、pre-envelope 存量变非零） | src/transcript.js src/runManager.js src/backgroundRunner.js |
 | TD-133 | delta 认证的空转形状、演练卫生面、存量 worker 重跑三项没处理（Owner 裁定低优先，重跑前要先改剧本）；越界写拦截的证据见决定 0084（codex 车道见 TD-309） | 开放 | 择机：下次车道认证周期 | 0025 0026 |
 | TD-134 | runs-guard 只做基线差分不做进程归属，主副本跑 npm test 期间后台 run 落盘即假红 exit 1 | 开放 | 等样本：主副本跑测试期间后台 run 落盘假红再成真实痛点 | scripts/canonical-test.mjs |
-| TD-135 | 并行会话集成后的语义组合冲突无机制覆盖，集成终验依赖 Lead 手动执行且时机不保证 | 开放 | 等样本：语义组合冲突致集成后回归实证；并行成常态时终验加为必做步骤 |  |
 | TD-138 | 全量由 filesystem 波决定，慢主要在机器侧：开机越久越慢，11-10（开机 13 天）波长 828–1335 s，11-11 重启后 331–498 s；内存吃紧时起进程变慢，联想 Vantage 一个后台插件单进程吞吐 0.5–5 GB 内存（Owner 已把该服务改为手动）。代码侧：最慢的测试文件每个起 1,200–2,600 个 git 进程；第 105 批合并交付证明里相邻的只读查询，8 个最慢文件少 5.9%。Dev Drive 无效；per-test 上限不动（Owner 11-11） | 开放 | 按 git trace 再定：reclaim 与 isolation 的相邻读取、测试夹具 | scripts/canonical-test.mjs src/delivery.js |
 | TD-139 | MCP 的 run_status 只返回 lastActivity.kind，不含活动摘要文本（当初按「安全子集」裁掉）；命令原文已在 run_activity 放开，这条边界该按同一口径重看 | 开放 | 择机：下次改 MCP 状态面时按 run_activity 同一口径放开摘要 |  |
 | TD-140 | 运行时硬钉 Node 22 区间，v24 libuv Job Object 回归未修复不能升级，LTS 维护到期即风险 | 开放 | 择机：每季度核对 v24 libuv 修复；2027-01 仍无修复迹象则评估迁移 | src/nodeVersionGuard.js docs/usage.md 0027 |
-| TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 等样本：再撞见一次未覆盖面的漂移即出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
-| TD-143 | 证据链层依赖 runtime 厂商 transcript 访问政策，且治理方法论无第二读者与操作者 | 开放 | 等样本：backend 收紧 transcript 政策，或第二操作者加入前补交接文档 |  |
+| TD-141 | 机器护栏只覆盖被断言的面。Owner 裁定：再撞见一次未覆盖面的漂移，就出一份「机器护栏对文档化不变量」的对照清单，逐点决定补断言还是接受 | 开放 | 已命中一次（TD-344：11-08 地图第二轮查出的重复与缺口，守卫没报）：与 TD-344 一起出对照清单 | docs/usage.md scripts/canonical-test.mjs AGENT_ONBOARDING.md |
+| TD-143 | 证据链层依赖 runtime 厂商 transcript 访问政策，且治理方法论无第二读者与操作者 | 开放 | 等样本：backend 收紧 transcript 或日志访问、且现有 Backend/parser 保不住证据链时（kimi 2.6/2.7 的接口变化已适配，TD-362）；第二操作者加入前补交接文档 |  |
 | TD-149 | repackage 的 allowedPaths 仍硬拒目录/尾斜杠条目，dispatch 收而 repackage 拒；waitWindowHint 缺 MCP 非泄漏钉 | 开放 | 等样本：实际被拒收目录清单时立项；触碰 delivery/repackage 面时顺带 | src/application/runDeliveryRepackage.js docs/02-architecture.md |
 | TD-153 | `runs list --since` 不走历史扫描通道；unknown 展示态不能作为过滤条件 | 开放 | 择机：下次改 CLI 查询面时让 --since 走历史扫描通道、放开 unknown 过滤 | src/scorecard.js src/transcript.js docs/usage.md |
 | TD-156 | runs/无保留策略，全量扫描随文件数增长变慢，当前约2-4秒逼近阈值 | 开放 | 等样本：全量扫描耗时破 5s 阈值即转按年龄归档（不删除） | scripts/canonical-test.mjs |
@@ -48,11 +46,10 @@
 | TD-169 | 认证通道零 case 已改显式失败（拒跑 exit 2）；selected/executed 等执行计数与 strict drill 覆盖不足可归 full 两项未做 | 开放 | 择机：阶段 2 处理 | scripts/run-reliability.mjs |
 | TD-171 | deliveryVerification.test.js 曾在并发下从约 246 秒涨到约 600 秒，原因没查清；2026-10-16/17 的全量里是 207–215 秒，没有复现 | 开放 | 等样本：再复现时查 | test/delivery/deliveryVerification.test.js |
 | TD-174 | worker 易把写路径指向主仓根，越界即终态 failed 无挽救；分类提示与诊断标注未落地 | 开放 | 择机：触碰派发任务书或 workdir_escape 提示面时做分类提示与诊断标注 | 0062 |
-| TD-176 | 缺 model 接线设计入口、中立收紧缺文档可见性、auditor 无 verdict 缺失败归类、复用断链缺可观测信号 | 开放 | 等样本：四项独立触发（接线 model、改文档、auditor 无 verdict、排查断链） | docs/troubleshooting.md |
+| TD-176 | 复用断链缺可观测信号：resume 失败后关联链静默回到首轮，排查时看不出（model 接线、中立收紧的文档、auditor 无 verdict 三项已了：决定 0046、troubleshooting、TD-180） | 开放 | 等样本：下一次排查 resume 断链时补可观测信号 | docs/troubleshooting.md |
 | TD-178 | live 文档经文档批次改写为现状后，指向运行时状态与 gitignored 路径的 fresh clone 必断指针尚未复扫清点 | 开放 | 择机：下次文档卫生包复扫全部 live 文档的运行时路径引用，无实例即了结 | AGENT_ONBOARDING.md |
 | TD-179 | 验证进程未落结果即死的交付没有正式验收出口：等待器在后台形态可证明时已退出（决定 0096），但只能有界拒收后手工采纳；记中断事实、reverify 重跑 pending 形态未做。09-01 至 10-30 共 1 例，为前台 | 开放 | 等样本：后台形态出现，或 Lead 需要正式验收这种交付时 | .wao/decisions/0096-waiter-exits-when-the-verifier-is-gone.md |
 | TD-180 | codex 后端启动期退出、零写入零 verdict：用量到顶已能识别（codex 自报的原话进终局 run.error，诊断归 provider_capacity），其余案例原因未明。Owner 已裁定不做自动重试 | 开放 | 等样本：再遇启动期退出样本，先查 codex JSON 输出有无原话 | 0067 docs/troubleshooting.md |
-| TD-182 | 会话恢复证据的历史来源不可独立复核，重跑 drill 前不得声称已独立验证 | 开放 | 等样本：下一次真实恢复 drill 运行 |  |
 | TD-183 | 完成门只在角色合同探针上（roleProbeRunCompletion）；等待到期与 llm 侧各检查不校验探针 run 是否完成即判定，传输层失败仍可能记成假红 | 开放 | 等样本：provider 抖动打到未覆盖探针时补完成门，或 Owner 裁定推广 | scripts/reliability/componentDrills.mjs src/transcript.js |
 | TD-184 | 复用证据已还清；遗留 dsh drill 路由键重算失效待修、codex 转录照不到部分工具调用等小项 | 开放 | 择机：dsh drill 路由键修复待排期；原语表 30 天期限钟持续刷新 | 0045 scripts/reliability/session-reuse-drill.mjs |
 | TD-185 | 入口判定修复已落地；测试夹具清理仍留空外层目录、构造失败可能残留 staging，早期 22.x 未实测 | 开放 | 择机：下次修改该夹具时收回清理所有权并覆盖构造失败清理 | test/process/genSurfaceEntry.test.js scripts/gen-surface.mjs |
@@ -62,16 +59,14 @@
 | TD-193 | kimi-web 后端的 WS 事件流与 seq 游标重放已静态确认但未接线；中止已改走 REST 的 `prompts/{id}:abort` | 开放 | 等样本：REST 轮询的延迟或断线后补读成为实际问题 | docs/incidents/2026-09-30-kimi-web-wiring.md src/backends/kimiWeb.js |
 | TD-194 | 全量套件随机无关用例首轮红、单跑绿（isolation_pass）。已知机制：同机两套全量互踩（TD-130，已有验证闸）；回收测试的 fixedNow 重读真实时钟（11-07 修）；`src/cli.js` 被 import 也跑 main（11-10 修）；`cli-runs` P0-1 删临时目录时经 WMI 起的 runner 还在写（11-12 改为等它释放认领再带重试清理）；zcode ⑥b 在 1000ms 真实时限内要满 60 拍（11-12 放宽到 3000ms）。processBackend 一例未归因。波时长见 TD-138 | 开放 | 再遇首轮红按 troubleshooting §8.1 处置，先查用例有无真实时钟窗口 | docs/research/td130-root-cause.md src/verificationGate.js |
 | TD-195 | 计划内系统重启会打断交付验证并留下 artifact_mutated 形状；WAO 不改系统设置，错峰靠 Owner 配置 Active Hours | 设计性约束 | 不处理 |  |
-| TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：下次交付隔离演练复验；隐私观察期未结 | 0067 0074 0075 |
-| TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 开放 | 等样本：下次受督的长运行或 zcode 交付运行 | docs/usage.md |
+| TD-197 | zcode 后端：隐私尽调的观察期未结；隔离通道下评分走的是非隔离目录，待复验 | 开放 | 等样本：出现 ZCode 会话数据上传异常，或隔离评分演练显示实际执行目录与声明工作树不一致时 | 0067 0074 0075 |
 | TD-204 | 认证 caseId 仍以 label 为合并键，改名即换键，仅 warn-only 护栏在线未解耦 | 开放 | 择机：下次改认证台账 schema 时解耦 caseId 与 label |  |
 | TD-206 | kimiWeb 失败 run 的部分产出不落盘，中途失败后已产出文本不可恢复 | 开放 | 等样本：受督 kimiWeb 长 run 需要中途产出可恢复 |  |
-| TD-209 | runner 无声挂死根因与延迟收割者身份未明，复现时需带现场归因；心跳盲区已缓解 | 开放 | 等样本：再遇同形（无声悬置+心跳活+计时器在场）带现场归因 | test/isolation-infra/backgroundRunner.test.js src/backends/kimiWeb.js |
+| TD-209 | runner 无声挂死根因与延迟收割者身份未明，复现时需带现场归因；心跳盲区已缓解 | 开放 | 等样本：现行启动路径（决定 0120 的 WMI 启动）下再遇 owner 心跳新鲜、请求或转录长时间无进展时，记下启动方式、计时器、父进程与退出时间 | test/isolation-infra/backgroundRunner.test.js src/backends/kimiWeb.js |
 | TD-212 | certification 视图答不到组合验到什么程度，矩阵投影未实现 | 开放 | 择机：下一轮生成器维护窗做矩阵投影 | scripts/gen-certification.mjs |
-| TD-216 | 判定失败是否新引入仍需自建基线对照，一键差分工具未落地 | 开放 | 等样本：fixture 权威化落地后复测红盘再定 |  |
+| TD-216 | 判定失败是否新引入仍需自建基线对照，一键差分工具未落地 | 开放 | 等样本：现行夹具下隔离复跑仍失败、须在相同环境对照父提交才能判断是否本改动引入时（夹具权威化已了：TD-214、TD-242） |  |
 | TD-219 | acceptance 落盘已落地，但仓库外写入任务走不了交付管线，expectedWriteRoots 与 manifest 第二步未落地 | 开放 | 等样本：仓库外写入任务族再临 |  |
-| TD-220 | 投影与标签已修，但 shell 介导写入不产事件且无写根比对锚，读侧新鲜度与事件时间戳失真仍挂账 | 开放 | 等样本：写根比对锚随 TD-219 后步；其余挂账未定 |  |
-| TD-222 | workspace 绑定下 readOnly 席位建隔离 worktree 确定性失败，consult 不可用 | 开放 | 等样本：再遇同形失败或 consult 维护窗 |  |
+| TD-220 | 投影与标签已修，但 shell 介导写入不产事件且无写根比对锚，读侧新鲜度与事件时间戳失真仍挂账 | 开放 | 等样本：监督中出现磁盘变更无对应事件、非交付运行缺写根无法比对，或落盘时间偏差影响判断时（写根比对锚随 TD-219） |  |
 | TD-225 | workspace 绑定强制 git 仓库，非 git 任务需现造锚点仓库并事后清扫 | 设计性约束 | 需要时现造锚点仓库，任务完成后顺手清扫现场 |  |
 | TD-231 | repackage 的 validateInput 严校验、CAS 形状不变量、commit 失败、Git 异常等拒绝路径仍为裸意外错误 | 开放 | 择机：触碰 repackage 时把拒绝路径从裸意外错误改为闭集拒绝 |  |
 | TD-241 | 成功面 text 仍与 structuredContent 双份全量 JSON（C1 挂起），kimi/opencode/zcode 三宿主消费行为未探 | 开放 | 等样本：C3 实测截断，或未探宿主证据显示成功面 text 被消费 | 0051 |
@@ -79,7 +74,7 @@
 | TD-245 | 运行认领文件永不删除、每次仲裁全量列目录；四个需要持续 IO 故障才触发的理论窗口已接受 | 设计性约束 | 认领目录列举成为瓶颈，或真实撞到并发认领 |  |
 | TD-248 | interference 登记册的交付保留路径仍靠派发纪律保护，机器化未落地 | 开放 | 择机：触碰派发纪律面时把交付保留路径机器化 | 0054 |
 | TD-250 | kimi 上游不回收会话进程荚；serve 整体空闲退出（0079）后荚随 serve 拆除、基本不再堆积；failed 会话的清扫判据没做 | 开放 | 等样本：failed 会话堆积再现时做清扫判据 | 0056 |
-| TD-254 | readOnly×lead_workspace 错位与 resume 源仓两缺口仍未修 | 开放 | 等样本：隔离边界崩溃恢复族另案观察 | 0058 |
+| TD-254 | readOnly×lead_workspace 错位：kimi 服务端会话的 cwd 钉在首轮树，复用轮可能另建树（resume 跑回源仓的缺口已由决定 0063、eaed753e 修） | 开放 | 等样本：同一 Lead 与项目第二次只读复用 kimi 会话时，实际操作目录仍是首轮树、而转录与观察面绑定了另一棵树 | 0058 |
 | TD-260 | 若干收口项（红队补记、supersedes lineage 事实、交付收条等）登记未实施 | 开放 | 择机：Owner 点名后实施各收口项 | 0062 |
 | TD-266 | worker 会读宿主仓库的规则与概况文件，连同任务需要读的内容一起发给车道背后的模型方 | 设计性约束 | Owner 2026-10-15 裁定：用户自己选了车道，就是同意把项目内容发给对应的模型方，要保密可以改用本地模型；WAO 不做读取范围声明，也不做按项目的车道白名单 | AGENTS.md |
 | TD-270 | deepseek 两后端仍无静默期取样（processActivity 只接 processBackend/zcode）；0072 起命令在跑已对 Lead 可见 | 开放 | 择机：下次改动 deepseek 后端时接静默取样 | 0070 0072 |
@@ -90,13 +85,13 @@
 | TD-304 | 终态额度正则的一个分支会把 "tokens per min limit reached" 这类措辞归成 `quota_exhausted`，而分钟级限流会自愈、恢复方式不同；这句是构造的措辞，OpenAI 实际的 TPM 报错归 `rate_limited`，尚无真实误归样本 | 开放 | 等样本：真实误归样本出现时按窗口长短区分限流与额度耗尽 | src/diagnosis.js |
 | TD-308 | 不写 profile 或 basic 画像的矩阵行，drills 不含相应活体检查（containmentEvidence，或声明 OS 沙箱车道的 sandboxEnforcement）时仍可评 certified、scope 记 full，没有任何越界写拦截的活体证据（strict 与 certification 已在矩阵构建时补齐） | 开放 | 择机：认证判定要求相应活体检查（containmentEvidence，或声明 OS 沙箱车道的 sandboxEnforcement）在场才可评 certified，或矩阵解析对这类行给出提示 | 0084 0086 scripts/reliability/certification.mjs |
 | TD-310 | 带 sessionReuse 的只读运行仍用 persistent 链接工作树：席位在树里跑 `git config`、`git branch`、`git worktree add`，写的仍是共享仓，运行事实里没有记录（ephemeral 只读运行已改用私有克隆，决定 0102）；只读观察只认 file_written，shell 写入看不见 | 开放 | 择机：下次动 sessionReuse 只读运行时评估同样改用私有克隆（kimi 会话的 server 侧 cwd 钉在首轮树，克隆要与线系同寿） | 0102 0057 src/runManager.js |
-| TD-321 | codex 车道没有在途纠偏：WAO 走 `codex exec`，exec 活动轮不消费 `codex queue` 排队的消息（0.165.0 复测仍阴性）；上游 app-server 协议已有 `turn/steer` 与 `turn/interrupt` | 开放 | 等样本：codex 车道需要在途纠偏时（Owner 2026-10-29 裁定暂不做：codex 车道只做会审）；做法是把 codex 后端改走 app-server 通道并补 live 实测 | src/backends/codex.js docs/certification-runbook.md |
+| TD-321 | codex 车道没有在途纠偏：WAO 走 `codex exec`，exec 活动轮不消费 `codex queue` 排队的消息（0.165.0 复测仍阴性）；上游 app-server 协议已有 `turn/steer` 与 `turn/interrupt`。Owner 2026-10-29 裁定 codex 车道只做会审 | 设计性约束 | 车道职责变化、需要在途纠偏时：codex 后端改走 app-server 通道并补 live 实测 | src/backends/codex.js docs/certification-runbook.md |
 | TD-323 | codex 沙箱里的会审席找不到 Node 22：scripts/wao-node.cjs 只看 WAO_NODE、%LOCALAPPDATA% 约定路径与 PATH，沙箱用户三样都对不上（PATH 只有 Node 24），席位跑 `npm test` 或 CLI 时任务书得写死 node-v22 的绝对路径 | 开放 | 择机：下次改 codex 后端或启动器时，让席位环境拿得到 WAO 自己所用的 Node 路径 | scripts/wao-node.cjs src/backends/codex.js |
 | TD-326 | 没删掉的私有克隆只保留、不自动回收：停止未确认、有新提交、HEAD 漂移、嵌套工作树、检查失败、删除失败或 spawn 后才被拒时留在 `.wao-worktrees/<runId>`；回收计划把转录可读且绑定此目录的归 `tree_protection`/`private_clone`，其余按外来或无法判定保留，人工处置见维护页；保留的克隆借源仓对象，源仓维护可能清掉这些对象 | 开放 | 等样本：残留克隆真积累起来时，给回收计划加 remove_clone 动作（apply 重证归属、收口、无新提交、无嵌套工作树），要留证据的先打包 | 0102 src/application/worktreeReclaim.js src/isolation.js |
 | TD-330 | zcode 的 `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 两边口径不一：doctor 与承重声明表把它当承重变量检查，进程继承名单只放行 `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`，registry 不写 env 块时它到不了 worker。2026-11-02 实测个人配置在默认位置时 canary 仍通过；放在别处时会丢 | 开放 | 下次动 zcode 车道或承重 env 时 | src/envPolicy.js src/application/loadBearingEnv.js |
 | TD-331 | `test/migration-0045/` 的 14 个测试文件是决定 0045 迁移批留下的，从没逐个审过：有的守着现行的角色、派发与身份合同，有的测一次性迁移工具（如 `ledgerMigration.test.js` 测 `scripts/migration/migrate-cert-ledger.mjs`） | 开放 | 有批次改到这些测试覆盖的派发、角色或身份代码时逐个审：守现行合同的留下，只测已不再用的一次性迁移的，连同那个工具一起退役 | test/migration-0045 scripts/migration |
 | TD-334 | 复用运行的 native 会话 id（codex `thread.started`）只在正常收口时写下，运行被停止时不写。读侧对紧邻前一轮读不出的情况记未知，用量不说假话；代价是停止轮之后那一轮的自身用量未知，停止的 codex 子运行也续不了（`no_provider_session`） | 开放 | 择机：在运行期观察到 id 的那一刻落盘 `run.provider_session_bound`（`session.created` 保持唯一 `proc_<pid>`），所有停止路径随之覆盖 | 0114 src/runManager.js |
-| TD-340 | `runs wait` 与 `consult wait` 的 `--until-settled` 对 `runs settle` 门拒绝的运行（serve 会话、有活 daemon、进程读不到）一直等 | 开放 | 等样本：各类拒绝有真实样本再定 | src/application/runSettlementWait.js |
+| TD-340 | `runs wait` 与 `consult wait` 的 `--until-settled` 对 `runs settle` 门以正面证据拒绝的运行（带 serve 停止路由、有活 daemon）一直等；未知类拒绝自第 107 批起静默满 30 分钟报警退出 | 开放 | 等样本：这类运行真出现要人工脱困的长等时，记干跑拒绝码、体征与等待时长 | src/application/runSettlementWait.js |
 | TD-344 | 2026-11-08 地图第二轮查出、发版前未改的重复与缺口：权威边界句五处逐字（守卫 M12-0-01 强制）；claude-code 隔离配置目录四处；zcode env 桥三处；transcript 路径在 README 与 architecture；host.md 复述 npm run mcp；认证门禁与模型/runtime 分叉的操作细节；lane-traits 注释复述政策；`wao accept` 无手册节 | 开放 | 择机：先连测试里钉住的字面一起查全，再定家收指针 | docs/ssot.md |
 | TD-348 | 第 92 批之前派发的 deepseek-acp 运行，会话记录只有上游会话 UUID、没有本机 pid：runner 死后 settle 门 5 拒于 `session_ambiguous`，stop 也没有路由，运行永远停在非终态（2026-11-09 宿主项目一个只读会审席位） | 开放 | 等样本：再遇到时考虑"本机重启晚于会话创建即放行门 5"（`ownerLiveness.js` 已有 `rebooted_since_anchor` 判据） | src/application/runSettle.js |
 | TD-349 | 定向测试并发跑时偶发 1 条失败：第 90 批本地 `cli-runs.test.js` 的 `run --format json: --scorecard-rules-file` 读到的不是 JSON；第 92 批交付验证同组命令 1/334 失败（只留尾部，认不出是哪条），reverify 通过 | 开放 | 等样本：再遇到时抓完整输出定位用例 | test/isolation-infra/cli-runs.test.js |
