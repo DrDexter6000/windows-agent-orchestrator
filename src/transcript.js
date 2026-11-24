@@ -194,9 +194,10 @@ export const STATE_CHANGE_REASON = Object.freeze(
 // M12-1S2: the closed set of final delivery verification outcome event types.
 // Shared by validateDeliveryFacts, tryAppendRepackageVerification, and the
 // repackage idempotency scans so there is one outcome-type set in this module.
-// Exported for read-only consumers that must locate the bound original outcome
-// event itself (Owner read model: the delivery's settled-at evidence time).
-export const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
+// Read-only consumers get the bound original outcome event itself through
+// validateDeliveryFacts's `verificationOutcomeEvent` fact (never a second copy
+// of this set / filter rule).
+const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_passed",
   "run.delivery_verification_failed",
   "run.delivery_verification_unavailable",
@@ -2383,7 +2384,7 @@ export function projectCorrectionStatus(events, runId, correctionId) {
  *
  * @param {object[]} events
  * @param {{expectedRunId?: string, allowVerificationPending?: boolean}} [options]
- * @returns {{valid:boolean, latestRef:object|null, createdRef:object|null, deliveryCommit:string|null, verificationStatus:string, effectiveVerificationStatus:string, effectiveRef:object|null, decisionEvent:object|null, recoveryAcceptable:boolean, reverifyStatus:string, reverifyReason:string|null, reverifyRequestedEvent:object|null, reverifyOutcomeEvent:object|null, createdEventRunId:string|null, verificationEventRunId:string|null, code:string|null, error:string|null}}
+ * @returns {{valid:boolean, latestRef:object|null, createdRef:object|null, deliveryCommit:string|null, verificationStatus:string, effectiveVerificationStatus:string, effectiveRef:object|null, decisionEvent:object|null, recoveryAcceptable:boolean, reverifyStatus:string, reverifyReason:string|null, reverifyRequestedEvent:object|null, reverifyOutcomeEvent:object|null, verificationOutcomeEvent:object|null, createdEventRunId:string|null, verificationEventRunId:string|null, code:string|null, error:string|null}}
  */
 export function validateDeliveryFacts(events, options = {}) {
   const expectedRunId = typeof options?.expectedRunId === "string" && options.expectedRunId.length > 0
@@ -2412,7 +2413,7 @@ export function validateDeliveryFacts(events, options = {}) {
     valid: false, latestRef, createdRef: latestRef ?? null, deliveryCommit: commit ?? null,
     verificationStatus: "pending", effectiveVerificationStatus: "pending", effectiveRef: null,
     decisionEvent: null, recoveryAcceptable: false, reverifyStatus: "none", reverifyReason: null,
-    reverifyRequestedEvent: null, reverifyOutcomeEvent: null,
+    reverifyRequestedEvent: null, reverifyOutcomeEvent: null, verificationOutcomeEvent: null,
     createdEventRunId: boundMode ? expectedRunId : (createdEvents[0]?.runId ?? null),
     verificationEventRunId: null,
     code: "delivery_unavailable",
@@ -2422,7 +2423,7 @@ export function validateDeliveryFacts(events, options = {}) {
     valid: false, latestRef, createdRef: latestRef ?? null, deliveryCommit: commit ?? null,
     verificationStatus: "pending", effectiveVerificationStatus: "pending", effectiveRef: null,
     decisionEvent: null, recoveryAcceptable: false, reverifyStatus: "none", reverifyReason: null,
-    reverifyRequestedEvent: null, reverifyOutcomeEvent: null,
+    reverifyRequestedEvent: null, reverifyOutcomeEvent: null, verificationOutcomeEvent: null,
     createdEventRunId: boundMode ? expectedRunId : (createdEvents[0]?.runId ?? null),
     verificationEventRunId: null,
     code: "delivery_malformed",
@@ -2445,7 +2446,7 @@ export function validateDeliveryFacts(events, options = {}) {
       valid: false, latestRef: null, createdRef: null, deliveryCommit: null,
       verificationStatus: "pending", effectiveVerificationStatus: "pending", effectiveRef: null,
       decisionEvent: null, recoveryAcceptable: false, reverifyStatus: "none", reverifyReason: null,
-      reverifyRequestedEvent: null, reverifyOutcomeEvent: null,
+      reverifyRequestedEvent: null, reverifyOutcomeEvent: null, verificationOutcomeEvent: null,
       createdEventRunId: null, verificationEventRunId: null,
       code: "delivery_unavailable",
       error: "No committed delivery found (missing run.delivery_created)",
@@ -2522,6 +2523,7 @@ export function validateDeliveryFacts(events, options = {}) {
           reverifyReason: null,
           reverifyRequestedEvent: null,
           reverifyOutcomeEvent: null,
+          verificationOutcomeEvent: null,
           createdEventRunId: createdEvents[0].runId ?? null,
           verificationEventRunId: null,
           code: null,
@@ -2694,6 +2696,10 @@ export function validateDeliveryFacts(events, options = {}) {
     reverifyReason: reverifyChain.reason,
     reverifyRequestedEvent: reverifyChain.requestedEvent,
     reverifyOutcomeEvent: reverifyChain.outcomeEvent,
+    // The original (bound) verification outcome event this validation selected —
+    // symmetric with reverifyOutcomeEvent. The read model's settled-at evidence
+    // uses this event instead of re-filtering events by a second rule.
+    verificationOutcomeEvent: verificationEvent,
     createdEventRunId: createdEvents[0].runId ?? null,
     verificationEventRunId: verificationEvent.runId ?? null,
     code: null,

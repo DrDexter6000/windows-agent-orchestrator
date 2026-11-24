@@ -67,7 +67,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { isValidRunId } from "../delivery.js";
+import { isValidRunId, gitProbeEnv } from "../delivery.js";
 import { resolveTranscriptPathDetailed } from "../projectBuckets.js";
 import {
   identifyProjectFromCwd,
@@ -81,7 +81,7 @@ import { deliveryContinuableHint } from "./runContinue.js";
 import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGate } from "./lineageSupersession.js";
 import { findRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { parseWorktreePorcelain, RECENT_BOUND_EVENT_MS } from "./worktreeReclaim.js";
-import { listRunBranchRunIds } from "./runBranches.js";
+import { listRunBranchRunIds, RUN_BRANCH_GIT_TIMEOUT_MS } from "./runBranches.js";
 import {
   FEEDBACK_FILE_RE,
   defaultPackageRoot,
@@ -99,13 +99,17 @@ export const OPEN_ITEM_BRANCH_CAP = 50;
 export const OPEN_ITEM_RUNIDS_CAP = 5;
 
 // 只读 git：结构化 argv、--no-optional-locks、不经 shell（serverBuildFacts 写法）。
+// env 走 gitProbeEnv()：去掉继承的 GIT_DIR 等定位变量——本收集器问的是绑定工作区
+// 自己的仓库，继承的定位变量会让它回答别处。等待有界（不冻住调用线程）。
 function defaultExecGit(args, cwd) {
   return execFileSync("git", ["--no-optional-locks", ...args], {
     cwd,
     encoding: "utf8",
+    env: gitProbeEnv(),
     stdio: ["ignore", "pipe", "ignore"],
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
+    timeout: RUN_BRANCH_GIT_TIMEOUT_MS,
   }).toString();
 }
 
@@ -187,7 +191,7 @@ async function collectRunBranchOpenItems({
   //    与 Owner 看板的读模型共用同一份答案）。
   let runIds;
   try {
-    runIds = listRunBranchRunIds(execGitFn, authorizedWorkspaceRoot);
+    runIds = await listRunBranchRunIds(execGitFn, authorizedWorkspaceRoot);
   } catch {
     return []; // 枚举失败 → 整个 A 省略
   }

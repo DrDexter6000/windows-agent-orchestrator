@@ -279,13 +279,13 @@ test("冷普查：项目桶、旧平铺、特殊桶全部入册；项目名来�
     const snap = model.snapshot({ now: NOW });
     assert.equal(snap.generatedAt, iso(NOW));
     assert.deepEqual(snap.consults, [], "没有会审组记录就没有会审");
-    // 第 140b 批：项目多两键——仓库是否可观测、分支观测时刻。这些项目没有请求交付的运行，
-    // 不枚举分支，所以是 unknown / 未观测。
+    // 第 140b 批：项目多两键——仓库是否可观测、分支观测时刻；140b 修正轮再加会审目录
+    // 是否可列。这些项目没有请求交付的运行，不枚举分支，所以是 unknown / 未观测。
     assert.deepEqual(snap.projects, [
-      { slug: "_sandbox", name: null, repo: "unknown", branchesObservedAt: null },
-      { slug: "_scratch", name: null, repo: "unknown", branchesObservedAt: null },
-      { slug: ALPHA.slug, name: ALPHA.name, repo: "unknown", branchesObservedAt: null },
-      { slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null },
+      { slug: "_sandbox", name: null, repo: "unknown", branchesObservedAt: null, consultRecords: "available" },
+      { slug: "_scratch", name: null, repo: "unknown", branchesObservedAt: null, consultRecords: "available" },
+      { slug: ALPHA.slug, name: ALPHA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available" },
+      { slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available" },
     ]);
     assert.deepEqual(snap.runs.map((r) => r.runId), ["run_a1", "run_b1", "run_flat1", "run_s1", "run_x1"], "按 runId 稳定排序");
     assert.deepEqual(runOf(snap, "run_a1").project, { slug: ALPHA.slug, name: ALPHA.name });
@@ -361,14 +361,22 @@ test("项目名进快照前过同一条安全链：脱敏、清控制字符、�
     const FOLDED = { slug: "fold-99999999", name: "  my\t\tproject\n\n name \t", key: "D:\\repos\\fold" };
     // 两段"换行/制表符"被空格隔开：整个空白段只折成一个空格，不是两个。
     const SEGMENTS = { slug: "seg-aaaaaaaaaa", name: "alpha\r\n \t\r\nbeta", key: "D:\\repos\\seg" };
+    // 项目显示名里带绝对路径（.project.json 可手改）：进快照前折成 …/最后一段。
+    const PATHY = { slug: "pathy-cccccccccc", name: "D:\\private\\repos\\gamma", key: "D:\\repos\\gamma" };
+    // 目录段含空格：后面还跟着分隔符就算目录的一部分（同一条安全链）。
+    const PATHY2 = { slug: "pathy2-dddddddddd", name: "E:\\Carloha Agent\\Temp\\notes.md", key: "D:\\repos\\pathy2" };
     s.writeProject(DIRTY);
     s.writeProject(LONG);
     s.writeProject(FOLDED);
     s.writeProject(SEGMENTS);
+    s.writeProject(PATHY);
+    s.writeProject(PATHY2);
     s.write(s.bucket(DIRTY.slug), "run_d1", completedEvents("run_d1", { project: DIRTY }));
     s.write(s.bucket(LONG.slug), "run_l1", completedEvents("run_l1", { project: LONG }));
     s.write(s.bucket(FOLDED.slug), "run_f1", completedEvents("run_f1", { project: FOLDED }));
     s.write(s.bucket(SEGMENTS.slug), "run_seg", completedEvents("run_seg", { project: SEGMENTS }));
+    s.write(s.bucket(PATHY.slug), "run_pathy", completedEvents("run_pathy", { project: PATHY }));
+    s.write(s.bucket(PATHY2.slug), "run_pathy2", completedEvents("run_pathy2", { project: PATHY2 }));
     const model = createOwnerReadModel({ runDir: s.runDir });
     await model.refresh();
     const snap = model.snapshot({ now: NOW });
@@ -380,6 +388,10 @@ test("项目名进快照前过同一条安全链：脱敏、清控制字符、�
     assert.equal(runOf(snap, "run_f1").project.name, "my project name");
     assert.equal(names[SEGMENTS.slug], "alpha beta", "alpha\\r\\n \\t\\r\\nbeta：整个空白段折成一个空格");
     assert.equal(runOf(snap, "run_seg").project.name, "alpha beta");
+    assert.equal(names[PATHY.slug], "…/gamma", "项目显示名里的盘符绝对路径折成 …/最后一段");
+    assert.equal(runOf(snap, "run_pathy").project.name, "…/gamma", "运行条目里的项目名同样折过");
+    assert.equal(names[PATHY2.slug], "…/notes.md", "目录段含空格的盘符路径也整段折掉");
+    assert.equal(runOf(snap, "run_pathy2").project.name, "…/notes.md");
     // 记录里没有名字 → null（listProjectRecords 原样给记录值；加工与"不编造"在读模型这层）。
     mkdirSync(s.bucket("noname-88888888"), { recursive: true });
     writeFileSync(join(s.bucket("noname-88888888"), ".project.json"), JSON.stringify({ key: "D:\\repos\\x", slug: "noname-88888888" }), "utf8");
@@ -883,16 +895,7 @@ test("枚举失败：refresh 拒绝，上一份索引与快照原样保留，下
     const before = model.snapshot({ now: NOW });
     broken = true;
     await assert.rejects(() => model.refresh(), /EACCES stub/);
-    // 第 140b 批唯一的例外：刷新失败后文件索引可能已经看不全，谱系两项按"无法判定"给出
-    // （lineageUndeterminable 翻成 true）；其余事实原样保留。
-    const during = model.snapshot({ now: NOW });
-    assert.deepEqual(
-      { ...during, runs: during.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
-      { ...before, runs: before.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
-      "失败的刷新不改已有快照",
-    );
-    assert.equal(runOf(during, "run_keep").lineageUndeterminable, true, "刷新失败 → 谱系按无法判定给");
-    assert.equal(runOf(during, "run_keep").supersededByRunId, null);
+    assert.deepEqual(model.snapshot({ now: NOW }), before, "失败的刷新不改已有快照（任何字段都不动）");
     assert.deepEqual(model.resolveRun("run_keep").bucket, ALPHA.slug);
     broken = false;
     const result = await model.refresh();
@@ -936,14 +939,7 @@ test("枚举用严格模式：一个桶 stat 失败时 refresh 拒绝、已有�
     s.write(s.bucket(BETA.slug), "run_st", completedEvents("run_st", { prompt: "# 被改过的副本" }));
     denyBeta = true;
     await assert.rejects(() => model.refresh(), /EACCES stub/);
-    const during = model.snapshot({ now: NOW });
-    // 谱系按无法判定给（第 140b 批）之外，失败的刷新不改已有快照。
-    assert.deepEqual(
-      { ...during, runs: during.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
-      { ...before, runs: before.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
-      "失败的刷新不改已有快照",
-    );
-    assert.equal(runOf(during, "run_st").lineageUndeterminable, true);
+    assert.deepEqual(model.snapshot({ now: NOW }), before, "失败的刷新不改已有快照（任何字段都不动）");
 
     denyBeta = false;
     const after = await model.refresh();
@@ -1547,6 +1543,71 @@ test("标题：先脱敏、再清控制字符、最后限 80 字——跨在截�
   assert.equal(deriveOwnerTitle("# 用 ghp_abcdefghijklmnopqrstuvwxyz 部署"), "用 [REDACTED] 部署");
   assert.equal(deriveOwnerTitle("# curl -u admin:hunter22 https://x"), "curl -u admin:[REDACTED] https://x");
   assert.equal(deriveOwnerTitle("Authorization: Bearer q9w8e7r6t5y4u3i2o1p0"), "Authorization: Bearer [REDACTED]");
+  // 绝对路径折成 `…/最后一段`（盘符 / UNC / POSIX 三种形状）；相对路径与 URL 不动。
+  assert.equal(
+    deriveOwnerTitle("请先完整读任务书：D:/projects/alpha/briefs/task-x.md"),
+    "请先完整读任务书：…/task-x.md",
+  );
+  assert.equal(deriveOwnerTitle(String.raw`读 \\server\share\nested\plan.md 再动手`), "读 …/plan.md 再动手");
+  assert.equal(deriveOwnerTitle("读 /home/owner/briefs/plan.md 再动手"), "读 …/plan.md 再动手");
+  assert.equal(
+    deriveOwnerTitle("# 看 docs/usage/host.md 与 https://example.com/x"),
+    "看 docs/usage/host.md 与 https://example.com/x",
+    "相对路径与 URL 不动",
+  );
+  // 含空格的目录段（三种形状共用）：后面紧跟分隔符、至多 3 个以单个空格相连的词、
+  // 且后面跟着空格的词不像文件名（不以 `.` + 1–8 个字母/数字结尾）。满足才折目录，
+  // 否则回到旧读法：路径到第一个空白为止。
+  assert.equal(deriveOwnerTitle(String.raw`E:\Carloha Agent\Temp\x.md`), "…/x.md", "Carloha：2 词目录段");
+  assert.equal(
+    deriveOwnerTitle(String.raw`看 E:\Carloha Agent\Projects\2026-11-18_Deck-市场部\预览-S26.png（新版）`),
+    "看 …/预览-S26.png（新版）",
+    "Carloha：多段含空格/中文/破折号/下划线的目录都折掉",
+  );
+  assert.equal(deriveOwnerTitle('"D:/My Docs/a b/c.md"'), '"…/c.md"');
+  // 段与段之间的重复分隔符（贴 JSON 的转义反斜杠 / 双斜杠）按同一个分隔符处理。
+  assert.equal(deriveOwnerTitle("/home//secret/project/notes.md"), "…/notes.md", "POSIX 重复斜杠");
+  assert.equal(deriveOwnerTitle(String.raw`D:\\projects\\foo\\x.md`), "…/x.md", "盘符 + 重复反斜杠");
+  assert.equal(deriveOwnerTitle(String.raw`E:\\Carloha Agent\\Temp\\x.md`), "…/x.md", "盘符重复分隔符 + 含空格目录段");
+  assert.equal(deriveOwnerTitle(String.raw`D:\v1.2\Beta\x.md`), "…/x.md", "目录名带点但后面是分隔符，不受文件名规则影响");
+  assert.equal(deriveOwnerTitle(String.raw`D:\a b c\x.md`), "…/x.md", "3 个词的目录段仍算目录");
+  assert.equal(deriveOwnerTitle(String.raw`D:\a\my file.md`), "…/my file.md", "最后一段到空白为止：目录不泄漏");
+  assert.equal(deriveOwnerTitle("读 /My Docs/a b/c.md 再看"), "读 …/c.md 再看", "POSIX 用同一套段规则");
+  assert.equal(deriveOwnerTitle(String.raw`\\server\My Docs\x.md`), "…/x.md", "UNC 用同一套段规则");
+
+  // 真实被毁形状（140b 修正三）：不能越过文件名吞掉后面的句子。
+  assert.equal(
+    deriveOwnerTitle(String.raw`Read the task brief at D:\p\docs\2026-11-18-G1-fix.md in full and do exactly what it says. Write only under src/a/ and src/b/ …`),
+    "Read the task brief at …/2026-11-18-G1-fix.md in full and do exactly what it sa…",
+    "长句子不再被当成目录段（80 字帽内保留文件名与后文）",
+  );
+  assert.equal(
+    deriveOwnerTitle("Read brief at D:/p/docs/2026-11-18-G1-fix.md in full and then src/a/"),
+    "Read brief at …/2026-11-18-G1-fix.md in full and then src/a/",
+    "同一形状的短句完整保留（不吞后文）",
+  );
+  assert.equal(
+    deriveOwnerTitle(String.raw`对比 D:\projects\foo 仓库中两个类别闭集的一致性——src/application/x.js 的 A 与 src/b/y.js`),
+    "对比 …/foo 仓库中两个类别闭集的一致性——src/application/x.js 的 A 与 src/b/y.js",
+    "破折号/中文长句不再被当成目录段",
+  );
+  assert.equal(deriveOwnerTitle("先读 D:/a/x.md 再看 run_x/y"), "先读 …/x.md 再看 run_x/y", "文件名后面的相对路径不被吞进来");
+  // 规则边界：4 个词的目录段不算目录；后面跟空格的词像文件名（.md）也不算目录段。
+  assert.equal(
+    deriveOwnerTitle(String.raw`D:\projects\foo and then bar\baz.md`),
+    String.raw`…/foo and then bar\baz.md`,
+    "4 个词 → 不当作目录段",
+  );
+  assert.equal(
+    deriveOwnerTitle(String.raw`D:\logs\run_a.md Old Dir\x.md`),
+    String.raw`…/run_a.md Old Dir\x.md`,
+    "中间词像文件名 → 不当作目录段",
+  );
+  // 修订版写法不是路径：词字符后面的撇号不算 POSIX 前导；行首/空白后的引号仍算。
+  assert.equal(deriveOwnerTitle("R3'/R4' 已 PASS"), "R3'/R4' 已 PASS");
+  assert.equal(deriveOwnerTitle("见 '/home/u/x.md' 再说"), "见 '…/x.md' 再说");
+  // 以斜杠开头的多斜杠写法（//server/share）同样按 POSIX 绝对路径折。
+  assert.equal(deriveOwnerTitle("见 //server/share/x.md 再说"), "见 …/x.md 再说");
 });
 
 test("标题：控制字符清掉、制表符折成一个空格；限 80 字且超长加 …，不切开代理对", () => {
@@ -2303,7 +2364,7 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
     head(b, {
       project: projectFact(BETA),
       worktreePath: `${CWD}\\.wao-worktrees\\run_leak`,
-      prompt: "# 含路径的任务\n",
+      prompt: "# 读 D:/private/briefs/plan.md\n",
       deliveryRequested: true,
     });
     working(b, { at: T0 + 3000 });
@@ -2316,14 +2377,16 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
     const snap = model.snapshot({ now: NOW });
 
     assert.deepEqual(Object.keys(snap).sort(), ["consults", "generatedAt", "projects", "runs"]);
-    for (const p of snap.projects) assert.deepEqual(Object.keys(p).sort(), ["branchesObservedAt", "name", "repo", "slug"]);
+    for (const p of snap.projects) {
+      assert.deepEqual(Object.keys(p).sort(), ["branchesObservedAt", "consultRecords", "name", "repo", "slug"]);
+    }
     const RUN_KEYS = [
       "agentId", "availability", "deliveryRequested", "lastEffectAt", "lastProcessActiveAt", "lastVitalAt", "laneId",
       "liveness", "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince",
       "startedAt", "state", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
       // 第 140b 批：交付、失败、额度、谱系。
       "capacity", "delivery", "failure", "legalDecision", "lineageRootConflict", "lineageRootRunId",
-      "lineageUndeterminable", "supersededByRunId",
+      "supersessionUndeterminable", "supersededByRunId",
     ].sort();
     assert.equal(snap.runs.length, 2, "夹具前提：一个可读运行 + 一个读不出的运行");
     for (const run of snap.runs) {
@@ -2353,9 +2416,12 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
     });
     assert.equal(runOf(snap, "run_leak").failure, null, "没失败就没有失败事实");
     assert.equal(runOf(snap, "run_leak").capacity, null);
+    assert.equal(runOf(snap, "run_leak").title, "读 …/plan.md", "标题首行里的绝对路径折成 …/最后一段");
     assert.deepEqual(runOf(snap, "run_leak").project, { slug: BETA.slug, name: BETA.name });
     const { keys, strings } = collect(snap);
     for (const key of keys) {
+      // supersessionUndeterminable 含 "session" 字样但是谱系判定字段，不是路径类键。
+      if (key === "supersessionUndeterminable") continue;
       assert.ok(!/path|cwd|dir|file|worktree|tree|pid|session|registry|key\b/i.test(key), `快照里不得出现路径类键名：${key}`);
     }
     const variants = (p) => [p, p.replace(/\\/g, "/")];
@@ -2369,6 +2435,11 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
       for (const needle of needles) {
         assert.ok(!str.includes(needle), `快照字符串泄漏了路径/标识：${JSON.stringify(str)} 含 ${JSON.stringify(needle)}`);
       }
+    }
+    // 通用形状检查（不只靠上面预置的样本串）：任何字符串都不得出现绝对路径形状。
+    const ABSOLUTE_PATH_SHAPE = /[A-Za-z]:[\\/]|\\\\[^\s]|(?:^|\s)\//;
+    for (const str of strings) {
+      assert.ok(!ABSOLUTE_PATH_SHAPE.test(str), `快照字符串出现了绝对路径形状：${JSON.stringify(str)}`);
     }
     assert.ok(!JSON.stringify(snap).includes("repos"), "连转义后的形式也不得出现");
   } finally {

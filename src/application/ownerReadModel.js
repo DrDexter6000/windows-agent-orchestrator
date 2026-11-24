@@ -22,7 +22,8 @@
 //
 // 边界：
 //   - 快照对象里不出现任何仓库路径、工作树路径、cwd 或转录路径；项目只给 slug 与
-//     名字。标题与项目名先脱敏、再清控制字符、最后限长。
+//     名字。标题与项目名先脱敏、把绝对路径（盘符 / UNC / POSIX）折成 `…/最后一段`、
+//     再清控制字符、最后限长。
 //   - 同一 runId 出现在两处：字节相同去重；字节不同标 conflict、不选其一；有一份读
 //     不出就整份按读不到处理（不比内容不择一）。读不到一律如实 unknown。
 //   - 枚举用严格模式：任何一个桶读不出，refresh() 拒绝，已有索引原样保留——不拿
@@ -35,30 +36,62 @@
 // 第 140b 批补的事实（给下一批的事项推导与接口用；同样只用既有判定）：
 //   - 交付：收口判定 determineRunSettlement；ambiguous / 打包失败 / 隔离失败三个
 //     结局取自交付视图 gatherDeliveryView；提交号与裁决事件取自交付事实校验
-//     validateDeliveryFacts。settledAt = 终态事件与该轮有效验证（或复验）结果事件
-//     两者中较晚的时间。
+//     validateDeliveryFacts。settledAt 是交付的收口时刻（决定见 deriveDeliveryFacts）：
+//     delivery_settled 取绑定终态事件与该轮有效验证（或已完成的复验）结果事件两者中
+//     较晚的时间；packaging_failed / isolation_failed 取绑定终态事件的时间；
+//     unsettled / undeterminable 为 null。
 //   - 失败与额度：diagnoseFailureWithBasis（src/diagnosis.js）——闭集 category 与
 //     code，以及额度结论所依据的那条 run.error 的时间。
 //   - 谱系：声明根与合法裁决是 lineageSupersession.js 的纯判定；"被取代"复用
 //     createLineageSupersession，把本模型的文件索引经 files / memberFilesForRoot
-//     注入——不另起全量枚举，也不做字节预筛。
+//     注入——不另起全量枚举，也不做字节预筛。文件集 = 活库 + 归档面（见
+//     deriveLineage）；成员按运行折叠（同 runId 的全部副本），与回收计划的 byRoot
+//     同一口径。派生有没有得出**结论**由 forRun 的 derived 事实给出：只有结论才
+//     缓存；没能推导的下一轮重试、快照里标 supersessionUndeterminable。
 //   - 分支：runBranches.js 的枚举，与 lead_preflight 待办事项是同一份答案。
 //   - 会审：组记录经 loadConsultRecord 校验；Q1 的取文与 observeSeatRun 同一个
-//     extractFinalAssistantText，归组与取值用 attributeReply / compareFields。
+//     extractFinalAssistantText，归组与取值用 attributeReply / compareFields；缓存
+//     只存算出的 Q1 值（键 = 席位转录身份 + 记录声明的 Q1 候选），不存回答原文，
+//     组记录只留快照需要的字段。
+//
+// 写清楚、不改的口径（140c 要知道）：
+//   - delivery.verification.status 是**有效**验证状态（复验链完成时用复验结果），
+//     等于 `wao runs delivery` 的 effectiveVerification.status，不是原始状态。
+//   - repo: "available" 表示"最近一次分支枚举成功"，与 branchesObservedAt 一起读；
+//     没观测过与观测失败都是 "unknown"，靠 branchesObservedAt 区分（null = 没观测过）。
+//   - 项目行的 consultRecords: "available" = 这一轮会审目录列出成功（或目录不存在）；
+//     "unknown" = 列不出、或单份记录 stat / 读取 I/O 出错（这一轮保留同一 key 上一轮
+//     的条目），并计入 unreadable。
+//   - 席位 runState 的值域：RUN_STATES、dispatch_failed、missing，以及读模型自己的
+//     unknown（席位记录的形状可用、但没定位到运行且记录没给可采信状态时）。
+//   - 转录只解析到最后一个换行为止（140a 约定，防半行）；席位 Q1 也按这份事件算。
+//     写转录总是整行带换行一次写入，所以缺尾换行只出现在截断或损坏的文件里。
+//   - legalDecision 用 legalDeliveryDecision（末条合法裁决），delivery.acceptance 用
+//     validateDeliveryFacts（多条裁决判 malformed）。两者纪律不同，在坏转录里可能
+//     不一致，事项推导要按各自的口径读。
 //
 // 已知局限：
 //   - 会审组记录只看现行位置 <项目 key>/.wao/runs/consults/<consultId>.json。项目的
 //     状态目录被重定向过的（链接工作树自己的 .wao、改过 stateDir 的项目），记录在
 //     别处，这里找不到。
-//   - 谱系成员与席位转录的事件不留在内存里（只缓存事实）。谱系成员、组记录或席位
-//     转录的文件身份变了，才重读相关文件。
+//   - 谱系派生的归档面只读"可能成为成员"的那一部分：子运行一定晚于它的根创建，
+//     runId 带创建时间（run_YYYYMMDD…），所以 runId 早于「最老的待派生根 − 24h 时钟
+//     容差」的归档文件不可能是成员——只保留文件名（归档枚举本身已对每份文件 lstat），
+//     不读内容（真实存储 2,420 份归档里通常只有个位数满足条件）。归档枚举读不出
+//     （整根或某个月目录）时，按它能覆盖的时间范围收窄影响面：整根读不出影响全部
+//     待派生根，月目录读不出只影响创建时间不晚于「该月末 + 容差」的根；单份文件读
+//     不出按该文件 runId 的时间只影响创建时间早于「它 + 容差」的根。理由同前：成员
+//     必晚于根。同一毫秒算"可能"。
+//   - 时钟容差 24 小时的已知局限：机器时钟回拨超过一天时，时间序判断可能漏掉或
+//     多算成员（方向由各处的保守写法决定）。
+//   - 席位回答只留算出的 Q1；席位转录的文件身份变了才重读。
 //
 // 架构契约：不 import src/commands/*、src/mcp/*、MCP SDK 或 zod。
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile as fsReadFile, readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   listProjectRecords,
@@ -67,7 +100,6 @@ import {
   SAFE_BUCKET_SLUG_RE,
 } from "../projectBuckets.js";
 import {
-  DELIVERY_VERIFICATION_OUTCOME_TYPES,
   findFirstBound,
   findLatestBound,
   findStateEvidence,
@@ -115,6 +147,7 @@ import { projectExecutionStage } from "./runStageProjection.js";
 import { lastActualEffectAtMs, lastEffectAtMs, lastVitalSignAtMs } from "./runQuietAdvisory.js";
 import { readOwnerLease } from "./ownerLiveness.js";
 import { execGitReadOnly, listRunBranchRunIds } from "./runBranches.js";
+import { listArchiveTranscriptFiles } from "./serveMaintenance.js";
 import {
   deliveryWasRequested,
   determineRunSettlement,
@@ -184,16 +217,66 @@ function truncateHead(text, maxChars) {
   return `${text.slice(0, keep)}…`;
 }
 
+// 绝对路径的三种形状（决定 0131 §3：快照里不出现路径），三种形状共用同一套段规则：
+//   - 段内字符：非空白、非路径分隔符、非引号/尖括号竖线、非中文标点、非破折号 `—`
+//     与省略号 `…`；
+//   - 目录段默认是单个词；**含空格的目录段**必须同时满足：后面紧跟路径分隔符、由
+//     至多 3 个以单个空格相连的词组成、且后面跟着空格的词都不像文件名（不以
+//     `.` + 1–8 个字母/数字结尾，如 `x.md`、`run_x.jsonl`）。目录名本身带点
+//     （`v1.2/`、`.bin/`）不受影响——它后面是分隔符，不是空格；
+//   - 段与段之间的分隔符是一个或多个 `\` 或 `/`（贴 JSON 时常见的转义重复分隔符
+//     `D:\\projects\\…`、`/home//secret/…` 按同一个分隔符处理）；
+//   - 不满足就回到旧读法：路径到第一个空白为止（最后一段/文件名也到空白为止）；
+//   - 宁可多折，不可漏目录，但不能越过文件名吞掉后面的句子。
+const PATH_SEGMENT_CHAR = "[^\\s\"'<>|，。；：、！？（）【】《》「」“”‘’—…\\\\/]+";
+// 「后面跟着空格的词」的尾部不能像文件名：`.md` / `.jsonl` 之类。
+const WORD_END_NOT_FILENAME = "(?<!\\.[A-Za-z0-9]{1,8})";
+// 目录段：单个词，或至多 3 个以单个空格相连的词（前两个词后面跟空格，不能像文件名）。
+const PATH_DIR_SEGMENT = `(?:${PATH_SEGMENT_CHAR}|${PATH_SEGMENT_CHAR}(?:${WORD_END_NOT_FILENAME}[ ]${PATH_SEGMENT_CHAR}){1,2})`;
+// 段与段之间是一个或多个 `\` 或 `/`（提示词里贴 JSON 时常见转义重复的分隔符）；
+// 最后一段到空白为止。
+const PATH_TAIL = `(?:${PATH_DIR_SEGMENT}[\\\\/]+)*${PATH_SEGMENT_CHAR}`;
+// 盘符路径：X:\… / X:/…。前面不能紧跟词字符（https://x 里的 "s:/" 不是盘符路径）；
+// 冒号后的分隔符也允许重复（`D:\\projects\\…`）。
+const DRIVE_PATH_RE = new RegExp(`(^|[^A-Za-z0-9_])([A-Za-z]:[\\\\/]+${PATH_TAIL})`, "g");
+// UNC：\\server\share\…
+const UNC_PATH_RE = new RegExp(`(\\\\\\\\${PATH_TAIL})`, "g");
+// POSIX 绝对路径：/a/b（也接受 `//server/share` 这种以斜杠开头的写法）。前导只有行首、
+// 空白、开括号，或"前面是行首/空白/开括号"的引号才算数——词字符后面的撇号不是前导
+// （修订版写法 `R3'/R4' 已 PASS` 原样保留）。
+// 整段前导用非捕获组写，外层只留"前导 | 路径"两个捕获组。
+const POSIX_PREFIX = `(?:^|[\\s(\\[（【{]|(?:^|[\\s(\\[（【{])["'])`;
+const POSIX_PATH_RE = new RegExp(`(${POSIX_PREFIX})(\\/{1,}${PATH_TAIL})`, "g");
+
+/** 路径的最后一段（末尾分隔符不算）；拆不出段时为空串。 */
+function lastPathSegment(path) {
+  const segments = String(path).split(/[\\/]+/).filter((segment) => segment.length > 0);
+  return segments.length === 0 ? "" : segments[segments.length - 1];
+}
+
+/**
+ * 把绝对路径折成 `…/最后一段`：只保留人认得出是哪个文件的那一段，目录与根全部去掉。
+ * 相对路径、普通斜杠词（wao/run_x、Q1/Q2）与 URL（https://…）不动；词字符后面的
+ * 撇号不算路径前导。先折路径再做控制字符清理与限长。
+ */
+function foldAbsolutePaths(text) {
+  return text
+    .replace(DRIVE_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`)
+    .replace(UNC_PATH_RE, (match, path) => `…/${lastPathSegment(path)}`)
+    .replace(POSIX_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`);
+}
+
 /**
  * 给人看的动态文本走同一条安全链（决定 0131 §3）：脱敏 → 含换行或制表符的空白段
- * 整体折成一个空格 → 清控制字符 → 限长。标题与项目名共用。顺序不能反：先截断会把
- * 跨在截断点上的秘密形状切掉半截，剩下的半段匹配不到整段规则，脱敏失效。
+ * 整体折成一个空格 → 绝对路径折成 `…/最后一段` → 清控制字符 → 限长。标题与项目名
+ * 共用。顺序不能反：先截断会把跨在截断点上的秘密形状切掉半截，剩下的半段匹配不到
+ * 整段规则，脱敏失效；路径折在限长之前，帽里永远不会出现盘符或目录。
  * 加工后为空 → null。
  */
 function safeDisplayText(text) {
   if (typeof text !== "string") return null;
   const folded = redactSecretShapes(text).replace(WHITESPACE_RUN_RE, (run) => (/[\r\n\t]/.test(run) ? " " : run));
-  const safe = truncateHead(sanitizeControls(folded).trim(), OWNER_TITLE_MAX_CHARS);
+  const safe = truncateHead(sanitizeControls(foldAbsolutePaths(folded)).trim(), OWNER_TITLE_MAX_CHARS);
   return safe.length > 0 ? safe : null;
 }
 
@@ -375,8 +458,12 @@ const NO_DELIVERY_OUTCOME = Object.freeze({
  *   - verification：有效验证状态（复验通过就覆盖原始结果）与复验链的状态。malformed
  *     链的 reason 是事件里的原值、没过形状校验，不进来；
  *   - acceptance：裁决状态；decidedAtMs 是裁决事件自己的时间；
- *   - settledAtMs：已收口的交付里，终态事件与该轮有效验证（或复验）结果事件两者中
- *     较晚的时间（"等裁决"从这一刻算起）；任一取不到就是 null。
+ *   - settledAtMs：已收口（settlement settled）的交付的收口时刻。delivery_settled 取
+ *     绑定终态事件与该轮有效验证结果事件（或已完成的复验结果事件）两者中较晚的时间
+ *     （"等裁决"从这一刻算起；结果事件由 validateDeliveryFacts 的
+ *     verificationOutcomeEvent / reverifyOutcomeEvent 给出，不在这里另写筛选）；
+ *     packaging_failed / isolation_failed 取绑定终态事件的时间；unsettled /
+ *     undeterminable 没有收口时刻，为 null。
  * 不取任何路径：deliveryRef 的 worktreePath、错误原文都不进来。
  *
  * @param {object[]} events
@@ -405,6 +492,19 @@ function deliveryFacts(events, runId, state, terminalEvent) {
         : null,
     };
     if (facts.code !== "delivery_malformed") out.commit = canonicalCommit(facts.createdRef?.deliveryCommit);
+    // 收口时刻与"交付视图可用"无关：打包/隔离失败时没有可用交付视图，但已收口。
+    if (settlement.status === "settled" && settlement.reason === "delivery_settled") {
+      // 有效验证来自复验链时，结果事件是复验的结果事件；否则是原始验证结果事件
+      // （validateDeliveryFacts 选中的那条，不在读模型里另写筛选）。
+      const outcome = facts.reverifyStatus === "complete"
+        ? facts.reverifyOutcomeEvent
+        : facts.verificationOutcomeEvent;
+      const times = [tsMs(terminalEvent?.ts), tsMs(outcome?.ts)];
+      if (times.every((t) => t !== null)) out.settledAtMs = Math.max(...times);
+    } else if (settlement.status === "settled") {
+      // 打包失败 / 隔离失败：绑定终态事件的时间就是收口时刻。
+      out.settledAtMs = tsMs(terminalEvent?.ts);
+    }
     if (view.deliveryAvailable !== true) return out;
     out.verification = {
       status: memberOf(DELIVERY_VERIFICATION_STATUSES, view.effectiveVerification?.status),
@@ -416,14 +516,6 @@ function deliveryFacts(events, runId, state, terminalEvent) {
     };
     out.acceptance = { status: memberOf(DELIVERY_ACCEPTANCE_STATUSES, view.acceptance?.status) };
     out.decidedAtMs = facts.decisionEvent ? tsMs(facts.decisionEvent.ts) : null;
-    if (settlement.status === "settled" && settlement.reason === "delivery_settled") {
-      // 有效验证来自复验链时，结果事件是复验的结果事件；否则是原始验证结果事件。
-      const outcome = facts.reverifyStatus === "complete"
-        ? facts.reverifyOutcomeEvent
-        : events.find((e) => e.runId === runId && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type)) ?? null;
-      const times = [tsMs(terminalEvent?.ts), tsMs(outcome?.ts)];
-      if (times.every((t) => t !== null)) out.settledAtMs = Math.max(...times);
-    }
     return out;
   }, { settlement: { status: null, reason: null }, ...NO_DELIVERY_OUTCOME });
 }
@@ -466,6 +558,70 @@ function lineageRootsOf(events, runId) {
     if (isValidRunId(e.rootRunId)) roots.add(e.rootRunId);
   }
   return [...roots].sort();
+}
+
+/**
+ * runId 里的创建时刻（epoch ms）。WAO 生成的 runId 是 `run_` + 17 位 UTC 时间戳
+ * （YYYYMMDDHHmmss + 毫秒）+ 随机后缀；不是这个形状（测试合成值、别的工具造的值）
+ * 就是 null——时间序不可比。
+ */
+function runCreatedAtMs(runId) {
+  if (typeof runId !== "string" || !runId.startsWith("run_")) return null;
+  const digits = runId.slice(4, 21);
+  if (!/^\d{17}$/.test(digits)) return null;
+  const year = Number(digits.slice(0, 4));
+  const month = Number(digits.slice(4, 6));
+  const day = Number(digits.slice(6, 8));
+  const hour = Number(digits.slice(8, 10));
+  const minute = Number(digits.slice(10, 12));
+  const second = Number(digits.slice(12, 14));
+  const milli = Number(digits.slice(14, 17));
+  const value = Date.UTC(year, month - 1, day, hour, minute, second, milli);
+  if (timeMs(value) === null) return null;
+  const at = new Date(value);
+  // 越界字段（13 月、32 日）会被 Date.UTC 归一化到别的时刻：按"时间序不可比"处理。
+  return at.getUTCFullYear() === year && at.getUTCMonth() === month - 1 && at.getUTCDate() === day
+    && at.getUTCHours() === hour && at.getUTCMinutes() === minute && at.getUTCSeconds() === second
+    && at.getUTCMilliseconds() === milli
+    ? value
+    : null;
+}
+
+/**
+ * 谱系时间序的时钟容差（24 小时）。runId 的时间戳来自机器时钟，转录归档/月目录的
+ * 分月也取自事件时间或文件 mtime——两边都可能偏。判"谁可能早于谁"时留出一天的
+ * 余量：覆盖机器时钟回拨与归档月份取末事件时间 / mtime 的偏差；回拨超过一天是
+ * 已知局限。
+ */
+const RUN_CLOCK_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * childRunId 有没有可能声明 rootRunId 为它的谱系根：子运行一定晚于它的根创建
+ * （runId 带创建时间）。相等（同一毫秒）算"可能"；再留 `RUN_CLOCK_TOLERANCE_MS`
+ * 的容差（根可以比子早最多一天、含恰好一天，仍算可能）。时间序不可比（形状不合）
+ * 时保守算"可能"。
+ */
+function childMayFollowRoot(childRunId, rootRunId) {
+  const childAt = runCreatedAtMs(childRunId);
+  const rootAt = runCreatedAtMs(rootRunId);
+  if (childAt === null || rootAt === null) return true;
+  // 恰好等于容差也算"可能"——与归档候选、月目录两处的等号边界一致。
+  return rootAt <= childAt + RUN_CLOCK_TOLERANCE_MS;
+}
+
+/**
+ * 归档月目录 `<yyyy-mm>` 里能装下的最晚 runId 时刻（该月最后一毫秒）。月份目录读不出
+ * 时，它可能藏着的成员最晚创建于这个时刻（再留时钟容差）——只有创建时间不晚于
+ * 「月末 + 容差」的根才受影响（成员必晚于根）。月份形状不合 → null（时间序不可比，
+ * 影响全部）。
+ */
+function archiveMonthEndMs(month) {
+  const m = /^(\d{4})-(\d{2})$/.exec(typeof month === "string" ? month : "");
+  if (m === null) return null;
+  const year = Number(m[1]);
+  const monthNumber = Number(m[2]);
+  if (!Number.isInteger(year) || monthNumber < 1 || monthNumber > 12) return null;
+  return Date.UTC(year, monthNumber, 1) - 1;
 }
 
 /**
@@ -586,6 +742,13 @@ function isRunTranscriptName(name) {
   return name.startsWith("run_") && name.endsWith(".jsonl") && isValidRunId(name.slice(0, -".jsonl".length));
 }
 
+/** 转录路径 → runId（文件名不是 run_<合法 runId>.jsonl 时 null）。 */
+function runIdFromTranscriptPath(path) {
+  if (typeof path !== "string") return null;
+  const name = basename(path);
+  return isRunTranscriptName(name) ? name.slice(0, -".jsonl".length) : null;
+}
+
 const safeSlug = (bucket) => (typeof bucket === "string" && SAFE_BUCKET_SLUG_RE.test(bucket) ? bucket : null);
 
 /** 定位顺序：桶优先于旧平铺，同类按路径码元序——与解析链的回退顺序同向。 */
@@ -604,10 +767,21 @@ function byConsultCreatedAt(a, b) {
   return a.consultId < b.consultId ? -1 : a.consultId > b.consultId ? 1 : 0;
 }
 
-/** 读不到的位置在索引里的那一条：事实全空；谱系候选根沿用上一次读得出时的值（从没有过就是 null）。 */
-function unreadableEntry(entry, previous) {
+/**
+ * 读不到的位置在索引里的那一条：事实全空；谱系候选根沿用上一次读得出时的值（从没有过
+ * 就是 null）。identityIntact = 这一轮已知它的身份没变（只是读失败）——这时旧根仍可信；
+ * 身份变了、或 stat 都失败（身份不可知）时，旧根不再可信：它现在只可能是比它早创建的
+ * 根的成员（见 deriveLineage 的 blind 口径）。
+ */
+function unreadableEntry(entry, previous, { identityIntact = false } = {}) {
   return {
-    runId: entry.runId, bucket: entry.bucket, identity: null, hash: null, facts: null, roots: previous?.roots ?? null,
+    runId: entry.runId,
+    bucket: entry.bucket,
+    identity: null,
+    hash: null,
+    facts: null,
+    roots: previous?.roots ?? null,
+    trustedRoots: identityIntact === true && previous?.trustedRoots === true,
   };
 }
 
@@ -649,6 +823,21 @@ function withinWindow(atMs, now, windowSeconds) {
   return atMs !== null && Math.max(0, now - atMs) <= windowSeconds * 1000;
 }
 
+/**
+ * 会审行（快照投影：每次快照新建对象，不把缓存里的对象交给调用方）。
+ * @param {object} value — 缓存里的会审事实
+ */
+function projectConsult(value) {
+  return {
+    consultId: value.consultId,
+    projectSlug: value.projectSlug,
+    createdAt: value.createdAt,
+    reviewedRunId: value.reviewedRunId,
+    q1Declared: value.q1Declared,
+    seats: value.seats.map((row) => ({ agentId: row.agentId, runId: row.runId, runState: row.runState, q1: row.q1 })),
+  };
+}
+
 const STAGE_DISPLAY = Object.freeze({
   accepted: "starting",
   spawned: "starting",
@@ -666,8 +855,9 @@ const STAGE_DISPLAY = Object.freeze({
  * @param {number} [input.batchSize=200] — 每批读取的文件数；批与批之间让出事件循环
  * @param {object} [input.io] — 注入缝（测试用）：`readFile(path)` → 原始字节、
  *   `stat(path)` → bigint stat、`listFiles(runDir, { strict })` → 转录清单、
- *   `listDir(dir)` → 文件名数组（会审组记录目录）、`execGit(args, cwd)` → stdout（只读
- *   分支枚举）
+ *   `listArchiveFiles(runDir)` → 归档面 `{ files, skipped }`（缺省
+ *   listArchiveTranscriptFiles）、`listDir(dir)` → 文件名数组（会审组记录目录）、
+ *   `execGit(args, cwd)` → stdout（只读分支枚举，同步或异步返回值都行）
  * @returns {{refresh: Function, snapshot: Function, resolveRun: Function}}
  */
 export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {} } = {}) {
@@ -680,34 +870,37 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   const readFile = io.readFile ?? fsReadFile;
   const statFile = io.stat ?? ((path) => fsStat(path, { bigint: true }));
   const listFiles = io.listFiles ?? listTranscriptsDeep;
+  const listArchiveFiles = io.listArchiveFiles ?? listArchiveTranscriptFiles;
   const listDir = io.listDir ?? fsReaddir;
   const execGit = io.execGit ?? execGitReadOnly;
 
-  // path → { runId, bucket, identity: {size, mtimeNs, ctimeNs, ino}|null, hash, facts, roots }
-  //（identity 为 null 或 hash / facts 为 null = 那一次读不到，下轮重试。roots = 这份
-  // 转录声明的谱系候选根；读不到时沿用上一次读得出时的值，从没读得出过就是 null）
+  // path → { runId, bucket, identity: {size, mtimeNs, ctimeNs, ino}|null, hash, facts,
+  //   roots, trustedRoots }（identity 为 null 或 hash / facts 为 null = 那一次读不到，
+  //   下轮重试。roots = 这份转录声明的谱系候选根；trustedRoots = 这份 roots 现在还可信
+  //   ——身份没变、只是这一轮又读不出时仍可信；从没读出过、或身份变了又读不出时不可信，
+  //   它现在只可能是比它早创建的根的成员）
   let fileIndex = new Map();
   // runId → { runId, availability, primaryPath, primaryBucket, locations, facts }
   let runIndex = new Map();
   // slug → 项目名（null = 没有名字）
   let projectNames = new Map();
-  // rootRunId → 谱系候选文件路径
-  let lineageMembers = new Map();
+  // 归档面候选文件 path → { identity, hash, roots }（只为"可能是待派生根的成员"的归档
+  // 文件读取；按文件身份缓存它们声明的谱系根，身份没变就不重读）
+  let archiveLineage = new Map();
   // rootRunId → { signature, superseded: Map<runId, runId|null> }（"被取代"的派生事实；
-  // 该谱系任一候选文件的身份变了才重算，没变就沿用）
+  // 只存得出过结论的；该谱系任一候选文件的身份变了才重算，没变就沿用）
   let lineageDerived = new Map();
-  // 有从没读得出过的转录：它属于哪条谱系无从得知，出快照时"被取代"与"合法裁决"一律
-  // 按无法判定给（派生照常做并缓存，见 deriveLineage）。
-  let lineageBlind = false;
-  // 上一次刷新失败：文件索引可能已经看不全，"被取代"按无法判定给出，直到下一次刷新成功。
-  let lineageStale = false;
-  // consultId → { identity, record, seatKeys, value }（会审组记录与由它算出的事实）
+  // `${slug}\u0000${consultId}` → { identity, spec, value }（会审组记录、快照需要的字段
+  // 与算好的投影；记录里的其余内容不留在内存里）
   let consultIndex = new Map();
-  // 席位转录路径 → { signature, text }：最终 assistant 文本（取结论用），text 是
-  // Promise<string|null>。只缓存真正当过席位的转录；文件身份变了才重读。
-  let finalTexts = new Map();
-  // slug → { repo, observedAtMs, branches: Set<runId>|null }（分支观测，至多每
-  // OWNER_BRANCH_REFRESH_MS 一次；失败如实记 unknown，不沿用过期结果）
+  // 席位转录 path → { signature, q1Key, q1 }：按"席位转录身份 + 记录声明的 Q1 候选"
+  // 缓存的 Q1 值（只缓存算出来的值，不缓存回答原文；读失败不缓存）。
+  let seatQ1 = new Map();
+  // slug → "available" | "unknown"：这一轮该项目会审目录有没有列出来。
+  let consultProjectStatus = new Map();
+  // slug → { key, repo, observedAtMs, branches: Set<runId>|null }（分支观测，至多每
+  // OWNER_BRANCH_REFRESH_MS 一次；失败如实记 unknown，不沿用过期结果。key 是这一轮
+  // 观测的仓库根：同一 slug 改指到另一个仓库时当作没观测过）
   let branchIndex = new Map();
   let inflight = null;
 
@@ -727,17 +920,14 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
    *   scanned = 本次枚举到的 run 转录数；reread = 本次实际读取内容的转录文件数（含为
    *   谱系派生与席位结论重读的）；added / removed = 新出现 / 消失的运行数（按 runId）；
    *   moved = 换了位置、旧位置一个不剩的运行数；unreadable = 本次读不出的文件数——
-   *   读不出（stat、读、解析任一失败）的转录，加上读不出或校验不过的会审组记录。
-   *   并发调用共用同一次普查。中途失败则拒绝，已有索引与快照原样保留；只有谱系的
-   *   "被取代"与"合法裁决"两项改为按无法判定给出（文件索引可能已经看不全）。
+   *   读不出（stat、读、解析任一失败）的转录（含为谱系派生读取的归档转录），加上读不出
+   *   或校验不过的会审组记录。
+   *   并发调用共用同一次普查。中途失败则拒绝，已有索引与快照原样保留（失败不改任何
+   *   字段；服务层把整份快照标为过期）。
    */
   function refresh() {
     if (inflight === null) {
       inflight = runRefresh()
-        .catch((error) => {
-          lineageStale = true;
-          throw error;
-        })
         .finally(() => {
           inflight = null;
         });
@@ -780,7 +970,8 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       } catch (error) {
         if (error?.code === "ENOENT") return; // 枚举之后被删：不算任何一项
         // stat 失败（权限等）：这个位置这一轮读不到，也不去读它的内容。仍留在运行的
-        // 分组里——否则同一运行剩下的副本会被当成唯一可用档。
+        // 分组里——否则同一运行剩下的副本会被当成唯一可用档。身份不可知：旧根按不可信
+        // 处理（它现在只可能是比它早创建的根的成员）。
         unreadable += 1;
         nextFiles.set(entry.path, unreadableEntry(entry, fileIndex.get(entry.path)));
         located.push({ entry, identity: null });
@@ -824,11 +1015,15 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
           .find((record) => record !== undefined && record.hash === hash && record.facts !== null);
         const facts = twin !== undefined ? twin.facts : factsOf(bytes, entry.runId);
         nextFiles.set(entry.path, {
-          runId: entry.runId, bucket: entry.bucket, identity, hash, facts, roots: facts.lineageRoots,
+          runId: entry.runId, bucket: entry.bucket, identity, hash, facts, roots: facts.lineageRoots, trustedRoots: true,
         });
       } catch {
         unreadable += 1;
-        nextFiles.set(entry.path, unreadableEntry(entry, fileIndex.get(entry.path)));
+        // 身份与上一轮相同：内容没变，旧根仍可信（读失败只让派生这一轮不推导、下轮重试）。
+        const previous = fileIndex.get(entry.path);
+        nextFiles.set(entry.path, unreadableEntry(entry, previous, {
+          identityIntact: previous?.identity != null && sameIdentity(previous.identity, identity),
+        }));
       }
     });
 
@@ -863,27 +1058,32 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       if (!nextRuns.has(runId)) removed += 1;
     }
 
-    // ⑤ 派生事实（都从上面刚建好的索引取，不另起枚举）：谱系取代、会审结论、项目分支。
-    //    任何一步抛错都走不到下面的交接，已有索引原样保留。
+    // ⑤ 派生事实（都从上面刚建好的索引取，不另起全量枚举）：谱系取代（含归档面）、
+    //    会审结论、项目分支。任何一步抛错都走不到下面的交接，已有索引原样保留。
     const nextKeys = collectProjectKeys();
     const readForFacts = async (path) => {
       derivedReads.add(path);
       return readFile(path);
     };
-    const lineage = await deriveLineage(nextFiles, nextRuns, readForFacts);
+    const lineage = await deriveLineage({
+      files: nextFiles,
+      runs: nextRuns,
+      read: readForFacts,
+      previousArchiveCache: archiveLineage,
+      listArchive: () => listArchiveFiles(runDir),
+    });
     const consults = await collectConsults({ files: nextFiles, runs: nextRuns, keys: nextKeys, read: readForFacts });
     const branches = await observeBranches(nextRuns, nextKeys);
 
     fileIndex = nextFiles;
     runIndex = nextRuns;
     projectNames = nextProjectNames;
-    lineageMembers = lineage.members;
+    archiveLineage = lineage.archiveCache;
     lineageDerived = lineage.derived;
-    lineageBlind = lineage.blind;
-    lineageStale = false;
     consultIndex = consults.index;
+    consultProjectStatus = consults.projectStatus;
+    seatQ1 = consults.seatQ1;
     branchIndex = branches;
-    for (const path of finalTexts.keys()) if (!nextFiles.has(path)) finalTexts.delete(path);
     let derivedOnly = 0;
     for (const path of derivedReads) if (!scannedReads.has(path)) derivedOnly += 1;
     return {
@@ -892,13 +1092,23 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       added,
       removed,
       moved,
-      unreadable: unreadable + consults.unreadable,
+      unreadable: unreadable + consults.unreadable + lineage.unreadable,
     };
   }
 
   async function isDirectory(path) {
     try {
       return (await statFile(path)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  /** 路径存在（目录、文件或链接目标都算）；读不出（权限等）视为不存在。 */
+  async function pathExists(path) {
+    try {
+      await statFile(path);
+      return true;
     } catch {
       return false;
     }
@@ -939,28 +1149,37 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
 
   /**
    * 谱系的"被取代"派生（createLineageSupersession 是判定与派生的唯一实现；这里只喂
-   * 索引）。候选根索引 lineageRootsOf 给出，成员判定仍在 lineageClose。
-   *   - 只为会走到派生的运行建派生器（supersessionCandidateGate：有谱系引用、已打包、
-   *     自身未裁决、已收口）；其余运行的"被取代"按同一条门的规则就是 null。
-   *   - 一条谱系的候选文件身份没变，就沿用上一次的派生结果，不读任何文件。派生结果
-   *     只取决于这条谱系的成员，所以缓存按成员身份有效。
-   *   - 有从没读得出过的转录时（blind）：它属于哪条谱系无从得知，就不能断言别的谱系
-   *     里没有它——这时照常派生并缓存，但出快照时一律不发布（见 projectRun）。不把
-   *     blind 传成 filesIncomplete：那会把这一轮的空结果缓存下来，等那份转录读得出
-   *     之后，与它无关的谱系会一直命中那份空结果。
-   *   - 读得出过的转录后来读不到了，仍留在它声明过的谱系的候选里——派生器读到读不出，
-   *     整条谱系如实不推导。
+   * 索引）。文件集 = 活库全部转录 + 归档面里"可能是待派生根成员"的那一部分。
+   *
+   * 归档面为什么只读一部分：子运行一定晚于它的根创建，runId 带创建时间
+   * （run_YYYYMMDD…），所以 runId 早于"最老的待派生根 − 时钟容差"的归档文件不可能是
+   * 任何待派生根的成员，也不可能是那个根自己。归档枚举（listArchiveTranscriptFiles）
+   * 已经对每份归档文件做过目录文件名枚举与 lstat（拒符号链接）；这里对不满足条件的
+   * 文件只保留文件名、不再 stat / 不读内容，对候选文件才做 bigint stat 与原始字节解析。
+   * 真实存储里 2,420 份归档通常只有个位数满足条件。候选文件与活库条目走同一套身份
+   * 与解析（bigint stat + eventsOf），按文件身份缓存它们声明的根，身份没变就不重读。
+   *
+   * 成员按运行折叠（与 worktreeReclaim 的 byRoot 同一口径）：只要一份文件声明了该根，
+   * 这个运行的全部副本（活库 + 归档）都进这条谱系的候选集、也都进签名——否则同一
+   * runId 的孪生副本分属两个根时，热刷新会沿用旧答案，冷刷新给出另一个。
+   *
+   * 三种派生结果（只看 createLineageSupersession.forRun 的 derived 事实，不在读模型里
+   * 另写判定）：得出"被取代"、得出"未被取代"都缓存；没能推导（抛错、根/成员读不出、
+   * 枚举不全、拒绝等）不缓存——下一轮重试，快照里按 supersessionUndeterminable 发布，
+   * 不能把一次瞬时读失败缓存成"确定未被取代"。
+   *
+   * 读不出/不可信的转录只影响比它早的根：从没读出过的（roots 未知）、身份变了又读不出
+   * 的（旧根已不可信）、单份归档文件 lstat 失败——它们属于哪条谱系无从得知，但成员
+   * 必晚于根，所以只有创建时间早于「它 + 时钟容差」的待派生根受影响。归档月目录读不出
+   * 时，它可能藏着的成员最晚创建于该月末，只有创建时间不晚于「该月末 + 容差」的根受
+   * 影响；整个归档根读不出则影响全部。时间序不可比（runId 形状不合）时一律按"可能"
+   * 处理。容差见 RUN_CLOCK_TOLERANCE_MS。
+   *
+   * 刷新失败不改快照（runRefresh 抛错时调用方不交接），所以这里没有"上一轮刷新失败就
+   * 全部无法判定"的门。
    */
-  async function deriveLineage(files, runs, read) {
-    const members = new Map();
-    let blind = false;
-    for (const [path, entry] of files) {
-      if (entry.roots === null) blind = true;
-      for (const root of entry.roots ?? [entry.runId]) {
-        if (!members.has(root)) members.set(root, []);
-        members.get(root).push(path);
-      }
-    }
+  async function deriveLineage({ files, runs, read, previousArchiveCache, listArchive }) {
+    const derived = new Map();
     const candidates = new Map(); // rootRunId → runId[]
     for (const run of runs.values()) {
       if (run.availability !== "ok" || !run.facts.supersessionCandidate || run.facts.lineageConflict) continue;
@@ -968,204 +1187,425 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       if (!candidates.has(root)) candidates.set(root, []);
       candidates.get(root).push(run.runId);
     }
-    const fileOf = (path) => ({ name: `${files.get(path).runId}.jsonl`, path });
-    const derived = new Map();
-    await eachBatch([...candidates.keys()].sort(), async (root) => {
-      const signature = signatureOf(members.get(root) ?? [], files);
+    const roots = [...candidates.keys()].sort();
+    // 没有会走到派生的运行：不必碰归档面。
+    if (roots.length === 0) return { derived, archiveCache: previousArchiveCache ?? new Map(), unreadable: 0 };
+
+    // ① 归档枚举与它的"未知面"：哪些位置读不出、各自最晚能藏住什么时刻的成员。
+    let archive;
+    try {
+      archive = listArchive();
+    } catch {
+      archive = { files: [], skipped: [{ reason: "root_readdir_failed" }] };
+    }
+    let archiveRootUnreadable = false;
+    const monthHazards = []; // 读不出的月目录的最晚成员时刻（null = 时间序不可比）
+    const blindRunIds = new Set(); // 谱系归属不可信的转录
+    for (const skipped of Array.isArray(archive.skipped) ? archive.skipped : []) {
+      const reason = skipped?.reason;
+      if (reason === "readdir_failed" && typeof skipped.dir === "string") {
+        monthHazards.push(archiveMonthEndMs(basename(skipped.dir)));
+        continue;
+      }
+      if ((reason === "lstat_failed" || reason === "symlink_not_followed") && typeof skipped.file === "string") {
+        const runId = runIdFromTranscriptPath(skipped.file);
+        if (runId !== null) blindRunIds.add(runId);
+        else archiveRootUnreadable = true; // 名字都不是转录：不知道它是什么，整面按不可信
+        continue;
+      }
+      // root_readdir_failed 与没见过的形状：整面不可信。
+      archiveRootUnreadable = true;
+    }
+
+    // ② 归档候选：runId 不早于「最老的待派生根 − 时钟容差」的才可能是成员
+    //    （相等算可能；时间序不可比 → 全算候选）。
+    const rootClocks = roots.map(runCreatedAtMs);
+    const oldestRootAt = rootClocks.some((at) => at === null) ? null : Math.min(...rootClocks);
+    const oldestCandidateBound = oldestRootAt === null ? null : oldestRootAt - RUN_CLOCK_TOLERANCE_MS;
+    const archiveCandidates = [];
+    for (const raw of Array.isArray(archive.files) ? archive.files : []) {
+      const path = raw?.path;
+      const runId = runIdFromTranscriptPath(path);
+      if (typeof path !== "string" || runId === null) continue;
+      const fileAt = runCreatedAtMs(runId);
+      if (oldestCandidateBound !== null && fileAt !== null && fileAt < oldestCandidateBound) continue;
+      archiveCandidates.push({ path, runId });
+    }
+
+    // ③ 只读这些候选：身份 + 原始字节（身份没变就沿用上一轮解析出的根）。
+    const archiveCache = new Map();
+    const archiveEntries = new Map(); // path → 与活库条目同形状的派生索引条目
+    let unreadable = 0;
+    await eachBatch(archiveCandidates, async ({ path, runId }) => {
+      let identity;
+      try {
+        identity = identityOf(await statFile(path));
+      } catch {
+        unreadable += 1;
+        blindRunIds.add(runId);
+        archiveEntries.set(path, { runId, identity: null, hash: null, roots: null, trustedRoots: false });
+        return;
+      }
+      const cached = previousArchiveCache?.get(path);
+      if (cached !== undefined && cached.identity !== null && sameIdentity(cached.identity, identity)) {
+        archiveCache.set(path, cached);
+        archiveEntries.set(path, {
+          runId, identity, hash: cached.hash, roots: cached.roots, trustedRoots: cached.roots !== null,
+        });
+        return;
+      }
+      try {
+        const bytes = toBytes(await read(path));
+        const hash = createHash("sha256").update(bytes).digest("hex");
+        const declaredRoots = lineageRootsOf(eventsOf(bytes), runId);
+        archiveCache.set(path, { identity, hash, roots: declaredRoots });
+        archiveEntries.set(path, { runId, identity, hash, roots: declaredRoots, trustedRoots: true });
+      } catch {
+        // 读/解析失败：不缓存（下一轮重读），根不可信。
+        unreadable += 1;
+        blindRunIds.add(runId);
+        archiveEntries.set(path, { runId, identity, hash: null, roots: null, trustedRoots: false });
+      }
+    });
+
+    // ④ 派生索引与按运行折叠：每轮建一次清单（不再为每条谱系重建整份文件列表）。
+    //    文件名取文件自己的名字（活库与归档条目本来就是 `<runId>.jsonl`）。
+    const derivationIndex = new Map();
+    const derivationFiles = [];
+    for (const [path, entry] of files) {
+      derivationIndex.set(path, entry);
+      derivationFiles.push({ name: basename(path), path });
+    }
+    for (const [path, entry] of archiveEntries) {
+      derivationIndex.set(path, entry);
+      derivationFiles.push({ name: basename(path), path });
+    }
+    const copies = new Map(); // runId → [{ name, path }]（同 runId 的全部副本）
+    const rootsOfRun = new Map(); // rootRunId → Set<runId>（凡有一份文件声明该根的运行）
+    for (const [path, entry] of derivationIndex) {
+      if (!copies.has(entry.runId)) copies.set(entry.runId, []);
+      copies.get(entry.runId).push({ name: basename(path), path });
+      if (entry.roots === null || entry.trustedRoots !== true) blindRunIds.add(entry.runId);
+      for (const root of entry.roots ?? []) {
+        if (!rootsOfRun.has(root)) rootsOfRun.set(root, new Set());
+        rootsOfRun.get(root).add(entry.runId);
+      }
+    }
+    const memberFilesFor = (root) => {
+      const out = [];
+      for (const runId of rootsOfRun.get(root) ?? []) {
+        for (const file of copies.get(runId) ?? []) out.push(file);
+      }
+      return out;
+    };
+
+    // ⑤ 未知面折成"最晚能属于哪条谱系"：成员必晚于根，只影响比它早的根（留时钟容差；
+    //    同一毫秒算"可能"——相等不能被排除）。
+    const rootHasUnknownSurface = (root) => {
+      if (archiveRootUnreadable) return true;
+      // 读不出的转录：创建时间早于「它 + 容差」的根可能藏在这份转录里。
+      for (const blindRunId of blindRunIds) {
+        if (childMayFollowRoot(blindRunId, root)) return true;
+      }
+      // 读不出的归档月目录：创建时间不晚于「月末 + 容差」的根可能藏着它的成员。
+      if (monthHazards.length > 0) {
+        const rootAt = runCreatedAtMs(root);
+        if (rootAt === null) return true;
+        for (const monthEnd of monthHazards) {
+          if (monthEnd === null || rootAt <= monthEnd + RUN_CLOCK_TOLERANCE_MS) return true;
+        }
+      }
+      return false;
+    };
+
+    // ⑥ 逐根派生：与派生器同一次请求共享文件清单与缓存；只有得出过结论的才缓存。
+    const supersession = createLineageSupersession({
+      runDir,
+      readTranscriptFn: async (path) => eventsOf(toBytes(await read(path))),
+      // 索引条目不带路径（路径是索引的键）：这里从键取。
+      files: derivationFiles,
+      memberFilesForRoot: memberFilesFor,
+      // 文件清单已注入：派生器不该再枚举。真枚举了就让它失败（= 不推导），不悄悄读盘。
+      enumerateFilesFn: () => {
+        throw new Error("ownerReadModel: lineage derivation must use the read model's file index");
+      },
+    });
+    await supersession.prepare(roots);
+    for (const root of roots) {
+      if (rootHasUnknownSurface(root)) continue; // 不推导、不缓存 → 快照按无法判定
+      const signature = signatureOf(memberFilesFor(root).map((file) => file.path), derivationIndex);
       const previous = lineageDerived.get(root);
       if (previous !== undefined && previous.signature === signature) {
         derived.set(root, previous);
-        return;
+        continue;
       }
-      const supersession = createLineageSupersession({
-        runDir,
-        readTranscriptFn: async (path) => eventsOf(toBytes(await read(path))),
-        // 索引条目不带路径（路径是索引的键）：这里从键取。
-        files: [...files].map(([path, entry]) => ({ name: `${entry.runId}.jsonl`, path })),
-        memberFilesForRoot: (rootRunId) => (members.get(rootRunId) ?? []).map(fileOf),
-        // 文件清单已注入：派生器不该再枚举。真枚举了就让它失败（= 不推导），不悄悄读盘。
-        enumerateFilesFn: () => {
-          throw new Error("ownerReadModel: lineage derivation must use the read model's file index");
-        },
-      });
       const superseded = new Map();
+      let complete = true;
       for (const runId of candidates.get(root)) {
-        let by = null;
         try {
           const result = await supersession.forRun({ runId });
-          by = isValidRunId(result.supersededByRunId) ? result.supersededByRunId : null;
+          if (result.derived !== true) {
+            complete = false; // 没能推导：不缓存，下一轮重试
+            break;
+          }
+          superseded.set(runId, isValidRunId(result.supersededByRunId) ? result.supersededByRunId : null);
         } catch {
-          by = null; // 派生读不出：不推导
+          complete = false;
+          break;
         }
-        superseded.set(runId, by);
       }
-      derived.set(root, { signature, superseded });
-    });
-    return { members, derived, blind };
+      if (complete) derived.set(root, { signature, superseded });
+    }
+    return { derived, archiveCache, unreadable };
   }
 
+  /** 会审索引的键：按 (项目 slug, consultId) 建键——同一 consultId 出现在两个项目时互不覆盖。 */
+  const consultKey = (slug, consultId) => `${slug}\u0000${consultId}`;
+
   /**
-   * 会审结论：逐个项目列 <key>/.wao/runs/consults/，按文件身份缓存组记录。组记录没变、
-   * 席位转录也没变就不重算；重算时，席位转录的文件身份没变就不重读（最终回答文本按
-   * 文件身份缓存）。坏记录计入 unreadable，不中断刷新。
+   * 会审结论：逐个项目列 <key>/.wao/runs/consults/。组记录按文件身份缓存；缓存里只留
+   * 快照需要的字段（投影输入 spec + 算好的 value），不常驻整份组记录，也不常驻席位
+   * 回答原文。记录没变时仍要按本轮的运行索引重算席位状态与 Q1——席位转录可能变了；
+   * Q1 按"席位转录身份 + 记录声明的 Q1 候选"缓存，命中就不重读。条目记下读取时的
+   * key：slug 改指新 key 后，旧 key 的条目不再保留。
+   *
+   * 读不出时不静默消失：目录列不出 → 保留该项目上一轮的全部条目（同一个 key）、项目行
+   * 标 consultRecords: "unknown"；单份记录 stat/读取 I/O 失败 → 保留该记录上一轮的条目、
+   * 项目行也标 "unknown"；都计入 unreadable。坏记录（JSON 坏、consultId 与文件名不符）
+   * 照旧计 unreadable 并跳过、不保留（内容读到了，只是坏）。读取失败不缓存。
    */
   async function collectConsults({ files, runs, keys, read }) {
     const index = new Map();
+    const projectStatus = new Map();
+    const nextSeatQ1 = new Map();
     let unreadable = 0;
     await eachBatch([...keys], async ([slug, key]) => {
-      if (key === null || !(await isDirectory(key))) return;
+      // 只保留同一个 key 下读出的条目：slug 改指到新 key 后，旧 key 的条目属于别的仓库。
+      const keepPreviousProject = () => {
+        const prefix = `${slug}\u0000`;
+        for (const [entryKey, entry] of consultIndex) {
+          if (entryKey.startsWith(prefix) && entry.key === key) index.set(entryKey, entry);
+        }
+      };
+      const keepPreviousRecord = (consultId) => {
+        const previous = consultIndex.get(consultKey(slug, consultId));
+        if (previous !== undefined && previous.key === key) index.set(consultKey(slug, consultId), previous);
+      };
+      if (key === null) {
+        // 两个 key 指向同一个 slug：说不清是哪个仓库，没有可列的会审目录。
+        projectStatus.set(slug, "available");
+        return;
+      }
+      let keyIsDirectory;
+      try {
+        keyIsDirectory = (await statFile(key)).isDirectory();
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          projectStatus.set(slug, "available"); // 项目目录不存在：没有会审记录可列
+        } else {
+          unreadable += 1;
+          projectStatus.set(slug, "unknown");
+          keepPreviousProject();
+        }
+        return;
+      }
+      if (!keyIsDirectory) {
+        projectStatus.set(slug, "available");
+        return;
+      }
       const dir = join(key, ".wao", "runs", "consults");
       let names;
       try {
         names = await listDir(dir);
       } catch (error) {
-        // 没有这个目录 = 这个项目还没开过会审；其余读不出（权限等）如实计数。
-        if (error?.code !== "ENOENT") unreadable += 1;
+        // 没有这个目录 = 这个项目还没开过会审；其余读不出（权限等）时保留上一轮的条目。
+        if (error?.code === "ENOENT") {
+          projectStatus.set(slug, "available");
+        } else {
+          unreadable += 1;
+          projectStatus.set(slug, "unknown");
+          keepPreviousProject();
+        }
         return;
       }
+      projectStatus.set(slug, "available");
       for (const name of Array.isArray(names) ? names : []) {
         if (typeof name !== "string" || !name.endsWith(".json")) continue;
         const consultId = name.slice(0, -".json".length);
         if (!isValidConsultId(consultId)) continue;
         const path = join(dir, name);
+        const entryKey = consultKey(slug, consultId);
         let identity;
         try {
           identity = identityOf(await statFile(path));
         } catch (error) {
-          if (error?.code !== "ENOENT") unreadable += 1;
+          if (error?.code === "ENOENT") continue; // 枚举之后被删：不是"读不出"
+          unreadable += 1;
+          projectStatus.set(slug, "unknown"); // 这一轮的记录没读全：项目行的会审可用性按 unknown
+          keepPreviousRecord(consultId);
           continue;
         }
-        const previous = consultIndex.get(consultId);
-        let record = previous !== undefined && sameIdentity(previous.identity, identity) ? previous.record : null;
-        if (record === null) {
-          record = await loadConsultRecordSafe(consultId, dir, path);
-          if (record === null) {
+        const previous = consultIndex.get(entryKey);
+        let spec;
+        if (previous !== undefined && sameIdentity(previous.identity, identity)) {
+          spec = previous.spec; // 记录没变：不重读，只按本轮的运行索引重算与席位有关的部分
+        } else {
+          // 读取与校验走 loadConsultRecord（consultId 形状、记录里的 consultId 与文件名
+          // 一致、JSON 可解析）。这里区分"读不出"（I/O 失败：保留上一轮、下轮重读）与
+          // "记录本身坏了"（照旧跳过、不保留）；读到半截内容不等，这一轮按坏记录计。
+          // 组记录不是转录，不计进 reread。
+          let readError = null;
+          let record;
+          try {
+            record = await loadConsultRecord({
+              consultId,
+              consultsDir: dir,
+              readFileFn: async () => {
+                try {
+                  return toBytes(await readFile(path)).toString("utf8");
+                } catch (error) {
+                  readError = error;
+                  throw error;
+                }
+              },
+              sleepFn: async () => {},
+            });
+          } catch (error) {
+            if (readError?.code === "ENOENT" || error?.code === "ENOENT") continue; // 记录没了
             unreadable += 1;
-            continue;
+            if (readError !== null) {
+              // I/O 失败（不是坏记录）：保留上一轮条目，项目行的会审可用性按 unknown。
+              projectStatus.set(slug, "unknown");
+              keepPreviousRecord(consultId);
+            }
+            continue; // 坏记录：不保留
           }
+          spec = consultSpec(consultId, record);
         }
-        const seats = locateSeats(record, runs);
-        const seatKeys = JSON.stringify(seats.map((seat) => seatKey(seat, files)));
-        if (previous !== undefined && record === previous.record && previous.seatKeys === seatKeys) {
-          index.set(consultId, previous);
-          continue;
-        }
-        index.set(consultId, {
-          identity, record, seatKeys, value: await consultValue(slug, record, seats, runs, files, read),
+        const seats = locateSpecSeats(spec, runs);
+        index.set(entryKey, {
+          key, identity, spec, value: await consultValue(slug, spec, seats, runs, files, read, nextSeatQ1),
         });
       }
     });
-    return { index, unreadable };
-  }
-
-  async function loadConsultRecordSafe(consultId, dir, path) {
-    try {
-      // 校验（consultId 形状、记录里的 consultId 与文件名一致、JSON 可解析）走
-      // loadConsultRecord。它读到半截内容会隔 100ms 重读几次；读模型本来就每轮刷新
-      // 重来一次，这里不等——半截的记录这一轮按坏记录计，下一轮自然重读。
-      // 直接走读缝：组记录不是转录，不计进 reread。
-      return await loadConsultRecord({
-        consultId,
-        consultsDir: dir,
-        readFileFn: async () => toBytes(await readFile(path)).toString("utf8"),
-        sleepFn: async () => {},
-      });
-    } catch {
-      return null;
-    }
+    // 席位 Q1 缓存只有这一轮用到的席位（nextSeatQ1 每轮新建，只装本轮算过/命中的）。
+    return { index, projectStatus, seatQ1: nextSeatQ1, unreadable };
   }
 
   /**
-   * 组记录里的席位与它们在本运行目录里的定位。定位走 resolveRun 同一份逻辑（只认本
-   * 运行目录的枚举结果）；记录里的 agentId / runId 不合形状就是 null。
+   * 组记录的投影输入：只留快照需要的字段（创建时间、被审运行、Q1 候选、席位的身份与
+   * 记录里的状态观察）。任务书路径、视角片段、席位回答等都不留在内存里。
    */
-  function locateSeats(record, runs) {
+  function consultSpec(consultId, record) {
+    const declared = record.declaredFields;
     const seats = Array.isArray(record.seats)
       ? record.seats.filter((seat) => seat !== null && typeof seat === "object" && !Array.isArray(seat))
       : [];
-    return seats.map((seat) => ({
-      agentId: isValidCanonicalAgentId(seat.agentId) ? seat.agentId : null,
-      runId: isValidRunId(seat.runId) ? seat.runId : null,
-      // 记录点名了一个 run（哪怕 runId 不合形状）：找不到就按 missing 给，不拿记录里的旧观察顶。
-      claimsRun: typeof seat.runId === "string" && seat.runId.length > 0,
-      recordedState: memberOf(SEAT_RUN_STATES, seat.runState),
-      located: isValidRunId(seat.runId) ? locateIn(runs, seat.runId) : null,
-    }));
+    return {
+      consultId,
+      createdAt: iso(tsMs(record.createdAt)),
+      reviewedRunId: isValidRunId(record.reviewedRunId) ? record.reviewedRunId : null,
+      // 记录的 Q1 候选原样保留（compareFields 用它们取值）；是不是"结论题"由闭集判。
+      q1Candidates: Array.isArray(declared?.Q1)
+        ? declared.Q1.filter((value) => typeof value === "string")
+        : null,
+      seats: seats.map((seat) => ({
+        agentId: isValidCanonicalAgentId(seat.agentId) ? seat.agentId : null,
+        runId: isValidRunId(seat.runId) ? seat.runId : null,
+        // 记录点名了一个 run（哪怕 runId 不合形状）：找不到就按 missing 给，不拿记录里的旧观察顶。
+        claimsRun: typeof seat.runId === "string" && seat.runId.length > 0,
+        recordedState: memberOf(SEAT_RUN_STATES, seat.runState),
+      })),
+    };
   }
 
-  /** 席位转录在这一轮的键：定位不到、读不到、或文件身份 + 内容哈希。 */
-  function seatKey(seat, files) {
-    const entry = seat.located === null ? undefined : files.get(seat.located.transcriptPath);
-    if (seat.located === null) return "missing";
-    if (entry === undefined || entry.facts === null) return "unreadable";
-    return signatureOf([seat.located.transcriptPath], files);
+  /**
+   * 记录里的席位与它们在本运行目录里的定位。定位走 resolveRun 同一份逻辑（只认本
+   * 运行目录的枚举结果）。
+   */
+  function locateSpecSeats(spec, runs) {
+    return spec.seats.map((seat) => ({
+      ...seat,
+      located: seat.runId === null ? null : locateIn(runs, seat.runId),
+    }));
   }
 
   /**
    * 一场会审的结论事实。Q1 按决定 0128 重算：取文与 observeSeatRun 同一个
-   * extractFinalAssistantText，归组与取值用 attributeReply / compareFields（声明用组记录
-   * 里的 declaredFields 原样）。只有记录声明了 Q1、且候选值里有闭集结论值时才算，取到的
+   * extractFinalAssistantText，归组与取值用 attributeReply / compareFields（声明用
+   * 记录里的 Q1 候选原样）。只有记录声明了 Q1、且候选值里有闭集结论值时才算，取到的
    * 值也必须是闭集成员——记录是磁盘上可手改的，别的字符串不进快照。
    */
-  async function consultValue(projectSlug, record, seats, runs, files, read) {
-    const declared = record.declaredFields;
-    const q1Declared = Array.isArray(declared?.Q1)
-      && declared.Q1.some((v) => typeof v === "string" && OWNER_CONSULT_Q1_VALUES.includes(v));
-    const attribution = {};
+  async function consultValue(projectSlug, spec, seats, runs, files, read, nextSeatQ1) {
+    const q1Declared = Array.isArray(spec.q1Candidates)
+      && spec.q1Candidates.some((value) => OWNER_CONSULT_Q1_VALUES.includes(value));
+    const q1 = q1Declared
+      ? { candidates: spec.q1Candidates, key: JSON.stringify([...new Set(spec.q1Candidates)].sort()) }
+      : null;
     const rows = [];
     for (const seat of seats) {
       let runState = seat.claimsRun ? "missing" : seat.recordedState;
-      let text = null;
+      let q1Value = null;
       if (seat.located !== null && seat.located.availability === "ok") {
-        runState = runs.get(seat.runId).facts.state;
-        text = await seatText(seat, files, read);
+        const run = runs.get(seat.runId);
+        runState = run === undefined ? "unknown" : run.facts.state;
+        if (q1 !== null && seat.agentId !== null) {
+          const answer = await seatQ1Of({ seat, q1, files, read, nextSeatQ1 });
+          // 席位转录这一轮读不出：与 rerenderConsultFromRecord 同一口径——这一席按
+          // missing 给，且不缓存（下一轮重读）。
+          if (!answer.readable) runState = "missing";
+          else q1Value = answer.q1;
+        }
       }
-      if (seat.agentId !== null && text !== null) attribution[seat.agentId] = attributeReply(text);
-      rows.push({ agentId: seat.agentId, runId: seat.runId, runState, q1: null });
-    }
-    const { fieldValues } = compareFields(attribution, declared);
-    for (const row of rows) {
-      row.q1 = q1Declared && row.agentId !== null
-        ? memberOf(OWNER_CONSULT_Q1_VALUES, fieldValues.Q1?.[row.agentId])
-        : null;
+      rows.push({ agentId: seat.agentId, runId: seat.runId, runState, q1: q1Value });
     }
     return {
-      consultId: record.consultId,
+      consultId: spec.consultId,
       projectSlug,
-      createdAt: iso(tsMs(record.createdAt)),
-      reviewedRunId: isValidRunId(record.reviewedRunId) ? record.reviewedRunId : null,
+      createdAt: spec.createdAt,
+      reviewedRunId: spec.reviewedRunId,
       q1Declared,
       seats: rows,
     };
   }
 
   /**
-   * 席位的最终 assistant 文本（取文与 observeSeatRun 同一个函数；读不到 → null）。按
-   * 转录的文件身份缓存：身份没变就不重读；同一轮里几场会审共用同一席时也只读一次。
+   * 席位的 Q1 值（取文与 observeSeatRun 同一个函数）。只缓存算出来的 Q1：键是席位
+   * 转录的文件身份（签名）+ 记录声明的 Q1 候选；读失败不缓存，下一轮重读。回答原文
+   * 不留在内存里。
    */
-  function seatText(seat, files, read) {
+  async function seatQ1Of({ seat, q1, files, read, nextSeatQ1 }) {
     const path = seat.located.transcriptPath;
     const signature = signatureOf([path], files);
-    const cached = finalTexts.get(path);
-    if (cached !== undefined && cached.signature === signature) return cached.text;
-    const runId = seat.runId;
-    const text = (async () => {
-      try {
-        return extractFinalAssistantText(eventsOf(toBytes(await read(path))), { runId, env: {} });
-      } catch {
-        return null;
-      }
-    })();
-    finalTexts.set(path, { signature, text });
-    return text;
+    // 先看这一轮刚算出的（同一席出现在几场会审里时只读一次），再看上一轮留下的缓存。
+    const cached = nextSeatQ1.get(path) ?? seatQ1.get(path);
+    if (cached !== undefined && cached.signature === signature && cached.q1Key === q1.key) {
+      nextSeatQ1.set(path, cached);
+      return { readable: true, q1: cached.q1 };
+    }
+    let text;
+    try {
+      text = await extractFinalAssistantText(eventsOf(toBytes(await read(path))), { runId: seat.runId, env: {} });
+    } catch {
+      return { readable: false, q1: null };
+    }
+    const { fieldValues } = compareFields({ seat: attributeReply(text) }, { Q1: q1.candidates });
+    const value = memberOf(OWNER_CONSULT_Q1_VALUES, fieldValues.Q1?.seat);
+    nextSeatQ1.set(path, { signature, q1Key: q1.key, q1: value });
+    return { readable: true, q1: value };
   }
 
   /**
    * 分支观测：只对至少有一个请求了交付的运行的项目做，每个项目至多每
-   * OWNER_BRANCH_REFRESH_MS 一次（不论成败）。仓库根不存在、不是目录、或 git 失败都如实
-   * 记 unknown——不拿上一次的结果冒充这一轮的观测。项目没有仓库事实（没有 key，或
-   * 多个 key 指向同一个 slug）时丢掉旧观测；不再有交付运行的项目留着最后一次观测，
-   * 它的时刻一并给出。
+   * OWNER_BRANCH_REFRESH_MS 一次（不论成败）；各项目并行枚举（异步执行器下整轮最长
+   * 约等于单次超时）。仓库根不存在、不是目录、或 git 失败都如实记 unknown——不拿上一次
+   * 的结果冒充这一轮的观测。项目没有仓库事实（没有 key，或 多个 key 指向同一个 slug）
+   * 时丢掉旧观测；不再有交付运行的项目，只要 key 没变就留着最后一次观测，但 key 已变 /
+   * 已没了 / 已变成 null（或 key 目录不再存在）时丢掉——旧观测属于别的仓库或已不可观测。
+   * 观测按 (slug, key) 有效：同一 slug 的 key 换成了另一个仓库时，旧观测作废、立刻重新
+   * 观测。只认 key 自己的仓库：没有 `<key>/.git` 的目录（顶层 key、非仓库、仓库子目录、
+   * 指向仓库子目录的 junction）按 unknown，不调 git；GIT_CEILING_DIRECTORIES 仍保留，
+   * 防空的 .git 目录向上发现祖先仓库。
    */
   async function observeBranches(runs, keys) {
     const next = new Map(branchIndex);
@@ -1176,30 +1616,43 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       const slug = projectSlugOf(run);
       if (slug !== null) wanted.add(slug);
     }
-    for (const slug of wanted) {
+    await Promise.all([...wanted].map(async (slug) => {
       const key = keys.get(slug);
       if (key === undefined || key === null) {
         next.delete(slug);
-        continue;
+        return;
       }
       const previous = next.get(slug);
-      if (previous !== undefined && now !== null && previous.observedAtMs !== null
+      // key 变了 = 换成另一个仓库：当作没观测过（旧集合与旧时刻都不能用）。
+      if (previous !== undefined && previous.key === key && now !== null && previous.observedAtMs !== null
         && previous.observedAtMs <= now && now - previous.observedAtMs < OWNER_BRANCH_REFRESH_MS) {
-        continue;
+        return;
       }
-      // 仓库根不存在或不是目录：没有可观测的分支，不记观测时刻（下一轮再看——stat 很便宜，
-      // 目录一出现就能观测到）。
-      if (!(await isDirectory(key))) {
-        next.set(slug, { repo: "unknown", observedAtMs: null, branches: null });
-        continue;
+      // 仓库根不存在或不是目录、或不是它自己的仓库（没有 <key>/.git）：没有可观测的分支，
+      // 不记观测时刻（下一轮再看——stat 很便宜，目录一出现就能观测到）。
+      if (!(await isDirectory(key)) || !(await pathExists(join(key, ".git")))) {
+        next.set(slug, { key, repo: "unknown", observedAtMs: null, branches: null });
+        return;
       }
       let branches = null;
       try {
-        branches = new Set(listRunBranchRunIds(execGit, key));
+        branches = new Set(await listRunBranchRunIds(execGit, key));
       } catch {
         branches = null;
       }
-      next.set(slug, { repo: branches === null ? "unknown" : "available", observedAtMs: now, branches });
+      next.set(slug, { key, repo: branches === null ? "unknown" : "available", observedAtMs: now, branches });
+    }));
+    // F4：不再有交付运行的项目——key 变了或 key 已没了/变成 null/key 目录或它自己的
+    // 仓库不再存在时，旧观测属于别的仓库或已不可观测，必须丢掉；key 没变、仓库仍在
+    // 才留着最后一次观测。
+    for (const slug of [...next.keys()]) {
+      if (wanted.has(slug)) continue;
+      const key = keys.get(slug);
+      if (key === undefined || key === null || next.get(slug)?.key !== key) {
+        next.delete(slug);
+        continue;
+      }
+      if (!(await isDirectory(key)) || !(await pathExists(join(key, ".git")))) next.delete(slug);
     }
     return next;
   }
@@ -1207,12 +1660,14 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   /**
    * 发布一份快照：用同一个 now 现算每个运行的活性与阶段时效，并当场读心跳租约。
    * 快照里没有任何仓库路径、工作树路径、cwd、转录路径或会审记录路径；项目只给
-   * slug、名字、仓库是否可观测与分支观测时刻。
+   * slug、名字、仓库是否可观测、分支观测时刻与会审记录是否可列。
+   * 快照里的每个对象都是这次新建的：调用方改动返回值不会污染缓存。
    *
    * @param {{now?: number}} [options] — 缺省取 nowFn()；必须是可表示的 epoch ms
    *   （有限且在 Date 范围内），否则抛 TypeError
    * @returns {{generatedAt: string,
-   *   projects: Array<{slug: string, name: string|null, repo: string, branchesObservedAt: string|null}>,
+   *   projects: Array<{slug: string, name: string|null, repo: string,
+   *     branchesObservedAt: string|null, consultRecords: string}>,
    *   runs: object[], consults: object[]}}
    *   consults 按组记录的 createdAt 升序（没有可用时间的排在最后）。
    */
@@ -1235,10 +1690,13 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
           name: projectNames.get(slug) ?? null,
           repo: observed?.repo === "available" ? "available" : "unknown",
           branchesObservedAt: iso(observed?.observedAtMs ?? null),
+          consultRecords: consultProjectStatus.get(slug) === "unknown" ? "unknown" : "available",
         };
       }),
       runs,
-      consults: [...consultIndex.values()].map((entry) => entry.value).sort(byConsultCreatedAt),
+      consults: [...consultIndex.values()]
+        .map((entry) => projectConsult(entry.value))
+        .sort(byConsultCreatedAt),
     };
   }
 
@@ -1267,10 +1725,12 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     }
     const vital = [ok ? f.lastVitalEventAtMs : null, heartbeatAtMs].filter((ms) => ms !== null);
 
-    // 谱系两项无法判定：上一轮刷新失败、有从没读得出过的转录、或本谱系里有读不出的成员。
-    // 这时不给"被取代"的结论，"合法裁决"也一并按无法判定给；声明根是本转录自己的事实，照给。
-    const undeterminable = ok
-      && (lineageStale || lineageBlind || memberUnreadable(f.lineageRoot));
+    // "被取代"能不能下结论：只有会走到派生的运行才需要一条得出过结论的派生（派生缓存
+    // 里没有 = 这一轮没能推导：盲转录、枚举不全、成员读不出等）。它只管"被取代"一项；
+    // legalDecision 只看本运行自己的转录。
+    const derivedForRoot = ok && f.lineageRoot !== null ? lineageDerived.get(f.lineageRoot) : undefined;
+    const supersessionUndeterminable = ok && f.supersessionCandidate === true && !f.lineageConflict
+      && derivedForRoot?.superseded.has(run.runId) !== true;
     const branches = slug === null ? undefined : branchIndex.get(slug)?.branches;
     return {
       runId: run.runId,
@@ -1302,14 +1762,14 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       // 交付：没请求交付就是 null。branchPresent = 该运行的 wao/<runId> 分支还在不在；
       // 仓库 unknown 或还没观测过就是 null（不当作"不在"）。
       delivery: f === null || f.delivery === null ? null : projectDelivery(run.runId, f.delivery, branches),
-      // 失败与额度：只在状态为 failed 时有。
-      failure: f?.failure ?? null,
+      // 失败与额度：只在状态为 failed 时有。每次快照新建对象，不交出缓存里的那个。
+      failure: f === null || f.failure === null ? null : { category: f.failure.category, code: f.failure.code },
       capacity: f === null || f.capacity === null ? null : { code: f.capacity.code, observedAt: iso(f.capacity.observedAtMs) },
       lineageRootRunId: f?.lineageRoot ?? null,
       lineageRootConflict: f?.lineageConflict ?? null,
-      lineageUndeterminable: ok ? undeterminable : null,
-      legalDecision: undeterminable ? null : f?.legalDecision ?? null,
-      supersededByRunId: undeterminable ? null : lineageDerived.get(f?.lineageRoot)?.superseded.get(run.runId) ?? null,
+      supersessionUndeterminable: ok ? supersessionUndeterminable : null,
+      legalDecision: f?.legalDecision ?? null,
+      supersededByRunId: derivedForRoot?.superseded.get(run.runId) ?? null,
     };
   }
 
@@ -1335,11 +1795,6 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     const singleUnreadable = run.availability === "unreadable" && run.locations.length === 1;
     if (run.availability !== "ok" && !singleUnreadable) return null;
     return { runId, availability: run.availability, transcriptPath: run.primaryPath, bucket: run.primaryBucket };
-  }
-
-  /** 本谱系的候选文件里有读不出的成员 → "被取代"无从推导。 */
-  function memberUnreadable(root) {
-    return root !== null && (lineageMembers.get(root) ?? []).some((path) => fileIndex.get(path)?.facts == null);
   }
 
   return { refresh, snapshot, resolveRun };

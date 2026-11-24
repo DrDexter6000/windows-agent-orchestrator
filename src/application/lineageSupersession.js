@@ -27,8 +27,10 @@
 // 时祖先不推导（拒收不上传）。
 //
 // 保守面（一律"不推导"，保持待裁决）：同一根内任何成员（含旁支）有内容不同的
-// 副本；归档枚举 skipped / 枚举错误；根或成员转录读不出、为空、自称别的根；
-// 同一根内已证明父边有任何环（整根不推导，含与根不相连的旁支环）；断链。
+// 副本；归档枚举 skipped / 枚举错误；根或成员转录读不出、为空、自称别的根；成员
+// 转录缺失/读不出导致一条已证明的父边或一个运行被丢掉（derived:false，调用方不得
+// 当成"确定未被取代"缓存）；同一根内已证明父边有任何环（整根不推导，含与根不相连
+// 的旁支环）；断链。
 //
 // 性能（审查 B/E 组）：派生路径先按**原始字节**预筛成员候选——文件名就是根的
 // 直接保留，否则读原文做 `Buffer.includes(根 runId)`（有界并发）；读原文失败
@@ -432,12 +434,22 @@ export function createLineageSupersession({
     }
   }
 
-  /** 已证明的父边（与 --since-parent 同一份检查；读不出/自相矛盾一律 null）。 */
+  /**
+   * 已证明的父边（与 --since-parent 同一份检查）。返回 { edge, parentUnreadable }：
+   *   - edge = {parentRunId} 只在这条边被证明时给出（= 链成立，是结论）；
+   *   - parentUnreadable = true 表示这次没证明出边、并且原因是**父转录读不出 / 缺失 /
+   *     冲突 / 为空**（`readParentEventsFn` 返回 null 或父运行状态不是 ok）——这时不能
+   *     把"没有边"当成链不成立的结论；派生结果要标 derived:false。
+   *   真正"链不成立"（父子转录都读得出，但续修事实不成立、根不一致等）仍是结论。
+   */
   async function parentEdge(runId, events, rootRunId) {
     if (edgeCache.has(runId)) return edgeCache.get(runId);
-    let edge = null;
+    const result = { edge: null, parentUnreadable: false };
     const declared = declaredLineageRoot(events, runId);
     if (!declared.conflict && declared.rootRunId === rootRunId && continuableLineageFact(events, runId)) {
+      // 父转录读没读成：resolveContinuationParentEdge 把"父读不出"折成固定拒绝文案，
+      // 只有在读缝旁记下父运行状态才能把它和"本来就没有父边"分开。
+      let parentReadState = "not_attempted";
       try {
         const resolved = await resolveContinuationParentEdge({
           runId,
@@ -445,24 +457,32 @@ export function createLineageSupersession({
           runDir,
           readParentEventsFn: async (_dir, parentRunId) => {
             const parentRead = await runEvents(parentRunId);
+            parentReadState = parentRead.state;
             return parentRead.state === "ok" ? parentRead.events : null;
           },
         });
-        if (resolved.rootRunId === rootRunId) edge = { parentRunId: resolved.parentRunId };
+        if (resolved.rootRunId === rootRunId) result.edge = { parentRunId: resolved.parentRunId };
       } catch {
-        edge = null;
+        result.edge = null;
+      }
+      if (result.edge === null && parentReadState !== "not_attempted" && parentReadState !== "ok") {
+        result.parentUnreadable = true;
       }
     }
-    edgeCache.set(runId, edge);
-    return edge;
+    edgeCache.set(runId, result);
+    return result;
   }
 
   /**
-   * 一条谱系（按根）的派生：{rootRunId, lineageClosed, byRunId}。
+   * 一条谱系（按根）的派生：{rootRunId, lineageClosed, byRunId, derived}。
    * byRunId：runId → supersededByRunId（只含被取代的运行）。
+   * derived：这次派生有没有得出**结论**。false = 没能推导（枚举不完整、根/成员
+   * 读不出、成员缺失导致丢边或丢运行、冲突、拒绝、断链、有环等保守出口）——调用方
+   * 不得把它的结果当成"确定未被取代"缓存下来，要下一轮重试；true = 结论有效（可能是
+   * "无人被取代"；也包含"转录都读得出、只是父边证不出来"这种真正的链不成立）。
    */
   async function deriveForRoot(rootRunId) {
-    const empty = { rootRunId, lineageClosed: false, byRunId: new Map() };
+    const empty = { rootRunId, lineageClosed: false, byRunId: new Map(), derived: false };
     // J2：刷新失败过的实例不再推导；N1：枚举不完整（含调用方注入的不完整清单）
     // 时不出"被取代"依据——看不全清单就不能断言谱系里没有环。
     if (refreshFailed || enumerationIncomplete) return empty;
@@ -474,8 +494,8 @@ export function createLineageSupersession({
     if (rootRead.state !== "ok") return empty;
     const rootEvents = rootRead.events;
     if (lineageClosedIn(rootEvents, rootRunId)) {
-      // 优先级：谱系显式关闭 > 派生被取代——关闭的谱系不再派生。
-      return { rootRunId, lineageClosed: true, byRunId: new Map() };
+      // 优先级：谱系显式关闭 > 派生被取代——关闭的谱系不再派生。关闭是结论。
+      return { rootRunId, lineageClosed: true, byRunId: new Map(), derived: true };
     }
     const rootDeclared = declaredLineageRoot(rootEvents, rootRunId);
     if (rootDeclared.conflict || rootDeclared.rootRunId !== rootRunId) return empty;
@@ -497,20 +517,32 @@ export function createLineageSupersession({
       if (read.state !== "ok") return empty;
       const declared = declaredLineageRoot(read.events, runId);
       if (declared.conflict || declared.rootRunId !== rootRunId) return empty;
+      const parent = await parentEdge(runId, read.events, rootRunId);
       facts.set(runId, {
         events: read.events,
-        edge: await parentEdge(runId, read.events, rootRunId),
+        edge: parent.edge,
+        parentUnreadable: parent.parentUnreadable,
         packaged: hasBound(read.events, PACKAGED_TYPE, runId),
         decided: read.events.some((e) => e && e.runId === runId && DECISION_TYPES.has(e.type)),
         settled: determineRunSettlement(read.events, runId).status === "settled",
       });
     }
 
-    // 只保留两端都已证明的父边（父运行必须是本谱系可读的成员）。
+    // 只保留两端都已证明的父边（父运行必须是本谱系可读的成员）。边是因为父转录
+    // 读不出/缺失才丢的（parentUnreadable），或父边证明了却缺父运行的事实——都说明
+    // 有一个成员没读成，整条派生不能当结论（F1）；链本身不成立（转录都读得出、
+    // 只是证不出父边）仍是结论。
+    let derived = true;
     const parentOf = new Map();
     for (const [runId, fact] of facts) {
-      if (!fact.edge) continue;
-      if (!facts.has(fact.edge.parentRunId)) continue;
+      if (!fact.edge) {
+        if (fact.parentUnreadable) derived = false;
+        continue;
+      }
+      if (!facts.has(fact.edge.parentRunId)) {
+        derived = false;
+        continue;
+      }
       parentOf.set(runId, fact.edge.parentRunId);
     }
     // 第 120 批续修（审查 F1）：同一根内已证明父边只要有环，整根不推导（恢复
@@ -567,20 +599,20 @@ export function createLineageSupersession({
         if (descendant) byRunId.set(runId, descendant);
       }
     }
-    return { rootRunId, lineageClosed: false, byRunId };
+    return { rootRunId, lineageClosed: false, byRunId, derived };
   }
 
   /** 按根派生（同一次请求内缓存；任何失败折叠成"不推导"）。 */
   async function forRoot(rootRunId) {
     if (typeof rootRunId !== "string" || !isValidRunId(rootRunId)) {
-      return { rootRunId: null, lineageClosed: false, byRunId: new Map() };
+      return { rootRunId: null, lineageClosed: false, byRunId: new Map(), derived: false };
     }
     if (!rootCache.has(rootRunId)) {
       rootCache.set(rootRunId, (async () => {
         try {
           return await deriveForRoot(rootRunId);
         } catch {
-          return { rootRunId, lineageClosed: false, byRunId: new Map() };
+          return { rootRunId, lineageClosed: false, byRunId: new Map(), derived: false };
         }
       })());
     }
@@ -613,6 +645,11 @@ export function createLineageSupersession({
    * 一个运行的派生事实。`events` 供给时用它（调用方手上的同一份快照——
    * 自身已裁决/未打包/未收口时直接返回，不触全库派生）。
    *
+   * `derived` 表示这次派生有没有得出**结论**（false = 没能推导：枚举不完整、
+   * 根/成员读不出、冲突、拒绝、刷新失败等）。调用方只有拿到 `derived === true`
+   * 才能把 supersededByRunId 当"确定未被取代"缓存；false 要下一轮重试、按无法
+   * 判定发布。
+   *
    * `transcriptState` 如实说明读不出转录的原因（missing | empty | unreadable |
    * conflict | untrusted | ok），调用方据此给各写各的跳过理由；`refreshFailed`
    * 表示此前 refresh 失败（枚举抛错/不完整）、本实例已不可信；`enumerationIncomplete`
@@ -625,7 +662,7 @@ export function createLineageSupersession({
    *   transcriptState: string, refreshFailed: boolean, enumerationIncomplete: boolean|null,
    *   lastState: string|null,
    *   decided: boolean, legalDecision: "accepted"|"rejected"|null,
-   *   packaged: boolean, settled: boolean, lineageClosed: boolean,
+   *   packaged: boolean, settled: boolean, lineageClosed: boolean, derived: boolean,
    *   supersededByRunId: string|null}>}
    */
   async function forRun({ runId, events } = {}) {
@@ -642,6 +679,7 @@ export function createLineageSupersession({
       packaged: false,
       settled: false,
       lineageClosed: false,
+      derived: false,
       supersededByRunId: null,
     };
     // 诊断字段只在真正枚举过（fileList 已建）之后才填；刷新失败时枚举不完整，
@@ -672,22 +710,27 @@ export function createLineageSupersession({
     // 非续修谱系成员（自身没有任何 rootRunId 引用）不可能有已证明的后代——
     // 子运行的父边检查要求父运行自己带 run.session_reuse 谱系根。直接按闭态
     // 收口、不触全库预筛（普通交付查询/等待的读面代价为零，Q2 也不做目录枚举）。
+    // "不是谱系成员"本身就是结论：不会有人被它取代。
     if (!gate.lineageRef) {
       result.lineageClosed = lineageClosedIn(ownEvents, runId);
+      result.derived = true;
       return finish(result);
     }
     const rootRunId = declared.rootRunId;
     result.rootRunId = rootRunId;
     // 审查 A2：调用方快照已裁决 / 未打包 / 未收口 → 不调 forRoot，只读根转录判闭态。
+    // 这三条规则各自已经确定"是否被取代"为 null，是结论，不是"没能推导"。
     if (!gate.candidate) {
       result.lineageClosed = await readLineageClosed(rootRunId, rootRunId === runId ? ownEvents : null);
+      result.derived = true;
       return finish(result);
     }
     const derived = await forRoot(rootRunId);
     // 根就是本 run 时，调用方手上的快照是同一份权威事实：文件索引读不出
-    // （注入读器的调用面/归档缺席）时用它兜底判闭态。
-    result.lineageClosed = derived.lineageClosed === true
-      || (rootRunId === runId && lineageClosedIn(ownEvents, rootRunId));
+    // （注入读器的调用面/归档缺席）时用它兜底判闭态——闭态是结论。
+    const ownClosed = rootRunId === runId && lineageClosedIn(ownEvents, rootRunId);
+    result.lineageClosed = derived.lineageClosed === true || ownClosed;
+    result.derived = derived.derived === true || ownClosed;
     result.supersededByRunId = result.lineageClosed
       ? null
       : (derived.byRunId.get(runId) ?? null);

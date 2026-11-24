@@ -26,7 +26,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,7 @@ import {
   createOwnerReadModel,
 } from "../../src/application/ownerReadModel.js";
 import { diagnoseFailure, diagnoseFailureWithBasis } from "../../src/diagnosis.js";
+import { validateDeliveryFacts } from "../../src/transcript.js";
 import { execGitReadOnly, listRunBranchRunIds, RUN_BRANCH_GIT_TIMEOUT_MS } from "../../src/application/runBranches.js";
 import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 
@@ -386,23 +387,23 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
       commit: null,
       verification: null,
       acceptance: { status: null, decidedAt: null },
-      settledAt: null,
+      settledAt: iso(T0 + 5000),
       ambiguous: false,
       packagingFailure: "empty_diff",
       isolationFailure: null,
       branchPresent: null,
-    });
+    }, "打包失败：收口时刻 = 绑定终态事件的时间");
     assert.deepEqual(runOf(snap, "run_iso").delivery, {
       settlement: { status: "settled", reason: "isolation_failed" },
       commit: null,
       verification: null,
       acceptance: { status: null, decidedAt: null },
-      settledAt: null,
+      settledAt: iso(T0 + 5000),
       ambiguous: false,
       packagingFailure: null,
       isolationFailure: { code: "workdir_escape", reason: "write_intent_lexical_outside" },
       branchPresent: null,
-    });
+    }, "隔离失败：收口时刻 = 绑定终态事件的时间");
     assert.deepEqual(runOf(snap, "run_amb").delivery, {
       settlement: { status: "undeterminable", reason: "delivery_facts_malformed" },
       commit: null,
@@ -637,8 +638,25 @@ test("交付事实：settledAt 取终态事件与该轮有效验证（或复验�
   }
 });
 
-// ===== 3. 失败与额度 =====
+test("交付事实校验：绑定的原始验证结果事件经 verificationOutcomeEvent 给出（与 reverifyOutcomeEvent 对称）；不再导出可变集合", async () => {
+  const b = deliveryRun("run_vo");
+  created(b, T0 + 6000, "run_vo");
+  outcome(b, T0 + 7000, "run_vo", "passed");
+  const facts = validateDeliveryFacts(b.events, { expectedRunId: "run_vo", allowVerificationPending: true });
+  assert.equal(facts.verificationOutcomeEvent?.type, "run.delivery_verification_passed");
+  assert.equal(facts.verificationOutcomeEvent?.ts, iso(T0 + 7000), "就是校验选中的那条结果事件");
+  assert.equal(facts.reverifyOutcomeEvent, null, "没有复验链");
 
+  const pending = deliveryRun("run_vo2");
+  created(pending, T0 + 6000, "run_vo2");
+  const pendingFacts = validateDeliveryFacts(pending.events, { expectedRunId: "run_vo2", allowVerificationPending: true });
+  assert.equal(pendingFacts.verificationOutcomeEvent, null, "没有结果事件就是 null（所有提前返回处）");
+
+  const transcriptModule = await import("../../src/transcript.js");
+  assert.equal("DELIVERY_VERIFICATION_OUTCOME_TYPES" in transcriptModule, false, "可变的结论类型集合不再导出");
+});
+
+// ===== 3. 失败与额度 =====
 test("失败与额度：只给闭集 category / code，与 diagnoseFailure 同源；证据文本（含秘密形状与私有路径）不进快照；非失败运行没有这两项", async () => {
   const s = makeStore();
   try {
@@ -832,7 +850,7 @@ test("谱系：续修链里父运行被子运行取代；已裁决的不再算�
     const pick = (runId) => {
       const r = runOf(snap, runId);
       return {
-        root: r.lineageRootRunId, conflict: r.lineageRootConflict, undeterminable: r.lineageUndeterminable,
+        root: r.lineageRootRunId, conflict: r.lineageRootConflict, undeterminable: r.supersessionUndeterminable,
         legal: r.legalDecision, superseded: r.supersededByRunId,
       };
     };
@@ -889,7 +907,7 @@ test("谱系：成员没变不重读、不第二次枚举；成员变了只重�
   }
 });
 
-test("谱系：刷新失败时不推导——谱系两项按无法判定给，声明根照旧；下一轮成功后恢复", async () => {
+test("谱系：刷新失败不改已有快照（任何字段都不动）；下一轮成功后完全恢复", async () => {
   const s = makeStore();
   try {
     s.writeProject(ALPHA);
@@ -911,13 +929,8 @@ test("谱系：刷新失败时不推导——谱系两项按无法判定给，�
 
     broken = true;
     await assert.rejects(() => model.refresh(), /EACCES stub/);
-    const during = model.snapshot({ now: NOW });
-    assert.equal(runOf(during, "run_s_a").supersededByRunId, null, "刷新失败：不再给出被取代");
-    assert.equal(runOf(during, "run_s_a").legalDecision, null);
-    assert.equal(runOf(during, "run_s_a").lineageUndeterminable, true, "并标明是无法判定");
-    assert.equal(runOf(during, "run_s_a").lineageRootRunId, "run_s_a", "声明根是本转录自己的事实，照给");
-    assert.equal(runOf(during, "run_s_b").lineageUndeterminable, true);
-    assert.equal(runOf(during, "run_s_b").legalDecision, null, "已采纳的子运行在同一轮里同样按无法判定给");
+    assert.deepEqual(model.snapshot({ now: NOW }), before, "失败的刷新不改已有快照（任何字段都不动，等 140c 的服务层把整份标为过期）");
+    assert.equal(runOf(model.snapshot({ now: NOW }), "run_s_a").legalDecision, null, "已有快照里的裁决事实照旧");
 
     broken = false;
     await model.refresh();
@@ -927,7 +940,7 @@ test("谱系：刷新失败时不推导——谱系两项按无法判定给，�
   }
 });
 
-test("谱系：成员读不到 → 该谱系不推导并标明，别的谱系不受影响；从没读得出过的转录 → 全部不推导", async () => {
+test("谱系：成员一次瞬时读失败 → 该谱系这一轮不推导并标明，别的谱系不受影响；不缓存失败，下一轮重试恢复", async () => {
   const s = makeStore();
   try {
     s.writeProject(ALPHA);
@@ -938,52 +951,412 @@ test("谱系：成员读不到 → 该谱系不推导并标明，别的谱系不
     put("run_m_x");
     put("run_m_y", { root: "run_m_x", parent: "run_m_x", decision: "accepted" });
 
-    // 新实例：c 从一开始就读不出（坏 JSON）——不知道它属于哪条谱系，全部不推导。
-    writeFileSync(c, "{\"seq\":1,\"type\":\n", "utf8");
-    const blindModel = createOwnerReadModel({ runDir: s.runDir });
-    const blindResult = await blindModel.refresh();
-    assert.equal(blindResult.unreadable, 1);
-    const blind = blindModel.snapshot({ now: NOW });
-    for (const run of blind.runs) {
-      assert.equal(run.lineageUndeterminable, run.availability === "ok" ? true : null, `${run.runId}：从没读得出过的转录在场 → 全部标明无法判定`);
-      assert.equal(run.supersededByRunId, null, `${run.runId}：不推导`);
-    }
-    assert.equal(runOf(blind, "run_m_a").lineageRootRunId, "run_m_a", "声明根照给");
-
-    // 那份转录后来读得出（它不属于 x 这条谱系）→ 压住的事实恢复。恢复出来的必须是按
-    // 成员算出的结果，不能是看不全那一轮留下的空结果。
-    writeFileSync(c, jsonl(lineageRun("run_m_c", { root: "run_m_a", parent: "run_m_b" })), "utf8");
-    await blindModel.refresh();
-    const unblinded = blindModel.snapshot({ now: NOW });
-    assert.equal(runOf(unblinded, "run_m_x").supersededByRunId, "run_m_y", "与它无关的谱系：恢复为被取代");
-    assert.equal(runOf(unblinded, "run_m_x").lineageUndeterminable, false);
-    assert.equal(runOf(unblinded, "run_m_a").supersededByRunId, "run_m_b", "它所属的谱系：成员齐了，同样派生出来");
-
-    // 另一个实例：先读得出（a 已被 b 取代），后来 c 变得读不到 → 只影响 a 这条谱系。
-    const good = lineageRun("run_m_c", { root: "run_m_a", parent: "run_m_b" });
-    const model = createOwnerReadModel({ runDir: s.runDir });
-    writeFileSync(c, jsonl(good), "utf8");
+    // 每轮里对 c 的第二次读失败（第一次是冷普查/增量普查，第二次是派生）。只在同一轮里
+    // 同时"改文件触发的重读 + 派生重读"时可能，用来模拟派生时的瞬时读失败。
+    let failSecondRead = false;
+    let cReads = 0;
+    const io = {
+      readFile: async (p) => {
+        if (p === c) {
+          cReads += 1;
+          if (failSecondRead && cReads === 2) throw Object.assign(new Error("EIO stub"), { code: "EIO" });
+        }
+        return readFile(p);
+      },
+    };
+    const model = createOwnerReadModel({ runDir: s.runDir, io });
     await model.refresh();
-    assert.equal(runOf(model.snapshot({ now: NOW }), "run_m_a").supersededByRunId, "run_m_b", "夹具前提：c 可读时派生出了被取代");
+    assert.equal(runOf(model.snapshot({ now: NOW }), "run_m_a").supersededByRunId, "run_m_b", "夹具前提");
 
-    writeFileSync(c, "{\"seq\":1,\"type\":\n", "utf8");
+    // c 变了（追加事件，签名变化）→ 必须重新派生；派生读 c 时瞬时失败：
+    // a 这条谱系这一轮不推导，且失败不缓存。
+    await appendFile(c, `${JSON.stringify({ seq: 99, ts: iso(T0 + 9000), type: "run.cleanup_done", runId: "run_m_c", agentId: "coder_hq" })}\n`, "utf8");
+    failSecondRead = true;
+    cReads = 0;
     await model.refresh();
-    const snap = model.snapshot({ now: NOW });
-    for (const runId of ["run_m_a", "run_m_b"]) {
-      assert.equal(runOf(snap, runId).lineageUndeterminable, true, `${runId}：谱系里有读不出的成员 → 标明无法判定`);
-      assert.equal(runOf(snap, runId).supersededByRunId, null, `${runId}：不推导`);
-      assert.equal(runOf(snap, runId).legalDecision, null);
-    }
+    const during = model.snapshot({ now: NOW });
+    assert.equal(runOf(during, "run_m_a").supersessionUndeterminable, true, "成员读不出 → 标明无法判定");
+    assert.equal(runOf(during, "run_m_a").supersededByRunId, null, "这一轮不推导");
+    assert.equal(runOf(during, "run_m_b").legalDecision, "accepted", "legalDecision 只看本运行自己的转录，不因别的成员读不出置 null");
     assert.deepEqual(
-      { sup: runOf(snap, "run_m_x").supersededByRunId, und: runOf(snap, "run_m_x").lineageUndeterminable },
+      { sup: runOf(during, "run_m_x").supersededByRunId, und: runOf(during, "run_m_x").supersessionUndeterminable },
       { sup: "run_m_y", und: false },
       "别的谱系不受影响",
     );
 
-    // c 修好 → 恢复。
-    writeFileSync(c, jsonl(good), "utf8");
+    // 文件没变，但失败没有缓存：下一轮重试并恢复。
+    failSecondRead = false;
+    cReads = 0;
     await model.refresh();
-    assert.equal(runOf(model.snapshot({ now: NOW }), "run_m_a").supersededByRunId, "run_m_b");
+    const after = model.snapshot({ now: NOW });
+    assert.equal(runOf(after, "run_m_a").supersededByRunId, "run_m_b", "下一轮重试后恢复为被取代");
+    assert.equal(runOf(after, "run_m_a").supersessionUndeterminable, false);
+
+    // 再一轮都不变：签名命中缓存，不再重读任何成员。
+    cReads = 0;
+    await model.refresh();
+    assert.equal(cReads, 0, "结论已缓存：成员没变就不重读");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系：从没读出过的转录只影响比它早创建的根（runId 带创建时间），不再全库一刀切", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT_OLD = "run_20261110000000000old001";
+    const CHILD_OLD = "run_20261110010000000old002";
+    const ROOT_NEW = "run_20261201000000000new001";
+    const CHILD_NEW = "run_20261201010000000new002";
+    const BLIND = "run_20261115000000000bad001";
+    const put = (runId, o) => s.write(s.bucket(ALPHA.slug), runId, lineageRun(runId, o));
+    put(ROOT_OLD);
+    put(CHILD_OLD, { root: ROOT_OLD, parent: ROOT_OLD, decision: "accepted" });
+    put(ROOT_NEW);
+    put(CHILD_NEW, { root: ROOT_NEW, parent: ROOT_NEW, decision: "accepted" });
+    // 从没读出过的转录（坏 JSON）：11-15 创建。它只可能是更早创建的根的成员。
+    const blindFile = s.write(s.bucket(ALPHA.slug), BLIND, []);
+    writeFileSync(blindFile, "{\"seq\":1,\"type\":\n", "utf8");
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_OLD).supersededByRunId, und: runOf(snap, ROOT_OLD).supersessionUndeterminable },
+      { sup: null, und: true },
+      "比它早的根：可能藏在这份读不出的转录里，按无法判定",
+    );
+    assert.deepEqual(
+      { sup: runOf(snap, CHILD_OLD).supersededByRunId, und: runOf(snap, CHILD_OLD).supersessionUndeterminable },
+      { sup: null, und: false },
+      "被采纳的子运行自己已裁决，不是派生候选",
+    );
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_NEW).supersededByRunId, und: runOf(snap, ROOT_NEW).supersessionUndeterminable },
+      { sup: CHILD_NEW, und: false },
+      "比它晚的根不受影响：子运行一定晚于根，11-15 的转录不可能是 12-01 的根的成员",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系：身份变了又读不出的转录不再沿用旧根——旧根只影响比它早的根，别的根照常推导", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT_OLD = "run_20261110000000000root01";
+    const CHILD_OLD = "run_20261110010000000root02";
+    const ROOT_MID = "run_20261112000000000mid001";
+    const CHILD_MID = "run_20261112010000000mid002";
+    const ROOT_NEW = "run_20261201000000000new001";
+    const CHILD_NEW = "run_20261201010000000new002";
+    const MOVED = "run_20261115000000000mov001";
+    const put = (runId, o) => s.write(s.bucket(ALPHA.slug), runId, lineageRun(runId, o));
+    put(ROOT_OLD);
+    put(CHILD_OLD, { root: ROOT_OLD, parent: ROOT_OLD, decision: "accepted" });
+    put(ROOT_MID);
+    put(CHILD_MID, { root: ROOT_MID, parent: ROOT_MID, decision: "accepted" });
+    put(ROOT_NEW);
+    put(CHILD_NEW, { root: ROOT_NEW, parent: ROOT_NEW, decision: "accepted" });
+    // 先读得出：MOVED 声明 ROOT_OLD 为根。
+    const movedFile = s.write(s.bucket(ALPHA.slug), MOVED, lineageRun(MOVED, { root: ROOT_OLD, parent: CHILD_OLD }));
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    let snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { old: runOf(snap, ROOT_OLD).supersededByRunId, mid: runOf(snap, ROOT_MID).supersededByRunId },
+      { old: CHILD_OLD, mid: CHILD_MID },
+      "夹具前提：两条谱系都派生出了被取代",
+    );
+
+    // 身份变了（内容整体改写）且这一轮读不出：旧根（ROOT_OLD）不可信——它现在只可能是
+    // 比它早的根的成员，所以 ROOT_MID（11-12，早于 MOVED 的 11-15）同样按无法判定。
+    writeFileSync(movedFile, "{\"seq\":1,\"type\":\"run.background_submitted\",\"rootRunId\":\n", "utf8");
+    await model.refresh();
+    snap = model.snapshot({ now: NOW });
+    for (const runId of [ROOT_OLD, ROOT_MID]) {
+      assert.equal(runOf(snap, runId).supersessionUndeterminable, true, `${runId}：比坏转录早的根 → 标明无法判定`);
+      assert.equal(runOf(snap, runId).supersededByRunId, null, `${runId}：不沿用旧根得出的结论`);
+    }
+    for (const runId of [CHILD_OLD, CHILD_MID]) {
+      assert.equal(runOf(snap, runId).supersessionUndeterminable, false, `${runId}：已裁决的子运行不是派生候选`);
+      assert.equal(runOf(snap, runId).supersededByRunId, null);
+    }
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_NEW).supersededByRunId, und: runOf(snap, ROOT_NEW).supersessionUndeterminable },
+      { sup: CHILD_NEW, und: false },
+      "比坏转录晚的根不受影响",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系：归档面纳入派生——活库根被归档里的已采纳子运行取代；只读可能是成员的归档文件，其余只列名", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT = "run_20261110000000000arc001";
+    const CHILD = "run_20261110010000000arc002";
+    const OLDER = "run_20250101000000000arc003"; // 比最老的待派生根还早：不可能是成员
+    s.write(s.bucket(ALPHA.slug), ROOT, lineageRun(ROOT));
+    const monthDir = join(s.base, "runs-archive", "2026-11");
+    mkdirSync(monthDir, { recursive: true });
+    const childFile = join(monthDir, `${CHILD}.jsonl`);
+    writeFileSync(childFile, jsonl(lineageRun(CHILD, { root: ROOT, parent: ROOT, decision: "accepted" })), "utf8");
+    const olderFile = join(monthDir, `${OLDER}.jsonl`);
+    writeFileSync(olderFile, jsonl(lineageRun(OLDER, { root: OLDER })), "utf8");
+
+    const { io, reads } = countingIo();
+    const model = createOwnerReadModel({ runDir: s.runDir, io });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT).supersededByRunId, und: runOf(snap, ROOT).supersessionUndeterminable },
+      { sup: CHILD, und: false },
+      "归档里的已采纳子运行也是成员：活库根被它取代",
+    );
+    assert.ok(reads.includes(childFile), "候选归档文件被读取（用来认出它声明的根）");
+    assert.ok(!reads.includes(olderFile), "runId 早于最老的待派生根的归档文件只列名、不读");
+
+    // 归档根读不出：影响全部待派生根（不推导、不缓存）。
+    const blocked = createOwnerReadModel({
+      runDir: s.runDir,
+      io: {
+        ...io,
+        listArchiveFiles: () => ({ files: [], skipped: [{ dir: join(s.base, "runs-archive"), reason: "root_readdir_failed" }] }),
+      },
+    });
+    await blocked.refresh();
+    assert.equal(runOf(blocked.snapshot({ now: NOW }), ROOT).supersededByRunId, null);
+    assert.equal(runOf(blocked.snapshot({ now: NOW }), ROOT).supersessionUndeterminable, true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系：归档月目录读不出只影响创建时间不晚于「月末 + 时钟容差」的根；整根读不出影响全部", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT_OLD = "run_20261110000000000month1";
+    const CHILD_OLD = "run_20261110010000000month2";
+    // 月末（2026-11-30T23:59:59.999Z）+ 24 小时容差 = 2026-12-01T23:59:59.999Z：
+    // 12-01 白天仍在容差里，12-02 之后才算确定晚于月目录。
+    const ROOT_EDGE = "run_20261201120000000month3";
+    const CHILD_EDGE = "run_20261201130000000month4";
+    const ROOT_NEW = "run_20261202120000000month5";
+    const CHILD_NEW = "run_20261202130000000month6";
+    const put = (runId, o) => s.write(s.bucket(ALPHA.slug), runId, lineageRun(runId, o));
+    put(ROOT_OLD);
+    put(CHILD_OLD, { root: ROOT_OLD, parent: ROOT_OLD, decision: "accepted" });
+    put(ROOT_EDGE);
+    put(CHILD_EDGE, { root: ROOT_EDGE, parent: ROOT_EDGE, decision: "accepted" });
+    put(ROOT_NEW);
+    put(CHILD_NEW, { root: ROOT_NEW, parent: ROOT_NEW, decision: "accepted" });
+
+    const model = createOwnerReadModel({
+      runDir: s.runDir,
+      io: {
+        listArchiveFiles: () => ({
+          files: [],
+          skipped: [{ dir: join(s.base, "runs-archive", "2026-11"), reason: "readdir_failed" }],
+        }),
+      },
+    });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_OLD).supersededByRunId, und: runOf(snap, ROOT_OLD).supersessionUndeterminable },
+      { sup: null, und: true },
+      "2026-11 月目录读不出：创建于 11-10 的根可能藏在这里 → 无法判定",
+    );
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_EDGE).supersededByRunId, und: runOf(snap, ROOT_EDGE).supersessionUndeterminable },
+      { sup: null, und: true },
+      "12-01 白天创建的根仍在「月末 + 24h 容差」之内 → 无法判定",
+    );
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_NEW).supersededByRunId, und: runOf(snap, ROOT_NEW).supersessionUndeterminable },
+      { sup: CHILD_NEW, und: false },
+      "12-02 创建的根确定晚于「月末 + 容差」 → 不受 2026-11 月目录影响",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系：成员按运行折叠——同一 runId 出现第二份声明另一个根的副本后，热刷新与冷刷新给出同一答案", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    s.writeProject(BETA);
+    s.write(s.bucket(ALPHA.slug), "run_cd_a", lineageRun("run_cd_a"));
+    s.write(s.bucket(ALPHA.slug), "run_cd_b", lineageRun("run_cd_b", { root: "run_cd_a", parent: "run_cd_a", decision: "accepted" }));
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    assert.equal(runOf(model.snapshot({ now: NOW }), "run_cd_a").supersededByRunId, "run_cd_b", "夹具前提：先缓存了被取代");
+
+    // 第二份 B：内容不同、声明另一个根（C 自己就不在本运行目录里）。B 现在是冲突副本。
+    const otherRoot = "run_cd_c";
+    s.write(s.bucket(BETA.slug), "run_cd_b", lineageRun("run_cd_b", { root: otherRoot, parent: otherRoot, decision: "accepted" }));
+    await model.refresh();
+
+    const hot = model.snapshot({ now: NOW });
+    const coldModel = createOwnerReadModel({ runDir: s.runDir });
+    await coldModel.refresh();
+    const cold = coldModel.snapshot({ now: NOW });
+    const pick = (snap) => {
+      const run = runOf(snap, "run_cd_a");
+      return { sup: run.supersededByRunId, und: run.supersessionUndeterminable };
+    };
+    assert.deepEqual(pick(hot), pick(cold), "热刷新与冷刷新给出同一个答案（成员按运行折叠）");
+    assert.deepEqual(pick(hot), { sup: null, und: true }, "B 有了冲突副本 → 派生拒绝，按无法判定，不沿用旧的被取代");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系（F1）：已采纳的后代借着读不出的中间父运行时 → 派生没有结论，整条谱系按无法判定", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT = "run_f1_root";
+    const MISSING = "run_f1_missing"; // 没有转录的中间父运行
+    const GRAND = "run_f1_grand";
+    s.write(s.bucket(ALPHA.slug), ROOT, lineageRun(ROOT));
+    s.write(s.bucket(ALPHA.slug), GRAND, lineageRun(GRAND, { root: ROOT, parent: MISSING, decision: "accepted" }));
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT).supersededByRunId, und: runOf(snap, ROOT).supersessionUndeterminable },
+      { sup: null, und: true },
+      "父转录缺失：不能把「父没被取代」当结论缓存（修复前 derived:true → und:false）",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系时间边界（F2）：同一毫秒的坏转录不能被排除——根按无法判定", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT = "run_20261110000000000same01";
+    const CHILD = "run_20261110010000000same02";
+    const BLIND = "run_20261110000000000same03"; // 与 ROOT 同一毫秒
+    const put = (runId, o) => s.write(s.bucket(ALPHA.slug), runId, lineageRun(runId, o));
+    put(ROOT);
+    put(CHILD, { root: ROOT, parent: ROOT, decision: "accepted" });
+    const blindFile = s.write(s.bucket(ALPHA.slug), BLIND, []);
+    writeFileSync(blindFile, "{\"seq\":1,\"type\":\n", "utf8");
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT).supersededByRunId, und: runOf(snap, ROOT).supersessionUndeterminable },
+      { sup: null, und: true },
+      "同一毫秒的坏转录仍可能是这个根的成员（相等算「可能」）",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系时间边界（F2）：坏转录比根早不到 24 小时也算可能；超出容差才不影响", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT_TOL = "run_20261115120000000tol001";
+    const CHILD_TOL = "run_20261115130000000tol002";
+    const BLIND_TOL = "run_20261115000000000tol003"; // 比 ROOT_TOL 早 12 小时（容差内）
+    const ROOT_FAR = "run_20261120000000000far001";
+    const CHILD_FAR = "run_20261120010000000far002";
+    const BLIND_FAR = "run_20261110000000000far003"; // 比 ROOT_FAR 早 10 天（容差外）
+    const put = (runId, o) => s.write(s.bucket(ALPHA.slug), runId, lineageRun(runId, o));
+    put(ROOT_TOL);
+    put(CHILD_TOL, { root: ROOT_TOL, parent: ROOT_TOL, decision: "accepted" });
+    put(ROOT_FAR);
+    put(CHILD_FAR, { root: ROOT_FAR, parent: ROOT_FAR, decision: "accepted" });
+    for (const blind of [BLIND_TOL, BLIND_FAR]) {
+      const file = s.write(s.bucket(ALPHA.slug), blind, []);
+      writeFileSync(file, "{\"seq\":1,\"type\":\n", "utf8");
+    }
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_TOL).supersededByRunId, und: runOf(snap, ROOT_TOL).supersessionUndeterminable },
+      { sup: null, und: true },
+      "坏转录比根早 12 小时（时钟回拨容差内）→ 根按无法判定",
+    );
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT_FAR).supersededByRunId, und: runOf(snap, ROOT_FAR).supersessionUndeterminable },
+      { sup: CHILD_FAR, und: false },
+      "坏转录比根早 10 天（容差外）→ 根照常推导",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系时间边界（F2）：坏转录恰好比根早 24 小时也算可能（三处容差边界一致）", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT = "run_20261115120000000edge01";
+    const CHILD = "run_20261115130000000edge02";
+    const BLIND = "run_20261114120000000edge03"; // 恰好比 ROOT 早 24 小时
+    const put = (runId, o) => s.write(s.bucket(ALPHA.slug), runId, lineageRun(runId, o));
+    put(ROOT);
+    put(CHILD, { root: ROOT, parent: ROOT, decision: "accepted" });
+    const blindFile = s.write(s.bucket(ALPHA.slug), BLIND, []);
+    writeFileSync(blindFile, "{\"seq\":1,\"type\":\n", "utf8");
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT).supersededByRunId, und: runOf(snap, ROOT).supersessionUndeterminable },
+      { sup: null, und: true },
+      "恰好等于容差（不是小于）也算「可能」→ 根按无法判定",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("谱系时间边界（F2）：归档文件在「最老待派生根 − 24h 容差」内仍是候选（时钟回拨）", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const ROOT = "run_20261102120000000arc01";
+    const CHILD = "run_20261101130000000arc02"; // 比根早 23 小时（容差内）
+    s.write(s.bucket(ALPHA.slug), ROOT, lineageRun(ROOT));
+    const monthDir = join(s.base, "runs-archive", "2026-11");
+    mkdirSync(monthDir, { recursive: true });
+    writeFileSync(
+      join(monthDir, `${CHILD}.jsonl`),
+      jsonl(lineageRun(CHILD, { root: ROOT, parent: ROOT, decision: "accepted" })),
+      "utf8",
+    );
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { sup: runOf(snap, ROOT).supersededByRunId, und: runOf(snap, ROOT).supersessionUndeterminable },
+      { sup: CHILD, und: false },
+      "早 23 小时的归档子运行仍在候选范围内 → 被取代（修复前按 runId 早于根被排除）",
+    );
   } finally {
     s.cleanup();
   }
@@ -1018,14 +1391,14 @@ test("谱系：同一转录里声明了互相矛盾的谱系根 → 根为 null 
     assert.equal(clashRun.lineageRootRunId, null, "声明根矛盾：不选其中一个");
     assert.equal(clashRun.lineageRootConflict, true, "并标明是矛盾");
     assert.equal(clashRun.supersededByRunId, null);
-    assert.equal(clashRun.lineageUndeterminable, false, "矛盾是本转录自己的确定事实，不是无法判定");
+    assert.equal(clashRun.supersessionUndeterminable, false, "矛盾是本转录自己的确定事实，不是无法判定");
     assert.equal(clashRun.legalDecision, null);
     assert.equal(runOf(snap, "run_k_decided").legalDecision, "accepted", "别的运行的谱系事实不受影响");
 
     const bad = runOf(snap, "run_k_gone");
     assert.equal(bad.availability, "unreadable");
     for (const key of [
-      "delivery", "failure", "capacity", "lineageRootRunId", "lineageRootConflict", "lineageUndeterminable", "legalDecision",
+      "delivery", "failure", "capacity", "lineageRootRunId", "lineageRootConflict", "supersessionUndeterminable", "legalDecision",
       "supersededByRunId",
     ]) {
       assert.equal(bad[key], null, `读不到的运行：${key} 为 null（不当作"没有"）`);
@@ -1043,54 +1416,118 @@ function git(args, cwd) {
 
 /** 一次性 Git 仓库（os.tmpdir() 下）：一个提交，调用方按需建分支。 */
 function makeRepo() {
-  const repo = mkdtempSync(join(tmpdir(), "wao-owner-read-model-facts-repo-"));
-  git(["init", "-b", "main"], repo);
-  git(["config", "user.email", "t@t.com"], repo);
-  git(["config", "user.name", "T"], repo);
-  writeFileSync(join(repo, "README.md"), "base\n", "utf8");
-  git(["add", "-A"], repo);
-  git(["commit", "-m", "base"], repo);
-  return repo;
+  return makeRepoIn(mkdtempSync(join(tmpdir(), "wao-owner-read-model-facts-repo-")));
 }
 
-test("listRunBranchRunIds：只认 wao/run_ 前缀 + 合法 runId；保持新到旧、不截断；git 失败原样抛出", () => {
+/** 在指定目录建一个一次性 Git 仓库（父目录名可以含 `;` 等特殊字符）。 */
+function makeRepoIn(dir) {
+  mkdirSync(dir, { recursive: true });
+  git(["init", "-b", "main"], dir);
+  git(["config", "user.email", "t@t.com"], dir);
+  git(["config", "user.name", "T"], dir);
+  writeFileSync(join(dir, "README.md"), "base\n", "utf8");
+  git(["add", "-A"], dir);
+  git(["commit", "-m", "base"], dir);
+  return dir;
+}
+
+test("listRunBranchRunIds：只认 wao/run_ 前缀 + 合法 runId；保持新到旧、不截断；git 失败原样抛出", async () => {
+  // 完整 refname（%(refname)）：同名 tag 存在时 short 名会退化/歧义，完整名不受影响。
   const canned = [
-    "wao/run_b",
-    "wao/run_a",
-    "wao/feature", // 不是运行分支
-    "wao/run_bad name", // runId 不合法
-    "main",
-    "wao/run_c",
+    "refs/heads/wao/run_b",
+    "refs/heads/wao/run_a",
+    "refs/heads/wao/feature", // 不是运行分支
+    "refs/heads/wao/run_bad name", // runId 不合法
+    "refs/heads/main",
+    "refs/heads/wao/run_c",
+    "refs/tags/wao/run_tagonly", // 同名 tag 的引用不在 refs/heads 下：不算分支
     "",
   ].join("\r\n");
   const seen = [];
-  const runIds = listRunBranchRunIds((args, cwd) => {
+  const runIds = await listRunBranchRunIds((args, cwd) => {
     seen.push({ args, cwd });
     return canned;
   }, "D:/fake/repo");
   assert.deepEqual(runIds, ["run_b", "run_a", "run_c"], "按输出顺序（新到旧），不认别的分支");
   assert.deepEqual(seen, [{
-    args: ["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads/wao/"],
+    args: ["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads/wao/"],
     cwd: "D:/fake/repo",
-  }], "枚举命令与工作目录原样交给执行缝");
-  // 60 条分支全给（leadOpenItems 的查看帽是它自己的事）。
-  const many = Array.from({ length: 60 }, (_, i) => `wao/run_${i}`).join("\n");
-  assert.equal(listRunBranchRunIds(() => many, "D:/fake/repo").length, 60, "不截断");
-  assert.throws(() => listRunBranchRunIds(() => { throw new Error("git failed"); }, "D:/fake/repo"), /git failed/, "失败原样抛出，由调用方处置");
+  }], "枚举命令与工作目录原样交给执行缝；用完整 refname，不用 short 名");
+  // 60 条分支全给（leadOpenItems 的查看帽是它自己的事）；同步与异步执行器都能用。
+  const many = Array.from({ length: 60 }, (_, i) => `refs/heads/wao/run_${i}`).join("\n");
+  assert.equal((await listRunBranchRunIds(() => many, "D:/fake/repo")).length, 60, "不截断（同步执行器）");
+  assert.equal((await listRunBranchRunIds(async () => many, "D:/fake/repo")).length, 60, "不截断（异步执行器）");
+  await assert.rejects(
+    () => listRunBranchRunIds(() => { throw new Error("git failed"); }, "D:/fake/repo"),
+    /git failed/,
+    "失败原样抛出，由调用方处置",
+  );
+  await assert.rejects(
+    () => listRunBranchRunIds(async () => { throw new Error("git failed async"); }, "D:/fake/repo"),
+    /git failed async/,
+  );
 });
 
-test("execGitReadOnly：真实 git 上只读枚举 wao/ 下的分支；等待上限是有界的正整数", () => {
+test("listRunBranchRunIds：同名 tag 在场时真实仓库里的分支仍然认得出来（%(refname:short) 会退化成 heads/…）", async () => {
+  const repo = makeRepo();
+  try {
+    git(["branch", "wao/run_tagdup"], repo);
+    git(["tag", "wao/run_tagdup"], repo); // 同名 tag
+    const runIds = await listRunBranchRunIds(execGitReadOnly, repo);
+    assert.ok(runIds.includes("run_tagdup"), `同名 tag 不得把存在的分支顶掉：${JSON.stringify(runIds)}`);
+  } finally {
+    rmrfRetry(repo);
+  }
+});
+
+test("execGitReadOnly：真实 git 上只读枚举 wao/ 下的分支；等待上限是有界的正整数", async () => {
   const repo = makeRepo();
   try {
     git(["branch", "wao/run_a"], repo);
     git(["branch", "wao/feature"], repo);
-    const out = execGitReadOnly(["for-each-ref", "--format=%(refname:short)", "refs/heads/wao/"], repo);
-    assert.deepEqual(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).sort(), ["wao/feature", "wao/run_a"]);
+    const out = await execGitReadOnly(["for-each-ref", "--format=%(refname)", "refs/heads/wao/"], repo);
+    assert.deepEqual(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).sort(), [
+      "refs/heads/wao/feature", "refs/heads/wao/run_a",
+    ]);
     assert.ok(!out.includes("main"), "只枚举 refs/heads/wao/");
     assert.ok(Number.isInteger(RUN_BRANCH_GIT_TIMEOUT_MS) && RUN_BRANCH_GIT_TIMEOUT_MS > 0);
     assert.equal(RUN_BRANCH_GIT_TIMEOUT_MS, 10_000);
     assert.equal(OWNER_BRANCH_REFRESH_MS, 30_000, "分支节流窗口导出且值固定");
   } finally {
+    rmrfRetry(repo);
+  }
+});
+
+test("execGitReadOnly：仓库的子目录作 key 时只认 key 自己——祖先仓库不被发现，项目如实 unknown", async () => {
+  const s = makeStore();
+  const repo = makeRepo();
+  try {
+    // 祖先仓库里有 wao/run_anc：没有 GIT_CEILING_DIRECTORIES 时 git 会向上发现它。
+    git(["branch", "wao/run_anc"], repo);
+    const subKey = join(repo, "nested-project");
+    mkdirSync(subKey, { recursive: true });
+    const alpha = { ...ALPHA, key: subKey };
+    s.writeProject(alpha);
+    const b = deliveryRun("run_br_anc");
+    created(b, T0 + 6000, "run_br_anc");
+    outcome(b, T0 + 7000, "run_br_anc", "passed");
+    s.write(s.bucket(alpha.slug), "run_br_anc", b.events);
+
+    // 直接调用：子目录不是仓库 → 拒绝，而不是报祖先仓库的分支。
+    await assert.rejects(() => execGitReadOnly(["for-each-ref", "refs/heads/"], subKey), /git/i);
+
+    const { io, gits } = countingIo();
+    const model = createOwnerReadModel({ runDir: s.runDir, io, nowFn: () => NOW });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.equal(gits.length, 0, "没有 <key>/.git：不调 git（F3 的仓库预检）");
+    assert.equal(projectOf(snap, alpha.slug).repo, "unknown", "祖先仓库的分支集不得冒充这个 key 的观测");
+    assert.deepEqual(projectOf(snap, alpha.slug), {
+      slug: alpha.slug, name: alpha.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
+    });
+    assert.equal(runOf(snap, "run_br_anc").delivery.branchPresent, null, "没有可用观测 → null（不当作不在）");
+  } finally {
+    s.cleanup();
     rmrfRetry(repo);
   }
 });
@@ -1128,10 +1565,10 @@ test("分支：真实临时仓库里 wao/run_* 分支还在 → branchPresent tr
     assert.equal(runOf(snap, "run_br_nodelivery").delivery, null, "没请求交付的运行没有交付对象");
     assert.equal(runOf(snap, "run_br_beta").delivery.branchPresent, null, "仓库不存在 → null（不当作不在）");
     assert.deepEqual(projectOf(snap, alpha.slug), {
-      slug: alpha.slug, name: alpha.name, repo: "available", branchesObservedAt: iso(NOW),
+      slug: alpha.slug, name: alpha.name, repo: "available", branchesObservedAt: iso(NOW), consultRecords: "available",
     }, "快照里的项目条目不带 key");
     assert.deepEqual(projectOf(snap, BETA.slug), {
-      slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null,
+      slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
     });
     assert.equal(gits.length, 1, "只枚举了 alpha 一个项目");
     assert.equal(gits[0].cwd, repo);
@@ -1203,6 +1640,7 @@ test("分支：仓库目录在但 git 失败 → 记 unknown、branchPresent 为
     assert.equal(runOf(snap, "run_br_fail").delivery.branchPresent, null, "git 失败 → unknown（不是 true，也不是 false）");
     assert.deepEqual(projectOf(snap, alpha.slug), {
       slug: alpha.slug, name: alpha.name, repo: "unknown", branchesObservedAt: iso(NOW + OWNER_BRANCH_REFRESH_MS),
+      consultRecords: "available",
     }, "记下这次观测的时刻");
 
     // 仓库目录整个没了：窗口到了之后重新观测——没有可观测的仓库，不记观测时刻，也不调 git。
@@ -1210,12 +1648,133 @@ test("分支：仓库目录在但 git 失败 → 记 unknown、branchPresent 为
     rmrfRetry(repo);
     await model.refresh();
     assert.deepEqual(projectOf(model.snapshot({ now: clock }), alpha.slug), {
-      slug: alpha.slug, name: alpha.name, repo: "unknown", branchesObservedAt: null,
+      slug: alpha.slug, name: alpha.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
     });
     assert.equal(gits.length, 2);
   } finally {
     s.cleanup();
     rmrfRetry(repo);
+  }
+});
+
+test("分支：同一 slug 的 key 在 30 秒窗口内改指另一个仓库 → 当作没观测过，立刻重新观测", async () => {
+  const s = makeStore();
+  const repoA = makeRepo();
+  const repoB = makeRepo();
+  try {
+    s.writeProject({ ...ALPHA, key: repoA });
+    const b = deliveryRun("run_br_move");
+    created(b, T0 + 6000, "run_br_move");
+    outcome(b, T0 + 7000, "run_br_move", "passed");
+    s.write(s.bucket(ALPHA.slug), "run_br_move", b.events);
+    git(["branch", "wao/run_br_move"], repoA);
+
+    let clock = NOW;
+    const model = createOwnerReadModel({ runDir: s.runDir, nowFn: () => clock });
+    await model.refresh();
+    assert.equal(runOf(model.snapshot({ now: clock }), "run_br_move").delivery.branchPresent, true, "夹具前提");
+
+    // 窗口内把 key 改指 repoB（没有这个分支）：旧仓库的观测不能沿用。
+    s.writeProject({ ...ALPHA, key: repoB });
+    clock = NOW + 1000;
+    await model.refresh();
+    const snap = model.snapshot({ now: clock });
+    assert.equal(runOf(snap, "run_br_move").delivery.branchPresent, false, "key 变了：不能沿用旧仓库的分支集合");
+    assert.equal(projectOf(snap, ALPHA.slug).branchesObservedAt, iso(NOW + 1000), "key 变了立刻重新观测，不等 30 秒窗口");
+  } finally {
+    s.cleanup();
+    rmrfRetry(repoA);
+    rmrfRetry(repoB);
+  }
+});
+
+test("分支（F3）：父目录名含 ; 的子目录作 key、指向仓库子目录的 junction → unknown，且不调 git", async (t) => {
+  const s = makeStore();
+  // 父目录名里带 `;`：Windows 的 GIT_CEILING_DIRECTORIES 用 `;` 分隔，这个路径会被切错；
+  // 现在的 <key>/.git 预检在调用 git 之前就否掉，不依赖那层环境变量。
+  const base = mkdtempSync(join(tmpdir(), "wao-f3-semi;parent-"));
+  const junctionKey = join(base, "junction-key");
+  try {
+    const repo = makeRepoIn(join(base, "repo"));
+    git(["branch", "wao/run_f3semi"], repo);
+    const subKey = join(repo, "sub-project");
+    mkdirSync(subKey, { recursive: true });
+    s.writeProject({ ...ALPHA, key: subKey });
+    const b = deliveryRun("run_f3_semi");
+    created(b, T0 + 6000, "run_f3_semi");
+    outcome(b, T0 + 7000, "run_f3_semi", "passed");
+    s.write(s.bucket(ALPHA.slug), "run_f3_semi", b.events);
+
+    // 指向仓库子目录的 junction（Windows）：key 自己不是仓库。
+    if (process.platform !== "win32") {
+      t.skip("junction 只在 Windows 上可建，非 Windows 跳过 junction 部分");
+    } else {
+      symlinkSync(subKey, junctionKey, "junction");
+      const beta = { ...BETA, slug: "beta-22222222", key: junctionKey };
+      s.writeProject(beta);
+      const jb = deliveryRun("run_f3_junc");
+      created(jb, T0 + 6000, "run_f3_junc");
+      outcome(jb, T0 + 7000, "run_f3_junc", "passed");
+      s.write(s.bucket(beta.slug), "run_f3_junc", jb.events.map((e) => ({
+        ...e, project: e.type === "run.background_submitted" ? projectFact(beta) : undefined,
+      })));
+    }
+
+    const { io, gits } = countingIo();
+    const model = createOwnerReadModel({ runDir: s.runDir, io, nowFn: () => NOW });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.equal(gits.length, 0, "没有 <key>/.git：一律不调 git");
+    assert.deepEqual(projectOf(snap, ALPHA.slug), {
+      slug: ALPHA.slug, name: ALPHA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
+    }, "父目录含 ; 的仓库子目录 → unknown");
+    assert.equal(runOf(snap, "run_f3_semi").delivery.branchPresent, null);
+    if (process.platform === "win32") {
+      assert.deepEqual(projectOf(snap, "beta-22222222"), {
+        slug: "beta-22222222", name: BETA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
+      }, "指向仓库子目录的 junction → unknown");
+      assert.equal(runOf(snap, "run_f3_junc").delivery.branchPresent, null);
+    }
+  } finally {
+    s.cleanup();
+    // junction 先单独删（只删链接，不进目标），再删临时树。
+    try { rmSync(junctionKey, { force: true }); } catch { /* 不存在/已删 */ }
+    rmrfRetry(base);
+  }
+});
+
+test("分支（F4）：最后一个交付运行移走、同时 slug 改指新 key → 旧观测丢掉（repo unknown、无观测时刻）", async () => {
+  const s = makeStore();
+  const repoA = makeRepo();
+  const repoB = makeRepo();
+  try {
+    s.writeProject({ ...ALPHA, key: repoA });
+    const b = deliveryRun("run_br_f4");
+    created(b, T0 + 6000, "run_br_f4");
+    outcome(b, T0 + 7000, "run_br_f4", "passed");
+    const runFile = s.write(s.bucket(ALPHA.slug), "run_br_f4", b.events);
+    git(["branch", "wao/run_br_f4"], repoA);
+
+    const model = createOwnerReadModel({ runDir: s.runDir, nowFn: () => NOW });
+    await model.refresh();
+    let snap = model.snapshot({ now: NOW });
+    assert.equal(projectOf(snap, ALPHA.slug).repo, "available", "夹具前提：观测到了旧仓库");
+    assert.equal(projectOf(snap, ALPHA.slug).branchesObservedAt, iso(NOW));
+    assert.equal(runOf(snap, "run_br_f4").delivery.branchPresent, true);
+
+    // 最后一个交付运行移走（删转录），同时项目改指另一个仓库：旧观测必须丢掉。
+    rmSync(runFile);
+    s.writeProject({ ...ALPHA, key: repoB });
+    await model.refresh();
+    snap = model.snapshot({ now: NOW });
+    assert.equal(snap.runs.some((run) => run.runId === "run_br_f4"), false, "运行已移走");
+    assert.deepEqual(projectOf(snap, ALPHA.slug), {
+      slug: ALPHA.slug, name: ALPHA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
+    }, "不再有交付运行且 key 变了 → 旧观测作废（修复前会一直报 available + 旧时刻）");
+  } finally {
+    s.cleanup();
+    rmrfRetry(repoA);
+    rmrfRetry(repoB);
   }
 });
 
@@ -1555,6 +2114,261 @@ test("会审：记录与席位转录都没变 → 不重读（只列目录）；
   }
 });
 
+test("会审：席位回答读失败 → 这一席按 missing 给且不缓存，下一轮重读恢复", async () => {
+  const s = makeConsultStore();
+  try {
+    const dir = s.consultsDir;
+    writeConsult(dir, "consult_20261124170000001aaaaaa", {
+      createdAt: iso(NOW - 1000),
+      seats: [seat("seat_a", "run_seat_a"), seat("seat_b", "run_seat_b")],
+    });
+    s.write(s.bucket(s.alpha.slug), "run_seat_a", seatRun("run_seat_a", "## Q1: PASS"));
+    const b = s.write(s.bucket(s.alpha.slug), "run_seat_b", seatRun("run_seat_b", "## Q1: PASS"));
+    // 席位转录的第二次读（取 Q1；第一次是冷普查）瞬时失败。
+    let bReads = 0;
+    const seatReads = [];
+    const { io } = countingIo({
+      readFile: async (p) => {
+        seatReads.push(p);
+        if (p === b) {
+          bReads += 1;
+          if (bReads === 2) throw Object.assign(new Error("EIO stub"), { code: "EIO" });
+        }
+        return readFile(p);
+      },
+    });
+    const model = createOwnerReadModel({ runDir: s.runDir, io });
+    await model.refresh();
+    const during = consultOf(model.snapshot({ now: NOW }), "consult_20261124170000001aaaaaa");
+    assert.deepEqual(during.seats, [
+      { agentId: "seat_a", runId: "run_seat_a", runState: "completed", q1: "PASS" },
+      { agentId: "seat_b", runId: "run_seat_b", runState: "missing", q1: null }, // 读失败：与 rerenderConsultFromRecord 同口径
+    ], "席位回答读不出 → 这一席 missing，不缓存");
+
+    // 文件没变：失败没有缓存，下一轮重读并恢复。
+    seatReads.length = 0;
+    await model.refresh();
+    assert.ok(seatReads.includes(b), "读失败的席位下一轮重读");
+    assert.deepEqual(
+      consultOf(model.snapshot({ now: NOW }), "consult_20261124170000001aaaaaa").seats.map((x) => x.q1),
+      ["PASS", "PASS"],
+      "下一轮恢复",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("会审：Q1 按（席位转录身份 + 记录声明的候选）缓存——只改候选声明时重算并重读该席转录，都变了才重读", async () => {
+  const s = makeConsultStore();
+  try {
+    const dir = s.consultsDir;
+    const consultId = "consult_20261124170000002aaaaaa";
+    writeConsult(dir, consultId, { createdAt: iso(NOW - 1000), seats: [seat("seat_a", "run_seat_a")] });
+    const a = s.write(s.bucket(s.alpha.slug), "run_seat_a", seatRun("run_seat_a", "## Q1: PASS"));
+    const recordPath = join(dir, `${consultId}.json`);
+
+    const { io, reads } = countingIo();
+    const model = createOwnerReadModel({ runDir: s.runDir, io });
+    await model.refresh();
+    assert.deepEqual(consultOf(model.snapshot({ now: NOW }), consultId).seats.map((x) => x.q1), ["PASS"]);
+
+    // 只改记录声明的候选（转录没变）：Q1 必须按新候选重算 → 重读该席转录一次。
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    record.declaredFields = { Q1: ["FIX_FIRST"] };
+    writeFileSync(recordPath, JSON.stringify(record, null, 2), "utf8");
+    reads.length = 0;
+    await model.refresh();
+    assert.ok(reads.includes(a), "候选声明变了：缓存键不匹配，重读席位转录");
+    assert.deepEqual(consultOf(model.snapshot({ now: NOW }), consultId).seats.map((x) => x.q1), [null],
+      "PASS 不在新候选里 → 未填");
+
+    // 都变了：再刷新一轮不重读（Q1 值已按新候选算好并缓存）。
+    reads.length = 0;
+    await model.refresh();
+    assert.ok(!reads.includes(a), "身份与候选都没变：Q1 命中缓存，不重读回答原文");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("会审：目录列不出 → 保留上一轮条目、项目行 consultRecords unknown；记录读取/stat 瞬时失败保留该条；坏记录照旧跳过不保留", async () => {
+  const s = makeConsultStore();
+  try {
+    const dir = s.consultsDir;
+    const KEEP = "consult_20261124170000003aaaaaa";
+    const READ_FAIL = "consult_20261124170000004bbbbbb";
+    const STAT_FAIL = "consult_20261124170000005cccccc";
+    const BAD = "consult_20261124170000006dddddd";
+    for (const id of [KEEP, READ_FAIL, STAT_FAIL]) writeConsult(dir, id, { seats: [] });
+
+    let failList = false;
+    const readFailPaths = new Set();
+    const statFailPaths = new Set();
+    const io = {
+      listDir: async (d) => {
+        if (failList && d === dir) throw Object.assign(new Error("EACCES stub"), { code: "EACCES" });
+        return readdir(d);
+      },
+      readFile: async (p) => {
+        if (readFailPaths.has(p)) throw Object.assign(new Error("EIO stub"), { code: "EIO" });
+        return readFile(p);
+      },
+      stat: async (p) => {
+        if (statFailPaths.has(p)) throw Object.assign(new Error("EACCES stub"), { code: "EACCES" });
+        return statSync(p, { bigint: true });
+      },
+    };
+    const model = createOwnerReadModel({ runDir: s.runDir, io });
+    await model.refresh();
+    assert.deepEqual(
+      model.snapshot({ now: NOW }).consults.map((c) => c.consultId).sort(),
+      [KEEP, READ_FAIL, STAT_FAIL],
+      "夹具前提：三份记录都读出来了",
+    );
+    assert.equal(projectOf(model.snapshot({ now: NOW }), s.alpha.slug).consultRecords, "available");
+
+    // ① 目录列不出：保留该项目上一轮的全部条目，项目行标 unknown，计入 unreadable。
+    failList = true;
+    let result = await model.refresh();
+    assert.equal(result.unreadable, 1);
+    let snap = model.snapshot({ now: NOW });
+    assert.deepEqual(snap.consults.map((c) => c.consultId).sort(), [KEEP, READ_FAIL, STAT_FAIL], "列不出：不静默消失");
+    assert.equal(projectOf(snap, s.alpha.slug).consultRecords, "unknown");
+
+    // ② 恢复列举，但一份记录读取瞬时失败（先改一下让它重读）：保留该条，项目行标 unknown。
+    failList = false;
+    const readFailPath = join(dir, `${READ_FAIL}.json`);
+    await appendFile(readFailPath, " \n", "utf8");
+    readFailPaths.add(readFailPath);
+    result = await model.refresh();
+    assert.equal(result.unreadable, 1);
+    snap = model.snapshot({ now: NOW });
+    assert.ok(snap.consults.some((c) => c.consultId === READ_FAIL), "读取瞬时失败：保留上一轮的条目");
+    assert.equal(projectOf(snap, s.alpha.slug).consultRecords, "unknown", "读取 I/O 失败 → 项目行会审可用性 unknown");
+
+    // ③ 一份记录 stat 失败（先改一下让它 stat 新身份）：保留该条，项目行标 unknown。
+    readFailPaths.clear();
+    const statFailPath = join(dir, `${STAT_FAIL}.json`);
+    await appendFile(statFailPath, " \n", "utf8");
+    statFailPaths.add(statFailPath);
+    result = await model.refresh();
+    assert.equal(result.unreadable, 1);
+    snap = model.snapshot({ now: NOW });
+    assert.ok(snap.consults.some((c) => c.consultId === STAT_FAIL), "stat 失败：保留上一轮的条目");
+    assert.equal(projectOf(snap, s.alpha.slug).consultRecords, "unknown", "stat I/O 失败 → 项目行会审可用性 unknown");
+
+    // ④ 单份坏记录（JSON 坏）：计 unreadable、跳过、不保留。
+    statFailPaths.clear();
+    writeConsult(dir, BAD, { seats: [] });
+    await model.refresh();
+    assert.ok(model.snapshot({ now: NOW }).consults.some((c) => c.consultId === BAD), "夹具前提：坏之前是好记录");
+    writeFileSync(join(dir, `${BAD}.json`), "{not json", "utf8");
+    result = await model.refresh();
+    assert.equal(result.unreadable, 1);
+    snap = model.snapshot({ now: NOW });
+    assert.ok(!snap.consults.some((c) => c.consultId === BAD), "坏记录：照旧跳过，不保留");
+    assert.deepEqual(snap.consults.map((c) => c.consultId).sort(), [KEEP, READ_FAIL, STAT_FAIL]);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("会审（F6）：保留上一轮条目只限同一个 key——slug 改指新 key 后旧 key 的条目不再保留", async () => {
+  const s = makeStore("wao-owner-read-model-consult-");
+  try {
+    const keyA = join(s.base, "key-a");
+    const keyB = join(s.base, "key-b");
+    mkdirSync(keyA, { recursive: true });
+    mkdirSync(keyB, { recursive: true });
+    const alpha = { ...ALPHA, key: keyA };
+    s.writeProject(alpha);
+    const consultId = "consult_20261124170000011aaaaaa";
+    writeConsult(consultsDirOf(keyA), consultId, { seats: [] });
+
+    const dirB = consultsDirOf(keyB);
+    let failB = false;
+    const io = {
+      listDir: async (d) => {
+        if (failB && d === dirB) throw Object.assign(new Error("EACCES stub"), { code: "EACCES" });
+        return readdir(d);
+      },
+    };
+    const model = createOwnerReadModel({ runDir: s.runDir, io });
+    await model.refresh();
+    assert.deepEqual(model.snapshot({ now: NOW }).consults.map((c) => c.consultId), [consultId], "夹具前提：keyA 下的记录读出来了");
+
+    // 改指 keyB（它的会审目录列不出）：只保留同一个 key 的条目 → 旧 key 的一条都不留。
+    s.writeProject({ ...alpha, key: keyB });
+    failB = true;
+    const result = await model.refresh();
+    assert.equal(result.unreadable, 1);
+    const snap = model.snapshot({ now: NOW });
+    assert.deepEqual(snap.consults, [], "旧 key 的条目不再保留（修复前会沿用 keyA 的记录）");
+    assert.equal(projectOf(snap, alpha.slug).consultRecords, "unknown");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("会审：同一个 consultId 出现在两个项目 → 按 (项目 slug, consultId) 建键，后者不覆盖前者", async () => {
+  const s = makeStore("wao-owner-read-model-consult-");
+  try {
+    const keyAlpha = join(s.base, "alpha-repo");
+    const keyBeta = join(s.base, "beta-repo");
+    mkdirSync(keyAlpha, { recursive: true });
+    mkdirSync(keyBeta, { recursive: true });
+    const alpha = { ...ALPHA, key: keyAlpha };
+    const beta = { ...BETA, key: keyBeta };
+    s.writeProject(alpha);
+    s.writeProject(beta);
+    const consultId = "consult_20261124170000009aaaaaa";
+    writeConsult(consultsDirOf(keyAlpha), consultId, { createdAt: iso(T0), seats: [] });
+    writeConsult(consultsDirOf(keyBeta), consultId, { createdAt: iso(T0 + 1000), seats: [] });
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const rows = model.snapshot({ now: NOW }).consults;
+    assert.deepEqual(
+      rows.map((c) => ({ id: c.consultId, slug: c.projectSlug })),
+      [{ id: consultId, slug: alpha.slug }, { id: consultId, slug: beta.slug }],
+      "同一 consultId 在两个项目各留一条（按 createdAt 升序）",
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("快照：返回的会审对象是这次新建的——改返回值不再污染之后的快照", async () => {
+  const s = makeConsultStore();
+  try {
+    const consultId = "consult_20261124170000010aaaaaa";
+    writeConsult(s.consultsDir, consultId, { seats: [seat("seat_a", "run_seat_a")] });
+    s.write(s.bucket(s.alpha.slug), "run_seat_a", seatRun("run_seat_a", "## Q1: PASS"));
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const first = model.snapshot({ now: NOW });
+    assert.deepEqual(first.consults[0].seats.map((x) => x.q1), ["PASS"]);
+    // 调用方改返回值（含嵌套对象）。
+    first.consults[0].seats[0].q1 = "FIX_FIRST";
+    first.consults[0].seats.push({ agentId: "injected", runId: null, runState: "completed", q1: "PASS" });
+    first.consults[0].consultId = "mutated";
+    const second = model.snapshot({ now: NOW });
+    assert.deepEqual(second.consults, [{
+      consultId,
+      projectSlug: s.alpha.slug,
+      createdAt: iso(T0),
+      reviewedRunId: null,
+      q1Declared: true,
+      seats: [{ agentId: "seat_a", runId: "run_seat_a", runState: "completed", q1: "PASS" }],
+    }], "改返回值不污染缓存");
+    assert.notEqual(second.consults[0], first.consults[0]);
+    assert.notEqual(second.consults[0].seats[0], first.consults[0].seats[0]);
+  } finally {
+    s.cleanup();
+  }
+});
+
 // ===== 7. 快照无路径 =====
 
 /** 递归收集快照里的全部键与字符串值。 */
@@ -1610,11 +2424,14 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
       code: "workdir_escape", reason: "file_written_physical_outside", path: `${PRIVATE_ROOT}\\..\\outside.txt`,
     });
     put("run_leak_iso", isoRun.events);
-    // 谱系：父被子取代。
-    put("run_leak_a", lineageRun("run_leak_a"));
-    put("run_leak_b", lineageRun("run_leak_b", { root: "run_leak_a", parent: "run_leak_a", decision: "accepted" }));
-    // 读不出的运行（先读得出、后来读不出）、没请求交付的运行。
-    const bad = put("run_leak_bad", completedEvents("run_leak_bad"));
+    // 谱系：父被子取代。用带创建时间的 runId：下面那份"读不出的运行"比它们早创建，
+    // 按 140b 修正轮的收窄口径不会波及这两条谱系。
+    const LEAK_ROOT = "run_20261110000000000lk0001";
+    const LEAK_CHILD = "run_20261110010000000lk0002";
+    put(LEAK_ROOT, lineageRun(LEAK_ROOT));
+    put(LEAK_CHILD, lineageRun(LEAK_CHILD, { root: LEAK_ROOT, parent: LEAK_ROOT, decision: "accepted" }));
+    // 读不出的运行（先读得出、后来读不出）、没请求交付的运行。它比上面两条谱系早创建。
+    const bad = put("run_20250101000000000lk0003", completedEvents("run_20250101000000000lk0003"));
     put("run_leak_plain", completedEvents("run_leak_plain"));
     // beta 的一个已采纳交付：仓库不存在。
     const betaRun = deliveryRun("run_leak_beta");
@@ -1645,7 +2462,8 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
     const accRun = runOf(snap, "run_leak_acc");
     assert.equal(accRun.delivery.branchPresent, true);
     assert.equal(accRun.legalDecision, "accepted");
-    assert.equal(runOf(snap, "run_leak_a").supersededByRunId, "run_leak_b");
+    assert.equal(runOf(snap, LEAK_ROOT).supersededByRunId, LEAK_CHILD);
+    assert.equal(runOf(snap, LEAK_ROOT).supersessionUndeterminable, false);
     assert.deepEqual(runOf(snap, "run_leak_cap").failure, { category: "provider_capacity", code: "rate_limited" });
     assert.deepEqual(runOf(snap, "run_leak_cap").capacity, { code: "rate_limited", observedAt: iso(T0 + 5000) });
     assert.equal(runOf(snap, "run_leak_pack").failure.category, "delivery_packaging_failed");
@@ -1659,13 +2477,18 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
     // 键集白名单（DTO 不整包透传：加键必须过这里）。
     assert.deepEqual(Object.keys(snap).sort(), ["consults", "generatedAt", "projects", "runs"]);
     for (const p of snap.projects) {
-      assert.deepEqual(Object.keys(p).sort(), ["branchesObservedAt", "name", "repo", "slug"], "项目条目恰四键，不带 key");
+      assert.deepEqual(Object.keys(p).sort(), ["branchesObservedAt", "consultRecords", "name", "repo", "slug"],
+        "项目条目恰五键，不带 key");
     }
-    assert.deepEqual(projectOf(snap, alpha.slug), { slug: alpha.slug, name: alpha.name, repo: "available", branchesObservedAt: iso(NOW) });
-    assert.deepEqual(projectOf(snap, BETA.slug), { slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null });
+    assert.deepEqual(projectOf(snap, alpha.slug), {
+      slug: alpha.slug, name: alpha.name, repo: "available", branchesObservedAt: iso(NOW), consultRecords: "available",
+    });
+    assert.deepEqual(projectOf(snap, BETA.slug), {
+      slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null, consultRecords: "available",
+    });
     const RUN_KEYS = [
       "agentId", "availability", "capacity", "delivery", "deliveryRequested", "failure", "lastEffectAt", "lastProcessActiveAt",
-      "lastVitalAt", "laneId", "legalDecision", "lineageRootConflict", "lineageRootRunId", "lineageUndeterminable", "liveness",
+      "lastVitalAt", "laneId", "legalDecision", "lineageRootConflict", "lineageRootRunId", "supersessionUndeterminable", "liveness",
       "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince", "startedAt",
       "state", "supersededByRunId", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
     ].sort();
@@ -1696,6 +2519,8 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
 
     const { keys, strings } = collect(snap);
     for (const key of keys) {
+      // supersessionUndeterminable 含 "session" 字样但是谱系判定字段，不是路径类键。
+      if (key === "supersessionUndeterminable") continue;
       assert.ok(!/path|cwd|dir|file|worktree|tree|pid|session|registry|key\b/i.test(key), `快照里不得出现路径类键名：${key}`);
     }
     const variants = (p) => [p, p.replace(/\\/g, "/")];
@@ -1710,6 +2535,11 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
       for (const needle of needles) {
         assert.ok(!str.includes(needle), `快照字符串泄漏了路径/标识：${JSON.stringify(str)} 含 ${JSON.stringify(needle)}`);
       }
+    }
+    // 通用形状检查（不只靠预置的样本串）：任何字符串都不得出现绝对路径形状。
+    const ABSOLUTE_PATH_SHAPE = /[A-Za-z]:[\\/]|\\\\[^\s]|(?:^|\s)\//;
+    for (const str of strings) {
+      assert.ok(!ABSOLUTE_PATH_SHAPE.test(str), `快照字符串出现了绝对路径形状：${JSON.stringify(str)}`);
     }
     assert.ok(!JSON.stringify(snap).includes("private"), "连转义后的形式也不得出现");
   } finally {

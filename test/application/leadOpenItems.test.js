@@ -218,9 +218,10 @@ function runningOnly(runId, cwd) {
   return [startedWithDelivery(runId, cwd), running(runId)];
 }
 
-// 注入 git：for-each-ref 按排序参数返回（refs 一律按**新到旧**传入；
-// sortByFlag=true 时收到 `--sort=committerdate`（旧到新）就倒序返回——变异
-// 排序方向必红）；worktree list 返回脚本化 porcelain。
+// 注入 git：for-each-ref 按排序参数返回（refs 是短分支名，按**新到旧**传入；输出
+// 完整 refname——生产用 --format=%(refname)，与读模型共用同一份枚举）；sortByFlag=true
+// 时收到 `--sort=committerdate`（旧到新）就倒序返回——变异排序方向必红）；worktree list
+// 返回脚本化 porcelain。
 function fakeGit({ refs = [], worktrees = [], sortByFlag = false } = {}) {
   const calls = [];
   return {
@@ -231,7 +232,7 @@ function fakeGit({ refs = [], worktrees = [], sortByFlag = false } = {}) {
         const oldestFirst = sortByFlag && args.includes("--sort=committerdate")
           && !args.includes("--sort=-committerdate");
         const ordered = oldestFirst ? [...refs].reverse() : refs;
-        return `${ordered.join("\n")}\n`;
+        return `${ordered.map((ref) => `refs/heads/${ref}`).join("\n")}\n`;
       }
       if (args[0] === "worktree" && args[1] === "list" && args[2] === "--porcelain") {
         return worktrees.map((p) => `worktree ${p}\nHEAD ${"h".repeat(40)}\n`).join("\n");

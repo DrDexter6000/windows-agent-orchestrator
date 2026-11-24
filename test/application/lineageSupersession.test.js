@@ -157,6 +157,40 @@ test("LS-1: 链 A→B→C 采纳 C——A、B 都被取代，supersededByRunId �
     const root = await s.forRoot("run_a");
     assert.equal(root.lineageClosed, false);
     assert.deepEqual([...root.byRunId.keys()].sort(), ["run_a", "run_b"]);
+    assert.equal(root.derived, true, "链完整：派生是结论");
+  } finally { cleanupDir(runDir); }
+});
+
+// ===== 1b. F1（140b 修正二）：结果不能建在读不出的成员上 =====
+
+test("LS-F1: 中间父运行转录缺失 → derived:false（不能把「未被取代」当结论），supersededByRunId 仍为 null（其它调用方行为不变）", async () => {
+  const runDir = makeRunDir();
+  try {
+    seed(runDir, "run_a", rootRun("run_a"));
+    // run_b 的转录缺失：C 的父边读父时 missing，这条边是因为成员读不出才丢的。
+    seed(runDir, "run_c", childRun("run_c", "run_b", "run_a", { decision: "accepted" }));
+    const s = reader(runDir);
+    const a = await s.forRunId("run_a");
+    assert.equal(a.derived, false, "父转录缺失：派生没有得出过结论");
+    assert.equal(a.supersededByRunId, null, "其余调用方读的字段行为不变");
+    assert.equal(a.lineageClosed, false);
+    const root = await s.forRoot("run_a");
+    assert.equal(root.derived, false, "按根派生同样标未得出");
+    assert.equal(root.byRunId.size, 0);
+  } finally { cleanupDir(runDir); }
+});
+
+test("LS-F1b: 转录都读得出、只是父边证不出来 → derived:true（链不成立是结论）", async () => {
+  const runDir = makeRunDir();
+  try {
+    seed(runDir, "run_a", rootRun("run_a"));
+    // run_x 属于另一条谱系：C 的续修事实指向它，父子转录都读得出但根不一致。
+    seed(runDir, "run_x", rootRun("run_x"));
+    seed(runDir, "run_c", childRun("run_c", "run_x", "run_a", { decision: "accepted" }));
+    const s = reader(runDir);
+    const a = await s.forRunId("run_a");
+    assert.equal(a.derived, true, "转录都读得出、父边证不出来 = 链不成立，仍是结论");
+    assert.equal(a.supersededByRunId, null);
   } finally { cleanupDir(runDir); }
 });
 
