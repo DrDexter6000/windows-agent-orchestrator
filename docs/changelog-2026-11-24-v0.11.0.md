@@ -71,3 +71,15 @@
 
 - deepseek-pro：仍挂着 Owner 的暂停派发说明（“调试中，暂勿派发”），本版未派发、未探测。Lead 问本版是否豁免，Owner 原话（2026-11-24）：“deepseek-pro可豁免”。
 - 状态是“豁免”，不是“通过”；不常驻，不沿用到下一版。
+
+## 发版门槛证据（2026-11-24，本地实跑）
+
+- 全量 `npm test`：**376/376 通过**（6 波，1157 秒，其中 filesystem 波 750 秒；无隔离重跑，runs 守卫干净），跑在发版提交 f0408392 上，用电池（76%）。tag 指向的提交在它之上只加了本节（只改文档），按 `docs/testing.md` 只改文档那一行跑了横切守卫组。
+- surface 再生成（§9 第 3 步）：在 f0408392 上重跑 `npm run gen:surface` 与 `npm run gen:certification`，生成物与入库文件逐字节一致。
+- `npm run reliability`：从主检出在 f0408392 上逐车道跑（`--agent <lane>`，08:01–08:11Z）：
+  - sol、astra：certified（full，含越界写被 OS 沙箱拒绝的检查）。
+  - kimi、deepseek-flash、opus、fable、glm-flash、glm-pro：全过，评 conditional（delta 子集全过不产生 certified）。
+  - deepseek-pro：按上文豁免，未跑。
+- `npm run smoke`（主检出 f0408392，08:11Z）：claude-code PASS，codex PASS（回复 `smoke ok`）。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
+- 1.0.0 额外门槛（§9 第 7 步）：不适用，本版仍是 0.x；TD-194 未关。
+- 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`npm run gen:certification`；`git diff --shortstat v0.10.0 v0.11.0`；`git rev-list --count v0.10.0..v0.11.0`。
