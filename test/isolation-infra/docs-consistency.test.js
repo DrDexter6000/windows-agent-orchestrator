@@ -3824,7 +3824,8 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
   const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
   const { TOOLS } = await import("../../src/mcp/toolSurface.js");
   const { RUNS_SUBCOMMANDS } = await import("../../src/commands/runs.js");
-  // 冻结期望配对（改表 = 有意变更，须同步此钉；批 119：等待行改指 run_await_result）：
+  // 冻结期望配对（改表 = 有意变更，须同步此钉；批 119：等待行改指 run_await_result；
+  // 第 137a 批：续修/纠偏/重打包三行——CLI 补齐后从"只有 MCP"改为对应命令）：
   const expected = [
     { mcp: ["run_status"], cli: ["status"] },
     { mcp: ["run_await_result"], cli: ["runs wait"] },
@@ -3834,11 +3835,14 @@ test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/
     { mcp: ["run_dispatch"], cli: ["run"] },
     { mcp: ["run_delivery", "run_delivery_decide"], cli: ["runs delivery"] },
     { mcp: ["run_delivery_review"], cli: ["runs delivery review"] },
+    { mcp: ["run_continue"], cli: ["runs continue"] },
+    { mcp: ["run_correct"], cli: ["runs correct"] },
+    { mcp: ["run_delivery_repackage"], cli: ["runs delivery repackage"] },
     { mcp: ["run_stop"], cli: ["stop"] },
     { mcp: ["run_diagnose"], cli: ["runs diagnose"] },
   ];
   assert.equal(rows.length, expected.length, `映射表行数漂移（${rows.length} vs ${expected.length}）——删行/加行须同步守卫期望`);
-  const cliTokenRe = /runs delivery review|runs [a-z]+|\bcollect\b|\brun\b|\bstop\b|\bstatus\b/g;
+  const cliTokenRe = /runs delivery repackage|runs delivery review|runs [a-z]+|\bcollect\b|\brun\b|\bstop\b|\bstatus\b/g;
   rows.forEach((row, i) => {
     const cells = splitRowCells(row).map((c) => c.trim());
     const mcp = cells[1]?.match(/[a-z]+(?:_[a-z]+)+/g) ?? [];

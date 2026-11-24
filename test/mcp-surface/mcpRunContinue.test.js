@@ -655,3 +655,77 @@ test("0130-续修5: invalid_delivery on an omitted (inherited) contract carries 
     } finally { await c3.close(); await s3.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
+
+// =====================================================================
+// 第 137a 批：回执投影下沉到应用层——MCP 的 structuredContent（除按面渲染的
+// nextStep）就是 projectContinueOutcome 的产物；CLI `runs continue` 输出同一个
+// 函数的结果（见 test/delivery/runsContinueCorrectRepackageCli.test.js），
+// 两面不会各改各的。
+// =====================================================================
+
+test("137a-MRC: MCP 回执 = 应用层 projectContinueOutcome + 按面的 nextStep（受理、每个拒绝码、累计范围事实、继承合同 guidance）", async () => {
+  const { projectContinueOutcome, CONTINUE_REJECTION_REASONS, CONTINUE_INHERITED_DELIVERY_NOTE } =
+    await import("../../src/application/runContinue.js");
+  const { buildNextStep } = await import("../../src/application/runNextStep.js");
+  const dir = makeGitDir("m137a-mrc-proj-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const PARENT = "run_parent_proj";
+    const refused = (rejectionReason, extra = {}) => ({ accepted: false, parentRunId: PARENT, continuation: true, rejectionReason, ...extra });
+    const cases = [
+      { label: "受理·合同省略", delivery: undefined, raw: () => successResult({ parentRunId: PARENT, runDir: dir }) },
+      { label: "受理·显式合同", delivery: DELIVERY, raw: () => successResult({ parentRunId: PARENT, runDir: dir }) },
+      ...CONTINUE_REJECTION_REASONS.map((reason) => ({ label: `拒绝·${reason}`, delivery: undefined, raw: () => refused(reason) })),
+      { label: "继承合同复验失败·显式合同不带 guidance", delivery: DELIVERY, raw: () => refused("invalid_delivery") },
+      {
+        label: "累计范围·截断标记合法",
+        delivery: DELIVERY,
+        raw: () => refused("continuation_scope_incomplete", {
+          inheritedChangedPaths: ["src/a.js", "src/b.js"], inheritedChangedCount: 3, inheritedChangedTruncated: true,
+          uncoveredInheritedPaths: ["src/b.js"], uncoveredInheritedCount: 1, uncoveredInheritedTruncated: false,
+        }),
+      },
+      {
+        label: "累计范围·不安全路径整组省略",
+        delivery: DELIVERY,
+        raw: () => refused("continuation_scope_incomplete", {
+          inheritedChangedPaths: ["src/a.js"], inheritedChangedCount: 1, inheritedChangedTruncated: false,
+          uncoveredInheritedPaths: ["../outside.js"], uncoveredInheritedCount: 1, uncoveredInheritedTruncated: false,
+        }),
+      },
+      {
+        label: "累计范围·计数与截断矛盾整组省略",
+        delivery: DELIVERY,
+        raw: () => refused("continuation_scope_incomplete", {
+          inheritedChangedPaths: ["src/a.js"], inheritedChangedCount: 1, inheritedChangedTruncated: true,
+          uncoveredInheritedPaths: [], uncoveredInheritedCount: 0, uncoveredInheritedTruncated: false,
+        }),
+      },
+    ];
+    for (const c of cases) {
+      const rawValue = c.raw();
+      const { server } = makeServer({ dir, serviceResult: () => rawValue });
+      const client = await buildInMemoryClient(server);
+      try {
+        const r = await client.callTool({
+          name: "run_continue",
+          arguments: { parentRunId: PARENT, prompt: "fix", expectedWorkspaceRoot: dir, ...(c.delivery ? { delivery: c.delivery } : {}) },
+        });
+        assert.equal(r.isError, undefined, `${c.label}: 不是错误`);
+        const expected = {
+          ...projectContinueOutcome(rawValue, c.delivery),
+          ...(rawValue.accepted
+            ? {
+                nextStep: buildNextStep({
+                  surface: "mcp", situation: "dispatch_accepted", runId: rawValue.runId,
+                  suffix: c.delivery === undefined ? CONTINUE_INHERITED_DELIVERY_NOTE : "",
+                }),
+              }
+            : {}),
+        };
+        assert.deepEqual(r.structuredContent, expected, `${c.label}: structuredContent 就是共享投影 + nextStep`);
+        assert.deepEqual(JSON.parse(r.content[0].text), expected, `${c.label}: text 与 structuredContent 同一份`);
+      } finally { await client.close(); await server.close(); }
+    }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});

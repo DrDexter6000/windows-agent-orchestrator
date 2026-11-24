@@ -99,6 +99,59 @@ function withCliClauseIfFits(base, clause, suffix) {
   return withClause.length <= NEXT_STEP_MAX_LEN ? withClause : base + suffix;
 }
 
+/**
+ * 重挂/等待命令里回显调用方给的 --run-dir 值：含空白的路径加双引号（runs wait
+ * 多目标的重挂行与续修受理回执的等待命令共用这一条规则）。
+ * @param {string} value
+ * @returns {string}
+ */
+export function quoteRunDirFlag(value) {
+  return /\s/.test(value) ? `"${value}"` : value;
+}
+
+// 回显 --run-dir 时不接受控制字符（C0、DEL、C1）——带进回执会破坏行结构。
+const RUN_DIR_CONTROL_CHARS_RE = /[\x00-\x1f\x7f-\x9f]/;
+
+/**
+ * 第 137a 批续修 1：CLI 面的等待命令带上调用方给的 --run-dir（照抄才找得到不在
+ * 缺省目录里的运行）。实际值含控制字符、或带上它整句就超上限时写占位
+ * `--run-dir <DIR>`——受理已经发生，不能因为一个路径太长让回执变成报错。
+ * 占位那句仍超限（只剩 runId 本身长到离谱这一种可能）时由 render 末尾的上限
+ * 守卫照旧抛错。
+ */
+function withRunDirIfFits(command, runDirFlag, suffix) {
+  // 复核（sol）：--run-dir 放在 --until-settled 之前——句末的句号不粘在路径上
+  // （放在最后时照抄会把 "." 收进路径）。整句长度与放在最后时相同。
+  const tail = ` --until-settled.${suffix}`;
+  if (runDirFlag === null) return `${command}${tail}`;
+  const actual = `${command} --run-dir ${quoteRunDirFlag(runDirFlag)}${tail}`;
+  if (!RUN_DIR_CONTROL_CHARS_RE.test(runDirFlag) && actual.length <= NEXT_STEP_MAX_LEN) return actual;
+  return `${command} --run-dir <DIR>${tail}`;
+}
+
+/**
+ * 第 137a 批：MCP 有界等待超窗（run_delivery_repackage / run_delivery_reverify
+ * 的 pending 回执）末尾补的一句。那两个回执没有 nextStep 字段、原有文字也不设
+ * 长度上限；这里只构造**新增的这一句**——自足的下一步：先 MCP 写法（服务进程被
+ * 换掉后以相同输入再调一次），后 CLI 写法（宿主有后台命令行时改用那条 CLI 命令：
+ * 不受单次调用时限，也不随 MCP 服务重启中断），与 dispatch_accepted 同一句式。
+ * 整句连同 CLI 半句超过上限时只留 MCP 写法（runId 很长时就是这样）。
+ *
+ * @param {string} mcpTool — 再调一次的 MCP 工具名（如 run_delivery_repackage）
+ * @param {string} cliCommand — 等价的 CLI 命令（带 runId 与占位参数）
+ * @returns {string}
+ */
+export function buildInterruptedRerunNextStep(mcpTool, cliCommand) {
+  return withCliClauseIfFits(
+    `If this MCP server is replaced before the outcome lands, the attempt stops: call ${mcpTool} again with the same input to re-run it.`,
+    backgroundShellClause(
+      cliCommand,
+      "re-runs it, free of the per-call timeout and of an MCP server restart",
+    ),
+    "",
+  );
+}
+
 function render(surface, situation, runId, extras) {
   const m = minutesFromMs(extras.vitalSignAgeMs ?? 0);
   let text;
@@ -125,13 +178,19 @@ function render(surface, situation, runId, extras) {
       break;
     case "dispatch_accepted":
       // 第 136 批：MCP 面在 MCP 写法后补一句 CLI 写法（带受理的 runId）。
+      // CLI 面也接调用方的后缀（续修受理时写明继承合同的那半句，决定 0130）。
       text = surface === "mcp"
         ? withCliClauseIfFits(
           "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles.",
           backgroundShellClause(`wao runs wait ${runId} --until-settled`, "waits until settlement"),
           extras.suffix,
         )
-        : `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId} --until-settled.`;
+        : withRunDirIfFits(
+          `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId}`,
+          // 续修 1：调用方给了 --run-dir 就带上（放不下实际值写占位）。
+          extras.runDirFlag,
+          extras.suffix,
+        );
       break;
     case "settled_line": {
       // CLI 等待器的收口终行（按收口判定的 reason 闭集分支）。
@@ -162,15 +221,17 @@ function render(surface, situation, runId, extras) {
       // 行同款）。只陈述谱系事实，不断言 run_continue 一定受理（资格检查在那
       // 边，拒绝零副作用、闭集）；不建议采纳或拒收。acceptanceStatus 只有
       // null（未决定）与 "rejected" 两支（accepted 的交付不可续，提示判定已排除）。
+      // 第 137a 批：CLI 面写 CLI 命令（wao runs continue），不再点名 MCP 工具；
+      // 未决定那句的 runId 触顶长度不短于改前（77 字符）。
       text = surface === "mcp"
         ? (extras.acceptanceStatus === "rejected"
           ? "Delivery settled; the Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. Verification passed is not acceptance."
           : "Delivery settled. Its lineage was dispatched continuable and it is not accepted: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything. An accepted delivery can no longer be continued. Verification passed is not acceptance.")
         : (extras.acceptanceStatus === "rejected"
-          ? `Settled. The Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility before changing anything. Verification passed is not acceptance.`
+          ? `Settled. The Lead decision is recorded: rejected. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${runId} --prompt-file <FILE> can resume the same worker conversation; it checks eligibility before changing anything. Verification passed is not acceptance.`
           // 第 136 批续修：审查命令让这一句长了 13 字符——别处改短 28 字符，runId
           // 触顶长度从 70 提到 78，同一长度的 runId 不比改动前更早触顶。
-          : `Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`);
+          : `Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${runId} --prompt-file <FILE> can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`);
       break;
     case "delivery_superseded":
       // 第 120 批：收口的交付已有被采纳的后代（派生事实）。只说这一件事——
@@ -181,13 +242,18 @@ function render(surface, situation, runId, extras) {
       // 终态等验证、验证者已证明不在。出口仍是既有的：未决定时有界拒收，
       // 已拒收则没有可等的；要用内容都走采纳协议手工采纳。
       // B91：completed 形状不可重试（验证者死了就是死了）；终态 failed——只有
-      // 重新打包的交付会走到这里——且未决定时可再调 MCP 工具
-      // run_delivery_repackage（相同输入）重跑验证，不产生
-      // 第二个提交；已拒收后 repackage 会拒绝，两条形状同用现有 rejected 文案。
+      // 重新打包的交付会走到这里——且未决定时按相同范围重跑验证（第 137a 批：
+      // CLI 面写 CLI 命令 wao runs delivery repackage，不产生
+      // 第二个提交）；已拒收后 repackage 会拒绝，两条形状同用现有 rejected 文案。
+      // 续修 1（会审 kimi、sol）：带 --cwd <workspace root> 占位——Lead 从主检出
+      // 照抄、交付属于另一棵工作树时，没有它会被归属门拒绝。真实 runId 只出现在
+      // 拒收命令里（照抄即用），重新打包命令用 <runId> 占位：两句都带真实 id 时
+      // runId 到 99 字符整句就超限抛错，收口结果丢失；现在触顶长度不短于改前
+      // 的 182（实测 183）。
       text = extras.acceptanceStatus === "rejected"
         ? "Its verification will not finish and the delivery is already rejected; nothing is left to wait for. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\")."
         : extras.terminalState === "failed"
-          ? `Its verification is no longer running. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit. Or reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>.`
+          ? `Its verification is no longer running. Call wao runs delivery repackage <runId> --allowed-path <path>... --cwd <workspace root> (the same allowed paths) to re-run the verification without creating a second commit. Or reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>.`
           : `Its verification will not finish. Reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>. To use its content, adopt the delivery commit by hand under the adoption protocol (wao manual delivery \"验证失败采纳协议\"); wao runs delivery ${runId} shows the commit.`;
       break;
     case "runner_gone":
@@ -200,9 +266,11 @@ function render(surface, situation, runId, extras) {
     case "runner_unproven":
       // 第 107 批：证明不了 runner 已不在（静默满 30 分钟 + 未知类拒绝，退出码
       // 5）。运行可能仍在变化——不说"等待不会改变事实"。先看当前状态、再干跑
-      // settle 看门事实（不写任何东西）；停掉（停掉后可续谱系才能用 MCP 工具
-      // run_continue——它只接终态的父运行）、结算还是重新挂等待，都归 Lead。
-      text = `The runner's absence cannot be proven, so the run may still change. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts (it writes nothing). The Lead then decides: stop it (wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue), settle it, or attach the wait again.`;
+      // settle 看门事实（不写任何东西）；停掉（停掉后可续谱系才能续修——续修只
+      // 接终态的父运行）、结算还是重新挂等待，都归 Lead。
+      // 第 137a 批：续修写 CLI 命令 wao runs continue；命令比原先的工具名长，同句
+      // 别处改短——runId 触顶长度不短于改前（39 字符）。
+      text = `The runner's absence cannot be proven, so the run may still change. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> for the gate facts (writes nothing). The Lead decides: stop it (wao stop with the --observed-seq from status and a reason; then a continuable lineage can resume via wao runs continue <runId> --prompt-file <FILE>), settle it, or re-attach the wait.`;
       break;
     case "consult_seats_running": {
       if (surface === "mcp") {
@@ -284,8 +352,13 @@ export function runnerUnprovenReport({ state, refusal, quietMs, rebooted }) {
  * @param {string} [input.runId] — CLI 面必给；MCP 面只有 dispatch_accepted 用
  *   （末尾 CLI 命令带本次受理的 runId）
  * @param {string} [input.suffix] — MCP 面 dispatch_accepted / consult_seats_running
- *   用：调用方要追加在末尾的后缀（如合同提醒、继承合同那半句）。它和 CLI 半句
- *   一起算长度，由这里拼好返回——调用方不要再自行追加。其余情形不用。
+ *   与 CLI 面 dispatch_accepted 用：调用方要追加在末尾的后缀（如合同提醒、继承
+ *   合同那半句）。MCP 面它和 CLI 半句一起算长度，由这里拼好返回——调用方不要
+ *   再自行追加。其余情形不用。
+ * @param {string|null} [input.runDirFlag] — 只有 CLI 面 dispatch_accepted 用（第
+ *   137a 批续修 1）：调用方显式给的 --run-dir 值，等待命令原样带上（含空白的
+ *   加双引号）；放不下实际值或含控制字符时写占位 `--run-dir <DIR>`，不抛错。
+ *   没给（null）时等待命令不带 --run-dir。别的面/情形传了即抛错（输入合同）。
  * @param {number|null} [input.vitalSignAgeMs] — 毫秒（vitalSignAgeMs 共享函数的输出）
  * @param {string|null} [input.settlementReason]
  * @param {string|null} [input.acceptanceStatus]
@@ -306,6 +379,7 @@ export function buildNextStep({
   situation,
   runId = null,
   suffix = "",
+  runDirFlag = null,
   vitalSignAgeMs = null,
   settlementReason = null,
   acceptanceStatus = null,
@@ -363,10 +437,19 @@ export function buildNextStep({
   if (typeof suffix !== "string") {
     throw new Error(`buildNextStep: suffix must be a string, got: ${JSON.stringify(suffix)}`);
   }
+  // 第 137a 批续修 1：--run-dir 回显只有 CLI 面 dispatch_accepted 渲染，且必须是非空
+  // 字符串——传给别的面/情形是调用方接错线，响亮失败而不是静默忽略。
+  if (runDirFlag !== null) {
+    if (surface !== "cli" || situation !== "dispatch_accepted"
+      || typeof runDirFlag !== "string" || runDirFlag.length === 0) {
+      throw new Error(`buildNextStep: runDirFlag needs a non-empty string on CLI dispatch_accepted only, got it for ${situation}/${surface}`);
+    }
+  }
   if (vitalSignAgeMs !== null && !Number.isFinite(vitalSignAgeMs)) {
     vitalSignAgeMs = null;
   }
   return render(surface, situation, runId, {
+    runDirFlag,
     suffix,
     vitalSignAgeMs,
     settlementReason,

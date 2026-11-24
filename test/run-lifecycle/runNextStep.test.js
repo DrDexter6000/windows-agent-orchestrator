@@ -13,11 +13,13 @@ import assert from "node:assert/strict";
 
 import {
   buildNextStep,
+  buildInterruptedRerunNextStep,
   runWaitNextStep,
   NEXT_STEP_MAX_LEN,
   NEXT_STEP_SITUATIONS,
 } from "../../src/application/runNextStep.js";
 import { LEAD_ADVISORY_WIRE_MAX_LEN } from "../../src/application/runQuietAdvisory.js";
+import { CONTINUE_INHERITED_DELIVERY_NOTE } from "../../src/application/runContinue.js";
 
 const RUN_ID = "run_20261029210000000nextstp";
 
@@ -310,25 +312,33 @@ test("NEXT-10: delivery_continuable——两面 × 未决定/已拒收四句；a
   const mcpRejected = buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "rejected" });
   assert.match(mcpRejected, /^Delivery settled; the Lead decision is recorded: rejected\. Its lineage was dispatched continuable: for a narrow fix, run_continue can resume the same worker conversation with its context loaded; it checks eligibility before changing anything\. Verification passed is not acceptance\.$/);
 
-  // CLI 未决定：带 runId（审查命令 + parentRunId）。第 136 批续修：审查命令让模板
+  // CLI 未决定：带 runId（审查命令 + 续修命令）。第 136 批续修：审查命令让模板
   // 长了 13 字符，别处改短 28 字符——同一长度的 runId 不比改动前更早触顶。
+  // 第 137a 批：续修写 CLI 命令 wao runs continue（CLI 有入口了，不再点名 MCP 工具）。
   const cliUndecided = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: null });
   assert.equal(cliUndecided,
-    `Settled. Delivery awaits the Lead's review: wao runs delivery review ${RUN_ID} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${RUN_ID}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`);
+    `Settled. Delivery awaits the Lead's review: wao runs delivery review ${RUN_ID} --all. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${RUN_ID} --prompt-file <FILE> can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`);
   // 76 字符的可续 runId（会审 sol 用 65 字符复现了触顶：改动前 469、改审查命令后
   // 482）——现在整句仍在限内；再长仍照旧抛错（不改上限、不截断 id）。
   const id76 = "run_" + "y".repeat(72);
   const fits76 = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: id76, acceptanceStatus: null });
   assert.ok(fits76.length <= NEXT_STEP_MAX_LEN, `${fits76.length} > ${NEXT_STEP_MAX_LEN}`);
   assert.ok(fits76.includes(`wao runs delivery review ${id76} --all.`));
+  // 第 137a 批：runId 触顶长度不短于改前——77 字符仍放得下，78 字符照旧抛错。
+  const id77 = "run_" + "y".repeat(73);
+  assert.ok(buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: id77, acceptanceStatus: null }).length <= NEXT_STEP_MAX_LEN);
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: "run_" + "y".repeat(74), acceptanceStatus: null }),
+    /exceeds 480/,
+  );
   assert.throws(
     () => buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: "run_" + "y".repeat(75), acceptanceStatus: null }),
     /exceeds 480/,
   );
 
-  // CLI 已拒收。
+  // CLI 已拒收（第 137a 批：续修同样写 CLI 命令）。
   const cliRejected = buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: "rejected" });
-  assert.match(cliRejected, new RegExp(`^Settled\\. The Lead decision is recorded: rejected\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${RUN_ID}\\) can resume the same worker conversation; it checks eligibility before changing anything\\. Verification passed is not acceptance\\.$`));
+  assert.match(cliRejected, new RegExp(`^Settled\\. The Lead decision is recorded: rejected\\. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${RUN_ID} --prompt-file <FILE> can resume the same worker conversation; it checks eligibility before changing anything\\. Verification passed is not acceptance\\.$`));
 
   for (const text of [mcpUndecided, mcpRejected, cliUndecided, cliRejected]) {
     assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length} > ${NEXT_STEP_MAX_LEN}`);
@@ -375,17 +385,22 @@ test("NEXT-11: runner_gone——只有 CLI 面；含 settle/stop 出口与 workt
 
 // ═══════════════════════════════════════════════════════════════════════════
 // B91：verifier_gone 按 terminalState 分支——终态 failed（只有重新打包的交付
-// 走到这里）且未决定时渲染指向再调 run_delivery_repackage 的新文案；completed
+// 走到这里）且未决定时渲染指向 `wao runs delivery repackage` 的新文案（第 137a 批
+// 起 CLI 面写 CLI 命令）；completed
 // 形状与已拒收文案逐字不变。仍只有 CLI 面、仍 ≤480。
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决定的新文案；completed 两支逐字不变", () => {
-  // 终态 failed、未决定：新文案（再调 run_delivery_repackage 重跑验证 + pending 拒收出口）。
+  // 终态 failed、未决定：新文案（再跑一次验证 + pending 拒收出口）。第 137a 批：
+  // CLI 面写 CLI 命令 wao runs delivery repackage（它有了入口），不再点名 MCP 工具。
+  // 续修 1（会审 kimi、sol）：带 --cwd <workspace root> 占位（照抄到另一棵工作树的
+  // 交付不会被归属门拒绝）；句中只出现一次真实 runId（拒收命令里），重新打包命令用
+  // <runId> 占位——runId 触顶长度回到不少于改前的 182（见 NEXT-20）。
   const failed = buildNextStep({
     surface: "cli", situation: "verifier_gone", runId: RUN_ID,
     acceptanceStatus: "pending", terminalState: "failed",
   });
-  assert.match(failed, /^Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit\. Or reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\.$/);
+  assert.match(failed, /^Its verification is no longer running\. Call wao runs delivery repackage <runId> --allowed-path <path>\.\.\. --cwd <workspace root> \(the same allowed paths\) to re-run the verification without creating a second commit\. Or reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\.$/);
   assert.ok(failed.length <= NEXT_STEP_MAX_LEN, `${failed.length}`);
 
   // completed、未决定：旧文案逐字不变（terminalState 缺省即 completed 形状）。
@@ -393,7 +408,7 @@ test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决�
     surface: "cli", situation: "verifier_gone", runId: RUN_ID, acceptanceStatus: "pending",
   });
   assert.match(completedPending, /^Its verification will not finish\. Reject it while it is pending: wao runs delivery run_\S+ --reject --reason-file <FILE>\./);
-  assert.ok(!completedPending.includes("run_delivery_repackage"), "completed 形状不指向 repackage");
+  assert.ok(!/repackage/.test(completedPending), "completed 形状不指向 repackage");
 
   // 已拒收：failed 与 completed 同用现有 rejected 文案（已有决定后 repackage 会拒绝）。
   const rejectedFailed = buildNextStep({
@@ -406,7 +421,7 @@ test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决�
   });
   assert.match(rejectedFailed, /already rejected; nothing is left to wait for/);
   assert.equal(rejectedFailed, rejectedCompleted, "已拒收两条形状同文案");
-  assert.ok(!rejectedFailed.includes("run_delivery_repackage"), "已拒收不再指向 repackage");
+  assert.ok(!/repackage/.test(rejectedFailed), "已拒收不再指向 repackage");
 
   // 仍只有 CLI 面。
   assert.throws(() => buildNextStep({ surface: "mcp", situation: "verifier_gone", terminalState: "failed" }), /CLI-only/);
@@ -420,10 +435,16 @@ test("NEXT-12 (B91): verifier_gone 的 terminalState 分支——failed 未决�
 
 test("NEXT-13: runner_unproven——只有 CLI 面；先 status 再干跑 settle，出口归 Lead，≤480", () => {
   assert.ok(NEXT_STEP_SITUATIONS.includes("runner_unproven"), "新情形进闭集");
+  // 第 137a 批：续修写 CLI 命令 wao runs continue；命令比工具名长，同句别处改短
+  // （"to see … (it writes nothing)" → "for … (writes nothing)"、"The Lead then
+  // decides" → "The Lead decides"、"attach the wait again" → "re-attach the wait"）。
   const text = buildNextStep({ surface: "cli", situation: "runner_unproven", runId: RUN_ID });
-  assert.match(text, new RegExp(`^The runner's absence cannot be proven, so the run may still change\\. First check wao status ${RUN_ID}, then dry-run wao runs settle --run-id ${RUN_ID} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
-  assert.match(text, new RegExp(`The Lead then decides: stop it \\(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\\), settle it, or attach the wait again\\.$`));
+  assert.match(text, new RegExp(`^The runner's absence cannot be proven, so the run may still change\\. First check wao status ${RUN_ID}, then dry-run wao runs settle --run-id ${RUN_ID} --reason-file <FILE> for the gate facts \\(writes nothing\\)\\.`));
+  assert.match(text, new RegExp(`The Lead decides: stop it \\(wao stop with the --observed-seq from status and a reason; then a continuable lineage can resume via wao runs continue <runId> --prompt-file <FILE>\\), settle it, or re-attach the wait\\.$`));
   assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length} > ${NEXT_STEP_MAX_LEN}`);
+  // 第 137a 批：runId 触顶长度不短于改前（39 字符；runId 在句中出现两次）。
+  const id39 = "run_" + "y".repeat(35);
+  assert.ok(buildNextStep({ surface: "cli", situation: "runner_unproven", runId: id39 }).length <= NEXT_STEP_MAX_LEN);
   // 措辞纪律：不断言 runner 已死、不说等待不会改变事实；不建议 accept/reject。
   assert.ok(!/gone|dead|will not change/i.test(text), "不断言已死/等待无效");
   assert.ok(!/run_delivery_decide|\b(accept|accepts|reject|rejects)\b/i.test(text), "不建议 accept/reject");
@@ -554,4 +575,132 @@ test("NEXT-16: MCP 会审——128 字符 consultId（入参 schema 上限）不
   assert.equal(buildNextStep({
     surface: "mcp", situation: "consult_seats_running", seatCount: 2, nonTerminalSeatCount: 1, consultId: real,
   }), `${base} If your host has a background shell, you can instead run wao consult wait ${real} --until-settled there; one command waits for all seats.`);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 137a 批：CLI 有了 continue / delivery repackage 入口——CLI 面一律写 CLI
+// 命令、不再点名 MCP 工具；MCP 面照旧写工具名。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-17: CLI 面不点名 MCP 工具（可续收口两支、verifier_gone 的 failed 支、runner_unproven）；MCP 面照旧写工具名", () => {
+  const cliTexts = [
+    buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: null }),
+    buildNextStep({ surface: "cli", situation: "delivery_continuable", runId: RUN_ID, acceptanceStatus: "rejected" }),
+    buildNextStep({ surface: "cli", situation: "verifier_gone", runId: RUN_ID, acceptanceStatus: "pending", terminalState: "failed" }),
+    buildNextStep({ surface: "cli", situation: "runner_unproven", runId: RUN_ID }),
+  ];
+  for (const text of cliTexts) {
+    assert.ok(!/MCP tool|run_continue|run_delivery_repackage/.test(text), `CLI 面不再点名 MCP 工具：${text}`);
+    assert.ok(text.includes("wao runs "), "CLI 面写 CLI 命令");
+  }
+  assert.ok(cliTexts[0].includes(`wao runs continue ${RUN_ID} --prompt-file <FILE>`));
+  // 续修 1：重新打包命令带 --cwd 占位、用 <runId> 占位（真实 id 在拒收命令里）。
+  assert.ok(cliTexts[2].includes("wao runs delivery repackage <runId> --allowed-path <path>... --cwd <workspace root>"));
+  // MCP 面照旧：写工具名、不含 runId、不写续修的 CLI 命令。
+  const mcpUndecided = buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: null });
+  const mcpRejected = buildNextStep({ surface: "mcp", situation: "delivery_continuable", acceptanceStatus: "rejected" });
+  for (const text of [mcpUndecided, mcpRejected]) {
+    assert.ok(/run_continue can resume the same worker conversation/.test(text));
+    assert.ok(!/wao runs continue/.test(text), "MCP 面不写续修的 CLI 命令");
+    assert.ok(!text.includes(RUN_ID));
+  }
+});
+
+test("NEXT-18: CLI 面的 dispatch_accepted 接后缀（续修受理时写明继承合同）；没有后缀时逐字不变", () => {
+  const base = `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${RUN_ID} --until-settled.`;
+  assert.equal(buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID }), base);
+  // 继承合同那半句与 MCP 面同一个常量（两处同一份文案）。
+  assert.equal(INHERITED_SUFFIX, CONTINUE_INHERITED_DELIVERY_NOTE);
+  assert.equal(
+    buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID, suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
+    `${base} Delivery contract inherited from the parent run.`,
+  );
+  // 后缀也计入长度上限（实现错误响亮失败，不静默截断）。
+  assert.throws(
+    () => buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID, suffix: "x".repeat(480) }),
+    /exceeds 480/,
+  );
+});
+
+test("NEXT-19: 有界等待超窗的出路一句（buildInterruptedRerunNextStep）——先 MCP 后 CLI、≤480；放不下就只留 MCP 写法", () => {
+  const id = "run_202610061200000000000000";
+  const text = buildInterruptedRerunNextStep("run_delivery_repackage", `wao runs delivery repackage ${id} --allowed-path <path>...`);
+  assert.equal(text,
+    "If this MCP server is replaced before the outcome lands, the attempt stops: call run_delivery_repackage again with the same input to re-run it."
+    + ` If your host has a background shell, you can instead run wao runs delivery repackage ${id} --allowed-path <path>... there; one command re-runs it, free of the per-call timeout and of an MCP server restart.`);
+  assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${text.length}`);
+  // 超长 runId：整句放不下就只留 MCP 写法，不抛错、不截断 id。
+  const longId = "run_" + "z".repeat(300);
+  const dropped = buildInterruptedRerunNextStep("run_delivery_reverify", `wao runs delivery reverify ${longId} --reason <code>`);
+  assert.ok(dropped.length <= NEXT_STEP_MAX_LEN, `${dropped.length}`);
+  assert.ok(!dropped.includes("wao runs delivery reverify"), "放不下就不加 CLI 半句");
+  assert.ok(dropped.startsWith("If this MCP server is replaced before the outcome lands, the attempt stops: call run_delivery_reverify again"));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 137a 批续修 1（会审 kimi、sol 均 FIX_FIRST）
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("NEXT-20: verifier_gone 的 failed 支——带 --cwd 占位；runId 触顶长度不短于改前的 182（99 与 182 字符都不抛错）", () => {
+  const failedFor = (id) => buildNextStep({
+    surface: "cli", situation: "verifier_gone", runId: id, acceptanceStatus: "pending", terminalState: "failed",
+  });
+  // 会审复现的 99 字符（首轮实现从 99 起抛错——收口结果丢失）与改前的触顶 182。
+  for (const n of [33, 99, 182, 183]) {
+    const id = ofLength("run_", n, "y");
+    const text = failedFor(id);
+    assert.ok(text.length <= NEXT_STEP_MAX_LEN, `${n} 字符：${text.length} > ${NEXT_STEP_MAX_LEN}`);
+    assert.ok(text.includes("--cwd <workspace root>"), `${n} 字符：带 --cwd 占位`);
+    assert.ok(text.endsWith(`wao runs delivery ${id} --reject --reason-file <FILE>.`), `${n} 字符：真实 runId 出现在拒收命令里`);
+    assert.equal(text.split(id).length - 1, 1, `${n} 字符：真实 runId 只出现一次，重新打包命令用 <runId> 占位`);
+  }
+  // 触顶恰为 183（改前 182——不少于此）：184 字符照旧抛错（不改上限、不截断 id）。
+  assert.throws(() => failedFor(ofLength("run_", 184, "y")), /exceeds 480/);
+  // 照抄可用：重新打包命令点名"同一组 allowed paths"，且说明不会产生第二个提交。
+  const text = failedFor(RUN_ID);
+  assert.match(text, /Call wao runs delivery repackage <runId> --allowed-path <path>\.\.\. --cwd <workspace root> \(the same allowed paths\) to re-run the verification without creating a second commit\./);
+});
+
+test("NEXT-21: CLI 面 dispatch_accepted 回显 --run-dir——实际值放得下就用实际值（含空格加引号），放不下或含控制字符写占位 <DIR>，不抛错", () => {
+  const pre = (id) => `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${id}`;
+  const base = (id) => `${pre(id)} --until-settled`;
+  const dispatch = (extras) => buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID, ...extras });
+  // 没给：逐字不变（缺省运行目录不需要带）。
+  assert.equal(dispatch({}), `${base(RUN_ID)}.`);
+  // 给了：等待命令带上调用方给的同一个值（照抄才找得到子运行）。
+  assert.equal(dispatch({ runDirFlag: "runs2" }), `${pre(RUN_ID)} --run-dir runs2 --until-settled.`);
+  // 含空白的路径加双引号——与 runs wait 多目标重挂行同一条规则。
+  assert.equal(dispatch({ runDirFlag: "C:/my runs" }), `${pre(RUN_ID)} --run-dir "C:/my runs" --until-settled.`);
+  // 与后缀一起算长度、一起渲染：继承合同那半句仍在末尾。
+  assert.equal(
+    dispatch({ runDirFlag: "runs2", suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
+    `${pre(RUN_ID)} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+  );
+  // 边界：恰好放得下的最长值用实际值；再长一个字符就换占位（带后缀时边界相应前移）。
+  const room = NEXT_STEP_MAX_LEN - `${base(RUN_ID)} --run-dir .`.length;
+  assert.equal(dispatch({ runDirFlag: ofLength("r", room, "d") }), `${pre(RUN_ID)} --run-dir ${ofLength("r", room, "d")} --until-settled.`);
+  assert.equal(dispatch({ runDirFlag: ofLength("r", room + 1, "d") }), `${pre(RUN_ID)} --run-dir <DIR> --until-settled.`);
+  const roomSuffix = room - CONTINUE_INHERITED_DELIVERY_NOTE.length;
+  assert.equal(
+    dispatch({ runDirFlag: ofLength("r", roomSuffix, "d"), suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
+    `${pre(RUN_ID)} --run-dir ${ofLength("r", roomSuffix, "d")} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+  );
+  assert.equal(
+    dispatch({ runDirFlag: ofLength("r", roomSuffix + 1, "d"), suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
+    `${pre(RUN_ID)} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+  );
+  // 任何长度的值都不让已受理的回执变成报错：很长的路径写占位。
+  for (const len of [400, 5000]) {
+    const text = dispatch({ runDirFlag: ofLength("d/", len, "x"), suffix: CONTINUE_INHERITED_DELIVERY_NOTE });
+    assert.equal(text, `${pre(RUN_ID)} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+    assert.ok(text.length <= NEXT_STEP_MAX_LEN);
+  }
+  // 含控制字符：写占位（不把控制字符带进回执）。
+  assert.equal(dispatch({ runDirFlag: "runs\tx" }), `${pre(RUN_ID)} --run-dir <DIR> --until-settled.`);
+  assert.equal(dispatch({ runDirFlag: "runs\nx" }), `${pre(RUN_ID)} --run-dir <DIR> --until-settled.`);
+  // 输入合同：只有 CLI 面 dispatch_accepted 渲染它；空串/非字符串是调用方错误。
+  assert.throws(() => buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId: RUN_ID, runDirFlag: "runs2" }), /runDirFlag/);
+  assert.throws(() => buildNextStep({ surface: "cli", situation: "wait_terminal", runId: RUN_ID, runDirFlag: "runs2" }), /runDirFlag/);
+  assert.throws(() => dispatch({ runDirFlag: "" }), /runDirFlag/);
+  assert.throws(() => dispatch({ runDirFlag: 42 }), /runDirFlag/);
 });

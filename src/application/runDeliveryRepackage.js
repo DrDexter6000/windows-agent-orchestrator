@@ -83,7 +83,7 @@ import {
   computeCandidateInventory,
   INVENTORY_PATHS_LIMIT,
 } from "./candidateInventory.js";
-import { validateProjectedPath } from "./deliveryReview.js";
+import { validateProjectedPath, MAX_PATH_LENGTH } from "./deliveryReview.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { proveWorkspaceRoot } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
@@ -170,6 +170,10 @@ const REPACKAGE_VERIFICATION_OUTCOME_TYPES = new Set([
 ]);
 
 export const REPACKAGE_ALLOWED_PATHS_LIMIT = INVENTORY_PATHS_LIMIT;
+// 第 137a 批：单条 allowedPath 的长度上限。服务经 validateProjectedPath 用的
+// 就是这个数（MAX_PATH_LENGTH）；MCP schema 与 CLI `--allowed-path` 都从这里取，
+// 三处同源。
+export const REPACKAGE_ALLOWED_PATH_MAX_LEN = MAX_PATH_LENGTH;
 
 /**
  * Normalize + validate a Lead-supplied allowedPaths array to a sorted, deduped,

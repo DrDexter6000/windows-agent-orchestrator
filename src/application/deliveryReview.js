@@ -25,8 +25,10 @@ import { isValidRepoRelativePath } from "../delivery.js";
 /** Server-owned cap for the number of changed paths exposed via MCP. */
 export const CHANGED_PATHS_LIMIT = 64;
 
-/** Max length of a single projected repo-relative path. */
-const MAX_PATH_LENGTH = 512;
+/** Max length of a single projected repo-relative path. Exported so the
+ *  run_delivery_repackage scope bound (application constant + MCP schema +
+ *  CLI `--allowed-path`) derives from this ONE number. */
+export const MAX_PATH_LENGTH = 512;
 
 /**
  * Validate a single projected path with MCP-boundary strictness.
