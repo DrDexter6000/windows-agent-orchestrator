@@ -18,7 +18,7 @@
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JsonlTranscript, STATE_CHANGE_REASON, transcriptPathFor } from "../transcript.js";
+import { JsonlTranscript, STATE_CHANGE_REASON, transcriptPathFor, isPersistableOwnerTaskType } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
 import { readRegistry } from "../registry.js";
@@ -392,6 +392,11 @@ export async function dispatchRun({
   // --tag），runner 收齐后按与前台相同的形状传 RunManager.start（parseTags
   // 接受 string | string[]）。undefined（不给）= argv 无 --tag。
   tags,
+  // 决定 0131 §5：派发时已知的任务类型（会审席给 plan_review / delivery_review），
+  // 以 --task-type 交给 runner，由 RunManager.start 固化进 run.started.taskType。
+  // 闭集 SSOT = transcript.js 的 OWNER_TASK_TYPES（且不是 "untyped"）；null /
+  // undefined = 不传（argv 与事件字节不变）。
+  taskType = null,
   // R10-A: per-dispatch model override (--model <modelId> on the CLI, `model`
   // on MCP run_dispatch) — ONE dispatch only, never persisted to the registry.
   // Validated against the core SSOT (assertValidModelOverride) BEFORE any
@@ -472,6 +477,14 @@ export async function dispatchRun({
   // supplied value.
   if (reasoningOverride !== null && reasoningOverride !== undefined) {
     assertValidReasoningOverride(reasoningOverride);
+  }
+  // 决定 0131 §5：taskType 的服务层形状门——同上两道（任何转录写入与 fork 之前；
+  // 固定文案不回显收到的值）。
+  if (taskType !== null && taskType !== undefined && !isPersistableOwnerTaskType(taskType)) {
+    throw new Error(
+      "dispatchRun: taskType must be a member of OWNER_TASK_TYPES other than \"untyped\" "
+      + "(task_type_invalid) — omit it, or pass one of the closed-set values.",
+    );
   }
 
   // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
@@ -876,6 +889,11 @@ export async function dispatchRun({
     for (const tag of tagList) {
       runnerArgs.push("--tag", tag);
     }
+  }
+  // 决定 0131 §5：任务类型交给 runner（--model 对先例）。闭集成员不会以 "--" 开头，
+  // parseSimpleFlags 原样还原这一对；缺席 = argv 不变。
+  if (isPersistableOwnerTaskType(taskType)) {
+    runnerArgs.push("--task-type", taskType);
   }
   // M12-6 (P1-A): thread the server-proven frozen HEAD to the detached runner so
   // RunManager.start can revalidate/pin the base. Server-side argv only (never

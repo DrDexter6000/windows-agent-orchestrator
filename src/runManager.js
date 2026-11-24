@@ -3,7 +3,7 @@ import { lstatSync, existsSync, readFileSync, realpathSync, statSync, openSync, 
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor } from "./transcript.js";
+import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor, isPersistableOwnerTaskType, parseTags, persistedOwnerTaskType } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
 import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError, listTranscriptsDeep } from "./projectBuckets.js";
 import { createWorktree, createReadOnlyClone, removeWorktree, removeWorktreeNoForce, removeReadOnlyClone, recycleRunBranch, probeReadOnlyClone, terminalWorktreeVerdict } from "./isolation.js";
@@ -809,6 +809,14 @@ export class RunManager {
     // xhigh"). resume rebuilds this run's own run.started.reasoningOverride
     // fact (R11-1 resume chain) exactly like R10-C C-1 does for the model.
     reasoningOverride = null,
+    // 决定 0131 §5（任务类型在派发事实中固化）：已知时写进 run.started.taskType。
+    // 来源于会审席（plan_review / delivery_review）、续修与 retry 的继承、MCP
+    // run_dispatch 的 taskType:"image"；必须是闭集 OWNER_TASK_TYPES 的成员且不是
+    // 读侧结论 "untyped"。CLI `--tag type=image` 是另一条来源，在落盘处由标签推导。
+    // 缺席（null/undefined）= 不写这个键（载荷字节不变）。
+    taskType = null,
+    // CLI retry 的新运行记原 runId（run.started.retryOf）。只接受合法 runId。
+    retryOf = null,
     } = options;
 
     // R10-A/R11-1 mutual exclusions (flag presence, value-insensitive — a
@@ -860,6 +868,22 @@ export class RunManager {
           + "must run one reasoning effort. Drop the reasoning override, or dispatch a non-reusable agent.",
         );
       }
+    }
+    // 决定 0131 §5：任务类型与 retryOf 的形状门——与上面两道互斥同位（注册表读取
+    // 之前，零转录、零 worktree、零 spawn）。闭集外的值一律 fail-closed，固定文案不
+    // 回显收到的值。
+    if (taskType !== null && taskType !== undefined && !isPersistableOwnerTaskType(taskType)) {
+      throw new Error(
+        "RunManager.start: taskType must be a member of OWNER_TASK_TYPES other than \"untyped\" "
+        + "(task_type_invalid) — the type is persisted on run.started, so an unknown value is never written. "
+        + "Omit it, or dispatch with one of the closed-set values.",
+      );
+    }
+    if (retryOf !== null && retryOf !== undefined && !isValidRunId(retryOf)) {
+      throw new Error(
+        "RunManager.start: retryOf must be a valid run id (retry_of_invalid) — letters, digits, "
+        + "underscore and hyphen only. Omit it, or pass the original run's id.",
+      );
     }
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -1469,6 +1493,10 @@ export class RunManager {
 
     const tagsPayload = tags ? parseTags(tags) : undefined;
     const scorecardRules = resolveScorecardRules(scorecard, agent.scorecard, scorecardMode);
+    // 决定 0131 §5：任务类型只在已知时写。口径与 runner 的启动失败收口共用同一处
+    // （persistedOwnerTaskType）：显式标签 `type=image` 是操作者对这一次运行的声明，
+    // 优先于传进来的继承值（会审席、续修、retry 走 taskType 选项）。
+    const persistedTaskType = persistedOwnerTaskType(tagsPayload, taskType);
 
     // 复验 F1：前台自决新 runId 的中心 claim 在首条持久事实（run.started）
     // 落盘即释放——此后同 runId 写者经既有档分支可见本档（窗口内抛错由
@@ -1552,6 +1580,8 @@ export class RunManager {
         : {}),
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
+      ...(persistedTaskType !== null ? { taskType: persistedTaskType } : {}),
+      ...(retryOf ? { retryOf } : {}),
       // TD-190 D2-②a：首事件落档有界桶归属事实（与 run.background_submitted
       // 同款；worktree 派发的 cwd 经 R4 回溯到所属仓根）。
       // D2-②b：后台 run 首事件（background_submitted）已带权威归属事实且与
@@ -2347,15 +2377,6 @@ async function _maybeWriteFrictionLogFromTranscript(transcript, runId, agentId, 
     frictionLogDir,
     debugMode: config.debugMode,
   });
-}
-
-function parseTags(tags) {
-  const arr = Array.isArray(tags) ? tags : [tags];
-  return arr.reduce((acc, t) => {
-    const [key, ...rest] = t.split("=");
-    acc[key] = rest.join("=");
-    return acc;
-  }, {});
 }
 
 /**

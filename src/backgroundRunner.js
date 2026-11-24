@@ -27,7 +27,7 @@ import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
 import { resolveTranscriptPath } from "./projectBuckets.js";
-import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor } from "./transcript.js";
+import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor, parseTags, persistedOwnerTaskType } from "./transcript.js";
 
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath } from "node:url";
@@ -137,6 +137,8 @@ function makeObjectRegistry(registryObj) {
  *   --reuse-material-json 原样转发；启动前与当前注册表重算值比对）
  * @param {Function} [opts.loadRoleContractFn] — 启动前材料复核的角色正文
  *   读取缝（缺省 loadRoleContract；测试模拟派发后正文变更，不写共享角色库）
+ * @param {string} [opts.taskType] — 决定 0131 §5：派发时已知的任务类型
+ *   （--task-type）；RunManager.start 校验闭集并固化进 run.started.taskType
  * @returns {Promise<{runId, completed, failed, timedOut, error, observationDeadlineReached}>}
  *   ADR-0030（TD-151）：observationDeadlineReached=true 表示等待窗到期事实已落盘
  *   （run.observation_deadline_reached）——到期不杀 worker，completed/failed 是
@@ -348,6 +350,8 @@ export async function runBackground(opts = {}) {
       // 标签：string | string[]（"key=value"），与前台传 RunManager.start 的
       // 形状一致（parseTags 两种都收）。
       ...(opts.tags !== undefined && opts.tags !== null ? { tags: opts.tags } : {}),
+      // 决定 0131 §5：任务类型原样交给 start（闭集的校验与落盘都在那里，SSOT）。
+      ...(opts.taskType !== undefined && opts.taskType !== null ? { taskType: opts.taskType } : {}),
       ...(opts.delivery ? { delivery: opts.delivery } : {}),
       // M11-11C: thread the resolved reuse routing (opaque {mode, opaqueUuid,
       // turn}) to RunManager. The capability check + argv compilation happen
@@ -390,7 +394,7 @@ export async function runBackground(opts = {}) {
         : {}),
     });
   } catch (error) {
-    await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error, transcriptDir });
+    await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error, transcriptDir, tags: opts.tags, taskType: opts.taskType });
     // P2′：入口起拍的心跳在此路径必须回收（失败也是终态——owner 不再存活）。
     clearInterval(heartbeatTimer);
     clearOwner(runDir, runId);
@@ -531,7 +535,7 @@ export async function runResumeBackground(opts = {}) {
   };
 }
 
-async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error, transcriptDir = null }) {
+async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error, transcriptDir = null, tags = undefined, taskType = null }) {
   const transcriptPath = runnerTranscriptPath(runDir, transcriptDir, runId);
   let events = [];
   try {
@@ -546,7 +550,21 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
   });
 
   if (!events.some((event) => event.type === "run.started")) {
-    await transcript.append("run.started", { backend: "backgroundRunner" });
+    // 决定 0131 §5：runner 没能走到 RunManager.start 时，这里合成的 run.started 写入
+    // 的类型要与 start 会固化的一致——同一处判定（persistedOwnerTaskType）：标签
+    // type=image 优先，否则合法的 --task-type，否则不写。只靠标签的运行（本批以前
+    // 的生图运行）才不会恰好在启动失败时丢掉类型。
+    let taskTypeToPersist = null;
+    try {
+      taskTypeToPersist = persistedOwnerTaskType(tags ? parseTags(tags) : undefined, taskType);
+    } catch {
+      // 标签形状坏（start 可能正是因此失败的）：合成的那条不带类型，收口照常完成。
+      taskTypeToPersist = null;
+    }
+    await transcript.append("run.started", {
+      backend: "backgroundRunner",
+      ...(taskTypeToPersist !== null ? { taskType: taskTypeToPersist } : {}),
+    });
   }
   if (!events.some((event) => event.type === "run.state_change")) {
     // TD-99：pending 初始化走 transitionState（first-terminal-wins 仲裁）。
@@ -575,8 +593,10 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
  * 供 detached 子进程调用。argv 形如：
  *   node backgroundRunner.js <agentId> --prompt "..." --run-dir D --registry F [--wait-timeout N]
  *   node backgroundRunner.js --resume-run-id <runId> --run-dir D --registry F [--wait-timeout N]
+ * stdin / stdout 是注入缝（与 backendFor 同款，测试用）：进程内调用时传假的，结果行
+ * 不落到真标准输出。
  */
-export async function runMain(argv = process.argv.slice(2), { stdin = process.stdin, backendFor, loadRoleContractFn } = {}) {
+export async function runMain(argv = process.argv.slice(2), { stdin = process.stdin, stdout = process.stdout, backendFor, loadRoleContractFn } = {}) {
   // TD-40：detached runner 是直接 spawn worker 子进程的点，必须在 v24（回归）上拒绝——
   // 否则子进程树可能被 OS Job Object bug 误杀，产生半完成的孤儿 transcript。
   // WAO_SKIP_VERSION_GUARD=1 绕过（仅测试用）。
@@ -635,7 +655,7 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
           }
         } catch { /* best effort — don't mask the original error */ }
       }
-      process.stdout.write(JSON.stringify({
+      stdout.write(JSON.stringify({
         runId: runId ?? "unknown", completed: false, failed: true, timedOut: false, error,
       }) + "\n");
       return;
@@ -655,7 +675,7 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
       globalWaitTimeout: opts["global-wait-timeout"] !== undefined ? Number(opts["global-wait-timeout"]) : undefined,
       pollInterval: Number(opts["poll-interval"] ?? 1000),
     });
-    process.stdout.write(JSON.stringify(result) + "\n");
+    stdout.write(JSON.stringify(result) + "\n");
     return;
   }
 
@@ -692,7 +712,7 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
         completed: false, failed: true, timedOut: false,
         error: "malformed delivery JSON in runner argv",
       };
-      process.stdout.write(JSON.stringify(failResult) + "\n");
+      stdout.write(JSON.stringify(failResult) + "\n");
       return;
     }
   }
@@ -735,7 +755,7 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
         completed: false, failed: true, timedOut: false,
         error: "malformed reuse-worktree JSON in runner argv",
       };
-      process.stdout.write(JSON.stringify(reuseFailResult) + "\n");
+      stdout.write(JSON.stringify(reuseFailResult) + "\n");
       return;
     }
   }
@@ -778,6 +798,9 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
     // 标签：--tag key=value 可重复，parseSimpleFlags 已收齐（单个=字符串，
     // 多个=数组），按前台同形状传 RunManager.start。
     tags: opts.tag,
+    // 决定 0131 §5：任务类型（值旗标，dispatchRun 的 --task-type）。缺席 = undefined，
+    // 普通派发字节不变；RunManager.start 负责闭集复核与落盘。
+    taskType: opts["task-type"],
     // M11-11C: opaque reuse routing threaded from dispatchRun. A malformed
     // internal envelope fails closed: requested reuse must never silently turn
     // into a fresh conversation.
@@ -809,7 +832,7 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
     reasoningOverride: opts.reasoning,
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
-  process.stdout.write(JSON.stringify(result) + "\n");
+  stdout.write(JSON.stringify(result) + "\n");
 }
 
 // 导出仅为测试探针位（进程内直测参数解析）；调用面只有本文件的 runMain。

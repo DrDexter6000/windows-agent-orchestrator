@@ -35,6 +35,80 @@ export const RUN_STATES = [
 
 export const TERMINAL_STATES = ["completed", "failed", "aborted", "timed_out"];
 
+// 决定 0131 §5：任务类型的闭集 SSOT——`run.started.taskType` 写入侧的冻结闭集，
+// 也是 Owner 读模型（src/application/ownerReadModel.js）判定顺序的读侧闭集，
+// 两处同一份。`"untyped"` 只在读侧出现（推不出时的结论）：派发侧只在已知时写，
+// 绝不把它落盘（isPersistableOwnerTaskType）。
+export const OWNER_TASK_TYPES = Object.freeze([
+  "research",
+  "code",
+  "test",
+  "plan_review",
+  "delivery_review",
+  "image",
+  "untyped",
+]);
+
+/**
+ * 派发侧可以固化进 `run.started.taskType` 的值：闭集成员，且不是读侧结论
+ * `"untyped"`。
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isPersistableOwnerTaskType(value) {
+  return typeof value === "string" && value !== "untyped" && OWNER_TASK_TYPES.includes(value);
+}
+
+/**
+ * 决定 0131 §5：子运行可以继承的任务类型——只看一条 run.started 自己的事实：
+ *   - 固化的 taskType 合法 → 用它；
+ *   - 否则 tags.type === "image" → "image"（本批以前的生图运行只有 CLI
+ *     `--tag type=image` 这一个来源，没有固化值）；
+ *   - 其余 → null（没有可继承的类型）。
+ * 续修（runContinue）与 CLI retry 共用这一处判定。纯函数。
+ *
+ * @param {object|null|undefined} started — 父/原 run 绑定的 run.started 事件
+ * @returns {string|null}
+ */
+export function inheritableOwnerTaskType(started) {
+  if (isPersistableOwnerTaskType(started?.taskType)) return started.taskType;
+  const tags = started?.tags;
+  if (tags !== null && typeof tags === "object" && !Array.isArray(tags) && tags.type === "image") return "image";
+  return null;
+}
+
+/**
+ * `--tag key=value`（可重复；string | string[]）→ 键值对象。RunManager.start 与
+ * runner 的启动失败收口共用这一处拆法：按第一个 "=" 切，值里的 "=" 原样保留。
+ *
+ * @param {string|string[]} tags
+ * @returns {Record<string, string>}
+ */
+export function parseTags(tags) {
+  const arr = Array.isArray(tags) ? tags : [tags];
+  return arr.reduce((acc, t) => {
+    const [key, ...rest] = t.split("=");
+    acc[key] = rest.join("=");
+    return acc;
+  }, {});
+}
+
+/**
+ * 决定 0131 §5：派发时固化进 `run.started.taskType` 的值。显式标签 `type=image` 是
+ * 操作者对这一次运行的声明，优先于传进来的 taskType（会审席、续修、retry 的继承值）；
+ * 其余只用闭集内的 taskType；都不成立 → null（不写这个键）。
+ * RunManager.start 与 runner 的启动失败收口（它合成的 run.started）共用这一处判定，
+ * 两边写出的类型不会分叉。纯函数。
+ *
+ * @param {object|undefined|null} tags — parseTags 的结果（没有标签则 undefined）
+ * @param {unknown} taskType
+ * @returns {string|null}
+ */
+export function persistedOwnerTaskType(tags, taskType) {
+  if (tags !== null && typeof tags === "object" && !Array.isArray(tags) && tags.type === "image") return "image";
+  return isPersistableOwnerTaskType(taskType) ? taskType : null;
+}
+
 /**
  * TD-190 D0：转录路径的唯一构造入口（读侧/写侧共用）。所有按 runId 定位
  * `<runDir>/<runId>.jsonl` 的消费者必须经此函数——项目分桶布局（Owner
@@ -2793,7 +2867,18 @@ function sleep(ms) {
 }
 
 export async function readTranscript(filePath) {
-  const raw = await readFile(filePath, "utf8");
+  return parseTranscriptText(await readFile(filePath, "utf8"));
+}
+
+/**
+ * JSONL 文本 → 事件数组的唯一解析点：readTranscript 自己走它；需要先拿到原文
+ * （比对多副本内容）的读侧也走它，不另写第二份逐行解析。任何一行不是合法 JSON
+ * 就整份抛出。调用方若要容忍还没写完的尾行（追加到一半被读到），先把文本截到
+ * 最后一个换行再交进来——Owner 读模型如此；readTranscript 的行为不变。
+ * @param {string} raw
+ * @returns {object[]}
+ */
+export function parseTranscriptText(raw) {
   return raw
     .split(/\r?\n/)
     .filter(Boolean)
@@ -2903,6 +2988,25 @@ export function findFirstBound(events, type, runId) {
  * 保持与重构前 runs list 行为一致。
  */
 export function findState(events) {
+  return findStateEvidence(events).state;
+}
+
+/**
+ * 状态判定与它依据的那条事件（findState 的判定正文；行为不变）。
+ *
+ * `index` 是"这个状态是从哪一条事件读出来的"在 events 里的下标：
+ *   - 有 run.state_change：那条事件自己（to 为终态时），或其后被末位优先选中的
+ *     终态事实（run.completed / run.aborted / run.timed_out / run.error）；
+ *   - 没有 run.state_change：末事件；
+ *   - 空序列：state 为 "pending"，没有依据事件，index 为 -1。
+ *
+ * 需要把状态与"终态发生的时刻"对上的读侧（如 Owner 读模型的 terminalAt）用它，
+ * 不要另写一份终态事件的挑选规则——那会让 state 与 terminalAt 各说各话。
+ *
+ * @param {object[]} events
+ * @returns {{state: string, index: number}}
+ */
+export function findStateEvidence(events) {
   const stateChangeIndex = findLatestIndex(events, "run.state_change");
   const stateChange = stateChangeIndex >= 0 ? events[stateChangeIndex] : undefined;
   if (stateChange) {
@@ -2914,23 +3018,23 @@ export function findState(events) {
         if (events[index].type === "run.stop_requested") continue;
         const inferred = inferStateFromLegacyEvent(events[index].type);
         if (TERMINAL_STATES.includes(inferred)) {
-          return inferred;
+          return { state: inferred, index };
         }
       }
     }
-    return stateChange.to;
+    return { state: stateChange.to, index: stateChangeIndex };
   }
   const last = events.at(-1);
   if (!last) {
-    return "pending";
+    return { state: "pending", index: -1 };
   }
   // TD-102: workflow.completed {completed:false} is a failed workflow, not completed.
   // 读取归档的旧 workflow 转录（决定 0094 退役了 workflow 层，写入方不复存在）：
   // 读取 workflow.completed 事件的 payload——type 映射只看类型名，不看 completed 字段。
   if (last.type === "workflow.completed" && last.completed === false) {
-    return "failed";
+    return { state: "failed", index: events.length - 1 };
   }
-  return inferStateFromLegacyEvent(last.type);
+  return { state: inferStateFromLegacyEvent(last.type), index: events.length - 1 };
 }
 
 function findLatestIndex(events, type) {

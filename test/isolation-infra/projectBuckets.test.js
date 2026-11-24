@@ -649,3 +649,29 @@ test("决定 0100: countProjectBuckets——无 projects/ 为 0、只数目录�
     assert.throws(() => countProjectBuckets(root, { io: badIo }), /EIO/, "读不出 → 抛错（调用方决定吞否）");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+// 第 140a 批续修二：strict 的根层读取不经 existsSync。
+test("listTranscriptsDeep strict: 存储根读不出时抛出，不把根层平铺档静默跳过；默认模式行为不变", () => {
+  const root = makeRoot("wao-pb-strict-root-");
+  try {
+    write(join(root, "run_flat.jsonl"), "{}\n");
+    write(join(root, "projects", "b-11111111", "run_bucket.jsonl"), "{}\n");
+    // 复核席的探针形状：existsSync 对存储根返回 false（它对任何错误都如此），其余路径照常；
+    // 根层 readdirSync 报权限错误。桶目录的读取不受影响。
+    const deniedRoot = {
+      existsSync: (p) => p !== root && existsSync(p),
+      readdirSync: (p, ...rest) => {
+        if (p === root) { const e = new Error("EACCES: operation not permitted"); e.code = "EACCES"; throw e; }
+        return readdirSync(p, ...rest);
+      },
+    };
+    assert.deepEqual(
+      listTranscriptsDeep(root).map((e) => e.name),
+      ["run_flat.jsonl", "run_bucket.jsonl"],
+      "夹具前提：健康时根层与桶里都枚举到",
+    );
+    assert.throws(() => listTranscriptsDeep(root, { io: deniedRoot, strict: true }), /EACCES/, "strict：根层读不出就抛出");
+    // 默认模式如旧：existsSync 把关，它返回 false 就当没有根层（只枚举到桶里的）。
+    assert.deepEqual(listTranscriptsDeep(root, { io: deniedRoot }).map((e) => e.name), ["run_bucket.jsonl"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

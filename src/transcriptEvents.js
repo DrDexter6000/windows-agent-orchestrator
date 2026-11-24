@@ -35,7 +35,7 @@
 export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   {
     type: "run.started",
-    description: "run 创建；记录生效 backend/cwd/model/worktreePath 与显式 override、agentArgs 摘要（count+sha256 指纹+addDirs 暴露面路径；无 args 缺席）。带 `--model` 覆盖的派发另含显式 `modelOverride` 字段，`model` 为合成后策略——只替换 `.id`，兄弟字段保留；`reasoning` 无条件落盘（agent 无 reasoning 时 JSON 省略该键），带 `--reasoning` 覆盖的派发另含显式 `reasoningOverride` 字段，合成后同样只替换 `.effort`；`providerKey` 无条件落盘，恒为 `null`（与 legacy 父 run 的字段缺失区分），也是 `run_continue` 续跑漂移比对的父侧 durable 事实（父侧为非 null 字符串时续跑拒绝）；delivery 派发另含 delivery 块（allowedPaths 等交付合同事实）；只读 ephemeral 轮的隔离树形态为私有克隆（决定 0102）时另含 `worktreeForm: \"private_clone\"` 与 `worktreeBaseCommit`（冻结基点完整 SHA）——resume 的延迟释放处置与回收普查按 worktreeForm 分流，没有该字段的转录一律按链接工作树处理。",
+    description: "run 创建；记录生效 backend/cwd/model/worktreePath 与显式 override、agentArgs 摘要（count+sha256 指纹+addDirs 暴露面路径；无 args 缺席）。带 `--model` 覆盖的派发另含显式 `modelOverride` 字段，`model` 为合成后策略——只替换 `.id`，兄弟字段保留；`reasoning` 无条件落盘（agent 无 reasoning 时 JSON 省略该键），带 `--reasoning` 覆盖的派发另含显式 `reasoningOverride` 字段，合成后同样只替换 `.effort`；`providerKey` 无条件落盘，恒为 `null`（与 legacy 父 run 的字段缺失区分），也是 `run_continue` 续跑漂移比对的父侧 durable 事实（父侧为非 null 字符串时续跑拒绝）；delivery 派发另含 delivery 块（allowedPaths 等交付合同事实）；只读 ephemeral 轮的隔离树形态为私有克隆（决定 0102）时另含 `worktreeForm: \"private_clone\"` 与 `worktreeBaseCommit`（冻结基点完整 SHA）——resume 的延迟释放处置与回收普查按 worktreeForm 分流，没有该字段的转录一律按链接工作树处理。可选 `taskType`：派发时已知的任务类型（闭集 SSOT `OWNER_TASK_TYPES` = `src/transcript.js`；只在已知时写——CLI `--tag type=image` 写 `image`，会审席位按有无被审 run 写 `plan_review` 或 `delivery_review`，续修与 CLI retry 继承父运行/原运行的值；读侧结论 `untyped` 永不落盘）。可选 `retryOf`：CLI retry 的新运行记原 runId。两者缺席 = 这次派发没有对应事实（载荷字节不变）。",
   },
   {
     type: "run.state_change",

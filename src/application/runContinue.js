@@ -42,7 +42,7 @@ import {
   findLatestBound,
   extractCanonicalAgentId,
   TERMINAL_STATES,
-  STATE_CHANGE_REASON, transcriptPathFor } from "../transcript.js";
+  STATE_CHANGE_REASON, transcriptPathFor, inheritableOwnerTaskType } from "../transcript.js";
 import { identifyProjectFromCwd, productionProjectIo } from "../projectIdentity.js";
 import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath } from "../projectBuckets.js";
 import {
@@ -1029,6 +1029,14 @@ export async function continueRun({
   if (lineageLaneRole) {
     runnerArgs.push("--lane", lineageLaneRole.laneId);
     runnerArgs.push("--role", lineageLaneRole.roleId);
+  }
+  // 决定 0131 §5：子运行继承父运行的任务类型（父转录 run.started：固化的 taskType，
+  // 本批以前的生图运行只有 tags.type=image），以 --task-type 交给 runner 落进子运行的
+  // run.started。父值缺席或不在闭集内（含读侧结论 "untyped"）就不传——类型只是分类
+  // 标签，坏值不拦续修，也不继承。
+  const inheritedTaskType = inheritableOwnerTaskType(started);
+  if (inheritedTaskType !== null) {
+    runnerArgs.push("--task-type", inheritedTaskType);
   }
   if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
     runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));

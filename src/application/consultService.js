@@ -754,6 +754,11 @@ export async function runConsult({
         runDir: resolvedRunDir,
         cwd,
         readOnly: true,
+        // 决定 0131 §5：会审席的任务类型在派发时固化进 run.started.taskType——有被审
+        // run 是交付会审，否则是方案会审。条件与组记录写 reviewedRunId 的那一条同一。
+        taskType: typeof reviewedRunId === "string" && reviewedRunId.length > 0
+          ? "delivery_review"
+          : "plan_review",
         // CLI 一次性进程：每席一次性 leadSession（可复用专家恒为首轮，
         // 与 commands/run.js 后台派发同款语义）。
         leadSession: randomUUID(),

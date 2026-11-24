@@ -284,6 +284,7 @@
     "worktree": [
       "application/worktreeReclaim.test.js",
       "application/worktreeReclaimApply.test.js",
+      "application/ownerReadModel.test.js",
       "delivery/td146ReclaimedRunEntryPoints.test.js",
       "delivery/delivery.test.js",
       "delivery/deliveryReviewKernel.test.js",

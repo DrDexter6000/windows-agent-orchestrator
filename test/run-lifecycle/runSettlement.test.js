@@ -507,4 +507,8 @@ test("VITAL-03: 10 分钟与 30 分钟边界毫秒级判定（9 分 59.5 秒仍�
   assert.match(step(RECENT - 500), /Signs of life were last observed 9 min ago/, "9:59.5 → recent 分支（floor 到 9 分）");
   assert.match(step(RECENT), /may be inside a long-running command/, "恰好 10 分钟 → ageing 分支");
   assert.match(step(QUIET), /No new signs of life in the transcript for 30 min/, "恰好 30 分钟 → quiet 分支");
+  // 末条 run.event 的 ts 为 null / 缺席：没有时间基准 → null。不能经 new Date(null) 落成 0，
+  // 那会把年龄算成从 1970 起算。
+  assert.equal(vitalSignAgeMs([{ type: "run.event", kind: "message", ts: null }], now), null, "ts: null → null");
+  assert.equal(vitalSignAgeMs([{ type: "run.event", kind: "message" }], now), null, "ts 缺席 → null");
 });

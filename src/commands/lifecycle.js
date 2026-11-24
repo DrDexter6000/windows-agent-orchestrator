@@ -20,7 +20,7 @@
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES } from "../transcript.js";
+import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES, inheritableOwnerTaskType } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 // TD-341（第 89 批续修 4）：resume 接管的 runner stderr 证据文件（adapters →
 // application 下向）。
@@ -156,6 +156,11 @@ export async function retryCommand(args, config) {
   }
   const modelOverride = options.model !== undefined ? options.model : inheritedModel;
   const reasoningOverride = options.reasoning !== undefined ? options.reasoning : inheritedReasoning;
+  // 决定 0131 §5：retry 的新运行继承原运行的任务类型（原转录 run.started：固化的
+  // taskType，本批以前的生图运行只有 tags.type=image），并记下原 runId。类型只是分类
+  // 标签：原值缺席或不在闭集内就不继承（retry 照常，不因标签拒发），绝不静默换成
+  // 别的类型；retryOf 恒为本次的原 runId（loadRun 已校验形状）。
+  const inheritedTaskType = inheritableOwnerTaskType(runStarted);
   const manager = newRunManager(config);
   const run = await manager.start(agentId, {
     prompt: promptEvent.prompt,
@@ -164,6 +169,8 @@ export async function retryCommand(args, config) {
     tags: options.tag,
     cwd: options.cwd,
     isolate: resolveIsolateFlag(options),
+    ...(inheritedTaskType !== null ? { taskType: inheritedTaskType } : {}),
+    retryOf: runId,
     // R12: inherited (or flag-replaced) overrides ride start's EXISTING gates —
     // the closed-set/shape assert, the requireCertified mutex (retry has no
     // such flag, so that door stays closed by construction), and the

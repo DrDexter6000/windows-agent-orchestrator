@@ -170,6 +170,43 @@ export function countProjectBuckets(runDir, { io } = {}) {
   return listBucketDirs(runDir, defaultIo(io)).length;
 }
 
+/**
+ * 每个桶一条项目记录（只读；Owner 读模型的项目列表与运行归属名字都用它）：
+ *   - 带 `.project.json` 的桶：`{ slug, displayName, reserved: false }`——slug 取
+ *     目录名（位置事实；目录名不是安全形状时退回记录里的 slug，再不行为 null），
+ *     displayName 取记录里的值（记录里没有、或记录读不出 → null）；
+ *   - 没有记录的桶：保留桶（`_sandbox` / `_scratch` / `_unattributed`）
+ *     `reserved: true`、displayName 恒 null（它们不是项目，不编造名字）；其余
+ *     无记录目录 `reserved: false`。
+ * 不携带记录里的 key（那是绝对路径）。单条记录损坏不抛——那一条的 displayName
+ * 如实为 null，别的桶照常返回。projects/ 不存在 → 空数组。按 slug 码元序排序。
+ */
+export function listProjectRecords(runDir, { io } = {}) {
+  const i = defaultIo(io);
+  const out = [];
+  for (const { name, dir } of listBucketDirs(runDir, i)) {
+    let record = null;
+    try {
+      // 只有 ENOENT 才是"没有记录"（保留桶）：先判存在，免得对它们走重读退避。
+      if (existsOrThrow(i, join(dir, PROJECT_RECORD_NAME))) record = readProjectRecord(dir, i);
+    } catch {
+      record = null;
+    }
+    out.push({
+      slug: SAFE_BUCKET_SLUG_RE.test(name)
+        ? name
+        : (record && isSafeBucketSlug(record.slug) ? record.slug : null),
+      displayName: record && typeof record.displayName === "string" ? record.displayName : null,
+      reserved: record === null && isReservedBucketSlug(name),
+    });
+  }
+  return out.sort((a, b) => {
+    const left = a.slug ?? "\uffff";
+    const right = b.slug ?? "\uffff";
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+}
+
 /** key→slug 索引读取；损坏/缺失/forceRebuild → 扫描 .project.json 重建（权威重建缓存）。 */
 export function loadBucketIndex(runDir, { io, forceRebuild = false } = {}) {
   const i = defaultIo(io);
@@ -703,14 +740,16 @@ export function findTranscriptTwin(runDir, runId, { io } = {}) {
  * 深层枚举（listTranscriptFiles 的两层扩容）：根层 + projects/* 桶内全部
  * `.jsonl`。根层在前（readdir 原序保持），桶按字典序、桶内保持 readdir 原序；
  * 归档目录在 runs/ 树外（决定 0050），天然不在枚举面。strict 供 fail-closed
- * 的调用方使用：存储根不在时抛出（不在不等于空存储）；projects/ 与桶目录只有
- * ENOENT 算不存在，其余 stat 失败（权限等）抛出。
+ * 的调用方使用：存储根不在或读不出时抛出（不在不等于空存储；根层读不出时桶里
+ * 仍在枚举，看不全的结果不能当成全部）；projects/ 与桶目录只有 ENOENT 算不
+ * 存在，其余 stat 失败（权限等）抛出。
  */
 export function listTranscriptsDeep(runDir, { io, strict = false } = {}) {
   const i = defaultIo(io);
   const out = [];
-  if (strict) i.statSync(runDir); // 存储根不在（含 ENOENT）→ 抛出
-  if (i.existsSync(runDir)) {
+  // strict：根层直接读目录，读不出就抛。不经 existsSync——它对任何错误（权限、
+  // 短暂不可见）都返回 false，会把根层的平铺档静默跳过。默认模式如旧。
+  if (strict || i.existsSync(runDir)) {
     for (const name of i.readdirSync(runDir)) {
       if (name.endsWith(".jsonl")) out.push({ path: join(runDir, name), name, bucket: null });
     }

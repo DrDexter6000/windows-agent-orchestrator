@@ -32,6 +32,27 @@ export const VITAL_SIGN_RECENT_SECONDS = 10 * 60;
 // MCP 面 leadAdvisory 的长度上界（模板 + 整数 + 闭集标签；schema 取同一常量）。
 export const LEAD_ADVISORY_WIRE_MAX_LEN = 480;
 
+/** 作用域内最后一条 worker `run.event`（任意 kind）的 ts 原值；没有则 undefined。 */
+function lastVitalSignTs(scopeEvents) {
+  for (let i = scopeEvents.length - 1; i >= 0; i -= 1) {
+    const e = scopeEvents[i];
+    if (e?.type === "run.event") return e.ts;
+  }
+  return undefined;
+}
+
+/**
+ * 作用域内最后一条 worker `run.event` 的时刻（epoch ms）。vitalSignAgeMs 的基准，
+ * 也是 Owner 读模型缓存 lastVitalAt 的同一口径（时刻本身是事实，年龄现算）。
+ * 没有任何 run.event、或该事件的 ts 缺席 / 为 null / 读不出 → null。
+ *
+ * @param {Array<object>} scopeEvents — 已绑定到请求 runId 的事件作用域
+ * @returns {number|null}
+ */
+export function lastVitalSignAtMs(scopeEvents) {
+  return tsMs(lastVitalSignTs(scopeEvents));
+}
+
 /**
  * 决定 0095：作用域内最后一条 worker `run.event`（含 runtime_activity）距今
  * 多少毫秒。口径同 runStatus 的心跳（决定 0069），未来时间钳成 0（同 runStop
@@ -44,44 +65,68 @@ export const LEAD_ADVISORY_WIRE_MAX_LEN = 480;
  */
 export function vitalSignAgeMs(scopeEvents, nowMs) {
   if (!Number.isFinite(nowMs)) return null;
-  let baseTs = null;
+  const base = lastVitalSignAtMs(scopeEvents);
+  return base === null ? null : Math.max(0, nowMs - base);
+}
+
+/** 作用域内最后一条"实质动作"（runEventIsUsableEffect）的 ts 原值；从未有过则 undefined。 */
+function lastUsableEffectTs(scopeEvents) {
   for (let i = scopeEvents.length - 1; i >= 0; i -= 1) {
     const e = scopeEvents[i];
-    if (e?.type === "run.event") {
-      baseTs = e.ts;
-      break;
-    }
+    if (e?.type === "run.event" && runEventIsUsableEffect(e)) return e.ts;
   }
-  if (baseTs === null || baseTs === undefined) return null;
-  const base = new Date(baseTs).getTime();
-  if (!Number.isFinite(base)) return null;
-  return Math.max(0, nowMs - base);
+  return undefined;
 }
 
 /**
- * 距最近一次动作或正文过了多少秒。从未有过动作时从 run.submitted 起算；连
- * run.submitted 都没有（卡在 pending、从未派出去的运行——真实转录里有这种停了
- * 三周的孤儿）就从转录的第一条事件起算。
+ * 最后一次实质动作（正文、命令、工具、落盘）的时刻（epoch ms）。不带任何回退：
+ * 从未有过动作、或那条事件的 ts 读不出 → null。"有进展"只认这个（Owner 读模型的
+ * lastEffectAt 与 progress 判定）——刚派出去、什么都没做的运行不算有进展。
+ *
+ * @param {Array<object>} scopeEvents — 已绑定到请求 runId 的事件作用域
+ * @returns {number|null}
+ */
+export function lastActualEffectAtMs(scopeEvents) {
+  return tsMs(lastUsableEffectTs(scopeEvents));
+}
+
+/**
+ * "距最近一次动作或正文"的回退基准时刻（epoch ms），secondsSinceLastEffect 的同一
+ * 口径：最后一次实质动作；从未有过动作时从 run.submitted 起算；连 run.submitted
+ * 都没有（卡在 pending、从未派出去的运行）就从转录的第一条带 ts 的事件起算。
+ * Owner 读模型把它作为 quietSince（静默门限的起点），与 lastActualEffectAtMs 分开。
+ *
+ * @param {Array<object>} scopeEvents — 已绑定到请求 runId 的事件作用域
+ * @returns {number|null} 无可用时间基准时为 null
+ */
+export function lastEffectAtMs(scopeEvents) {
+  const baseTs = lastUsableEffectTs(scopeEvents)
+    ?? scopeEvents.find((e) => e?.type === "run.submitted")?.ts
+    ?? scopeEvents.find((e) => typeof e?.ts === "string")?.ts
+    ?? null;
+  return tsMs(baseTs);
+}
+
+/**
+ * 事件 ts 原值 → epoch ms。null / undefined 是"没有时间基准"，绝不能经
+ * `new Date(null)` 落成 0（那是 1970，会把年龄算成半个多世纪）。
+ */
+function tsMs(ts) {
+  if (ts === null || ts === undefined) return null;
+  const ms = new Date(ts).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * 距最近一次动作或正文过了多少秒（基准见 lastEffectAtMs）。
  *
  * @param {Array<object>} scopeEvents — 已绑定到请求 runId 的事件作用域
  * @param {number} nowMs
  * @returns {number|null} 无可用时间基准时为 null
  */
 export function secondsSinceLastEffect(scopeEvents, nowMs) {
-  let baseTs = null;
-  for (let i = scopeEvents.length - 1; i >= 0; i -= 1) {
-    const e = scopeEvents[i];
-    if (e?.type === "run.event" && runEventIsUsableEffect(e)) {
-      baseTs = e.ts;
-      break;
-    }
-  }
-  baseTs ??= scopeEvents.find((e) => e?.type === "run.submitted")?.ts
-    ?? scopeEvents.find((e) => typeof e?.ts === "string")?.ts
-    ?? null;
-  if (baseTs === null || baseTs === undefined) return null;
-  const base = new Date(baseTs).getTime();
-  return Number.isFinite(base) ? Math.round((nowMs - base) / 1000) : null;
+  const base = lastEffectAtMs(scopeEvents);
+  return base === null ? null : Math.round((nowMs - base) / 1000);
 }
 
 /**
