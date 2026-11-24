@@ -83,3 +83,12 @@
 - `npm run smoke`（主检出 f0408392，08:11Z）：claude-code PASS，codex PASS（回复 `smoke ok`）。smoke 不覆盖的后端，以上面各车道的 reliability 为真实运行时证据（`docs/milestone-discipline.md` §6.1）。
 - 1.0.0 额外门槛（§9 第 7 步）：不适用，本版仍是 0.x；TD-194 未关。
 - 复现命令：`npm test`；`npm run reliability -- --agent <lane>`；`npm run smoke`；`npm run gen:surface`；`npm run gen:certification`；`git diff --shortstat v0.10.0 v0.11.0`；`git rev-list --count v0.10.0..v0.11.0`。
+
+## 总量
+
+71 个提交（含 v0.10.0 打标后的总量补记、发版提交与证据提交），220 个文件，+18,289 / −4,182 行（`git diff --shortstat v0.10.0 v0.11.0`）。
+
+## 发版记录
+
+- tag：`v0.11.0`（annotated，tag 对象 156fdcbf → 提交 c54eb1e7，正文载门槛证据与 Owner 的豁免原话）；推送顺序：先 main，后 tag。
+- main 以快进合入候选，没有压缩。
