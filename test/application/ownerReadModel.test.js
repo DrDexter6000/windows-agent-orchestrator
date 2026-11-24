@@ -272,17 +272,20 @@ test("冷普查：项目桶、旧平铺、特殊桶全部入册；项目名来�
     s.write(s.runDir, "run_flat1", completedEvents("run_flat1"));
 
     const model = createOwnerReadModel({ runDir: s.runDir });
-    assert.deepEqual(model.snapshot({ now: NOW }), { generatedAt: iso(NOW), projects: [], runs: [] }, "未 refresh 前是空快照");
+    assert.deepEqual(model.snapshot({ now: NOW }), { generatedAt: iso(NOW), projects: [], runs: [], consults: [] }, "未 refresh 前是空快照");
     assert.equal(model.resolveRun("run_a1"), null, "首次 refresh 完成前一律 null（服务端要先等冷普查）");
     const result = await model.refresh();
     assert.deepEqual(result, { scanned: 5, reread: 5, added: 5, removed: 0, moved: 0, unreadable: 0 });
     const snap = model.snapshot({ now: NOW });
     assert.equal(snap.generatedAt, iso(NOW));
+    assert.deepEqual(snap.consults, [], "没有会审组记录就没有会审");
+    // 第 140b 批：项目多两键——仓库是否可观测、分支观测时刻。这些项目没有请求交付的运行，
+    // 不枚举分支，所以是 unknown / 未观测。
     assert.deepEqual(snap.projects, [
-      { slug: "_sandbox", name: null },
-      { slug: "_scratch", name: null },
-      { slug: ALPHA.slug, name: ALPHA.name },
-      { slug: BETA.slug, name: BETA.name },
+      { slug: "_sandbox", name: null, repo: "unknown", branchesObservedAt: null },
+      { slug: "_scratch", name: null, repo: "unknown", branchesObservedAt: null },
+      { slug: ALPHA.slug, name: ALPHA.name, repo: "unknown", branchesObservedAt: null },
+      { slug: BETA.slug, name: BETA.name, repo: "unknown", branchesObservedAt: null },
     ]);
     assert.deepEqual(snap.runs.map((r) => r.runId), ["run_a1", "run_b1", "run_flat1", "run_s1", "run_x1"], "按 runId 稳定排序");
     assert.deepEqual(runOf(snap, "run_a1").project, { slug: ALPHA.slug, name: ALPHA.name });
@@ -812,7 +815,9 @@ test("CRLF 转录：截到最后一个换行（含）再解析，完整前缀不
     assert.equal(result.unreadable, 0);
     const snap = model.snapshot({ now: NOW });
     const strip = (runId) => {
-      const { runId: omitted, ...rest } = runOf(snap, runId);
+      // lineageRootRunId 是"自己的 runId"（普通运行自成一根），随 runId 走，一并剔掉。
+      const { runId: omitted, lineageRootRunId: omittedRoot, ...rest } = runOf(snap, runId);
+      assert.equal(omittedRoot, runId, `${runId}：普通运行的谱系根就是自己`);
       return rest;
     };
     assert.equal(runOf(snap, "run_cr").availability, "ok");
@@ -878,11 +883,21 @@ test("枚举失败：refresh 拒绝，上一份索引与快照原样保留，下
     const before = model.snapshot({ now: NOW });
     broken = true;
     await assert.rejects(() => model.refresh(), /EACCES stub/);
-    assert.deepEqual(model.snapshot({ now: NOW }), before, "失败的刷新不改已有快照");
+    // 第 140b 批唯一的例外：刷新失败后文件索引可能已经看不全，谱系两项按"无法判定"给出
+    // （lineageUndeterminable 翻成 true）；其余事实原样保留。
+    const during = model.snapshot({ now: NOW });
+    assert.deepEqual(
+      { ...during, runs: during.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
+      { ...before, runs: before.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
+      "失败的刷新不改已有快照",
+    );
+    assert.equal(runOf(during, "run_keep").lineageUndeterminable, true, "刷新失败 → 谱系按无法判定给");
+    assert.equal(runOf(during, "run_keep").supersededByRunId, null);
     assert.deepEqual(model.resolveRun("run_keep").bucket, ALPHA.slug);
     broken = false;
     const result = await model.refresh();
     assert.deepEqual(result, { scanned: 1, reread: 0, added: 0, removed: 0, moved: 0, unreadable: 0 });
+    assert.deepEqual(model.snapshot({ now: NOW }), before, "下一次刷新成功后快照完全恢复");
   } finally {
     s.cleanup();
   }
@@ -921,7 +936,14 @@ test("枚举用严格模式：一个桶 stat 失败时 refresh 拒绝、已有�
     s.write(s.bucket(BETA.slug), "run_st", completedEvents("run_st", { prompt: "# 被改过的副本" }));
     denyBeta = true;
     await assert.rejects(() => model.refresh(), /EACCES stub/);
-    assert.deepEqual(model.snapshot({ now: NOW }), before, "失败的刷新不改已有快照");
+    const during = model.snapshot({ now: NOW });
+    // 谱系按无法判定给（第 140b 批）之外，失败的刷新不改已有快照。
+    assert.deepEqual(
+      { ...during, runs: during.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
+      { ...before, runs: before.runs.map(({ lineageUndeterminable, ...rest }) => rest) },
+      "失败的刷新不改已有快照",
+    );
+    assert.equal(runOf(during, "run_st").lineageUndeterminable, true);
 
     denyBeta = false;
     const after = await model.refresh();
@@ -981,7 +1003,7 @@ test("运行目录不存在：按空存储处理（零个运行）；只枚举 r
   try {
     const model = createOwnerReadModel({ runDir: s.runDir });
     assert.deepEqual(await model.refresh(), { scanned: 0, reread: 0, added: 0, removed: 0, moved: 0, unreadable: 0 });
-    assert.deepEqual(model.snapshot({ now: NOW }), { generatedAt: iso(NOW), projects: [], runs: [] });
+    assert.deepEqual(model.snapshot({ now: NOW }), { generatedAt: iso(NOW), projects: [], runs: [], consults: [] });
     // 非 run_ 前缀（legacy wf_* 工作流转录）与非法形状的文件名都不是运行。
     mkdirSync(s.runDir, { recursive: true });
     writeFileSync(join(s.runDir, "wf_legacy.jsonl"), "{}\n", "utf8");
@@ -2293,18 +2315,44 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
     await model.refresh();
     const snap = model.snapshot({ now: NOW });
 
-    assert.deepEqual(Object.keys(snap).sort(), ["generatedAt", "projects", "runs"]);
-    for (const p of snap.projects) assert.deepEqual(Object.keys(p).sort(), ["name", "slug"]);
+    assert.deepEqual(Object.keys(snap).sort(), ["consults", "generatedAt", "projects", "runs"]);
+    for (const p of snap.projects) assert.deepEqual(Object.keys(p).sort(), ["branchesObservedAt", "name", "repo", "slug"]);
     const RUN_KEYS = [
       "agentId", "availability", "deliveryRequested", "lastEffectAt", "lastProcessActiveAt", "lastVitalAt", "laneId",
       "liveness", "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince",
       "startedAt", "state", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
+      // 第 140b 批：交付、失败、额度、谱系。
+      "capacity", "delivery", "failure", "legalDecision", "lineageRootConflict", "lineageRootRunId",
+      "lineageUndeterminable", "supersededByRunId",
     ].sort();
     assert.equal(snap.runs.length, 2, "夹具前提：一个可读运行 + 一个读不出的运行");
     for (const run of snap.runs) {
       assert.deepEqual(Object.keys(run).sort(), RUN_KEYS, `${run.runId} 的键集（DTO 白名单；加键必须过这里）`);
       if (run.project !== null) assert.deepEqual(Object.keys(run.project).sort(), ["name", "slug"], "project 恰两键");
+      // 交付对象也是白名单：deliveryRef 的其余字段（worktreePath 等）不整包透传。
+      if (run.delivery !== null) {
+        assert.deepEqual(Object.keys(run.delivery).sort(), [
+          "acceptance", "ambiguous", "branchPresent", "commit", "isolationFailure", "packagingFailure", "settledAt",
+          "settlement", "verification",
+        ], `${run.runId} 的 delivery 键集`);
+        assert.deepEqual(Object.keys(run.delivery.settlement).sort(), ["reason", "status"]);
+        assert.deepEqual(Object.keys(run.delivery.acceptance).sort(), ["decidedAt", "status"]);
+      }
     }
+    // 这个夹具里的运行请求了交付、终态却既没打包也没隔离证据：如实是判不出的收口，不是"没有"。
+    assert.deepEqual(runOf(snap, "run_leak").delivery, {
+      settlement: { status: "undeterminable", reason: "terminal_delivery_ambiguous" },
+      commit: null,
+      verification: null,
+      acceptance: { status: null, decidedAt: null },
+      settledAt: null,
+      ambiguous: false,
+      packagingFailure: null,
+      isolationFailure: null,
+      branchPresent: null, // 项目仓库不存在 → 没有分支观测
+    });
+    assert.equal(runOf(snap, "run_leak").failure, null, "没失败就没有失败事实");
+    assert.equal(runOf(snap, "run_leak").capacity, null);
     assert.deepEqual(runOf(snap, "run_leak").project, { slug: BETA.slug, name: BETA.name });
     const { keys, strings } = collect(snap);
     for (const key of keys) {

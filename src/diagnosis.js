@@ -625,19 +625,45 @@ function upstreamNeutralFact(u) {
  *   evidence 是事实证据（eventType 指向源事件，fact 陈述具体事实）。
  */
 export function diagnoseFailure(events, expectedRunId) {
-  const raw = diagnoseFailureInner(events, expectedRunId);
-  // Fail closed: a closed-set code is surfaced ONLY for a valid (category, code)
-  // pair — provider_auth carries a PROVIDER_DIAGNOSIS_CODES member, and no_effect
-  // carries the M12-21 completed_empty machine fact. Anything else (a branch that
-  // forgot its code, a wrong-category pairing, an attacker-controlled value)
-  // collapses to null. The wire projections (run_diagnose / run_await_result) use
-  // the SAME isValidDiagnosisCode pair check, so completed_empty reaches a Lead as
-  // code=no_effect/completed_empty on the wire (category=no_effect), derived from
-  // the single DIAGNOSIS_CODES SSOT — never a raw provider payload echo.
-  return {
-    ...raw,
-    code: kernelDiagnosisCode(raw.category, raw.code),
-  };
+  const { basisEvent, ...diagnosis } = diagnoseFailureDetailed(events, expectedRunId);
+  return diagnosis;
+}
+
+/**
+ * 与 diagnoseFailure 同一次判定，但只带 `category`、过了成对校验的 `code` 与
+ * `basisEvent`（不带 evidence）：判为 provider_capacity 时，basisEvent 是判定所依据的
+ * 那条绑定本 runId 的 run.error——终局 provider 错误（终态 failed 转移之前最近的一条），
+ * 或 zcode 上游摘要升级所绑定的本运行最后一条 run.error；其余结论为 null。额度结论
+ * 有这两条来路，只认前一条会把依据事件认错，所以由判定本身记下是哪一条。只供只读
+ * 消费方取这条事件的时刻（Owner 读模型的额度证据）；事件文本不得对外透出。
+ *
+ * @param {Array} events
+ * @param {string} [expectedRunId]
+ * @returns {{category: string, code: string|null, basisEvent: object|null}}
+ */
+export function diagnoseFailureWithBasis(events, expectedRunId) {
+  const { category, code, basisEvent } = diagnoseFailureDetailed(events, expectedRunId);
+  return { category, code, basisEvent };
+}
+
+/**
+ * 判定的唯一来源：diagnoseFailureInner 的结果，加上过了成对校验的 code 与依据事件。
+ * 两个导出各自从它取，永不各自判定。
+ *
+ * Fail closed: a closed-set code is surfaced ONLY for a valid (category, code)
+ * pair — provider_auth carries a PROVIDER_DIAGNOSIS_CODES member, and no_effect
+ * carries the M12-21 completed_empty machine fact. Anything else (a branch that
+ * forgot its code, a wrong-category pairing, an attacker-controlled value)
+ * collapses to null. The wire projections (run_diagnose / run_await_result) use
+ * the SAME isValidDiagnosisCode pair check, so completed_empty reaches a Lead as
+ * code=no_effect/completed_empty on the wire (category=no_effect), derived from
+ * the single DIAGNOSIS_CODES SSOT — never a raw provider payload echo.
+ *
+ * @returns {{category: string, code: string|null, evidence: object[], basisEvent: object|null}}
+ */
+function diagnoseFailureDetailed(events, expectedRunId) {
+  const { basisEvent = null, ...raw } = diagnoseFailureInner(events, expectedRunId);
+  return { ...raw, code: kernelDiagnosisCode(raw.category, raw.code), basisEvent };
 }
 
 /**
@@ -923,7 +949,8 @@ function diagnoseFailureInner(events, expectedRunId) {
   if (capacityError) {
     const code = classifyProviderCapacityCode(stripUpstreamSummary(capacityError.error));
     evidence.push({ eventType: "run.error", fact: `provider capacity unavailable（${code}）` });
-    return { category: "provider_capacity", code, evidence };
+    // basisEvent：判定所依据的那条 run.error（diagnoseFailureWithBasis 透出，diagnoseFailure 剥掉）。
+    return { category: "provider_capacity", code, evidence, basisEvent: capacityError };
   }
 
   // 3) timeout：run.timed_out 事件。
@@ -983,7 +1010,7 @@ function diagnoseFailureInner(events, expectedRunId) {
       if (evidenceAudit) {
         evidence.push({ eventType: "run.evidence_audit", fact: "有产出（证据审计通过），需人工确认" });
       }
-      return { category: "provider_capacity", code: "rate_limited", evidence };
+      return { category: "provider_capacity", code: "rate_limited", evidence, basisEvent: lastErrorEvent };
     }
     evidence.push({
       eventType: "run.error",

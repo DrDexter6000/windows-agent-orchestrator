@@ -194,7 +194,9 @@ export const STATE_CHANGE_REASON = Object.freeze(
 // M12-1S2: the closed set of final delivery verification outcome event types.
 // Shared by validateDeliveryFacts, tryAppendRepackageVerification, and the
 // repackage idempotency scans so there is one outcome-type set in this module.
-const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
+// Exported for read-only consumers that must locate the bound original outcome
+// event itself (Owner read model: the delivery's settled-at evidence time).
+export const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_passed",
   "run.delivery_verification_failed",
   "run.delivery_verification_unavailable",

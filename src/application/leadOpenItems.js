@@ -81,6 +81,7 @@ import { deliveryContinuableHint } from "./runContinue.js";
 import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGate } from "./lineageSupersession.js";
 import { findRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { parseWorktreePorcelain, RECENT_BOUND_EVENT_MS } from "./worktreeReclaim.js";
+import { listRunBranchRunIds } from "./runBranches.js";
 import {
   FEEDBACK_FILE_RE,
   defaultPackageRoot,
@@ -182,22 +183,13 @@ async function collectRunBranchOpenItems({
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return [];
   const resolvedRunDir = resolve(runDir);
 
-  // 1) 枚举（新到旧；只认 wao/run_ 前缀且 runId 合法的）。
-  let refs;
+  // 1) 枚举（新到旧；只认 wao/run_ 前缀且 runId 合法的——命令与判法在 runBranches.js，
+  //    与 Owner 看板的读模型共用同一份答案）。
+  let runIds;
   try {
-    const out = execGitFn(
-      ["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads/wao/"],
-      authorizedWorkspaceRoot,
-    );
-    refs = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    runIds = listRunBranchRunIds(execGitFn, authorizedWorkspaceRoot);
   } catch {
     return []; // 枚举失败 → 整个 A 省略
-  }
-  const runIds = [];
-  for (const ref of refs) {
-    if (!ref.startsWith("wao/run_")) continue;
-    const runId = ref.slice("wao/".length);
-    if (isValidRunId(runId)) runIds.push(runId);
   }
   const total = runIds.length;
   const examined = runIds.slice(0, OPEN_ITEM_BRANCH_CAP);

@@ -1,8 +1,8 @@
 // src/application/ownerReadModel.js
 //
-// 决定 0131 §5–§7（第 140a 批）：Owner 看板的共享读模型——每个运行目录一个、跨
-// 全部项目、只在内存。本批只做读模型与派发端的类型固化；HTTP 接口、前端与 MCP
-// schema 不在这里。
+// 决定 0131 §5–§7（第 140a、140b 批）：Owner 看板的共享读模型——每个运行目录一个、
+// 跨全部项目、只在内存。140a 做读模型与派发端的类型固化，140b 补交付、失败、额度、
+// 谱系、分支、会审结论几组事实。HTTP 接口、前端、MCP schema 与事项推导都不在这里。
 //
 // 模型：
 //   - 冷普查：第一次 refresh() 用 listTranscriptsDeep（严格模式）枚举全部桶（项目桶、
@@ -32,14 +32,42 @@
 //     （findStateEvidence / projectExecutionStage / runQuietAdvisory /
 //     ownerLiveness / deliveryWasRequested / boundReportScope），不另写第二份判定。
 //
+// 第 140b 批补的事实（给下一批的事项推导与接口用；同样只用既有判定）：
+//   - 交付：收口判定 determineRunSettlement；ambiguous / 打包失败 / 隔离失败三个
+//     结局取自交付视图 gatherDeliveryView；提交号与裁决事件取自交付事实校验
+//     validateDeliveryFacts。settledAt = 终态事件与该轮有效验证（或复验）结果事件
+//     两者中较晚的时间。
+//   - 失败与额度：diagnoseFailureWithBasis（src/diagnosis.js）——闭集 category 与
+//     code，以及额度结论所依据的那条 run.error 的时间。
+//   - 谱系：声明根与合法裁决是 lineageSupersession.js 的纯判定；"被取代"复用
+//     createLineageSupersession，把本模型的文件索引经 files / memberFilesForRoot
+//     注入——不另起全量枚举，也不做字节预筛。
+//   - 分支：runBranches.js 的枚举，与 lead_preflight 待办事项是同一份答案。
+//   - 会审：组记录经 loadConsultRecord 校验；Q1 的取文与 observeSeatRun 同一个
+//     extractFinalAssistantText，归组与取值用 attributeReply / compareFields。
+//
+// 已知局限：
+//   - 会审组记录只看现行位置 <项目 key>/.wao/runs/consults/<consultId>.json。项目的
+//     状态目录被重定向过的（链接工作树自己的 .wao、改过 stateDir 的项目），记录在
+//     别处，这里找不到。
+//   - 谱系成员与席位转录的事件不留在内存里（只缓存事实）。谱系成员、组记录或席位
+//     转录的文件身份变了，才重读相关文件。
+//
 // 架构契约：不 import src/commands/*、src/mcp/*、MCP SDK 或 zod。
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
+import { readFile as fsReadFile, readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
+import { join } from "node:path";
 
-import { listProjectRecords, listTranscriptsDeep, SAFE_BUCKET_SLUG_RE } from "../projectBuckets.js";
 import {
+  listProjectRecords,
+  listTranscriptsDeep,
+  loadBucketIndex,
+  SAFE_BUCKET_SLUG_RE,
+} from "../projectBuckets.js";
+import {
+  DELIVERY_VERIFICATION_OUTCOME_TYPES,
   findFirstBound,
   findLatestBound,
   findStateEvidence,
@@ -47,18 +75,53 @@ import {
   isPersistableOwnerTaskType,
   OWNER_TASK_TYPES,
   parseTranscriptText,
+  REVERIFY_REASONS,
   RUN_STATES,
   TERMINAL_STATES,
+  validateDeliveryFacts,
 } from "../transcript.js";
-import { isValidRunId } from "../delivery.js";
+import { isCanonicalCommitId, isValidRunId } from "../delivery.js";
+import {
+  DIAGNOSIS_CATEGORIES,
+  diagnoseFailureWithBasis,
+  ISOLATION_VIOLATION_REASONS,
+  isValidDiagnosisCode,
+  PROVIDER_CAPACITY_DIAGNOSIS_CODES,
+} from "../diagnosis.js";
+import { PACKAGING_FAILURE_CODES } from "../deliveryFailureCodes.js";
 import { boundReportScope } from "../metrics.js";
 import { redactSecretShapes } from "../secretRedaction.js";
 import { ID_RE, isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
+import {
+  attributeReply,
+  compareFields,
+  extractFinalAssistantText,
+  isValidConsultId,
+  loadConsultRecord,
+} from "./consultService.js";
+import {
+  createLineageSupersession,
+  declaredLineageRoot,
+  legalDeliveryDecision,
+  supersessionCandidateGate,
+} from "./lineageSupersession.js";
+import {
+  DELIVERY_ACCEPTANCE_STATUSES,
+  DELIVERY_VERIFICATION_STATUSES,
+  gatherDeliveryView,
+} from "./runDelivery.js";
 import { projectExecutionStage } from "./runStageProjection.js";
 import { lastActualEffectAtMs, lastEffectAtMs, lastVitalSignAtMs } from "./runQuietAdvisory.js";
 import { readOwnerLease } from "./ownerLiveness.js";
-import { deliveryWasRequested } from "./runSettlement.js";
+import { execGitReadOnly, listRunBranchRunIds } from "./runBranches.js";
+import {
+  deliveryWasRequested,
+  determineRunSettlement,
+  RUN_SETTLEMENT_REASONS,
+  RUN_SETTLEMENT_STATUSES,
+  SAFE_ISOLATION_VIOLATION_CODES,
+} from "./runSettlement.js";
 
 // 闭集 SSOT 在 src/transcript.js（写入侧 runManager 也要引用它）；这里转出，读模型的
 // 消费方不必再绕去转录模块。
@@ -70,6 +133,10 @@ export const OWNER_PROGRESS_WINDOW_SECONDS = 300;
 export const OWNER_PROCESS_WINDOW_SECONDS = 120;
 /** 标题与项目名的字符帽（超长时帽含省略号）。 */
 export const OWNER_TITLE_MAX_CHARS = 80;
+/** 每个项目的分支集合至多多久重新观测一次（ms）。 */
+export const OWNER_BRANCH_REFRESH_MS = 30_000;
+/** 会审结论 Q1 的闭集（决定 0128 的审查写法）。记录声明了别的候选值的 Q1 不是结论题。 */
+export const OWNER_CONSULT_Q1_VALUES = Object.freeze(["PASS", "PASS_WITH_NOTES", "FIX_FIRST"]);
 
 export const OWNER_LIVENESS_VALUES = Object.freeze(["terminal", "progress", "process_only", "silent", "unknown"]);
 export const OWNER_STAGE_VALUES = Object.freeze(["starting", "active", "terminal", "stage_unknown"]);
@@ -265,6 +332,142 @@ function factSlugOf(fact) {
   return null;
 }
 
+// ===== 交付、失败、额度、谱系：从事件算出的事实（纯函数） =====
+
+/** 闭集成员才放行：是字符串且在集合里 → 原值，否则 null。 */
+function memberOf(set, value) {
+  return typeof value === "string" && set.includes(value) ? value : null;
+}
+
+/** 交付提交号：规范的 40/64 位十六进制才是，其余 null。 */
+const canonicalCommit = (value) => (typeof value === "string" && isCanonicalCommitId(value) ? value : null);
+
+/**
+ * 事实派生的兜底：某个判定函数对一份转录抛错时如实给 fallback。读得到与否只取决于
+ * 读与解析，不能因为下游判定抛错就把整份转录判成读不到。
+ */
+function safeFact(compute, fallback) {
+  try {
+    return compute();
+  } catch {
+    return fallback;
+  }
+}
+
+const NO_DELIVERY_OUTCOME = Object.freeze({
+  commit: null,
+  verification: null,
+  acceptance: null,
+  decidedAtMs: null,
+  settledAtMs: null,
+  ambiguous: false,
+  packagingFailure: null,
+  isolationFailure: null,
+});
+
+/**
+ * 交付事实（只在该运行请求了交付时给）。口径全部是既有判定：
+ *   - settlement：determineRunSettlement 的 { status, reason }；
+ *   - ambiguous / packagingFailure / isolationFailure：交付视图（gatherDeliveryView）的
+ *     三个非交付结局，各给闭集码；
+ *   - commit：validateDeliveryFacts 认可的交付提交；交付事实自相矛盾（malformed）时
+ *     "是哪个提交"没有唯一答案，不给；
+ *   - verification：有效验证状态（复验通过就覆盖原始结果）与复验链的状态。malformed
+ *     链的 reason 是事件里的原值、没过形状校验，不进来；
+ *   - acceptance：裁决状态；decidedAtMs 是裁决事件自己的时间；
+ *   - settledAtMs：已收口的交付里，终态事件与该轮有效验证（或复验）结果事件两者中
+ *     较晚的时间（"等裁决"从这一刻算起）；任一取不到就是 null。
+ * 不取任何路径：deliveryRef 的 worktreePath、错误原文都不进来。
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {string} state
+ * @param {object|null} terminalEvent — 状态依据的那条终态事件
+ */
+function deliveryFacts(events, runId, state, terminalEvent) {
+  return safeFact(() => {
+    const settlement = determineRunSettlement(events, runId);
+    const view = gatherDeliveryView(events, runId, state);
+    const facts = validateDeliveryFacts(events, { expectedRunId: runId, allowVerificationPending: true });
+    const out = {
+      settlement: {
+        status: memberOf(RUN_SETTLEMENT_STATUSES, settlement.status),
+        reason: memberOf(RUN_SETTLEMENT_REASONS, settlement.reason),
+      },
+      ...NO_DELIVERY_OUTCOME,
+      ambiguous: view.ambiguous === true,
+      packagingFailure: memberOf(PACKAGING_FAILURE_CODES, view.deliveryFailure?.code),
+      isolationFailure: view.isolationFailure
+        ? {
+          code: memberOf(SAFE_ISOLATION_VIOLATION_CODES, view.isolationFailure.code),
+          reason: memberOf(ISOLATION_VIOLATION_REASONS, view.isolationFailure.reason),
+        }
+        : null,
+    };
+    if (facts.code !== "delivery_malformed") out.commit = canonicalCommit(facts.createdRef?.deliveryCommit);
+    if (view.deliveryAvailable !== true) return out;
+    out.verification = {
+      status: memberOf(DELIVERY_VERIFICATION_STATUSES, view.effectiveVerification?.status),
+      reverify: {
+        // 复验链的状态由投影器从代码字面量给出（none / pending / complete / malformed）。
+        status: view.reverify?.status ?? null,
+        reason: view.reverify?.status === "malformed" ? null : memberOf(REVERIFY_REASONS, view.reverify?.reason),
+      },
+    };
+    out.acceptance = { status: memberOf(DELIVERY_ACCEPTANCE_STATUSES, view.acceptance?.status) };
+    out.decidedAtMs = facts.decisionEvent ? tsMs(facts.decisionEvent.ts) : null;
+    if (settlement.status === "settled" && settlement.reason === "delivery_settled") {
+      // 有效验证来自复验链时，结果事件是复验的结果事件；否则是原始验证结果事件。
+      const outcome = facts.reverifyStatus === "complete"
+        ? facts.reverifyOutcomeEvent
+        : events.find((e) => e.runId === runId && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type)) ?? null;
+      const times = [tsMs(terminalEvent?.ts), tsMs(outcome?.ts)];
+      if (times.every((t) => t !== null)) out.settledAtMs = Math.max(...times);
+    }
+    return out;
+  }, { settlement: { status: null, reason: null }, ...NO_DELIVERY_OUTCOME });
+}
+
+/**
+ * 失败与额度事实：只在状态为 failed 时给，其余一律 null（不是失败就没有这两项）。
+ *   - failure：diagnoseFailureWithBasis 的 category（闭集）与 code（成对校验通过才给）；
+ *     证据文本一律不给；
+ *   - capacity：category 是 provider_capacity 且 code 属于额度码时给 { code, observedAtMs }；
+ *     observedAtMs 是判定所依据的那条 run.error 自己的时间，取不到为 null。
+ */
+function failureFacts(events, runId, state) {
+  if (state !== "failed") return { failure: null, capacity: null };
+  return safeFact(() => {
+    const diagnosis = diagnoseFailureWithBasis(events, runId);
+    const category = memberOf(DIAGNOSIS_CATEGORIES, diagnosis.category);
+    const code = isValidDiagnosisCode(diagnosis.category, diagnosis.code) ? diagnosis.code : null;
+    const capacityCode = category === "provider_capacity" ? memberOf(PROVIDER_CAPACITY_DIAGNOSIS_CODES, code) : null;
+    return {
+      failure: { category, code },
+      capacity: capacityCode === null
+        ? null
+        : { code: capacityCode, observedAtMs: tsMs(diagnosis.basisEvent?.ts) },
+    };
+  }, { failure: { category: null, code: null }, capacity: null });
+}
+
+const LINEAGE_ROOT_EVENT_TYPES = new Set(["run.session_reuse", "run.background_submitted"]);
+
+/**
+ * 这份转录可能属于哪几条谱系（rootRunId，码元序）：自身，加上绑定本 runId 的
+ * run.session_reuse / run.background_submitted 声明的 rootRunId。它只是喂给
+ * createLineageSupersession 的候选集（与回收计划的 byRoot 同一口径）；谁算成员由
+ * lineageClose 的 enumerateLineageMembers 判，这里不判。
+ */
+function lineageRootsOf(events, runId) {
+  const roots = new Set([runId]);
+  for (const e of events) {
+    if (e.runId !== runId || !LINEAGE_ROOT_EVENT_TYPES.has(e.type)) continue;
+    if (isValidRunId(e.rootRunId)) roots.add(e.rootRunId);
+  }
+  return [...roots].sort();
+}
+
 /**
  * 从一份转录的事件里提取这个运行的事实（全部与时间无关；时效结论不在这里）。
  * 绑定口径同 runs list / runQuietAdvisory：boundReportScope 收窄到该 runId 的信封
@@ -300,13 +503,15 @@ function extractFacts(events, runId) {
   }
 
   const agentId = first?.agentId;
+  const deliveryRequested = deliveryWasRequested(events, runId);
+  const lineage = declaredLineageRoot(events, runId);
   return {
     factSlug: factSlugOf(first?.project),
     agentId: isValidCanonicalAgentId(agentId) ? agentId : null,
     laneId: safeId(started?.laneId),
     roleId: ownerRoleId(started),
     readOnly: scope.some((e) => e.type === "run.read_only_declared"),
-    deliveryRequested: deliveryWasRequested(events, runId),
+    deliveryRequested,
     title,
     titleBasis,
     ...deriveOwnerTaskType(started),
@@ -327,26 +532,41 @@ function extractFacts(events, runId) {
     parentRunId: isValidRunId(submitted?.parentRunId) && submitted.parentRunId !== runId
       ? submitted.parentRunId
       : null,
+    // 第 140b 批：交付、失败、额度、谱系。没请求交付就没有交付事实；没失败就没有失败
+    // 与额度事实。声明根互相矛盾（同一转录里出现多个 rootRunId）时根为 null 并标明。
+    delivery: deliveryRequested ? deliveryFacts(events, runId, state, terminalEvent) : null,
+    ...failureFacts(events, runId, state),
+    lineageRoot: lineage.conflict ? null : lineage.rootRunId,
+    lineageConflict: lineage.conflict,
+    legalDecision: safeFact(() => legalDeliveryDecision(events, runId), null),
+    // 只有它会真正走到谱系派生（有谱系引用、已打包、自身未裁决、已收口）时才需要读别的成员。
+    supersessionCandidate: safeFact(() => supersessionCandidateGate(events, runId).candidate === true, false),
+    lineageRoots: safeFact(() => lineageRootsOf(events, runId), [runId]),
   };
 }
 
 const toBytes = (raw) => (Buffer.isBuffer(raw) ? raw : Buffer.from(raw));
 
 /**
- * 一份转录的原始字节 → 事实。只解析到最后一个换行为止（保留那个 LF）：其后没有
+ * 一份转录的原始字节 → 事件。只解析到最后一个换行为止（保留那个 LF）：其后没有
  * 换行结尾的尾部片段是还没写完的半行，忽略（写完后文件身份变化，下一轮会重读）。
  * LF 必须保留——CRLF 转录里把最后的 LF 切掉会留下一个孤立的 \r，完整的前缀
  * 反而被判读不到。完整行里有坏 JSON、一个完整行都没有、或出现非对象行 → 抛出，
  * 调用方按读不到处理。
  */
-function factsOf(bytes, runId) {
+function eventsOf(bytes) {
   const end = bytes.lastIndexOf(0x0a);
   if (end < 0) throw new Error("ownerReadModel: transcript has no complete line");
   const events = parseTranscriptText(bytes.subarray(0, end + 1).toString("utf8"));
   if (events.length === 0 || events.some((e) => e === null || typeof e !== "object" || Array.isArray(e))) {
     throw new Error("ownerReadModel: transcript has no readable events");
   }
-  return extractFacts(events, runId);
+  return events;
+}
+
+/** 一份转录的原始字节 → 事实（解析口径见 eventsOf）。 */
+function factsOf(bytes, runId) {
+  return extractFacts(eventsOf(bytes), runId);
 }
 
 /** 文件身份（bigint stat 的四个字段，转成字符串比较）。 */
@@ -376,6 +596,54 @@ function locationOrder(a, b) {
 
 const byRunId = (a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0);
 
+/** 会审按组记录的 createdAt 升序；没有可用时间的排在最后；同一时刻按 consultId 码元序。 */
+function byConsultCreatedAt(a, b) {
+  const left = tsMs(a.createdAt);
+  const right = tsMs(b.createdAt);
+  if (left !== right) return left === null ? 1 : right === null ? -1 : left - right;
+  return a.consultId < b.consultId ? -1 : a.consultId > b.consultId ? 1 : 0;
+}
+
+/** 读不到的位置在索引里的那一条：事实全空；谱系候选根沿用上一次读得出时的值（从没有过就是 null）。 */
+function unreadableEntry(entry, previous) {
+  return {
+    runId: entry.runId, bucket: entry.bucket, identity: null, hash: null, facts: null, roots: previous?.roots ?? null,
+  };
+}
+
+/** 运行的项目 slug。conflict 时两处可能属于不同项目：不选。读不到时位置事实仍可用。 */
+function projectSlugOf(run) {
+  if (run.availability === "conflict") return null;
+  return run.facts !== null ? run.facts.factSlug ?? safeSlug(run.primaryBucket) : safeSlug(run.primaryBucket);
+}
+
+/** 组记录里可以照抄进快照的席位状态（其余记录值不采信）。 */
+const SEAT_RUN_STATES = Object.freeze([...RUN_STATES, "dispatch_failed", "missing"]);
+
+/**
+ * 运行行的交付事实（快照投影：逐字段取，不整包透传）。branches 是该项目最近一次
+ * 观测到的分支集合；没有可用的观测（仓库 unknown、还没观测过、项目定不了）就是
+ * undefined，branchPresent 如实给 null。
+ */
+function projectDelivery(runId, delivery, branches) {
+  return {
+    settlement: { status: delivery.settlement.status, reason: delivery.settlement.reason },
+    commit: delivery.commit,
+    verification: delivery.verification === null ? null : {
+      status: delivery.verification.status,
+      reverify: { status: delivery.verification.reverify.status, reason: delivery.verification.reverify.reason },
+    },
+    acceptance: { status: delivery.acceptance === null ? null : delivery.acceptance.status, decidedAt: iso(delivery.decidedAtMs) },
+    settledAt: iso(delivery.settledAtMs),
+    ambiguous: delivery.ambiguous,
+    packagingFailure: delivery.packagingFailure,
+    isolationFailure: delivery.isolationFailure === null
+      ? null
+      : { code: delivery.isolationFailure.code, reason: delivery.isolationFailure.reason },
+    branchPresent: branches === undefined || branches === null ? null : branches.has(runId),
+  };
+}
+
 /** "在窗口内"：年龄（未来时间钳成 0）不超过窗口；atMs 为 null（无从观测）→ false。 */
 function withinWindow(atMs, now, windowSeconds) {
   return atMs !== null && Math.max(0, now - atMs) <= windowSeconds * 1000;
@@ -397,7 +665,9 @@ const STAGE_DISPLAY = Object.freeze({
  * @param {Function} [input.nowFn=Date.now] — 注入时钟
  * @param {number} [input.batchSize=200] — 每批读取的文件数；批与批之间让出事件循环
  * @param {object} [input.io] — 注入缝（测试用）：`readFile(path)` → 原始字节、
- *   `stat(path)` → bigint stat、`listFiles(runDir, { strict })`
+ *   `stat(path)` → bigint stat、`listFiles(runDir, { strict })` → 转录清单、
+ *   `listDir(dir)` → 文件名数组（会审组记录目录）、`execGit(args, cwd)` → stdout（只读
+ *   分支枚举）
  * @returns {{refresh: Function, snapshot: Function, resolveRun: Function}}
  */
 export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {} } = {}) {
@@ -410,14 +680,35 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   const readFile = io.readFile ?? fsReadFile;
   const statFile = io.stat ?? ((path) => fsStat(path, { bigint: true }));
   const listFiles = io.listFiles ?? listTranscriptsDeep;
+  const listDir = io.listDir ?? fsReaddir;
+  const execGit = io.execGit ?? execGitReadOnly;
 
-  // path → { runId, bucket, identity: {size, mtimeNs, ctimeNs, ino}|null, hash, facts }
-  //（identity 为 null 或 hash / facts 为 null = 那一次读不到，下轮重试）
+  // path → { runId, bucket, identity: {size, mtimeNs, ctimeNs, ino}|null, hash, facts, roots }
+  //（identity 为 null 或 hash / facts 为 null = 那一次读不到，下轮重试。roots = 这份
+  // 转录声明的谱系候选根；读不到时沿用上一次读得出时的值，从没读得出过就是 null）
   let fileIndex = new Map();
   // runId → { runId, availability, primaryPath, primaryBucket, locations, facts }
   let runIndex = new Map();
   // slug → 项目名（null = 没有名字）
   let projectNames = new Map();
+  // rootRunId → 谱系候选文件路径
+  let lineageMembers = new Map();
+  // rootRunId → { signature, superseded: Map<runId, runId|null> }（"被取代"的派生事实；
+  // 该谱系任一候选文件的身份变了才重算，没变就沿用）
+  let lineageDerived = new Map();
+  // 有从没读得出过的转录：它属于哪条谱系无从得知，出快照时"被取代"与"合法裁决"一律
+  // 按无法判定给（派生照常做并缓存，见 deriveLineage）。
+  let lineageBlind = false;
+  // 上一次刷新失败：文件索引可能已经看不全，"被取代"按无法判定给出，直到下一次刷新成功。
+  let lineageStale = false;
+  // consultId → { identity, record, seatKeys, value }（会审组记录与由它算出的事实）
+  let consultIndex = new Map();
+  // 席位转录路径 → { signature, text }：最终 assistant 文本（取结论用），text 是
+  // Promise<string|null>。只缓存真正当过席位的转录；文件身份变了才重读。
+  let finalTexts = new Map();
+  // slug → { repo, observedAtMs, branches: Set<runId>|null }（分支观测，至多每
+  // OWNER_BRANCH_REFRESH_MS 一次；失败如实记 unknown，不沿用过期结果）
+  let branchIndex = new Map();
   let inflight = null;
 
   async function eachBatch(items, visit) {
@@ -433,16 +724,23 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
    *
    * @returns {Promise<{scanned: number, reread: number, added: number, removed: number,
    *   moved: number, unreadable: number}>}
-   *   scanned = 本次枚举到的 run 转录数；reread = 本次实际读取内容的文件数；
-   *   added / removed = 新出现 / 消失的运行数（按 runId）；moved = 换了位置、旧位置
-   *   一个不剩的运行数；unreadable = 本次读不出（stat、读、解析任一失败）的文件数。
-   *   并发调用共用同一次普查。中途失败则拒绝，已有索引与快照原样保留。
+   *   scanned = 本次枚举到的 run 转录数；reread = 本次实际读取内容的转录文件数（含为
+   *   谱系派生与席位结论重读的）；added / removed = 新出现 / 消失的运行数（按 runId）；
+   *   moved = 换了位置、旧位置一个不剩的运行数；unreadable = 本次读不出的文件数——
+   *   读不出（stat、读、解析任一失败）的转录，加上读不出或校验不过的会审组记录。
+   *   并发调用共用同一次普查。中途失败则拒绝，已有索引与快照原样保留；只有谱系的
+   *   "被取代"与"合法裁决"两项改为按无法判定给出（文件索引可能已经看不全）。
    */
   function refresh() {
     if (inflight === null) {
-      inflight = runRefresh().finally(() => {
-        inflight = null;
-      });
+      inflight = runRefresh()
+        .catch((error) => {
+          lineageStale = true;
+          throw error;
+        })
+        .finally(() => {
+          inflight = null;
+        });
     }
     return inflight;
   }
@@ -471,6 +769,8 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     // ① 先 stat（读之前取身份：读到的新于 stat 时下一轮会重读，不会漏）。
     const located = [];
     const nextFiles = new Map();
+    const scannedReads = new Set(); // ③ 里实际读了内容的转录路径
+    const derivedReads = new Set(); // ⑤ 里为派生事实重读的转录路径
     let reread = 0;
     let unreadable = 0;
     await eachBatch(listed, async (entry) => {
@@ -482,7 +782,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
         // stat 失败（权限等）：这个位置这一轮读不到，也不去读它的内容。仍留在运行的
         // 分组里——否则同一运行剩下的副本会被当成唯一可用档。
         unreadable += 1;
-        nextFiles.set(entry.path, { runId: entry.runId, bucket: entry.bucket, identity: null, hash: null, facts: null });
+        nextFiles.set(entry.path, unreadableEntry(entry, fileIndex.get(entry.path)));
         located.push({ entry, identity: null });
         return;
       }
@@ -517,15 +817,18 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       try {
         const bytes = toBytes(await readFile(entry.path));
         reread += 1;
+        scannedReads.add(entry.path);
         const hash = createHash("sha256").update(bytes).digest("hex");
         const twin = earlier
           .map((path) => nextFiles.get(path))
           .find((record) => record !== undefined && record.hash === hash && record.facts !== null);
         const facts = twin !== undefined ? twin.facts : factsOf(bytes, entry.runId);
-        nextFiles.set(entry.path, { runId: entry.runId, bucket: entry.bucket, identity, hash, facts });
+        nextFiles.set(entry.path, {
+          runId: entry.runId, bucket: entry.bucket, identity, hash, facts, roots: facts.lineageRoots,
+        });
       } catch {
         unreadable += 1;
-        nextFiles.set(entry.path, { runId: entry.runId, bucket: entry.bucket, identity: null, hash: null, facts: null });
+        nextFiles.set(entry.path, unreadableEntry(entry, fileIndex.get(entry.path)));
       }
     });
 
@@ -560,26 +863,358 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       if (!nextRuns.has(runId)) removed += 1;
     }
 
+    // ⑤ 派生事实（都从上面刚建好的索引取，不另起枚举）：谱系取代、会审结论、项目分支。
+    //    任何一步抛错都走不到下面的交接，已有索引原样保留。
+    const nextKeys = collectProjectKeys();
+    const readForFacts = async (path) => {
+      derivedReads.add(path);
+      return readFile(path);
+    };
+    const lineage = await deriveLineage(nextFiles, nextRuns, readForFacts);
+    const consults = await collectConsults({ files: nextFiles, runs: nextRuns, keys: nextKeys, read: readForFacts });
+    const branches = await observeBranches(nextRuns, nextKeys);
+
     fileIndex = nextFiles;
     runIndex = nextRuns;
     projectNames = nextProjectNames;
+    lineageMembers = lineage.members;
+    lineageDerived = lineage.derived;
+    lineageBlind = lineage.blind;
+    lineageStale = false;
+    consultIndex = consults.index;
+    branchIndex = branches;
+    for (const path of finalTexts.keys()) if (!nextFiles.has(path)) finalTexts.delete(path);
+    let derivedOnly = 0;
+    for (const path of derivedReads) if (!scannedReads.has(path)) derivedOnly += 1;
     return {
       scanned: listed.length,
-      reread,
+      reread: reread + derivedOnly,
       added,
       removed,
       moved,
-      unreadable,
+      unreadable: unreadable + consults.unreadable,
+    };
+  }
+
+  async function isDirectory(path) {
+    try {
+      return (await statFile(path)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * slug → 项目仓库的主工作树根（.project.json 的 key；null = 多个 key 指向同一个 slug）。
+   * 绝对路径，只用来定位会审组记录目录和枚举分支，不进快照。每次都从各桶的
+   * .project.json 重建（那是权威；中心索引只是缓存，写失败时会缺条目）。读不出就是
+   * 空表：所有项目仓库按 unknown 给。
+   */
+  function collectProjectKeys() {
+    const keys = new Map();
+    let entries;
+    try {
+      entries = loadBucketIndex(runDir, { forceRebuild: true }).entries;
+    } catch {
+      return keys;
+    }
+    for (const [key, slug] of Object.entries(entries)) {
+      if (typeof slug !== "string" || !SAFE_BUCKET_SLUG_RE.test(slug)) continue;
+      // 两个 key 指向同一个 slug：说不清是哪个仓库。
+      keys.set(slug, keys.has(slug) && keys.get(slug) !== key ? null : key);
+    }
+    return keys;
+  }
+
+  /** 一组文件的身份签名：路径 + 文件身份 + 内容哈希。任一文件变了、增了、没了，签名就变。 */
+  function signatureOf(paths, files) {
+    return paths.slice().sort().map((path) => {
+      const entry = files.get(path);
+      const identity = entry === undefined || entry.identity === null
+        ? "-"
+        : `${entry.identity.size}:${entry.identity.mtimeNs}:${entry.identity.ctimeNs}:${entry.identity.ino}`;
+      return `${path}\u0000${identity}\u0000${entry?.hash ?? "-"}`;
+    }).join("\u0001");
+  }
+
+  /**
+   * 谱系的"被取代"派生（createLineageSupersession 是判定与派生的唯一实现；这里只喂
+   * 索引）。候选根索引 lineageRootsOf 给出，成员判定仍在 lineageClose。
+   *   - 只为会走到派生的运行建派生器（supersessionCandidateGate：有谱系引用、已打包、
+   *     自身未裁决、已收口）；其余运行的"被取代"按同一条门的规则就是 null。
+   *   - 一条谱系的候选文件身份没变，就沿用上一次的派生结果，不读任何文件。派生结果
+   *     只取决于这条谱系的成员，所以缓存按成员身份有效。
+   *   - 有从没读得出过的转录时（blind）：它属于哪条谱系无从得知，就不能断言别的谱系
+   *     里没有它——这时照常派生并缓存，但出快照时一律不发布（见 projectRun）。不把
+   *     blind 传成 filesIncomplete：那会把这一轮的空结果缓存下来，等那份转录读得出
+   *     之后，与它无关的谱系会一直命中那份空结果。
+   *   - 读得出过的转录后来读不到了，仍留在它声明过的谱系的候选里——派生器读到读不出，
+   *     整条谱系如实不推导。
+   */
+  async function deriveLineage(files, runs, read) {
+    const members = new Map();
+    let blind = false;
+    for (const [path, entry] of files) {
+      if (entry.roots === null) blind = true;
+      for (const root of entry.roots ?? [entry.runId]) {
+        if (!members.has(root)) members.set(root, []);
+        members.get(root).push(path);
+      }
+    }
+    const candidates = new Map(); // rootRunId → runId[]
+    for (const run of runs.values()) {
+      if (run.availability !== "ok" || !run.facts.supersessionCandidate || run.facts.lineageConflict) continue;
+      const root = run.facts.lineageRoot;
+      if (!candidates.has(root)) candidates.set(root, []);
+      candidates.get(root).push(run.runId);
+    }
+    const fileOf = (path) => ({ name: `${files.get(path).runId}.jsonl`, path });
+    const derived = new Map();
+    await eachBatch([...candidates.keys()].sort(), async (root) => {
+      const signature = signatureOf(members.get(root) ?? [], files);
+      const previous = lineageDerived.get(root);
+      if (previous !== undefined && previous.signature === signature) {
+        derived.set(root, previous);
+        return;
+      }
+      const supersession = createLineageSupersession({
+        runDir,
+        readTranscriptFn: async (path) => eventsOf(toBytes(await read(path))),
+        // 索引条目不带路径（路径是索引的键）：这里从键取。
+        files: [...files].map(([path, entry]) => ({ name: `${entry.runId}.jsonl`, path })),
+        memberFilesForRoot: (rootRunId) => (members.get(rootRunId) ?? []).map(fileOf),
+        // 文件清单已注入：派生器不该再枚举。真枚举了就让它失败（= 不推导），不悄悄读盘。
+        enumerateFilesFn: () => {
+          throw new Error("ownerReadModel: lineage derivation must use the read model's file index");
+        },
+      });
+      const superseded = new Map();
+      for (const runId of candidates.get(root)) {
+        let by = null;
+        try {
+          const result = await supersession.forRun({ runId });
+          by = isValidRunId(result.supersededByRunId) ? result.supersededByRunId : null;
+        } catch {
+          by = null; // 派生读不出：不推导
+        }
+        superseded.set(runId, by);
+      }
+      derived.set(root, { signature, superseded });
+    });
+    return { members, derived, blind };
+  }
+
+  /**
+   * 会审结论：逐个项目列 <key>/.wao/runs/consults/，按文件身份缓存组记录。组记录没变、
+   * 席位转录也没变就不重算；重算时，席位转录的文件身份没变就不重读（最终回答文本按
+   * 文件身份缓存）。坏记录计入 unreadable，不中断刷新。
+   */
+  async function collectConsults({ files, runs, keys, read }) {
+    const index = new Map();
+    let unreadable = 0;
+    await eachBatch([...keys], async ([slug, key]) => {
+      if (key === null || !(await isDirectory(key))) return;
+      const dir = join(key, ".wao", "runs", "consults");
+      let names;
+      try {
+        names = await listDir(dir);
+      } catch (error) {
+        // 没有这个目录 = 这个项目还没开过会审；其余读不出（权限等）如实计数。
+        if (error?.code !== "ENOENT") unreadable += 1;
+        return;
+      }
+      for (const name of Array.isArray(names) ? names : []) {
+        if (typeof name !== "string" || !name.endsWith(".json")) continue;
+        const consultId = name.slice(0, -".json".length);
+        if (!isValidConsultId(consultId)) continue;
+        const path = join(dir, name);
+        let identity;
+        try {
+          identity = identityOf(await statFile(path));
+        } catch (error) {
+          if (error?.code !== "ENOENT") unreadable += 1;
+          continue;
+        }
+        const previous = consultIndex.get(consultId);
+        let record = previous !== undefined && sameIdentity(previous.identity, identity) ? previous.record : null;
+        if (record === null) {
+          record = await loadConsultRecordSafe(consultId, dir, path);
+          if (record === null) {
+            unreadable += 1;
+            continue;
+          }
+        }
+        const seats = locateSeats(record, runs);
+        const seatKeys = JSON.stringify(seats.map((seat) => seatKey(seat, files)));
+        if (previous !== undefined && record === previous.record && previous.seatKeys === seatKeys) {
+          index.set(consultId, previous);
+          continue;
+        }
+        index.set(consultId, {
+          identity, record, seatKeys, value: await consultValue(slug, record, seats, runs, files, read),
+        });
+      }
+    });
+    return { index, unreadable };
+  }
+
+  async function loadConsultRecordSafe(consultId, dir, path) {
+    try {
+      // 校验（consultId 形状、记录里的 consultId 与文件名一致、JSON 可解析）走
+      // loadConsultRecord。它读到半截内容会隔 100ms 重读几次；读模型本来就每轮刷新
+      // 重来一次，这里不等——半截的记录这一轮按坏记录计，下一轮自然重读。
+      // 直接走读缝：组记录不是转录，不计进 reread。
+      return await loadConsultRecord({
+        consultId,
+        consultsDir: dir,
+        readFileFn: async () => toBytes(await readFile(path)).toString("utf8"),
+        sleepFn: async () => {},
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 组记录里的席位与它们在本运行目录里的定位。定位走 resolveRun 同一份逻辑（只认本
+   * 运行目录的枚举结果）；记录里的 agentId / runId 不合形状就是 null。
+   */
+  function locateSeats(record, runs) {
+    const seats = Array.isArray(record.seats)
+      ? record.seats.filter((seat) => seat !== null && typeof seat === "object" && !Array.isArray(seat))
+      : [];
+    return seats.map((seat) => ({
+      agentId: isValidCanonicalAgentId(seat.agentId) ? seat.agentId : null,
+      runId: isValidRunId(seat.runId) ? seat.runId : null,
+      // 记录点名了一个 run（哪怕 runId 不合形状）：找不到就按 missing 给，不拿记录里的旧观察顶。
+      claimsRun: typeof seat.runId === "string" && seat.runId.length > 0,
+      recordedState: memberOf(SEAT_RUN_STATES, seat.runState),
+      located: isValidRunId(seat.runId) ? locateIn(runs, seat.runId) : null,
+    }));
+  }
+
+  /** 席位转录在这一轮的键：定位不到、读不到、或文件身份 + 内容哈希。 */
+  function seatKey(seat, files) {
+    const entry = seat.located === null ? undefined : files.get(seat.located.transcriptPath);
+    if (seat.located === null) return "missing";
+    if (entry === undefined || entry.facts === null) return "unreadable";
+    return signatureOf([seat.located.transcriptPath], files);
+  }
+
+  /**
+   * 一场会审的结论事实。Q1 按决定 0128 重算：取文与 observeSeatRun 同一个
+   * extractFinalAssistantText，归组与取值用 attributeReply / compareFields（声明用组记录
+   * 里的 declaredFields 原样）。只有记录声明了 Q1、且候选值里有闭集结论值时才算，取到的
+   * 值也必须是闭集成员——记录是磁盘上可手改的，别的字符串不进快照。
+   */
+  async function consultValue(projectSlug, record, seats, runs, files, read) {
+    const declared = record.declaredFields;
+    const q1Declared = Array.isArray(declared?.Q1)
+      && declared.Q1.some((v) => typeof v === "string" && OWNER_CONSULT_Q1_VALUES.includes(v));
+    const attribution = {};
+    const rows = [];
+    for (const seat of seats) {
+      let runState = seat.claimsRun ? "missing" : seat.recordedState;
+      let text = null;
+      if (seat.located !== null && seat.located.availability === "ok") {
+        runState = runs.get(seat.runId).facts.state;
+        text = await seatText(seat, files, read);
+      }
+      if (seat.agentId !== null && text !== null) attribution[seat.agentId] = attributeReply(text);
+      rows.push({ agentId: seat.agentId, runId: seat.runId, runState, q1: null });
+    }
+    const { fieldValues } = compareFields(attribution, declared);
+    for (const row of rows) {
+      row.q1 = q1Declared && row.agentId !== null
+        ? memberOf(OWNER_CONSULT_Q1_VALUES, fieldValues.Q1?.[row.agentId])
+        : null;
+    }
+    return {
+      consultId: record.consultId,
+      projectSlug,
+      createdAt: iso(tsMs(record.createdAt)),
+      reviewedRunId: isValidRunId(record.reviewedRunId) ? record.reviewedRunId : null,
+      q1Declared,
+      seats: rows,
     };
   }
 
   /**
+   * 席位的最终 assistant 文本（取文与 observeSeatRun 同一个函数；读不到 → null）。按
+   * 转录的文件身份缓存：身份没变就不重读；同一轮里几场会审共用同一席时也只读一次。
+   */
+  function seatText(seat, files, read) {
+    const path = seat.located.transcriptPath;
+    const signature = signatureOf([path], files);
+    const cached = finalTexts.get(path);
+    if (cached !== undefined && cached.signature === signature) return cached.text;
+    const runId = seat.runId;
+    const text = (async () => {
+      try {
+        return extractFinalAssistantText(eventsOf(toBytes(await read(path))), { runId, env: {} });
+      } catch {
+        return null;
+      }
+    })();
+    finalTexts.set(path, { signature, text });
+    return text;
+  }
+
+  /**
+   * 分支观测：只对至少有一个请求了交付的运行的项目做，每个项目至多每
+   * OWNER_BRANCH_REFRESH_MS 一次（不论成败）。仓库根不存在、不是目录、或 git 失败都如实
+   * 记 unknown——不拿上一次的结果冒充这一轮的观测。项目没有仓库事实（没有 key，或
+   * 多个 key 指向同一个 slug）时丢掉旧观测；不再有交付运行的项目留着最后一次观测，
+   * 它的时刻一并给出。
+   */
+  async function observeBranches(runs, keys) {
+    const next = new Map(branchIndex);
+    const now = timeMs(nowFn());
+    const wanted = new Set();
+    for (const run of runs.values()) {
+      if (run.availability !== "ok" || run.facts.deliveryRequested !== true) continue;
+      const slug = projectSlugOf(run);
+      if (slug !== null) wanted.add(slug);
+    }
+    for (const slug of wanted) {
+      const key = keys.get(slug);
+      if (key === undefined || key === null) {
+        next.delete(slug);
+        continue;
+      }
+      const previous = next.get(slug);
+      if (previous !== undefined && now !== null && previous.observedAtMs !== null
+        && previous.observedAtMs <= now && now - previous.observedAtMs < OWNER_BRANCH_REFRESH_MS) {
+        continue;
+      }
+      // 仓库根不存在或不是目录：没有可观测的分支，不记观测时刻（下一轮再看——stat 很便宜，
+      // 目录一出现就能观测到）。
+      if (!(await isDirectory(key))) {
+        next.set(slug, { repo: "unknown", observedAtMs: null, branches: null });
+        continue;
+      }
+      let branches = null;
+      try {
+        branches = new Set(listRunBranchRunIds(execGit, key));
+      } catch {
+        branches = null;
+      }
+      next.set(slug, { repo: branches === null ? "unknown" : "available", observedAtMs: now, branches });
+    }
+    return next;
+  }
+
+  /**
    * 发布一份快照：用同一个 now 现算每个运行的活性与阶段时效，并当场读心跳租约。
-   * 快照里没有任何仓库路径、工作树路径、cwd 或转录路径。
+   * 快照里没有任何仓库路径、工作树路径、cwd、转录路径或会审记录路径；项目只给
+   * slug、名字、仓库是否可观测与分支观测时刻。
    *
    * @param {{now?: number}} [options] — 缺省取 nowFn()；必须是可表示的 epoch ms
    *   （有限且在 Date 范围内），否则抛 TypeError
-   * @returns {{generatedAt: string, projects: Array<{slug: string, name: string|null}>, runs: object[]}}
+   * @returns {{generatedAt: string,
+   *   projects: Array<{slug: string, name: string|null, repo: string, branchesObservedAt: string|null}>,
+   *   runs: object[], consults: object[]}}
+   *   consults 按组记录的 createdAt 升序（没有可用时间的排在最后）。
    */
   function snapshot({ now } = {}) {
     const at = now === undefined ? nowFn() : now;
@@ -593,18 +1228,24 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     for (const run of runs) if (run.project !== null) slugs.add(run.project.slug);
     return {
       generatedAt: iso(at),
-      projects: [...slugs].sort().map((slug) => ({ slug, name: projectNames.get(slug) ?? null })),
+      projects: [...slugs].sort().map((slug) => {
+        const observed = branchIndex.get(slug);
+        return {
+          slug,
+          name: projectNames.get(slug) ?? null,
+          repo: observed?.repo === "available" ? "available" : "unknown",
+          branchesObservedAt: iso(observed?.observedAtMs ?? null),
+        };
+      }),
       runs,
+      consults: [...consultIndex.values()].map((entry) => entry.value).sort(byConsultCreatedAt),
     };
   }
 
   function projectRun(run, now) {
     const ok = run.availability === "ok";
     const f = ok ? run.facts : null;
-    // conflict 时两处可能属于不同项目：不选。读不到时位置事实仍可用。
-    const slug = run.availability === "conflict"
-      ? null
-      : (f !== null ? f.factSlug ?? safeSlug(run.primaryBucket) : safeSlug(run.primaryBucket));
+    const slug = projectSlugOf(run);
     let heartbeatAtMs = null;
     if (ok && f.terminal !== true) {
       try {
@@ -625,6 +1266,12 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       else liveness = "silent";
     }
     const vital = [ok ? f.lastVitalEventAtMs : null, heartbeatAtMs].filter((ms) => ms !== null);
+
+    // 谱系两项无法判定：上一轮刷新失败、有从没读得出过的转录、或本谱系里有读不出的成员。
+    // 这时不给"被取代"的结论，"合法裁决"也一并按无法判定给；声明根是本转录自己的事实，照给。
+    const undeterminable = ok
+      && (lineageStale || lineageBlind || memberUnreadable(f.lineageRoot));
+    const branches = slug === null ? undefined : branchIndex.get(slug)?.branches;
     return {
       runId: run.runId,
       project: slug === null ? null : { slug, name: projectNames.get(slug) ?? null },
@@ -652,6 +1299,17 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       lastProcessActiveAt: iso(f?.lastProcessActiveAtMs ?? null),
       retryOf: f?.retryOf ?? null,
       parentRunId: f?.parentRunId ?? null,
+      // 交付：没请求交付就是 null。branchPresent = 该运行的 wao/<runId> 分支还在不在；
+      // 仓库 unknown 或还没观测过就是 null（不当作"不在"）。
+      delivery: f === null || f.delivery === null ? null : projectDelivery(run.runId, f.delivery, branches),
+      // 失败与额度：只在状态为 failed 时有。
+      failure: f?.failure ?? null,
+      capacity: f === null || f.capacity === null ? null : { code: f.capacity.code, observedAt: iso(f.capacity.observedAtMs) },
+      lineageRootRunId: f?.lineageRoot ?? null,
+      lineageRootConflict: f?.lineageConflict ?? null,
+      lineageUndeterminable: ok ? undeterminable : null,
+      legalDecision: undeterminable ? null : f?.legalDecision ?? null,
+      supersededByRunId: undeterminable ? null : lineageDerived.get(f?.lineageRoot)?.superseded.get(run.runId) ?? null,
     };
   }
 
@@ -666,12 +1324,22 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
    * @returns {{runId: string, availability: string, transcriptPath: string, bucket: string|null}|null}
    */
   function resolveRun(runId) {
+    return locateIn(runIndex, runId);
+  }
+
+  /** resolveRun 的定位逻辑，对任意一份运行索引求值（刷新中途的会审席位定位用新索引）。 */
+  function locateIn(index, runId) {
     if (!isValidRunId(runId)) return null;
-    const run = runIndex.get(runId);
+    const run = index.get(runId);
     if (run === undefined) return null;
     const singleUnreadable = run.availability === "unreadable" && run.locations.length === 1;
     if (run.availability !== "ok" && !singleUnreadable) return null;
     return { runId, availability: run.availability, transcriptPath: run.primaryPath, bucket: run.primaryBucket };
+  }
+
+  /** 本谱系的候选文件里有读不出的成员 → "被取代"无从推导。 */
+  function memberUnreadable(root) {
+    return root !== null && (lineageMembers.get(root) ?? []).some((path) => fileIndex.get(path)?.facts == null);
   }
 
   return { refresh, snapshot, resolveRun };
