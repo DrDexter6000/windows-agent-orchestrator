@@ -28,6 +28,8 @@
 //   TD-240 追加第四处：runs verify-commit 服务头（src/application/
 //   runVerifyCommit.js）——env 准备之前先过本门，防本 CLI 成为 worker 获取
 //   净化环境/嵌套豁免的入口（Lead 主检出语境正常放行）。
+//   第 137a 批追加：CLI `runs continue` 入口（src/commands/runs.js）——续修起
+//   worker，与 MCP run_continue 处理器头同一道门，先于任何服务调用。
 import { resolve as resolvePath } from "node:path";
 // P4 分层修（2026-10-10 摩擦处置批）：豁免变量名常量的 SSOT 迁 envPolicy.js
 // （shared 内核——backends 层消费该名字做注入拒收时不再产生 core 上向边；

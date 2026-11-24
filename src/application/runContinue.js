@@ -27,7 +27,8 @@
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Depends on transcript.js, delivery.js, sessionReuse.js,
 //     runWorkspaceOwnership.js, registry.js, credentialReadiness.js, envPolicy.js,
-//     and runnerLaunch.js (detached runner 的唯一启动口；spawnFn 注入缝经它传递).
+//     secretRedaction.js (receipt projection), and runnerLaunch.js (detached
+//     runner 的唯一启动口；spawnFn 注入缝经它传递).
 
 import { join, resolve, dirname } from "node:path";
 import { existsSync } from "node:fs";
@@ -77,6 +78,8 @@ import { deriveStartedIdentity, laneFingerprint as laneFingerprintOf } from "./i
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { PROMPT_HANDOFF_TIMEOUT_MS, PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs } from "../runnerPrompt.js";
 import { openRunnerStderrFd, runnerStderrPath } from "./runnerStderr.js";
+// 第 137a 批：续修回执投影（MCP 与 CLI 共用）里对累计范围路径做 exact-secret 脱敏。
+import { createSecretRedactor } from "../secretRedaction.js";
 // TD-347（第 93 批）：runner 的唯一启动口（WMI 启动桥 / 本进程 spawn，见
 // runnerLaunch.js 头注）。同层 application import。
 import { launchRunner, runnerLaunchFailureText } from "./runnerLaunch.js";
@@ -213,6 +216,127 @@ export function computeContinuationCumulativeScope(worktreePath, baseCommit, chi
     uncoveredInheritedCount: uncovered.length,
     uncoveredInheritedTruncated: uncovered.length > uncoveredPaths.length,
     complete: uncovered.length === 0,
+  };
+}
+
+// ===== 续修回执投影（MCP run_continue 与 CLI `runs continue` 共用）=====
+//
+// 两面都只做 transport/input/output adaptation：服务结果怎么投影成回执、哪些
+// 字段能出、畸形怎么收，只写在这里（第 137a 批从 MCP 适配层下沉——CLI 补齐时
+// 不复制第二份）。MCP 适配层在它之后再用输出 schema 校验一遍；CLI 直接输出。
+
+/** 受理回执 nextStep 末尾的后缀：delivery 省略、子运行继承父运行合同时的那半句
+ *  （决定 0130；不新增 wire 字段）。 */
+export const CONTINUE_INHERITED_DELIVERY_NOTE = " Delivery contract inherited from the parent run.";
+
+/** 继承来的合同复验失败时（invalid_delivery 且 delivery 省略）回执带的固定指路文案。 */
+export const CONTINUE_INHERITED_DELIVERY_GUIDANCE =
+  "the inherited delivery contract failed revalidation; pass an explicit delivery to override it.";
+
+// 畸形服务结果的固定收口文案（不带任何动态内容）。
+const CONTINUE_OUTCOME_INVALID_TEXT = "run_continue outcome failed closed projection";
+
+/**
+ * Validate an untrusted service-level cumulative-scope refusal for the wire.
+ * ANY malformed/unsafe value collapses the WHOLE projection to null — never an
+ * error, never partial truth — so the refusal still carries its closed-set reason
+ * but the untrustworthy facts are dropped (the Lead verifies manually). Mirrors
+ * safeProjectCandidateInventory: bounded sorted-unique path lists through the strict
+ * validateProjectedPath SSOT, exact-secret redaction, and count/truncation
+ * consistency (truncated iff count > paths.length, count >= paths.length).
+ *
+ * @param {unknown} raw — the service refusal object
+ * @returns {object|null}
+ */
+export function safeProjectContinuationScope(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const redactor = createSecretRedactor();
+  const projectList = (paths, count, truncated) => {
+    if (!Array.isArray(paths) || paths.length > INVENTORY_PATHS_LIMIT) return null;
+    if (!Number.isInteger(count) || count < 0) return null;
+    if (typeof truncated !== "boolean") return null;
+    // Consistency: truncation flag must exactly reflect full cardinality vs the
+    // bounded list; the full count can never be below the list length.
+    if (count < paths.length || truncated !== (count > paths.length)) return null;
+    const seen = new Set();
+    let prev = null;
+    const projected = [];
+    for (const p of paths) {
+      try {
+        validateProjectedPath(p);
+      } catch {
+        return null;
+      }
+      if (seen.has(p) || (prev !== null && p < prev)) return null; // sorted unique
+      seen.add(p);
+      prev = p;
+      // Same exact-secret redaction rule as candidateInventory/changedPaths: any
+      // redaction collapses the whole path to the fixed marker (no partial fragment).
+      const redacted = redactor.redactString(p);
+      projected.push(redacted === p ? p : "[REDACTED]");
+    }
+    return projected;
+  };
+  const inheritedChangedPaths = projectList(
+    raw.inheritedChangedPaths, raw.inheritedChangedCount, raw.inheritedChangedTruncated,
+  );
+  const uncoveredInheritedPaths = projectList(
+    raw.uncoveredInheritedPaths, raw.uncoveredInheritedCount, raw.uncoveredInheritedTruncated,
+  );
+  if (inheritedChangedPaths === null || uncoveredInheritedPaths === null) return null;
+  return {
+    inheritedChangedPaths,
+    inheritedChangedCount: raw.inheritedChangedCount,
+    inheritedChangedTruncated: raw.inheritedChangedTruncated,
+    uncoveredInheritedPaths,
+    uncoveredInheritedCount: raw.uncoveredInheritedCount,
+    uncoveredInheritedTruncated: raw.uncoveredInheritedTruncated,
+  };
+}
+
+/**
+ * 把 continueRun 的结果投影成回执对象（不含 nextStep——那句按面渲染，归适配层）。
+ * 只挑已知字段：转录路径、活动 lineage runId、prompt、parentState 等服务附带
+ * 事实一律不出。受理带子运行身份与谱系事实；拒绝带闭集 rejectionReason（其余
+ * 成功字段为 null）。两个可选键各有唯一的出现条件：
+ *   - guidance：仅 invalid_delivery 且 delivery 省略（继承合同复验失败）；
+ *   - 六个累计范围字段：仅 continuation_scope_incomplete，经
+ *     safeProjectContinuationScope；它 fail closed 成 null 时整组省略。
+ * 畸形结果（闭集外的原因码、受理却缺字段或身份不合法）抛固定文案的 Error，
+ * 调用方零输出——与 MCP 输出 schema 拒绝后的收口同义。
+ *
+ * @param {object} result — continueRun 的返回值（不可信）
+ * @param {object|undefined} delivery — 本次调用显式给出的 delivery；undefined =
+ *   省略（继承父合同）
+ * @returns {object} 回执对象（键集与 MCP run_continue 输出除 nextStep 外相同）
+ */
+export function projectContinueOutcome(result, delivery = undefined) {
+  const fail = () => { throw new Error(CONTINUE_OUTCOME_INVALID_TEXT); };
+  if (!result || typeof result !== "object" || Array.isArray(result)) fail();
+  if (typeof result.accepted !== "boolean" || typeof result.parentRunId !== "string") fail();
+  const accepted = result.accepted;
+  const rejected = !accepted;
+  if (rejected && !CONTINUE_REJECTION_REASONS.includes(result.rejectionReason)) fail();
+  if (accepted && (typeof result.runId !== "string" || typeof result.rootRunId !== "string"
+    || typeof result.state !== "string" || !isValidCanonicalAgentId(result.agentId))) {
+    fail();
+  }
+  const scope = rejected && result.rejectionReason === "continuation_scope_incomplete"
+    ? safeProjectContinuationScope(result)
+    : null;
+  return {
+    accepted,
+    parentRunId: result.parentRunId,
+    continuation: true,
+    runId: accepted ? result.runId : null,
+    agentId: accepted ? result.agentId : null,
+    rootRunId: accepted ? result.rootRunId : null,
+    state: accepted ? result.state : null,
+    rejectionReason: accepted ? null : result.rejectionReason,
+    ...(rejected && result.rejectionReason === "invalid_delivery" && delivery === undefined
+      ? { guidance: CONTINUE_INHERITED_DELIVERY_GUIDANCE }
+      : {}),
+    ...(scope ? scope : {}),
   };
 }
 

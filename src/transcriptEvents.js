@@ -220,7 +220,7 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
   },
   {
     type: "run.correction_requested",
-    description: "MCP `run_correct` 的入队事件（恰一条/correctionId）：载荷 {correctionId（闭集字母表 ≤64 字符——exactly-once 键）, prompt（≤15000 字符，落盘脱敏同 prompt.sent）}；runner 重读 prompt 投递；安全查询面（run_activity）只投影 status，永不回显正文。",
+    description: "纠偏入队事件（MCP `run_correct` 与 CLI `wao runs correct`，两面同一服务；恰一条/correctionId）：载荷 {correctionId（闭集字母表 ≤64 字符——exactly-once 键）, prompt（≤15000 字符，落盘脱敏同 prompt.sent）}；runner 重读 prompt 投递；安全查询面（run_activity）只投影 status，永不回显正文。",
   },
   {
     type: "run.correction_claimed",

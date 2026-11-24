@@ -99,10 +99,13 @@ async function loadScorecardRules(options) {
  * object suitable for RunManager.start({delivery}), or undefined if no
  * --delivery-spec-file was given.
  *
+ * 第 137a 批起导出：`runs continue --delivery-spec-file`（runs.js）用同一个解析器
+ * 与文件格式，不在别处复制第二份。
+ *
  * @param {object} options — parsed CLI options
  * @returns {Promise<object|undefined>} validated delivery request or undefined
  */
-async function loadDeliverySpec(options) {
+export async function loadDeliverySpec(options) {
   if (!options.deliverySpecFile) return undefined;
   const raw = await readFile(resolve(options.deliverySpecFile), "utf8");
   let parsed;

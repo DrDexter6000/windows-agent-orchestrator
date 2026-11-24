@@ -499,14 +499,22 @@ test("3C1-08: JSON output preserves verified DeliveryRef and verification flags"
 });
 
 /**
- * 3C1-09: help exposes the new option exactly once.
+ * 3C1-09: help exposes the option exactly on the commands that accept it.
+ * 第 137a 批：`runs continue` 也接 --delivery-spec-file（与 run 同一个解析器），
+ * 所以帮助里恰两行有它——run 行与 runs continue 行；别的命令行一次都没有。
  */
-test("3C1-09: help exposes --delivery-spec-file exactly once", async () => {
+test("3C1-09: help exposes --delivery-spec-file on the run and runs continue lines only", async () => {
   // Use the actual CLI process for help
   const result = execSync("node src/cli.js --help 2>&1", {
     cwd: resolve(process.cwd()),
     encoding: "utf8",
   });
-  const count = (result.match(/--delivery-spec-file/g) || []).length;
-  assert.equal(count, 1, "help must mention --delivery-spec-file exactly once");
+  const lines = result.split(/\r?\n/).filter((line) => line.includes("--delivery-spec-file"));
+  assert.equal(lines.length, 2, `exactly two help lines mention --delivery-spec-file; got: ${JSON.stringify(lines)}`);
+  assert.ok(lines[0].startsWith("  run <agentId>"), "the run line carries it");
+  assert.ok(lines[1].startsWith("  runs continue "), "the runs continue line carries it");
+  for (const line of lines) {
+    assert.equal((line.split(" # ")[0].match(/--delivery-spec-file/g) || []).length, 1,
+      `syntax part of ${JSON.stringify(line.slice(0, 24))} mentions it exactly once`);
+  }
 });

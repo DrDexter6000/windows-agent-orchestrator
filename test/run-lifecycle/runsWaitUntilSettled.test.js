@@ -1431,7 +1431,7 @@ test("R-05: 节流——同一等待器两次 runner 证明至少间隔 5 分钟
 // ═══════════════════════════════════════════════════════════════════════════
 // 决定 0112：收口终行的可续提示——delivery_settled、未采纳、且同一份快照判定为
 // continuable 谱系成员时，终行/JSON 的 nextStep 用 delivery_continuable（CLI 面，
-// 点名 MCP run_continue）；否则照旧 settled_line。
+// 写 `wao runs continue`）；否则照旧 settled_line。
 // ═══════════════════════════════════════════════════════════════════════════
 
 function lineageFirst(runId) {
@@ -1474,7 +1474,8 @@ test("U-12: 可续未决定交付收口 → 终行与 JSON 的 nextStep 用 deli
     assert.equal(r.outLines[2], `Delivery: ${"d".repeat(12)} on ${"b".repeat(12)}, 1 file(s): src/a.js`);
     assert.equal(
       r.outLines[3],
-      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${runId}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`,
+      // 第 137a 批：CLI 面的续修提示写 CLI 命令 wao runs continue（不再点名 MCP 工具）。
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${runId} --prompt-file <FILE> can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`,
     );
     // JSON 面：键序 {settled,runId,state,settlement,delivery,nextStep}，nextStep 同款。
     const j = await runWaitSettled({ dir, runId, asJson: true });
@@ -1485,7 +1486,7 @@ test("U-12: 可续未决定交付收口 → 终行与 JSON 的 nextStep 用 deli
       deliveryCommit: DELIVERED, baseCommit: BASE, changedFileCount: 1, changedPaths: ["src/a.js"],
     });
     assert.equal(parsed.settlement.reason, "delivery_settled");
-    assert.match(parsed.nextStep, new RegExp(`the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`));
+    assert.match(parsed.nextStep, new RegExp(`wao runs continue ${runId} --prompt-file <FILE> can resume the same worker conversation`));
     assert.match(parsed.nextStep, /An accepted delivery cannot be continued\. Verification passed is not acceptance\.$/);
   } finally {
     cleanupDir(dir);
@@ -1546,7 +1547,9 @@ test("U-15: 收口交付已有被采纳的后代（第 120 批派生被取代）
       `Next step: Settled. A descendant of this run was already accepted (${CHILD}); no Lead decision is needed here.`,
     );
     assert.ok(!r.outLines[3].includes("awaits the Lead's review"), "不再说等 Lead 裁决");
-    assert.ok(!r.outLines[3].includes("run_continue"), "不给续修提示");
+    // 续修 1：CLI 面的续修提示写的是 `wao runs continue`——只查旧工具名会让这条
+    // 断言空转（提示给了也红不了），两种写法都不得出现。
+    assert.ok(!/run_continue|wao runs continue/.test(r.outLines[3]), "不给续修提示");
     // JSON 面：nextStep 同款，delivery 对象照给。
     const j = await runWaitSettled({ dir, runId: ROOT, asJson: true });
     assert.equal(j.exitCode, undefined);
@@ -1611,7 +1614,7 @@ test("U-14: 续跑子运行（turn:resume，根是另一运行）——根转录
     );
     assert.match(
       r.outLines[4],
-      new RegExp(`^Next step: Settled\\. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all\\. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue \\(parentRunId ${runId}\\) can resume the same worker conversation`),
+      new RegExp(`^Next step: Settled\\. Delivery awaits the Lead's review: wao runs delivery review ${runId} --all\\. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${runId} --prompt-file <FILE> can resume the same worker conversation`),
       "子运行经根转录判未闭合 → 给可续提示（谱系措辞）",
     );
   } finally {
@@ -1994,7 +1997,7 @@ test("U-23: 真正的续修子交付带一个坏路径 → 路径投影不成立
       `Run: ${CHILD} (completed)`,
       "Settlement: settled (delivery_settled; verification passed)",
       LAND_LINE,
-      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${CHILD} --all. Its lineage was dispatched continuable: for a narrow fix, the MCP tool run_continue (parentRunId ${CHILD}) can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`,
+      `Next step: Settled. Delivery awaits the Lead's review: wao runs delivery review ${CHILD} --all. Its lineage was dispatched continuable: for a narrow fix, wao runs continue ${CHILD} --prompt-file <FILE> can resume the same worker conversation; it checks eligibility first. An accepted delivery cannot be continued. Verification passed is not acceptance.`,
     ]);
     const parsed = JSON.parse((await runWaitSettled({ dir, runId: CHILD, asJson: true })).out);
     assert.deepEqual(Object.keys(parsed), ["settled", "runId", "state", "settlement", "land", "nextStep"], "没有 delivery 键，land 照给");
@@ -2095,7 +2098,7 @@ test("R-02c: 有 .runner-<runId>.stderr 文件 → 文本与 JSON 都附展示�
 // B91（TD-345）：重新打包的形状（终态 failed、交付来自重新打包、验证显式
 // pending、无结果、无 reverify）。等待器用真实 proveVerifierGone + 全桩探测
 //（不跑真实进程扫描）：证明成立 → 退出 3、reason verifier_gone、nextStep 是
-// 指向再调 run_delivery_repackage 的新文案；证明后重读已有结果仍收口退出 0。
+// 指向 `wao runs delivery repackage` 的新文案；证明后重读已有结果仍收口退出 0。
 // ═══════════════════════════════════════════════════════════════════════════
 
 // 重新打包形状的转录：disallowed_scope 恢复候选 + created（显式 pending）+
@@ -2112,7 +2115,7 @@ function repackagePendingEvents(runId) {
   return { ref, events };
 }
 
-test("W-07 (B91): 重新打包形状证明成立 → 退出 3，nextStep 指向再调 run_delivery_repackage（新文案）", async () => {
+test("W-07 (B91): 重新打包形状证明成立 → 退出 3，nextStep 指向 wao runs delivery repackage（新文案）", async () => {
   const dir = makeRunDir();
   try {
     const runId = "run_wg07";
@@ -2126,7 +2129,13 @@ test("W-07 (B91): 重新打包形状证明成立 → 退出 3，nextStep 指向�
       r.outLines[1],
       `Stuck: the verification of ${runId} has no outcome and no WAO process that could finish it remains (lease_missing); waiting will not change this.`,
     );
-    assert.match(r.outLines[2], /^Next step: Its verification is no longer running\. Call the MCP tool run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot: it runs the verification again and will not create a second commit\. Or reject it while it is pending: wao runs delivery run_wg07 --reject --reason-file <FILE>\.$/);
+    // 第 137a 批：CLI 面写 CLI 命令 wao runs delivery repackage（不再点名 MCP 工具）。
+    // 续修 1：带 --cwd <workspace root> 占位；句中只有拒收命令带真实 runId（重新打包
+    // 命令用 <runId> 占位）——runId 触顶长度不短于改前的 182。
+    assert.equal(
+      r.outLines[2],
+      `Next step: Its verification is no longer running. Call wao runs delivery repackage <runId> --allowed-path <path>... --cwd <workspace root> (the same allowed paths) to re-run the verification without creating a second commit. Or reject it while it is pending: wao runs delivery ${runId} --reject --reason-file <FILE>.`,
+    );
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "证明成立即退：不打印未收口进度行");
   } finally {
     cleanupDir(dir);
@@ -2266,8 +2275,10 @@ test("W-07b (B91): 重新打包形状 JSON——{settled:false,state:failed,reas
     assert.equal(parsed.state, "failed");
     assert.equal(parsed.reason, "verifier_gone");
     assert.equal(parsed.basis, "lease_missing");
-    assert.match(parsed.nextStep, /run_delivery_repackage again with the same runId, allowedPaths and expectedWorkspaceRoot/);
-    assert.ok(parsed.nextStep.includes("will not create a second commit"));
+    // 第 137a 批：CLI 面写 CLI 命令 wao runs delivery repackage（不再点名 MCP 工具）；
+    // 续修 1：带 --cwd <workspace root> 占位。
+    assert.match(parsed.nextStep, /^Its verification is no longer running\. Call wao runs delivery repackage <runId> --allowed-path <path>\.\.\. --cwd <workspace root> \(the same allowed paths\) to re-run the verification without creating a second commit\./);
+    assert.ok(parsed.nextStep.includes("without creating a second commit"), "续修 1：措辞改为 without creating a second commit（原 will not create）");
     assert.ok(parsed.nextStep.includes("--reject --reason-file <FILE>"), "pending 拒收出口仍在");
   } finally {
     cleanupDir(dir);
@@ -2358,8 +2369,9 @@ test("UP-01: 静默满 30 分钟且本轮拒于 runner_scan_failed → 退出 5�
       r.outLines[1],
       `Unproven: the owner heartbeat is missing or not fresh and the run has been silent for 31 min, but the runner's absence cannot be proven (runner_scan_failed); the run is still running, and waiting longer may still see it change.`,
     );
-    assert.match(r.outLines[2], new RegExp(`^Next step: The runner's absence cannot be proven, so the run may still change\\. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> to see the gate facts \\(it writes nothing\\)\\.`));
-    assert.match(r.outLines[2], new RegExp(`The Lead then decides: stop it \\(wao stop with the --observed-seq from status and a reason; once stopped, a continuable lineage can go on via the MCP tool run_continue\\), settle it, or attach the wait again\\.$`));
+    // 第 137a 批：续修写 CLI 命令 wao runs continue；同句别处相应改短。
+    assert.match(r.outLines[2], new RegExp(`^Next step: The runner's absence cannot be proven, so the run may still change\\. First check wao status ${runId}, then dry-run wao runs settle --run-id ${runId} --reason-file <FILE> for the gate facts \\(writes nothing\\)\\.`));
+    assert.match(r.outLines[2], new RegExp(`The Lead decides: stop it \\(wao stop with the --observed-seq from status and a reason; then a continuable lineage can resume via wao runs continue <runId> --prompt-file <FILE>\\), settle it, or re-attach the wait\\.$`));
     // 措辞纪律：不说"等待不会改变事实"，不断言 runner 已死。
     assert.ok(!r.out.includes("waiting will not change this"), "不得写 waiting will not change this");
     assert.ok(!r.outLines.some((l) => l.startsWith("[runs wait]")), "报警即退：不打印未收口进度行");

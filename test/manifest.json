@@ -220,6 +220,7 @@
     ],
     "git": [
       "delivery/adoptionQuery.test.js",
+      "delivery/runsContinueCorrectRepackageCli.test.js",
       "delivery/runsDeliveryAdoption.test.js",
       "application/lineageClose.test.js",
       "application/leadOpenItems.test.js",

@@ -62,7 +62,14 @@ import { WORKSPACE_MISMATCH_REASONS_TEXT } from "../application/runWorkspaceOwne
 // parent's retained worktree. The MCP boundary resolves the workspace + Lead
 // session (same authority as run_dispatch) and collapses every closed-set
 // eligibility refusal to a structured rejectionReason.
-import { continueRun, CONTINUE_REJECTION_REASONS } from "../application/runContinue.js";
+import {
+  continueRun,
+  CONTINUE_REJECTION_REASONS,
+  // 第 137a 批：回执投影下沉到应用层——MCP 与 CLI `runs continue` 共用同一份
+  // （字段挑选、继承合同那半句、累计范围路径的安全投影都在那里）。
+  projectContinueOutcome,
+  CONTINUE_INHERITED_DELIVERY_NOTE,
+} from "../application/runContinue.js";
 // M12-16: queued in-flight correction application service. Atomically appends a
 // run.correction_requested durable fact under workspace ownership + runId +
 // non-terminal + persisted correctable=true, with a closed-set outcome
@@ -158,7 +165,7 @@ import { createRunSummaryCache } from "../application/runSummaryCache.js";
 // 决定 0095：nextStep——等待族工具没等到收口时的一句固定英文模板（MCP 面只写
 // 工具名；第 136 批起派发/续修与会审回执末尾的 CLI 半句带受理的 runId /
 // consultId）。run_await_result 有意不加（它是取结果形态）。
-import { buildNextStep } from "../application/runNextStep.js";
+import { buildNextStep, buildInterruptedRerunNextStep } from "../application/runNextStep.js";
 import {
   runAwaitResult,
   RUN_AWAIT_RESULT_MIN_MS,
@@ -226,6 +233,7 @@ import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
   REPACKAGE_ALLOWED_PATHS_LIMIT,
+  REPACKAGE_ALLOWED_PATH_MAX_LEN,
   // TD-226: closed-set expected-policy rejection protocol (decide M12-9 discipline).
   REPACKAGE_REJECTION_CODES,
   classifyRepackageRejection,
@@ -1510,8 +1518,9 @@ const RUN_CONTINUE_INPUT = z.object({
 // truncation flags) so a Lead can explicitly approve a cumulative scope and retry.
 // They are OPTIONAL: success and every other refusal omit them, so the established
 // success/refusal key set is byte-identical (zero drift). Each path list is bounded
-// by the repository's existing INVENTORY_PATHS_LIMIT cap; the safe projection below
-// re-validates every path and redacts exact-secret-shaped entries before parse.
+// by the repository's existing INVENTORY_PATHS_LIMIT cap; the application-layer
+// safe projection re-validates every path and redacts exact-secret-shaped entries
+// before parse.
 const RUN_CONTINUE_OUTPUT = z.object({
   accepted: z.boolean(),
   parentRunId: z.string(),
@@ -1541,61 +1550,12 @@ const RUN_CONTINUE_OUTPUT = z.object({
   guidance: z.string().max(160).optional(),
 }).strict();
 
-// M12-22: validate an untrusted service-level cumulative-scope refusal for the wire.
-// ANY malformed/unsafe value collapses the WHOLE projection to null — never an
-// error, never partial truth — so the refusal still carries its closed-set reason
-// but the untrustworthy facts are dropped (the Lead verifies manually). Mirrors
-// safeProjectCandidateInventory: bounded sorted-unique path lists through the strict
-// validateProjectedPath SSOT, exact-secret redaction, and count/truncation
-// consistency (truncated iff count > paths.length, count >= paths.length).
-//
-// @param {unknown} raw — the service refusal object
-// @returns {object|null}
-function safeProjectContinuationScope(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const redactor = createSecretRedactor();
-  const projectList = (paths, count, truncated) => {
-    if (!Array.isArray(paths) || paths.length > INVENTORY_PATHS_LIMIT) return null;
-    if (!Number.isInteger(count) || count < 0) return null;
-    if (typeof truncated !== "boolean") return null;
-    // Consistency: truncation flag must exactly reflect full cardinality vs the
-    // bounded list; the full count can never be below the list length.
-    if (count < paths.length || truncated !== (count > paths.length)) return null;
-    const seen = new Set();
-    let prev = null;
-    const projected = [];
-    for (const p of paths) {
-      try {
-        validateProjectedPath(p);
-      } catch {
-        return null;
-      }
-      if (seen.has(p) || (prev !== null && p < prev)) return null; // sorted unique
-      seen.add(p);
-      prev = p;
-      // Same exact-secret redaction rule as candidateInventory/changedPaths: any
-      // redaction collapses the whole path to the fixed marker (no partial fragment).
-      const redacted = redactor.redactString(p);
-      projected.push(redacted === p ? p : "[REDACTED]");
-    }
-    return projected;
-  };
-  const inheritedChangedPaths = projectList(
-    raw.inheritedChangedPaths, raw.inheritedChangedCount, raw.inheritedChangedTruncated,
-  );
-  const uncoveredInheritedPaths = projectList(
-    raw.uncoveredInheritedPaths, raw.uncoveredInheritedCount, raw.uncoveredInheritedTruncated,
-  );
-  if (inheritedChangedPaths === null || uncoveredInheritedPaths === null) return null;
-  return {
-    inheritedChangedPaths,
-    inheritedChangedCount: raw.inheritedChangedCount,
-    inheritedChangedTruncated: raw.inheritedChangedTruncated,
-    uncoveredInheritedPaths,
-    uncoveredInheritedCount: raw.uncoveredInheritedCount,
-    uncoveredInheritedTruncated: raw.uncoveredInheritedTruncated,
-  };
-}
+// M12-22: the cumulative-scope refusal's path facts are validated and redacted by
+// the application-layer safeProjectContinuationScope (runContinue.js) — reached
+// through projectContinueOutcome below. ANY malformed/unsafe value collapses the
+// WHOLE projection to null (never an error, never partial truth), so the refusal
+// still carries its closed-set reason and the untrustworthy facts are dropped.
+// 第 137a 批：投影下沉到应用层，CLI `runs continue` 与这里同一份。
 
 // run_continue spawns a worker that resumes a provider conversation and modifies the
 // retained worktree — destructive (not append-only). Target-scoped (the parent must
@@ -2903,7 +2863,9 @@ const DELIVERY_REPACKAGE_ERROR_TEXT = "run_delivery_repackage failed";
 
 const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
   runId: z.string().min(1),
-  allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(REPACKAGE_ALLOWED_PATHS_LIMIT),
+  // 条数与单条长度上限取应用层导出的常量——CLI `runs delivery repackage
+  // --allowed-path` 用同一组（第 137a 批；数值不变）。
+  allowedPaths: z.array(z.string().min(1).max(REPACKAGE_ALLOWED_PATH_MAX_LEN)).min(1).max(REPACKAGE_ALLOWED_PATHS_LIMIT),
   // per-call target (proved; the run must belong to it; the default binding
   // is not consulted). 第 135 批：wire 必填。
   expectedWorkspaceRoot: z.string().min(1).max(1024),
@@ -5586,23 +5548,14 @@ export function createWaoMcpServer({
       // (validated by the service); on a refusal it is null. The opaque provider
       // uuid, Lead id, workspace path, and any active lineage runId never appear.
       //
-      // M12-22: a continuation_scope_incomplete refusal also carries the bounded
-      // cumulative-scope facts, projected through safeProjectContinuationScope
-      // (re-validates + redacts). If that projection fails closed (null), the facts
-      // are omitted — the closed-set reason still tells the Lead it is a scope issue.
+      // 第 137a 批：字段挑选与两个可选键（guidance、累计范围事实及其安全投影）在
+      // 应用层 projectContinueOutcome——CLI `runs continue` 与这里同一份；本层只
+      // 加按面渲染的 nextStep，再用输出 schema 校验一遍。M12-22 的
+      // continuation_scope_incomplete 路径事实投影 fail closed（null）时整组省略，
+      // 闭集原因照旧带给 Lead。
       try {
-        const projectedScope = (!result.accepted && result.rejectionReason === "continuation_scope_incomplete")
-          ? safeProjectContinuationScope(result)
-          : null;
         const parsed = RUN_CONTINUE_OUTPUT.parse({
-          accepted: result.accepted,
-          parentRunId: result.parentRunId,
-          continuation: true,
-          runId: result.accepted ? result.runId : null,
-          agentId: result.accepted ? result.agentId : null,
-          rootRunId: result.accepted ? result.rootRunId : null,
-          state: result.accepted ? result.state : null,
-          rejectionReason: result.accepted ? null : result.rejectionReason,
+          ...projectContinueOutcome(result, delivery),
           // 决定 0095：受理成功的后台续跑附 nextStep（MCP 面模板；第 136 批起末尾
           // 的 CLI 半句带子运行自己的 runId）；拒收不给。
           // 第 135 批（决定 0130）：delivery 省略的受理回执在 nextStep 末尾补
@@ -5615,23 +5568,10 @@ export function createWaoMcpServer({
                   surface: "mcp",
                   situation: "dispatch_accepted",
                   runId: result.runId,
-                  suffix: delivery === undefined ? " Delivery contract inherited from the parent run." : "",
+                  suffix: delivery === undefined ? CONTINUE_INHERITED_DELIVERY_NOTE : "",
                 }),
               }
             : {}),
-          // 第 135 批续修 5：继承合同复验失败的拒绝带固定指路文案（只在
-          // delivery 省略的 invalid_delivery 上；其余拒绝键缺席）。
-          ...(!result.accepted && result.rejectionReason === "invalid_delivery" && delivery === undefined
-            ? { guidance: "the inherited delivery contract failed revalidation; pass an explicit delivery to override it." }
-            : {}),
-          ...(projectedScope ? {
-            inheritedChangedPaths: projectedScope.inheritedChangedPaths,
-            inheritedChangedCount: projectedScope.inheritedChangedCount,
-            inheritedChangedTruncated: projectedScope.inheritedChangedTruncated,
-            uncoveredInheritedPaths: projectedScope.uncoveredInheritedPaths,
-            uncoveredInheritedCount: projectedScope.uncoveredInheritedCount,
-            uncoveredInheritedTruncated: projectedScope.uncoveredInheritedTruncated,
-          } : {}),
         });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -6972,7 +6912,16 @@ export function createWaoMcpServer({
                 + "again with the same input then runs the verification again without creating a second "
                 + "commit. Poll run_delivery with "
                 + `{ runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
-                + "Do NOT blind-retry while a run is in flight — reentry re-executes verification side effects.",
+                + "Do NOT blind-retry while a run is in flight — reentry re-executes verification side effects. "
+                // 第 137a 批：服务进程被换掉后的出路——先 MCP 写法，后 CLI 写法（宿主有
+                // 后台命令行时用；CLI 进程不受单次调用时限、不随 MCP 服务重启中断）。
+                // 只补这一句（它自带上限）；上面原有文字一字不动。输出 schema 不变。
+                // 续修 1：带 --cwd <expectedWorkspaceRoot> 占位——Lead 从主检出照抄、
+                // 交付属于另一棵工作树时，没有它会被归属门拒绝；不回显绝对路径。
+                + buildInterruptedRerunNextStep(
+                  "run_delivery_repackage",
+                  `wao runs delivery repackage ${runId} --allowed-path <path>... --cwd <expectedWorkspaceRoot>`,
+                ),
             }],
             structuredContent: pending,
           };
@@ -7083,7 +7032,27 @@ export function createWaoMcpServer({
                 + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The re-verification continues in this MCP `
                 + `server process; if that process is replaced, it stops. Poll `
                 + `run_delivery with { runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
-                + "Avoid concurrent re-calls while the first is in flight — reentry re-executes verification.",
+                + "Avoid concurrent re-calls while the first is in flight — reentry re-executes verification. "
+                // 第 137a 批：同 run_delivery_repackage 的 pending 回执——出路先 MCP 后 CLI。
+                // 续修 1（会审 kimi、sol）：CLI 写法要能重跑**同一次尝试**——按本次调用的
+                // 实际输入补齐。只给 --reason 时，原调用 attempt: 2 的照抄会按缺省
+                // attempt 1 读回第一条链的旧结果。attempt 2 才写（1 是缺省）；显式给了
+                // timeoutMs 写那个数；非空 setupCommands 写文件占位（内容就是同一组
+                // 命令——命令正文不进回执）；--cwd 只给占位，不回显绝对路径。三个值
+                // 都过输入 schema（闭集 / 有界整数），runId 已过 isValidRunId。
+                + buildInterruptedRerunNextStep(
+                  "run_delivery_reverify",
+                  [
+                    `wao runs delivery reverify ${runId}`,
+                    `--reason ${reason}`,
+                    ...(attempt === 2 ? ["--attempt 2"] : []),
+                    ...(Array.isArray(setupCommands) && setupCommands.length > 0
+                      ? ["--setup-commands-file <FILE>"]
+                      : []),
+                    ...(timeoutMs !== undefined ? [`--timeout-ms ${timeoutMs}`] : []),
+                    "--cwd <expectedWorkspaceRoot>",
+                  ].join(" "),
+                ),
             }],
             structuredContent: pending,
           };

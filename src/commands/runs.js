@@ -17,6 +17,10 @@
 //   - node built-in：fs/promises（unlink/mkdir/rename/stat）、fs
 //     （existsSync）、path（join/resolve/dirname）
 //
+// 第 137a 批：本模块另承载只在 MCP 有的三个操作的 CLI 入口——`runs continue`
+// （委托 continueRun）、`runs correct`（correctRun）、`runs delivery repackage`
+// （runDeliveryRepackage），都是薄适配层，与 `runs delivery reverify` 同一模式。
+//
 // 本模块内部 helper：parseDuration（runs prune --older-than 与 runs list
 // --since 共用的唯一 duration 解析器，TD-153 提为导出）、loadRunFiles（runs 族
 // 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
@@ -29,7 +33,7 @@ import { tmpdir } from "node:os";
 
 import {
   readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES,
-  validateDeliveryFacts,
+  validateDeliveryFacts, RECOVERY_CANDIDATE_KINDS,
 } from "../transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
 import {
@@ -112,7 +116,13 @@ import {
 } from "../verificationGate.js";
 import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
-import { parseOptions, resolveTargetCwd } from "./shared.js";
+import { parseOptions, resolveTargetCwd, loadPrompt } from "./shared.js";
+// 第 137a 批：`runs continue --delivery-spec-file` 与 `wao run` 同一个解析器与
+// 文件格式（同层 commands 模块间的既有写法，如 lifecycle.js ← run.js）。
+import { loadDeliverySpec } from "./run.js";
+// 第 137a 批：`runs continue` 会起 worker——与 CLI run 入口、MCP run_continue
+// 处理器头同一道 0047 L1 门，先于一切副作用。
+import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
 // runs settle 门 6 与 verifier 证明的 daemon 握手 SSOT：daemon.js 与本模块同属
 // adapters 层，静态导入合法；application 层的 runSettle.js 不得上向导入，由这
 // 里注入三态读器 readHandshakeDetailed（分清文件不在/读不出/读出——readHandshake
@@ -142,7 +152,9 @@ import {
   judgeRunSettlementOnce,
   SETTLEMENT_MAX_UNTRUSTED_ROUNDS as RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS,
 } from "../application/runSettlementWait.js";
-import { runWaitNextStep, buildNextStep, runnerUnprovenReport } from "../application/runNextStep.js";
+import { runWaitNextStep, buildNextStep, runnerUnprovenReport, quoteRunDirFlag } from "../application/runNextStep.js";
+// 第 137a 批续修 1：`runs continue` 的全局等待预算与 `wao run` 同一道门。
+import { validateBoundedWaitTimeout } from "../application/timeoutPolicy.js";
 // 决定 0112：收口终行的可续提示判定（与 run_continue 资格检查共用谱系事实函数）。
 import { deliveryContinuableHint } from "../application/runContinue.js";
 // 第 120 批：谱系派生"被取代"（与 lead_preflight / 交付读面 / 回收同一份实现）。
@@ -152,7 +164,31 @@ import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGa
 // Shared workspace authority (proveWorkspaceRoot) + registry IDs (readRegistry).
 import { createOwnerDashboardServer } from "../ownerDashboardServer.js";
 import { proveWorkspaceRoot } from "../application/workspaceBinding.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, KNOWN_BACKENDS } from "../registry.js";
+// 第 137a 批：三条 CLI 入口委托的服务与其边界常量——与 MCP run_continue /
+// run_correct / run_delivery_repackage 同一份（不抄第二份清单或上限）。
+import {
+  continueRun,
+  projectContinueOutcome,
+  CONTINUE_INHERITED_DELIVERY_NOTE,
+} from "../application/runContinue.js";
+import {
+  correctRun,
+  CORRECTION_OUTCOMES,
+  CORRECTION_REJECTION_REASONS,
+  CORRECTION_ID_PATTERN,
+  CORRECTION_ID_MAX_LEN,
+  CORRECTION_PROMPT_MAX_LEN,
+} from "../application/runCorrection.js";
+import {
+  runDeliveryRepackage,
+  REPACKAGE_ALLOWED_PATHS_LIMIT,
+  REPACKAGE_ALLOWED_PATH_MAX_LEN,
+  classifyRepackageRejection,
+} from "../application/runDeliveryRepackage.js";
+// 续修的后端能力判定（supportsSessionReuse）用共享工厂构造的 backend 实例，
+// 与 CLI 后台派发的 continuable 能力门同源（构造零副作用，不按名分支）。
+import { backendFor as factoryBackendFor } from "../backends/factory.js";
 
 // TD-109: the full legal subcommand set of `runs`. `list` was previously only
 // reachable through the silent fallthrough; it is now an explicit branch so the
@@ -165,6 +201,7 @@ export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
   "dashboard", "diagnose", "delivery", "wait", "gate", "verify-commit", "lineage-close",
   "settle",
+  "continue", "correct",
   "migrate-projects",
 ];
 
@@ -204,6 +241,15 @@ async function runsCommand(args, config, deps) {
   }
   if (sub === "delivery") {
     await runsDeliveryCommand(tail, config);
+    return;
+  }
+  // 第 137a 批：只在 MCP 有的两个操作的 CLI 入口（repackage 在 runs delivery 下）。
+  if (sub === "continue") {
+    await runsContinueCommand(tail, config, deps);
+    return;
+  }
+  if (sub === "correct") {
+    await runsCorrectCommand(tail, config, deps);
     return;
   }
   // TD-254（决定 0058）：线系闭合出口（Lead 显式放弃；dry-run 默认，--apply 执行）。
@@ -797,8 +843,9 @@ async function renderSettledOutcome({ outcome, runId, runDir, deps = {} }) {
   if (outcome.kind === "settled") {
     const s = outcome.settlement;
     // 决定 0112：delivery_settled、未采纳、且同一份快照判定为可续谱系成员时，
-    // 收口终行改用 delivery_continuable 提示（窄缺陷可用 MCP run_continue 续修）；
-    // 其余照旧 settled_line。判定用等待器读到的同一份快照事件，不另读新快照。
+    // 收口终行改用 delivery_continuable 提示（窄缺陷可用 run_continue 续修——
+    // CLI 面写 `wao runs continue`）；其余照旧 settled_line。判定用等待器读到的
+    // 同一份快照事件，不另读新快照。
     // 第 120 批：未裁定的收口交付若已有被采纳的后代（派生事实），终行改用
     // delivery_superseded——不再说"等裁决"，也不给 run_continue 提示。
     let situation = "settled_line";
@@ -869,8 +916,9 @@ async function renderSettledOutcome({ outcome, runId, runDir, deps = {} }) {
   if (outcome.kind === "verifier_gone") {
     // 决定 0096：证明成立且重读仍是终态等验证。退出码 3。completed 形状不可
     // 重试（验证者死了就是死了）；终态 failed 的形状——只有重新打包的交付会
-    // 走到这里——可再调 MCP 工具 run_delivery_repackage（相同输入）重跑
-    // 验证，nextStep 按收口事实里的终态分支（B91）。
+    // 走到这里——可再按相同范围重跑验证（nextStep 给 CLI 命令
+    // `wao runs delivery repackage`；MCP 的 run_delivery_repackage 同义），nextStep
+    // 按收口事实里的终态分支（B91）。
     // JSON 以 reason 与本轮的不可信面区分；只给闭集 basis，不回显 pid/路径。
     const s = outcome.settlement;
     const nextStep = buildNextStep({
@@ -1215,7 +1263,8 @@ function renderRearmCommand(remaining, { runDirFlag, asJson }) {
   if (remaining.length === 0) return null;
   const parts = ["wao", "runs", "wait", ...remaining, "--until-settled"];
   if (runDirFlag !== undefined) {
-    parts.push("--run-dir", /\s/.test(runDirFlag) ? `"${runDirFlag}"` : runDirFlag);
+    // 引号规则与续修受理回执的等待命令同一份（quoteRunDirFlag）。
+    parts.push("--run-dir", quoteRunDirFlag(runDirFlag));
   }
   if (asJson) parts.push("--format", "json");
   return parts.join(" ");
@@ -3090,7 +3139,9 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   // validated through its closed set. Any violation fails closed — no
   // command/path/stderr/env/raw-event is ever echoed.
   if (raw.runId !== runId) throw new Error("reverify runId mismatch");
-  if (!/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/.test(raw.deliveryCommit)) {
+  // 第 137a 批续修 1（同类路径）：先查类型——数组 ["<合法 SHA>"] 会被正则强转成
+  // 字符串放行（repackage 的 CLI 同一行写法由会审发现，这里是它的既有同款）。
+  if (typeof raw.deliveryCommit !== "string" || !/^[0-9a-fA-F]{40}$|^[0-9a-f]{64}$/.test(raw.deliveryCommit)) {
     throw new Error("reverify bad deliveryCommit");
   }
   if (!Number.isInteger(raw.attempt) || raw.attempt < 1 || raw.attempt > 2) {
@@ -3132,6 +3183,347 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   console.log(`Delivery: ${result.deliveryCommit}`);
   console.log(`Reason: ${result.reason} (${result.state})`);
   console.log(`Verification: ${result.verificationStatus}${result.failureCode ? ` (${result.failureCode})` : ""}`);
+}
+
+// =====================================================================
+// 第 137a 批：只在 MCP 有的三个操作的 CLI 入口（薄适配层，与 runs delivery
+// reverify 同一模式）——委托 MCP 同一个应用服务，只输出闭集安全字段。
+// =====================================================================
+
+/** 三条命令各自的旗标集。导出只为测试钉住"帮助行 ↔ 解析器"两面不漂移。 */
+export const RUNS_CONTINUE_FLAGS = Object.freeze([
+  "--prompt-file", "--delivery-spec-file", "--cwd", "--format", "--run-dir", "--registry",
+]);
+export const RUNS_CORRECT_FLAGS = Object.freeze([
+  "--correction-id", "--prompt-file", "--cwd", "--format", "--run-dir",
+]);
+export const RUNS_DELIVERY_REPACKAGE_FLAGS = Object.freeze([
+  "--allowed-path", "--cwd", "--format", "--run-dir",
+]);
+// 可重复的取值旗标；其余取值旗标重复即拒。
+const RUNS_DELIVERY_REPACKAGE_REPEAT_FLAGS = Object.freeze(["--allowed-path"]);
+
+// 文本面每张累计范围路径表最多列出的条数；完整的有界清单看 --format json。
+const CONTINUE_SCOPE_PATHS_SHOWN = 10;
+
+function flagKey(flag) {
+  return flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+/**
+ * 三条命令共用的严格解析（runs delivery reverify 同纪律）：取值旗标各取下一个
+ * 词作值（非空、不以 -- 开头），单值旗标重复即拒，可重复旗标收成数组，未知
+ * 旗标拒绝，其余光词是位置参数。报错只点名旗标名，不回显旗标值。
+ */
+function parseStrictRunArgs(args, { command, flags, repeatFlags = [] }) {
+  const singles = new Set(flags);
+  const repeats = new Set(repeatFlags);
+  const seen = new Set();
+  const values = {};
+  const lists = {};
+  const positionals = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (!singles.has(a)) {
+      if (a.startsWith("--")) {
+        // 认不出的旗标形状（带 = 或控制字符等）连名字也不回显。
+        const name = /^--[A-Za-z0-9-]+$/.test(a) ? a : "(unprintable flag)";
+        throw new Error(`unknown flag for ${command}: ${name}`);
+      }
+      positionals.push(a);
+      continue;
+    }
+    const v = args[i + 1];
+    if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
+    if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+    if (repeats.has(a)) {
+      (lists[flagKey(a)] ??= []).push(v);
+    } else {
+      if (seen.has(a)) throw new Error(`${a} specified multiple times`);
+      seen.add(a);
+      values[flagKey(a)] = v;
+    }
+    i += 1;
+  }
+  return { values, lists, positionals };
+}
+
+/** 恰一个合法 runId（isValidRunId SSOT）；多一个、少一个或形状不对都在调用服务前拒绝。 */
+function requireSingleRunId(positionals, { command, placeholder }) {
+  if (positionals.length !== 1) throw new Error(`${command} requires exactly one <${placeholder}>`);
+  const [runId] = positionals;
+  if (!isValidRunId(runId)) throw new Error(`${command} requires a valid <${placeholder}>`);
+  return runId;
+}
+
+/** --format 只认 json（缺省文本）；返回是否 JSON。 */
+function requireTextOrJson(values) {
+  if (values.format !== undefined && values.format !== "json") {
+    throw new Error("--format only supports 'json' (text mode is default)");
+  }
+  return values.format === "json";
+}
+
+/**
+ * 三条命令的授权工作区根：--cwd 显式给出，缺省 WAO_TARGET_CWD，再当前目录
+ * （resolveTargetCwd，与 runs delivery reverify 同一条链）；随后证明它是 Git
+ * 顶层（proveWorkspaceRoot——与 MCP 处理器的 proveCallWorkspaceRoot 同一证明），
+ * 把证明后的规范根交给服务。证明失败原样上抛：子目录或非 Git 目录不会被
+ * 服务的归属核验折成 workspace_mismatch。调用方输入不能直接指定工作区根。
+ */
+function proveAuthorizedWorkspaceRoot(cwdFlag, config) {
+  const cwd = cwdFlag ? resolve(cwdFlag) : resolveTargetCwd({ cwd: undefined }, config);
+  return proveWorkspaceRoot(cwd).root;
+}
+
+/**
+ * 第 137a 批：`wao runs continue <parentRunId> --prompt-file FILE [--delivery-spec-file FILE]
+ * [--cwd DIR] [--format json] [--run-dir DIR] [--registry FILE]`
+ *
+ * MCP run_continue 的 CLI 入口：委托同一个 continueRun，传参与 MCP 处理函数一致
+ * （授权根先证明；服务级 requireCertified 为 false；带全局等待窗与后端选择器）。
+ * 回执经应用层 projectContinueOutcome——与 MCP 输出除按面渲染的 nextStep 外同键
+ * 同义；nextStep 是 CLI 面的等待命令，省略交付规格时末尾写明继承父合同。
+ * 退出码：受理 0；闭集拒绝 1（正常结构化结果）；环境错误原样上抛（非零）。
+ * 不回显 prompt、会话 id、绝对路径、命令行。
+ *
+ * @param {string[]} args — everything after `runs continue`
+ * @param {object} config
+ * @param {object} [hostDeps] — { continueRunFn } for testing
+ */
+async function runsContinueCommand(args, config, hostDeps = {}) {
+  // 0047 L1：续修会起 worker——与 CLI run 入口、MCP run_continue 处理器头同一道门，
+  // 在一切副作用之前拒绝 worker 上下文。
+  assertNotNestedDispatchContext();
+  const { values, positionals } = parseStrictRunArgs(args, { command: "runs continue", flags: RUNS_CONTINUE_FLAGS });
+  const parentRunId = requireSingleRunId(positionals, { command: "runs continue", placeholder: "parentRunId" });
+  const asJson = requireTextOrJson(values);
+  if (values.promptFile === undefined) throw new Error("runs continue requires --prompt-file FILE");
+  // 续修 1：全局等待预算与 `wao run` 同一道门（run.js 的 validateBoundedWaitTimeout）。
+  // config.waitTimeout 给了就必须是 [1000, 600000] 的整数——在任何副作用之前：它
+  // 会被原样交给 runner，坏的值不该等到续修位已占、工作树已转换才失败。
+  if (config?.waitTimeout !== undefined && config?.waitTimeout !== null) {
+    validateBoundedWaitTimeout(config.waitTimeout);
+  }
+  // 与 `wao run --prompt-file` 同一个读取器；提示词全文交给服务，不进任何输出。
+  const prompt = await loadPrompt({ promptFile: values.promptFile });
+  // 与 `wao run --delivery-spec-file` 同一个解析器与文件格式（校验走
+  // prepareDeliveryRequest SSOT——显式合同必须自带验证这条规则就在那里）；
+  // 省略即 undefined，服务按决定 0130 继承父合同。
+  const delivery = await loadDeliverySpec({ deliverySpecFile: values.deliverySpecFile });
+  const authorizedWorkspaceRoot = proveAuthorizedWorkspaceRoot(values.cwd, config);
+  const raw = await (hostDeps.continueRunFn ?? continueRun)({
+    parentRunId,
+    prompt,
+    delivery,
+    runDir: resolve(values.runDir ?? config.runDir),
+    registryPath: resolve(values.registry ?? config.registry),
+    authorizedWorkspaceRoot,
+    // 与 MCP 处理函数一致。认证清单门（WAO_MCP_REQUIRE_CERTIFIED）是 MCP 边界的
+    // 部署开关，只在 MCP 适配层；CLI 是 Lead 的特权通道，不设这道门。
+    requireCertified: false,
+    // 全局等待窗与 CLI 后台派发同源（config.waitTimeout）。
+    globalWaitTimeout: config.waitTimeout,
+    // 与 MCP resolveBackendFor 同约定：未知 backend 折成 null（能力门 fail-closed）。
+    backendFor: (agent) => (KNOWN_BACKENDS.includes(agent?.backend) ? factoryBackendFor(agent) : null),
+  });
+  const wire = projectContinueOutcome(raw, delivery);
+  // 子运行 id 要写进等待命令：形状也按 runId SSOT 核一遍（投影只保证它是字符串）。
+  if (wire.accepted && !isValidRunId(wire.runId)) throw new Error("runs continue bad child runId");
+  const result = {
+    ...wire,
+    ...(wire.accepted
+      ? {
+          nextStep: buildNextStep({
+            surface: "cli",
+            situation: "dispatch_accepted",
+            runId: wire.runId,
+            // 省略交付规格时与 MCP 受理回执同一句后缀：写明用的是继承的父合同。
+            suffix: delivery === undefined ? CONTINUE_INHERITED_DELIVERY_NOTE : "",
+            // 续修 1：调用方显式给了 --run-dir，等待命令就带上同一个值（照抄才
+            // 找得到不在缺省目录里的子运行）；放不下实际值时这里写占位 <DIR>。
+            runDirFlag: values.runDir ?? null,
+          }),
+        }
+      : {}),
+  };
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    printContinueText(result);
+  }
+  if (!wire.accepted) process.exitCode = 1;
+}
+
+function printContinueText(result) {
+  if (result.accepted) {
+    console.log(`Run: ${result.runId}`);
+    console.log(`Parent: ${result.parentRunId}`);
+    console.log(`Root: ${result.rootRunId}`);
+    console.log(`Agent: ${result.agentId}`);
+    console.log(`State: ${result.state}`);
+    console.log(`Next step: ${result.nextStep}`);
+    return;
+  }
+  console.log(`Run: ${result.parentRunId}`);
+  console.log(`Continuation refused: ${result.rejectionReason}`);
+  if (result.guidance !== undefined) console.log(`Note: ${result.guidance}`);
+  // 累计范围事实（仅 continuation_scope_incomplete）：计数 + 截断标记 + 前几条；
+  // 完整有界清单用 --format json。
+  const tables = [
+    ["Inherited changed paths", "inheritedChangedPaths", "inheritedChangedCount", "inheritedChangedTruncated"],
+    ["Uncovered inherited paths", "uncoveredInheritedPaths", "uncoveredInheritedCount", "uncoveredInheritedTruncated"],
+  ];
+  for (const [label, pathsKey, countKey, truncatedKey] of tables) {
+    if (!Array.isArray(result[pathsKey])) continue;
+    console.log(`${label}: ${result[countKey]}${result[truncatedKey] ? " (truncated)" : ""}`);
+    for (const p of result[pathsKey].slice(0, CONTINUE_SCOPE_PATHS_SHOWN)) console.log(`  - ${p}`);
+    const rest = result[pathsKey].length - CONTINUE_SCOPE_PATHS_SHOWN;
+    if (rest > 0) console.log(`  ... ${rest} more; --format json lists all`);
+  }
+}
+
+/**
+ * 第 137a 批：`wao runs correct <runId> --correction-id ID --prompt-file FILE
+ * [--cwd DIR] [--format json] [--run-dir DIR]`
+ *
+ * MCP run_correct 的 CLI 入口：委托同一个 correctRun，输出与 MCP 同一份
+ * { runId, correctionId, outcome, reason }（闭集）。correctionId 的形状与
+ * prompt 的长度按 MCP schema 的同一组常量在调用服务前校验。
+ * 退出码：queued / pending / delivered 为 0；rejected 为 1。不回显 prompt。
+ *
+ * @param {string[]} args — everything after `runs correct`
+ * @param {object} config
+ * @param {object} [hostDeps] — { correctRunFn } for testing
+ */
+async function runsCorrectCommand(args, config, hostDeps = {}) {
+  const { values, positionals } = parseStrictRunArgs(args, { command: "runs correct", flags: RUNS_CORRECT_FLAGS });
+  const runId = requireSingleRunId(positionals, { command: "runs correct", placeholder: "runId" });
+  const asJson = requireTextOrJson(values);
+  if (values.correctionId === undefined) throw new Error("runs correct requires --correction-id ID");
+  if (values.correctionId.length > CORRECTION_ID_MAX_LEN || !CORRECTION_ID_PATTERN.test(values.correctionId)) {
+    throw new Error(`--correction-id must be 1..${CORRECTION_ID_MAX_LEN} characters of [A-Za-z0-9_-]`);
+  }
+  const correctionId = values.correctionId;
+  if (values.promptFile === undefined) throw new Error("runs correct requires --prompt-file FILE");
+  const prompt = await loadPrompt({ promptFile: values.promptFile });
+  if (prompt.length === 0 || prompt.length > CORRECTION_PROMPT_MAX_LEN) {
+    throw new Error(`--prompt-file must hold 1..${CORRECTION_PROMPT_MAX_LEN} characters`);
+  }
+  const authorizedWorkspaceRoot = proveAuthorizedWorkspaceRoot(values.cwd, config);
+  const raw = await (hostDeps.correctRunFn ?? correctRun)({
+    runId,
+    correctionId,
+    prompt,
+    runDir: resolve(values.runDir ?? config.runDir),
+    authorizedWorkspaceRoot,
+  });
+  // 闭集校验：任何不符都 fail closed（抛错、零输出）。
+  if (raw.runId !== runId || raw.correctionId !== correctionId) throw new Error("runs correct identity mismatch");
+  if (!CORRECTION_OUTCOMES.includes(raw.outcome)) throw new Error("runs correct bad outcome");
+  if (raw.outcome === "rejected" ? !CORRECTION_REJECTION_REASONS.includes(raw.reason) : raw.reason != null) {
+    throw new Error("runs correct bad reason");
+  }
+  const result = { runId, correctionId, outcome: raw.outcome, reason: raw.outcome === "rejected" ? raw.reason : null };
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`Run: ${result.runId}`);
+    console.log(`Correction: ${result.correctionId}`);
+    console.log(`Outcome: ${result.outcome}${result.reason === null ? "" : ` (${result.reason})`}`);
+  }
+  if (result.outcome === "rejected") process.exitCode = 1;
+}
+
+/**
+ * 第 137a 批：`wao runs delivery repackage <runId> --allowed-path P [--allowed-path P]...
+ * [--cwd DIR] [--format json] [--run-dir DIR]`
+ *
+ * MCP run_delivery_repackage 的 CLI 入口：委托同一个 runDeliveryRepackage，本进程
+ * 等到打包与验证结束——没有 MCP 的有界等待，也不返回 pending（验证可能很久；
+ * 宿主有后台命令行时放后台跑）。输出 MCP 同一份闭集字段；期望内的政策拒绝是
+ * 正常结构化结果（status ok + 闭集 rejectionReason，交付字段缺席）、退出码 1；
+ * 意外错误原样上抛。--allowed-path 的条数与单条长度上限取应用层导出的常量
+ * （MCP schema 同一组）。
+ *
+ * @param {string[]} args — everything after `delivery repackage`
+ * @param {object} config
+ * @param {object} [hostDeps] — { getRunDeliveryRepackageFn } for testing
+ */
+async function runsDeliveryRepackageCommand(args, config, hostDeps = {}) {
+  const { values, lists, positionals } = parseStrictRunArgs(args, {
+    // 未知旗标的报错点名子命令本身（与 runs delivery reverify 同一写法）。
+    command: "delivery repackage",
+    flags: RUNS_DELIVERY_REPACKAGE_FLAGS,
+    repeatFlags: RUNS_DELIVERY_REPACKAGE_REPEAT_FLAGS,
+  });
+  const runId = requireSingleRunId(positionals, { command: "runs delivery repackage", placeholder: "runId" });
+  const asJson = requireTextOrJson(values);
+  const allowedPaths = lists.allowedPath ?? [];
+  if (allowedPaths.length === 0) throw new Error("runs delivery repackage requires at least one --allowed-path P");
+  if (allowedPaths.length > REPACKAGE_ALLOWED_PATHS_LIMIT) {
+    throw new Error(`--allowed-path exceeds ${REPACKAGE_ALLOWED_PATHS_LIMIT} paths`);
+  }
+  const tooLongAt = allowedPaths.findIndex((p) => p.length > REPACKAGE_ALLOWED_PATH_MAX_LEN);
+  if (tooLongAt !== -1) {
+    // 只报第几条超长，不回显路径。
+    throw new Error(`--allowed-path entry ${tooLongAt + 1} exceeds ${REPACKAGE_ALLOWED_PATH_MAX_LEN} characters`);
+  }
+  const authorizedWorkspaceRoot = proveAuthorizedWorkspaceRoot(values.cwd, config);
+  let raw;
+  try {
+    raw = await (hostDeps.getRunDeliveryRepackageFn ?? runDeliveryRepackage)({
+      runId,
+      runDir: resolve(values.runDir ?? config.runDir),
+      allowedPaths,
+      authorizedWorkspaceRoot,
+    });
+  } catch (error) {
+    // 与 MCP 同义：类型化的政策拒绝是正常结果（闭集码），不是错误。
+    const rejectionReason = classifyRepackageRejection(error);
+    if (rejectionReason === null) throw error;
+    const rejected = { status: "ok", runId, rejectionReason };
+    if (asJson) {
+      console.log(JSON.stringify(rejected, null, 2));
+    } else {
+      console.log(`Run: ${runId}`);
+      console.log(`Repackage rejected: ${rejectionReason}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+  // 闭集校验：任何不符都 fail closed（抛错、零输出）。
+  if (raw.runId !== runId) throw new Error("repackage runId mismatch");
+  // 续修 1（会审）：先查类型——数组 ["<合法 SHA>"] 会被正则强转成字符串放行。
+  if (typeof raw.deliveryCommit !== "string" || !/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/.test(raw.deliveryCommit)) {
+    throw new Error("repackage bad deliveryCommit");
+  }
+  if (!["passed", "failed", "unavailable"].includes(raw.verificationStatus)) {
+    throw new Error("repackage bad verificationStatus");
+  }
+  if (!["packaged", "recovered"].includes(raw.source)) throw new Error("repackage bad source");
+  if (!RECOVERY_CANDIDATE_KINDS.includes(raw.recoveryKind)) throw new Error("repackage bad recoveryKind");
+  if (typeof raw.created !== "boolean") throw new Error("repackage created not boolean");
+  const result = {
+    status: "ok",
+    runId,
+    deliveryCommit: raw.deliveryCommit,
+    verificationStatus: raw.verificationStatus,
+    source: raw.source,
+    recoveryKind: raw.recoveryKind,
+    created: raw.created,
+    rejectionReason: null,
+  };
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`Run: ${result.runId}`);
+    console.log(`Delivery: ${result.deliveryCommit}`);
+    console.log(`Verification: ${result.verificationStatus}`);
+    console.log(`Source: ${result.source}`);
+    console.log(`Recovery kind: ${result.recoveryKind}`);
+    console.log(`Created: ${result.created}`);
+  }
 }
 
 /**
@@ -3433,6 +3825,12 @@ async function runsDeliveryCommand(args, config, hostDeps) {
   // runId. Same dispatch discipline as "review".
   if (args[0] === "reverify") {
     await runsDeliveryReverifyCommand(args.slice(1), config, hostDeps);
+    return;
+  }
+  // 第 137a 批：`runs delivery repackage` 子命令——与 review / reverify 同一分发
+  // 纪律，先于普通查询解析，"repackage" 不会被当成 runId。
+  if (args[0] === "repackage") {
+    await runsDeliveryRepackageCommand(args.slice(1), config, hostDeps);
     return;
   }
 

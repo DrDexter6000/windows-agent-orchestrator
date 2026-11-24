@@ -21,7 +21,7 @@
 
 ## MCP 工具名 ↔ CLI 命令速查
 
-MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——本表按用途映射，非改名（名字两侧均不动）；本表由 docs-consistency 守卫绑定断言（MCP 名派生自 `toolSurface.js` TOOLS、CLI 名派生自 `RUNS_SUBCOMMANDS` 导出，表内名字漂移即红）。完整参数见生成层 `docs/surface/`（权威源是代码，随代码再生成）。
+MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——本表按用途映射，非改名（名字两侧均不动）；本表由 docs-consistency 守卫绑定断言（表内名字漂移即红）。
 
 | 用途 | MCP 工具 | CLI 等价 | 差异注 |
 |---|---|---|---|
@@ -33,5 +33,8 @@ MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——�
 | 派发 | `run_dispatch` | `run <agentId> …` | MCP 无前台阻塞语义，CLI run 前台等待 |
 | 验收/交付查询与决策 | `run_delivery` / `run_delivery_decide` | `runs delivery <runId> [--accept/--reject]` | CLI 覆盖查询与 accept/reject；review 见下行 |
 | 交付审查（diff/review） | `run_delivery_review` | `runs delivery review <runId> --file-index N` | 两次调用（见交付页） |
+| 续修 | `run_continue` | `runs continue <parentRunId>` | 同一服务，等价 |
+| 纠偏 | `run_correct` | `runs correct <runId>` | 同一服务，等价 |
+| 重打包 | `run_delivery_repackage` | `runs delivery repackage <runId> --allowed-path P` | 同一服务；CLI 等到验证结束，不回 `pending` |
 | 停止 | `run_stop` | `stop <runId> --observed-seq <n> --reason "<理由>"` | 等价（前置要求见监督页 run_stop 节） |
 | 台账诊断 | `run_diagnose` | `runs diagnose` | 等价（MCP 返回含 state/terminal；CLI JSON 分支刻意不含） |
