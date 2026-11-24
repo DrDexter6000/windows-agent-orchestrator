@@ -171,7 +171,7 @@
 | TD-117 | kimi-code 与 deepseek-harness 两个后端暂停使用、不配车道：kimi-code 不上报用量，deepseek-harness 不支持会话复用；在用的是 kimi-web 与 deepseek-acp | 2026-11-10 第 101 批（决定 0123）：两个后端退役出闭集（KNOWN_BACKENDS 7→5），通道留观察表；存档 tag archive/kimi-code-backend / archive/deepseek-harness-backend |
 | TD-352 | claude-code 续修轮看不到新的交付合同：`claude --resume` 沿用建会话时的系统提示，放宽的 allowedPaths 对 worker 不可见 | 2026-11-18 第 110 批：codex `exec resume` 同样沿用（实测），两个后端声明 resumeKeepsSessionInstructions，resume 轮由 ProcessBackend 把本轮合同重述进提示词；deepseek-acp 实测能看到新合同，zcode、kimi 的合同本就随每轮提示词 |
 | TD-353 | 交付谱系收尾要 Lead 逐条裁决（采纳最终 run、被续修取代的父辈逐条拒收）再另做回收 | 2026-11-20 第 120 批（决定 0126）：祖先由谱系派生为被取代（`supersededByRunId`，不写事件），preflight 不再催，回收直接摘树；显式“谱系裁决”命令不做 |
-| TD-359 | GLM 周额度用尽（429/1310）时 zcode 运行要等 5 分多钟停滞门才收口；可靠性门先超时，把车道判成 rejected，认证门随即拒派所有项目的这两条车道 | 2026-11-20 第 122 批：当前主轮请求不可重试时 5 秒内收口，诊断 provider_capacity；任一演练撞服务商额度即整案无法判定，本轮有无法判定就整轮不写台账、进程非 0。额度用尽时实测 21 秒、台账逐字节不变 |
+| TD-359 | GLM 周额度用尽（429/1310）时 zcode 运行要等 5 分多钟停滞门才收口；可靠性门先超时，把车道判成 rejected，认证门随即拒派所有项目的这两条车道 | 2026-11-20 第 122 批：当前主轮请求不可重试时宽限 5 秒、凭其后的快照收口，诊断 provider_capacity；任一演练撞服务商额度即整案无法判定，本轮有无法判定就整轮不写台账、进程非 0。额度用尽时实测 21 秒、台账逐字节不变 |
 | TD-339 | `SKILL.md` 有九条承重短规则没有守卫，删掉任何一条测试仍全绿 | 2026-11-20 第 127 批（决定 0127）：入口按步骤切片检查工具名、字段名与关键词，十二条承重规则各有用例，删规则即红（逐条变异自证）；不钉整句 |
 | TD-357 | codex 车道做不了生图：worker 按合同写域拒写生图缓存；失败补丁被记成写入，隔离门误判 `workdir_escape` | 2026-11-20 第 126 批：生图列为 Owner 规则 1 的例外；codex 只把 `status:"completed"` 的 file_change 记写入；codex 交付合同许读本轮生图缓存并拷进授权路径；写了又删的误判另记 TD-361 |
 | TD-351 | dsh 暂不升到官方新版：越界防护按工具编号关闭，新版不断加插件，名单可能关不住 | 2026-11-21 Owner 交 Lead 自主研判：旁装 0.2.2-rc.5、独立 DSH_HOME 比对 acp 档组成，新增工具均关闭或无越界能力，现有防护名单不用改；delta 认证、drill、跨版本续修与停止冒烟通过后升级（认证手册 deepseek-acp 行） |

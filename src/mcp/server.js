@@ -3159,7 +3159,7 @@ const LEAD_PREFLIGHT_DESCRIPTION =
   "the default binding falls back to MCP roots / server config. A failed proof " +
   "returns its fixed refusal text with NO project content. ADVISORY ONLY — not a " +
   "gate: warnings are facts, never an auto-stop; sections settle independently, " +
-  "re-verify via the original tools. `open item:` observation lines list what awaits " +
+  "re-verify via manualChecks. `open item:` observation lines list what awaits " +
   "Lead closeout (unsettled deliveries, reclaimable worktrees/branches, feedback " +
   "inbox) with the next command.";
 

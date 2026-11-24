@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.10.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-20-v0.10.0.md)
+[![version](https://img.shields.io/badge/version-v0.11.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-24-v0.11.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
@@ -58,25 +58,26 @@ you.
   review discipline: advice is recorded, the Lead decides. Results depend on task and
   configuration.
 
-## What's new in v0.10.0 (2026-11-20)
+## What's new in v0.11.0 (2026-11-24)
 
-- **Upgrade action** — the MCP tool surface goes from 23 to 20 (decision 0125): `workspace_select`,
-  `workspace_status` and MCP `run_wait` are gone. Each call names its project with
-  `expectedWorkspaceRoot` (required on write tools, optional on read tools); wait with repeated
-  `run_await_result`, `run_delivery` with `waitMs`, or CLI `runs wait --until-settled`. Restart the
-  MCP host. The kimi-web lane needs kimi 2.6 or later; the sol and astra lanes change model
-  (`wao registry align`).
-- **Continuation lineages close in one decision** — accepting the final candidate marks its
-  continuation ancestors as superseded, so they need no rejection each and reclaim can remove
-  them (decision 0126); `worktree reclaim` keeps more when facts are unclear.
-- **Resumed workers see the new contract** — claude-code and codex resume turns restate the turn's
-  role and delivery contract in the prompt.
-- **Waits** — `runs wait` takes several runs and returns at the first to settle; a settlement wait
-  that cannot prove its runner gone exits 5 `runner_unproven` (decision 0124).
-- **Lanes** — implementation follows the ladder glm-pro → deepseek-flash → opus; ratings come from
-  real deliveries and reviews.
+- **Upgrade action** — the MCP tool surface goes from 20 to 17 (decision 0129): `registry_list`,
+  `runs_list` and `run_delivery_review_bundle` are gone. `lead_preflight` returns the full worker
+  entries and, with `recentRuns`, recent runs; call `run_delivery` and `run_delivery_review` in place
+  of the bundle. The CLI `spawn` and `wao ask` are retired: use `run` in the foreground, or
+  `run --background` followed by `runs wait`. Restart the MCP host.
+- **Fewer rules to remember** — `run_dispatch` runs the contract check itself (decision 0129); a
+  continuation may omit `delivery` and inherits its parent's contract, `delivery.mode` defaults to
+  `git_commit_v1`, and write tools mark `expectedWorkspaceRoot` required (decision 0130).
+- **The CLI covers continuations** — `runs continue`, `runs correct` and `runs delivery repackage`;
+  repackage waits for verification in its own process, out of reach of the MCP host's call timeout.
+- **Results carry the next facts** — wait and dispatch results name the delivery commit, the changed
+  files and the review command; MCP replies give a ready CLI wait command.
+- **Review verdicts** — declared consult fields (`--fields Q1=...`) are the formal verdict channel
+  (decision 0128).
+- **Runtimes** — kimi 2.7, ZCode 4.0, codex 0.171, dsh 0.2.2-rc.5; the glm-pro lane changes model;
+  `npm run harness-inventory` compares local and latest versions.
 - Scope, review record and release-gate evidence:
-  [`docs/changelog-2026-11-20-v0.10.0.md`](docs/changelog-2026-11-20-v0.10.0.md).
+  [`docs/changelog-2026-11-24-v0.11.0.md`](docs/changelog-2026-11-24-v0.11.0.md).
 
 ## Current status
 

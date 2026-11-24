@@ -196,9 +196,9 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 `lead_preflight` 的可选输入 `recentRuns`（对象 `{limit?: 1..100, activeOnly?: boolean}`，缺省 limit 50、activeOnly false）让输出多一个 `recentRuns` 节。只读幂等：不改持久状态、不追加事件；不请求该输入就没有这个键、不多扫描。其它项目的 run 不可见，不跨 workspace 探测；既没给 `expectedWorkspaceRoot` 又没有缺省绑定时该节为 `null`（workspace 节如实报未绑定），请求了但读不出也为 `null` + warning——绝不伪造空清单。
 
-范围与 `lead_preflight` 自身一致：`expectedWorkspaceRoot` 给了就当场证明、只作用于本次调用；省略时用缺省绑定。条目按新到旧返回；`activeOnly:true` 先筛"经证明 active"的运行、再按 `limit` 截断（与原 `runs_list` 同一 `listRuns` 语义）。`runDir`、registry 等 server-owned。
+范围与 `lead_preflight` 自身一致：`expectedWorkspaceRoot` 给了就当场证明、只作用于本次调用；省略时用缺省绑定。条目按新到旧返回；`activeOnly:true` 先筛"经证明 active"的运行、再按 `limit` 截断。`runDir`、registry 等 server-owned。
 
-`recentRuns.runs` 每个元素与原 `runs_list.runs[]` 同形——`runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
+`recentRuns.runs` 每个元素有 `runId`/`agentId`/`state`/`terminal`/`updatedAt` 和两个活动投影字段：
 
 - `activityStatus` ∈ `terminal | active | unresolved | unknown`
 - `activityBasis` ∈ `terminal_state | fresh_owner_heartbeat | no_fresh_owner_heartbeat | unknown_state`

@@ -486,9 +486,9 @@ function standaloneRunFacts(path, fileRunId) {
 /**
  * Read consult records (deduplicated by consultId, createdAt in [since, until)) and each seat's
  * verdict from its run transcript. Read-only; an unreadable record or directory is skipped, an
- * unreadable seat run counts as not answered. A seat's verdict: the declared Q1 value when the
- * consult field parser reads one (source "declared"); otherwise inferVerdict on the final reply
- * (source "inferred").
+ * unreadable seat run counts as not answered. A seat's verdict: when the consult declared Q1, the value the
+ * consult field parser reads (source "declared"; declared but unfilled stays unfilled, never inferred);
+ * only when Q1 was not declared, inferVerdict on the final reply (source "inferred").
  */
 export async function collectConsults({ dirs, runDir, since = null, until = null, observeFn = observeSeatRun }) {
   const seen = new Set();

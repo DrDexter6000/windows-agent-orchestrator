@@ -21,7 +21,7 @@ read_when: delivery 模式派发、审查、重验证、验收或拒收、重打
 npm run cli -- run glm-flash --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
 ```
 
-Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。`mode` 可省（缺省 `git_commit_v1`，显式别的值照旧拒绝）。worker 留下的暂存改动打包前会被重置到基线（不动工作树），以工作树内容为准继续打包；重置路径清单随 `run.delivery_created` 的 DeliveryRef（`stagedResetPaths`）落转录。重置失败或暂存新文件会被忽略时拒为 `pre_staged_changes`（决定 0130）。
+Spec 文件是内层 delivery 对象，不是 MCP `run_dispatch` 参数那一层；形状与解析合同见[架构](../02-architecture.md) §4.7。`mode` 可省（缺省 `git_commit_v1`，显式别的值照旧拒绝）。worker 留下的暂存改动打包前会被重置到基线（不动工作树），以工作树内容为准继续打包；重置路径清单（`stagedResetPaths`）随 `run.delivery_created` 的 DeliveryRef 落转录，打包失败时随 `run.delivery_failed`。重置失败或有会被忽略的暂存新增时拒为 `pre_staged_changes`（决定 0130）。
 
 写入只在授权 worktree 内（越界即 `failed(workdir_escape)`）、scratch 放 `.wao/runs/`：控制面注入的交付执行合同已写明，任务书不必重复。仍建议任务书写明：
 
@@ -145,7 +145,7 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 
 ## 交付首屏查询
 
-用 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用：先 `run_delivery`（`waitMs` 区间与返回时机见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再 `run_delivery_review`。**两次调用没有组合工具的跨结果保证**：Lead 要把 `run_delivery_review` 回执的 `deliveryCommit`/`changedFileCount` 与先前 `run_delivery` 结果对照，不一致就重读重审；例外是已裁决但验证仍 pending——此时 `run_delivery_review` 给 `available:false`、`unavailableReason:"verification_pending"`，这是正常形态，不是两次回执不一致。两个原子工具的边界不变：workspace/runId-bound、非 reviewable 带 cursor fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment，也不 stop/retry/repackage/accept/reject；失败回各自固定文案、无 partial 输出或泄漏。Lead 仍须审查全部页面后独立调用 `run_delivery_decide`。
+用 `run_delivery`（带 `waitMs` 的一次等待）+ `run_delivery_review`（一页审查）两次调用：先 `run_delivery`（`waitMs` 取 1000..300000 ms，0 无效，省略即当场查询；返回时机见[监督](supervise.md)「等待到收口」），readiness 为 `reviewable` 时再 `run_delivery_review`。**两次调用没有组合工具的跨结果保证**：Lead 要把 `run_delivery_review` 回执的 `deliveryCommit`/`changedFileCount` 与先前 `run_delivery` 结果对照，不一致就重读重审；例外是已裁决但验证仍 pending——此时 `run_delivery_review` 给 `available:false`、`unavailableReason:"verification_pending"`，这是正常形态，不是两次回执不一致。两个原子工具的边界不变：workspace/runId-bound、非 reviewable 带 cursor fail-closed、WAO 不选择 `fileIndex`、不遍历文件、不追 `nextCursor`、不总结 fragment，也不 stop/retry/repackage/accept/reject；失败回各自固定文案、无 partial 输出或泄漏。Lead 仍须审查全部页面后独立调用 `run_delivery_decide`。
 
 ## MCP `run_delivery_reverify`（未变工件重验证）
 
@@ -161,7 +161,7 @@ npm run cli -- runs delivery review <runId> --all --since-parent   # 续修子�
 
 Lead 仍须在 decision 前完整 review（`run_delivery_review`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
 
-规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。受理后立即看回执里的 `contractAdvisories`（引用路径等提醒当场给出），需要就停掉重派；要**派发前**预检，用 `run_dispatch_contract_check`（只预检不派发）。验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
+规格错误不适用 reverify：`command_failed` 虽在 eligible 闭集内，但 reverify 会逐字节重跑原始断言——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次；重验机会至多两次（每条链一条 durable outcome），错走这一步会烧掉机器杠杆。派发受理后立即看 `run_dispatch`/`run_continue` 回执里的 `contractAdvisories`（引用路径等提醒当场给出），需要就停掉重派；要**派发前**预检，用 `run_dispatch_contract_check`（只预检不派发）。验证失败时先归因——规格错误走"验证失败采纳协议"（见下），不要碰 reverify。
 
 CLI 等价（同一 service 与安全投影，不是 raw 通道，不能改断言命令）：
 

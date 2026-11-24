@@ -68,7 +68,7 @@ WAO 的 MCP 工具全部始终注册，不按宿主名分支、也不是权限�
 
 `run_dispatch` 在派发前**就地**跑同一份合同预检（决定 0129 的"规矩下沉"；与保留的 `run_dispatch_contract_check` 工具是同一函数）：会让派发被拒的合同问题照旧在任何副作用之前按既有固定文案拒绝（权威仍是 `run_dispatch`）；只是提醒、不拦截的 advisory 码随受理回执的 `contractAdvisories` 给出（闭集码 + 固定说明，零提醒不带该键；`nextStep` 届时提醒先看它）。预检只看 delivery/profile 的机械合同，不预评 `expectedGitHead`/`expectedDirty`、continuable/backend/session 资格或 worker 凭据；预检自身意外失败按 advisory 缺席处理，绝不把可派发的调用折成失败。
 
-`run_dispatch_contract_check` 是保留的 advisory 只读预检（决定 0129 会审修正：它独有的"只预检不派发"在 MCP 面没有等价物——worker 启动前看合同是否有效、按需改请求；省略 `executionProfileId` 时列出 `availableProfiles`（只有 id 与命令计数））。它与 `run_dispatch` 共享输入 schema 与同一 application 校验，返回闭集 workspace/registry/contract 视图与有界 issue 码；`contractValid` 只反映 delivery/profile 机械合同；`contract:"unknown"` 表示预检本身没完成（不是合同错），派发仍由 `run_dispatch` 权威校验；可选 `expectedWorkspaceRoot` 只选本次检查的项目（`workspaceScope` 如实标注）。sections 独立 settle 为 `observed`/`unknown`，零副作用——不是门禁，`run_dispatch` 不依赖它；它**接受**顶层 `readOnly` 但**不评估**。
+`run_dispatch_contract_check` 是保留的 advisory 只读预检（决定 0129 会审修正：它独有的"只预检不派发"在 MCP 面没有等价物——worker 启动前看合同是否有效、按需改请求；省略 `executionProfileId` 时列出 `availableProfiles`（只有 id 与命令计数））。它与 `run_dispatch` 同源输入（这里 `expectedWorkspaceRoot` 可选）、同一 application 校验，返回闭集 workspace/registry/contract 视图与有界 issue 码；`contractValid` 只反映 delivery/profile 机械合同；`sections.contract:"unknown"` 表示预检本身没完成（不是合同错），派发仍由 `run_dispatch` 权威校验；可选 `expectedWorkspaceRoot` 只选本次检查的项目（`workspaceScope` 如实标注）。sections 独立 settle 为 `observed`/`unknown`，零副作用——不是门禁，`run_dispatch` 不依赖它；它**接受**顶层 `readOnly` 但**不评估**。
 
 `run_dispatch` 的可选顶层输入 `executionProfileId`（与 `delivery` 同级）只提供验证命令、与 inline `delivery.verificationCommands`/`verificationSetupCommands`/`verificationUnavailableReason` 互斥；未知/冲突由共享 resolver 拒绝。派发细节见[派发](dispatch.md)。
 
@@ -96,7 +96,7 @@ registry 源可读但某条目无法 normalize/project 时走**部分投影**：
 
 `activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——transcript 为**已知非终态**，且有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。非终态但缺少 fresh heartbeat 的 run（如历史 stale transcript）不算 active，也不据此推断它 failed/dead/stopped（它可能仍在跑或休眠）；它计入 `unresolvedRunCount`（同一次扫描），`> 0` 时追加一条 advisory observation（不在 `activeRuns` 里，不证明失败或停止，用 `recentRuns` 查看）。`activeRunCount=0` 不等于"工作区干净"。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）；`activeRuns` 为数组，其截断另由布尔字段 `activeRunsTruncated` 表示。
 
-可选输入 `recentRuns`（对象 `{limit?: 1..100, activeOnly?: boolean}`，缺省 limit 50、activeOnly false；limit 上限与 activeOnly 先筛后截断都与原 `runs_list` 一致）让输出多一个可选 `recentRuns` 节（条目同原 `runs_list.runs[]`，另带 `returnedCount`/`truncated`/`unresolvedCount`；范围随本次 `expectedWorkspaceRoot` 或缺省绑定）。不请求该输入（键缺席）就没有这个键、不多扫描；请求了但读不出或未绑定时该节为 `null`（unknown，绝不伪造空清单）——`null` 与键缺席可区分"请求了读不出"和"没请求"。它不进 `checkStatus`、不影响 `complete`；条目与活动投影的完整语义见[取结果与查历史](results.md)。
+可选输入 `recentRuns`（对象 `{limit?: 1..100, activeOnly?: boolean}`，缺省 limit 50、activeOnly false；activeOnly 先筛后截断）让输出多一个可选 `recentRuns` 节（另带 `returnedCount`/`truncated`/`unresolvedCount`；范围随本次 `expectedWorkspaceRoot` 或缺省绑定）。不请求该输入（键缺席）就没有这个键、不多扫描；请求了但读不出或未绑定时该节为 `null`（unknown，绝不伪造空清单）——`null` 与键缺席可区分"请求了读不出"和"没请求"。它不进 `checkStatus`、不影响 `complete`；条目与活动投影的完整语义见[取结果与查历史](results.md)。
 
 `observations` 里的 server build 一行说明服务进程跑的是哪版代码：MCP 服务只在启动时加载 WAO 代码，detached runner 加载当下检出，合入后两者可能不同。`server build: started <启动时间> at HEAD <提交>, src/ unchanged since start` 表示启动以来 `src/` 树哈希（`HEAD:src`）没变、前后都干净；HEAD 动过时 `<提交>` 后补 `(HEAD now <当前提交>)`。树哈希或干净状态变了就换成 warning `server src/ differs from server start…`（重启宿主才加载新代码）；只改 `src/` 以外的提交不触发；树哈希读不出时只给启动时间与包版本。这一行不影响 `complete`。
 

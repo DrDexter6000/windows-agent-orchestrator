@@ -1,6 +1,6 @@
 # Windows Agent Orchestrator (WAO)
 
-[![version](https://img.shields.io/badge/version-v0.10.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-20-v0.10.0.md)
+[![version](https://img.shields.io/badge/version-v0.11.0-2f2f2f?style=flat-square)](docs/changelog-2026-11-24-v0.11.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
 
 [English](README.md) · 简体中文
@@ -51,20 +51,22 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
   Lead；效果因任务与配置而异。
 
-## v0.10.0 新增（2026-11-20）
+## v0.11.0 新增（2026-11-24）
 
-- **升级要动手**——MCP 工具面 23 → 20（决定 0125）：`workspace_select`、`workspace_status` 与 MCP
-  `run_wait` 撤出。每次调用用 `expectedWorkspaceRoot` 指定项目（写类必传、读类可选）；等待改用重复
-  `run_await_result`、`run_delivery` 带 `waitMs`，或 CLI `runs wait --until-settled`。MCP 宿主要重启。
-  kimi-web 车道要 kimi 2.6 或更新；sol、astra 两条车道换型号（`wao registry align`）。
-- **续修谱系一次裁决收尾**——采纳最终候选后，续修祖先自动算被取代，不用逐条拒收，回收可直接摘掉
-  （决定 0126）；事实不清时 `worktree reclaim` 保留得更多。
-- **续修轮看得到新合同**——claude-code 与 codex 的续修轮把本轮角色与交付合同重述在提示词里。
-- **等待**——`runs wait` 可同时等多个运行、先到先返回；收口等待证明不了 runner 已不在时以退出码 5
-  `runner_unproven` 退出（决定 0124）。
-- **车道**——写代码按 glm-pro → deepseek-flash → opus 的阶梯选；评级来自真实交付与会审。
+- **升级要动手**——MCP 工具面 20 → 17（决定 0129）：`registry_list`、`runs_list` 与
+  `run_delivery_review_bundle` 撤出。`lead_preflight` 给出完整的 worker 条目，带 `recentRuns` 时给出近期运行；
+  组合审查改为 `run_delivery` 加 `run_delivery_review` 两次调用。CLI `spawn` 与 `wao ask` 退役：前台改用 `run`，
+  后台用 `run --background` 再 `runs wait`。MCP 宿主要重启。
+- **少背几条规矩**——`run_dispatch` 派发时自己跑合同预检（决定 0129）；续修可省 `delivery`、继承父运行的合同，
+  `delivery.mode` 缺省 `git_commit_v1`，写类工具的 `expectedWorkspaceRoot` 标必填（决定 0130）。
+- **CLI 补齐续修**——`runs continue`、`runs correct`、`runs delivery repackage`；重新打包在自己的进程里等验证跑完，
+  不受 MCP 宿主单次调用超时影响。
+- **回执带下一步事实**——等待与派发回执直接给出交付提交、改动文件与审查命令；MCP 回执附可直接用的 CLI 等待命令。
+- **会审结论**——会审声明的字段（`--fields Q1=...`）是正式的结论通道（决定 0128）。
+- **运行时**——kimi 2.7、ZCode 4.0、codex 0.171、dsh 0.2.2-rc.5；glm-pro 车道换了型号；
+  `npm run harness-inventory` 对照本机与最新版本。
 - 范围、会审记录与发版门槛证据见
-  [`docs/changelog-2026-11-20-v0.10.0.md`](docs/changelog-2026-11-20-v0.10.0.md)。
+  [`docs/changelog-2026-11-24-v0.11.0.md`](docs/changelog-2026-11-24-v0.11.0.md)。
 
 ## 当前状态
 

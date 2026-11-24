@@ -32,7 +32,7 @@
           "stars": 5,
           "basis": "measured",
           "n": 225,
-          "evidence": "`npm run lane-review-stats -- --since 2026-10-29`（第 116 批起读各项目会审记录与审计员只读运行，结论含按答复开头推断），统计到 2026-11-18",
+          "evidence": "`npm run lane-review-stats -- --since 2026-10-29`（第 116 批起读各项目会审记录与审计员只读运行，结论含按答复开头推断，决定 0128 之前的口径），统计到 2026-11-18",
           "note": "最严：认出结论的 122 次里判先修 100 次；同场比 deepseek-flash 严 2、松 1、同 8，比 opus 严 1、同 4；常附可复现的反例"
         },
         "design": {
@@ -358,7 +358,7 @@
           "stars": 4,
           "basis": "measured",
           "n": 81,
-          "evidence": "`npm run lane-review-stats -- --since 2026-10-29`（第 116 批起读各项目会审记录与审计员只读运行，结论含按答复开头推断），统计到 2026-11-18",
+          "evidence": "`npm run lane-review-stats -- --since 2026-10-29`（第 116 批起读各项目会审记录与审计员只读运行，结论含按答复开头推断，决定 0128 之前的口径），统计到 2026-11-18",
           "note": "认出结论的 54 次里判先修 29 次；同场比 deepseek-flash 严 3、松 2、同 16，比 sol 松 1、同 4"
         },
         "design": {
