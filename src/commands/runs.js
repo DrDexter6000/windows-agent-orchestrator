@@ -3141,7 +3141,7 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   if (raw.runId !== runId) throw new Error("reverify runId mismatch");
   // 第 137a 批续修 1（同类路径）：先查类型——数组 ["<合法 SHA>"] 会被正则强转成
   // 字符串放行（repackage 的 CLI 同一行写法由会审发现，这里是它的既有同款）。
-  if (typeof raw.deliveryCommit !== "string" || !/^[0-9a-fA-F]{40}$|^[0-9a-f]{64}$/.test(raw.deliveryCommit)) {
+  if (typeof raw.deliveryCommit !== "string" || !/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/.test(raw.deliveryCommit)) {
     throw new Error("reverify bad deliveryCommit");
   }
   if (!Number.isInteger(raw.attempt) || raw.attempt < 1 || raw.attempt > 2) {

@@ -662,41 +662,42 @@ test("NEXT-20: verifier_gone 的 failed 支——带 --cwd 占位；runId 触顶
 });
 
 test("NEXT-21: CLI 面 dispatch_accepted 回显 --run-dir——实际值放得下就用实际值（含空格加引号），放不下或含控制字符写占位 <DIR>，不抛错", () => {
-  const base = (id) => `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${id} --until-settled`;
+  const pre = (id) => `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${id}`;
+  const base = (id) => `${pre(id)} --until-settled`;
   const dispatch = (extras) => buildNextStep({ surface: "cli", situation: "dispatch_accepted", runId: RUN_ID, ...extras });
   // 没给：逐字不变（缺省运行目录不需要带）。
   assert.equal(dispatch({}), `${base(RUN_ID)}.`);
   // 给了：等待命令带上调用方给的同一个值（照抄才找得到子运行）。
-  assert.equal(dispatch({ runDirFlag: "runs2" }), `${base(RUN_ID)} --run-dir runs2.`);
+  assert.equal(dispatch({ runDirFlag: "runs2" }), `${pre(RUN_ID)} --run-dir runs2 --until-settled.`);
   // 含空白的路径加双引号——与 runs wait 多目标重挂行同一条规则。
-  assert.equal(dispatch({ runDirFlag: "C:/my runs" }), `${base(RUN_ID)} --run-dir "C:/my runs".`);
+  assert.equal(dispatch({ runDirFlag: "C:/my runs" }), `${pre(RUN_ID)} --run-dir "C:/my runs" --until-settled.`);
   // 与后缀一起算长度、一起渲染：继承合同那半句仍在末尾。
   assert.equal(
     dispatch({ runDirFlag: "runs2", suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
-    `${base(RUN_ID)} --run-dir runs2.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+    `${pre(RUN_ID)} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
   );
   // 边界：恰好放得下的最长值用实际值；再长一个字符就换占位（带后缀时边界相应前移）。
   const room = NEXT_STEP_MAX_LEN - `${base(RUN_ID)} --run-dir .`.length;
-  assert.equal(dispatch({ runDirFlag: ofLength("r", room, "d") }), `${base(RUN_ID)} --run-dir ${ofLength("r", room, "d")}.`);
-  assert.equal(dispatch({ runDirFlag: ofLength("r", room + 1, "d") }), `${base(RUN_ID)} --run-dir <DIR>.`);
+  assert.equal(dispatch({ runDirFlag: ofLength("r", room, "d") }), `${pre(RUN_ID)} --run-dir ${ofLength("r", room, "d")} --until-settled.`);
+  assert.equal(dispatch({ runDirFlag: ofLength("r", room + 1, "d") }), `${pre(RUN_ID)} --run-dir <DIR> --until-settled.`);
   const roomSuffix = room - CONTINUE_INHERITED_DELIVERY_NOTE.length;
   assert.equal(
     dispatch({ runDirFlag: ofLength("r", roomSuffix, "d"), suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
-    `${base(RUN_ID)} --run-dir ${ofLength("r", roomSuffix, "d")}.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+    `${pre(RUN_ID)} --run-dir ${ofLength("r", roomSuffix, "d")} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
   );
   assert.equal(
     dispatch({ runDirFlag: ofLength("r", roomSuffix + 1, "d"), suffix: CONTINUE_INHERITED_DELIVERY_NOTE }),
-    `${base(RUN_ID)} --run-dir <DIR>.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+    `${pre(RUN_ID)} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
   );
   // 任何长度的值都不让已受理的回执变成报错：很长的路径写占位。
   for (const len of [400, 5000]) {
     const text = dispatch({ runDirFlag: ofLength("d/", len, "x"), suffix: CONTINUE_INHERITED_DELIVERY_NOTE });
-    assert.equal(text, `${base(RUN_ID)} --run-dir <DIR>.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+    assert.equal(text, `${pre(RUN_ID)} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
     assert.ok(text.length <= NEXT_STEP_MAX_LEN);
   }
   // 含控制字符：写占位（不把控制字符带进回执）。
-  assert.equal(dispatch({ runDirFlag: "runs\tx" }), `${base(RUN_ID)} --run-dir <DIR>.`);
-  assert.equal(dispatch({ runDirFlag: "runs\nx" }), `${base(RUN_ID)} --run-dir <DIR>.`);
+  assert.equal(dispatch({ runDirFlag: "runs\tx" }), `${pre(RUN_ID)} --run-dir <DIR> --until-settled.`);
+  assert.equal(dispatch({ runDirFlag: "runs\nx" }), `${pre(RUN_ID)} --run-dir <DIR> --until-settled.`);
   // 输入合同：只有 CLI 面 dispatch_accepted 渲染它；空串/非字符串是调用方错误。
   assert.throws(() => buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId: RUN_ID, runDirFlag: "runs2" }), /runDirFlag/);
   assert.throws(() => buildNextStep({ surface: "cli", situation: "wait_terminal", runId: RUN_ID, runDirFlag: "runs2" }), /runDirFlag/);

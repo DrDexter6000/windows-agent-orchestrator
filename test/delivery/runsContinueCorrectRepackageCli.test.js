@@ -1085,7 +1085,8 @@ test("续修1-C1: 全局等待预算——config.waitTimeout 给了就按 wao ru
 test("续修1-C2: 受理回执的等待命令带上调用方给的 --run-dir（含空格加引号）；放不下实际值写占位 <DIR>，任何长度都不抛错", async () => {
   const repo = makeRepo();
   const promptFile = writePromptFile(repo);
-  const wait = `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD} --until-settled`;
+  const waitPre = `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD}`;
+  const wait = `${waitPre} --until-settled`;
   const nextStepOf = async (runDirFlag) => {
     const r = await runCli(() => runsCommand(
       ["continue", ...continueArgs(promptFile, repo, ["--format", "json"]), ...(runDirFlag === null ? [] : ["--run-dir", runDirFlag])],
@@ -1100,17 +1101,17 @@ test("续修1-C2: 受理回执的等待命令带上调用方给的 --run-dir（�
   // 没给 --run-dir：等待命令不带（照抄落回缺省目录就对）。
   assert.equal(await nextStepOf(null), `${wait}.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
   // 给了：等待命令带同一个值（照抄才找得到子运行）。
-  assert.equal(await nextStepOf("runs2"), `${wait} --run-dir runs2.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf("runs2"), `${waitPre} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
   // 含空白的路径加双引号（与 runs wait 多目标重挂行同一规则）。
-  assert.equal(await nextStepOf("C:/my runs"), `${wait} --run-dir "C:/my runs".${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf("C:/my runs"), `${waitPre} --run-dir "C:/my runs" --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
   // 边界：恰好放得下的最长值用实际值，再长一个字符换占位。
   const room = 480 - `${wait} --run-dir .${CONTINUE_INHERITED_DELIVERY_NOTE}`.length;
   const fits = "r".repeat(room);
-  assert.equal(await nextStepOf(fits), `${wait} --run-dir ${fits}.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
-  assert.equal(await nextStepOf(`${fits}r`), `${wait} --run-dir <DIR>.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf(fits), `${waitPre} --run-dir ${fits} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf(`${fits}r`), `${waitPre} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
   // 任何长度都不让已受理的回执变成报错：很长的路径写占位。
   for (const len of [400, 5000]) {
-    assert.equal(await nextStepOf("d/".repeat(len)), `${wait} --run-dir <DIR>.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+    assert.equal(await nextStepOf("d/".repeat(len)), `${waitPre} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
   }
   // 显式给了合同（无继承后缀）时同样带上 --run-dir。
   const spec = join(repo, "delivery.json");
@@ -1119,13 +1120,13 @@ test("续修1-C2: 受理回执的等待命令带上调用方给的 --run-dir（�
     ["continue", ...continueArgs(promptFile, repo, ["--format", "json", "--run-dir", "runs2", "--delivery-spec-file", spec])],
     makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
-  assert.equal(JSON.parse(explicit.out).nextStep, `${wait} --run-dir runs2.`);
+  assert.equal(JSON.parse(explicit.out).nextStep, `${waitPre} --run-dir runs2 --until-settled.`);
   // 文本面同款。
   const text = await runCli(() => runsCommand(
     ["continue", ...continueArgs(promptFile, repo, ["--run-dir", "runs2"])], makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
   assert.equal(text.exitCode, 0);
-  assert.equal(text.out.split("\n").at(-1), `Next step: ${wait} --run-dir runs2.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(text.out.split("\n").at(-1), `Next step: ${waitPre} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
 });
 
 const CLI_PATH = join(import.meta.dirname, "..", "..", "src", "cli.js");

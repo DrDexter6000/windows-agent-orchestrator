@@ -1513,7 +1513,7 @@ function acceptedDecision(runId, ref) {
   };
 }
 
-test("U-15: 收口交付已有被采纳的后代（第 120 批派生被取代）→ 终行说无需裁决，不给 run_continue 提示", async () => {
+test("U-15: 收口交付已有被采纳的后代（第 120 批派生被取代）→ 终行说无需裁决，不给续修提示", async () => {
   const dir = makeRunDir();
   const ROOT = "run_u15_root";
   const CHILD = "run_u15_child";

@@ -120,10 +120,13 @@ const RUN_DIR_CONTROL_CHARS_RE = /[\x00-\x1f\x7f-\x9f]/;
  * 守卫照旧抛错。
  */
 function withRunDirIfFits(command, runDirFlag, suffix) {
-  if (runDirFlag === null) return `${command}.${suffix}`;
-  const actual = `${command} --run-dir ${quoteRunDirFlag(runDirFlag)}.${suffix}`;
+  // 复核（sol）：--run-dir 放在 --until-settled 之前——句末的句号不粘在路径上
+  // （放在最后时照抄会把 "." 收进路径）。整句长度与放在最后时相同。
+  const tail = ` --until-settled.${suffix}`;
+  if (runDirFlag === null) return `${command}${tail}`;
+  const actual = `${command} --run-dir ${quoteRunDirFlag(runDirFlag)}${tail}`;
   if (!RUN_DIR_CONTROL_CHARS_RE.test(runDirFlag) && actual.length <= NEXT_STEP_MAX_LEN) return actual;
-  return `${command} --run-dir <DIR>.${suffix}`;
+  return `${command} --run-dir <DIR>${tail}`;
 }
 
 /**
@@ -183,7 +186,7 @@ function render(surface, situation, runId, extras) {
           extras.suffix,
         )
         : withRunDirIfFits(
-          `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId} --until-settled`,
+          `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${runId}`,
           // 续修 1：调用方给了 --run-dir 就带上（放不下实际值写占位）。
           extras.runDirFlag,
           extras.suffix,
