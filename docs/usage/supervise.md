@@ -67,6 +67,8 @@ read_when: run 在跑时：等待、看状态和活动、停止
 
 MCP 面用 `run_await_result` 等待终态或 liveness 摘要，避免 busy `run_status` 轮询；`runAwaitResult.js` 自带有界等待循环（复用 `runWait.js` 的活性投影），不 shell-out CLI；只读——不追加 transcript、不改 terminal state。**长等待 = 重复调用 `run_await_result` 直到终态；交付 run 终态后用 `run_delivery` 带 `waitMs` 等收口；挂到收口用 CLI `runs wait --until-settled`（见下节）。单次窗口：MCP `waitMs` 0..270000、缺省 45000；CLI `--wait-ms` 30000..600000、缺省 270000。**
 
+CLI `runs wait --wait-ms` 非法时退出 1：非数字（如 `abc`）在 CLI 层以固定文案 `--wait-ms must be a number` 拒绝，不回显原值、不调用服务；越界或非整数（如 `1000`、`30000.5`）由服务边界报错。不带 `--until-settled` 时按 Ctrl-C 会打印中断快照后退出 1；`--until-settled` 的 SIGINT 退出码 130 见下节。
+
 `runId` 必填；`runDir`、registry、`force`、timeout 等控制面参数是 server-owned。`afterSeq`（整数 ≥0，可选）：
 
 - 省略：以首次读取时的最大 `seq` 为基线——只统计窗口内的新进展，不把历史误报为 progress。

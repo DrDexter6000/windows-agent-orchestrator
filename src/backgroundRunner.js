@@ -2,10 +2,10 @@
 //
 // P2（M7）：后台生命周期接管 / detached runner。
 //
-// 06-18 事故架构洞：fire-and-forget spawn 的孤儿会话脱离任何 WAO 进程——所有防线
+// 06-18 事故架构洞：fire-and-forget 派发的孤儿会话脱离任何 WAO 进程——所有防线
 // （token 闸门 S1-1 / 事件轮询 / 兜底 abort）全活在 waitForCompletion() 内部，
 // 孤儿会话无人消费事件流 → 状态不推进 → 失控烧 token（06-18：7.4h，半周 quota）。
-// 当前的"拒绝裸 spawn"护栏（runManager.js TD-39）只是"拒绝脚枪"，堵了无人值守。
+// TD-39 的 fire-and-forget 护栏只是拒绝无人值守，并不接管生命周期。
 //
 // 本模块是正解：detached runner 进程**拥有** worker handle，驱动 waitForCompletion
 // （含 token 闸门 + 观察到期通知 + 兜底 abort），写共享 transcript（文件，跨进程）。

@@ -12,7 +12,7 @@ import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
-import { runCommand, spawnCommand } from "../../src/commands/run.js";
+import { runCommand } from "../../src/commands/run.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 
 // ===== Helpers =====
@@ -377,35 +377,6 @@ test("3C1-05: background delivery produces delivery_created + verification + ter
     assert.ok(!existsSync(ownerFile), "heartbeat cleared after runner exit");
   } finally {
     await cleanupDir(repo);
-  }
-});
-
-/**
- * 3C1-06: spawn with delivery fails explicitly.
- */
-test("3C1-06: spawn with delivery fails explicitly", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-3c1-06-"));
-  try {
-    const specPath = join(dir, "delivery.json");
-    writeFileSync(specPath, JSON.stringify({
-      mode: "git_commit_v1",
-      allowedPaths: ["src"],
-      verificationCommands: ["echo ok"],
-    }), "utf8");
-
-    const config = makeConfig(dir, dir, createMockFetch());
-    await assert.rejects(
-      () => spawnCommand([
-        "test", "--prompt", "hi",
-        "--delivery-spec-file", specPath,
-        "--wait",
-        "--run-dir", dir,
-      ], config),
-      /delivery|spawn/i,
-      "spawn with delivery should fail explicitly",
-    );
-  } finally {
-    await cleanupDir(dir);
   }
 });
 

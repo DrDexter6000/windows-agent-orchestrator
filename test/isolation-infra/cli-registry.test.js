@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readRegistry as readRegistryFile } from "../../src/registry.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
-import { COMMAND_NAMES } from "../../src/cliHelp.js";
+import { COMMAND_NAMES, SPAWN_RETIRED_MESSAGE, WAO_ASK_RETIRED_MESSAGE } from "../../src/cliHelp.js";
 import { captureLog, runCliOnPathNode, makeDoctorPanelFixture, doctorPanelRun } from "./_cliTestHelpers.mjs";
 
 test("registry validate: prependArgs 必须是数组", () => {
@@ -511,7 +511,8 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /wao decision/, "help 必须列出 wao decision");
   assert.match(out, /wao declare/, "help 必须列出 wao declare（TD-82 自做声明）");
   assert.match(out, /wao stage/, "help 必须列出 wao stage（TD-83 阶段声明）");
-  assert.match(out, /wao ask/, "help 必须列出 wao ask（TD-88 快捷派工）");
+  assert.doesNotMatch(out, /^  spawn /m, "已退役的 spawn 不得继续出现在 help");
+  assert.doesNotMatch(out, /^  wao ask /m, "已退役的 wao ask 不得继续出现在 help");
   assert.match(out, /wao handoff/, "help 必须列出 wao handoff");
   assert.match(out, /wao doctor/, "help 必须列出 wao doctor");
   // daemon 补充族（P5/TD-45/46，曾漏）
@@ -912,18 +913,22 @@ test("R9 回归: wao onboarding refused/error 分支 exitCode 行为不受分级
   assert.match(preview.stdout, /会审就绪（(模板面|已配置面)/, "selected/preview 分支打印分级块（R9 需求 1）");
 });
 
-test("TD-88: wao ask 缺 agentId 或任务时 fail-fast（快捷派工参数校验）", () => {
-  // 缺 agentId
-  const r1 = spawnSync(process.execPath, ["src/cli.js", "wao", "ask"],
-    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
-  assert.notEqual(r1.status, 0, "缺 agentId 必须 fail-fast");
-  assert.match(r1.stderr, /requires <agentId>/, "stderr 提示需要 agentId");
-
-  // 有 agentId 缺任务
-  const r2 = spawnSync(process.execPath, ["src/cli.js", "wao", "ask", "researcher"],
-    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
-  assert.notEqual(r2.status, 0, "缺任务必须 fail-fast");
-  assert.match(r2.stderr, /requires 一句话任务/, "stderr 提示需要一句话任务");
+test("137d: spawn 与 wao ask 的退役报错给出固定替代写法", async () => {
+  for (const [cmd, message] of [
+    ["spawn researcher --prompt x", SPAWN_RETIRED_MESSAGE],
+    ["ask researcher x", WAO_ASK_RETIRED_MESSAGE],
+    ["wao ask researcher x", WAO_ASK_RETIRED_MESSAGE],
+  ]) {
+    const { status, stderr } = runCliExpectFail(cmd);
+    assert.notEqual(status, 0, `${cmd} 应以非零退出`);
+    assert.equal(stderr.trim(), message, `${cmd} 的替代写法逐字固定`);
+  }
+  assert.match(SPAWN_RETIRED_MESSAGE, /"run" for foreground waiting \("spawn --wait"\)/, "spawn --wait 对应前台 run");
+  assert.match(SPAWN_RETIRED_MESSAGE, /"run --background" for one background agent/, "单席后台对应 run --background");
+  assert.match(SPAWN_RETIRED_MESSAGE, /one "run --background" per agent/, "多席逐 agent 后台派发");
+  assert.match(SPAWN_RETIRED_MESSAGE, /"runs wait <id1> <id2> \.\.\. --until-settled"/, "多席收口命令");
+  const { WAO_SUBCOMMANDS } = await import("../../src/commands/wao.js");
+  assert.ok(!WAO_SUBCOMMANDS.includes("ask"), "ask 不再属于正式 wao 子命令闭集");
 });
 
 test("R7-AB 层一：run --background 缺 cwd 拒绝（fixture 必缺 cwd，派发服务层 typed 拒绝）", () => {

@@ -2,7 +2,7 @@
 //
 // M9-2A: Shared application service for background run dispatch.
 //
-// This module owns the dispatch side of `run --background` / `spawn` (no --wait):
+// This module owns the dispatch side of CLI `run --background` and MCP `run_dispatch`:
 // generating/validating a runId, creating the transcript, writing the initial
 // durable facts (background_submitted → pending), and spawning the detached
 // background runner. It is the single place where CLI and MCP both dispatch a

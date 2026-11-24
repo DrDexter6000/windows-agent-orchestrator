@@ -2049,7 +2049,7 @@ export function createComponentDrills(deps) {
     }
   };
 
-  // 后台族（--background / spawn/stop）显式 run-dir：detached runner 不自动建
+  // 后台族（--background / stop）显式 run-dir：detached runner 不自动建
   // runDir，须预创建；CLI 进程 cwd=root（detached
   // runner 继承 CLI cwd，registry/config 解析不能落在临时目录）。
   const backgroundRunDir = (name) => {
@@ -2281,18 +2281,18 @@ export function createComponentDrills(deps) {
     }
 
     // ── 生命周期：显式停止——按执行形态分车道（backendStopChecks 判定内核）。
-    //    2026-09-20 缺陷 4：原实现把 serve 形当唯一形态（spawn + `wao stop` 的
+    //    2026-09-20 缺陷 4：原实现把 serve 形当唯一形态（后台派发 + `wao stop` 的
     //    serveUrl 车道），进程式 backend（无 serveUrl 是常态）被整体误杀——
     //    deepseek-acp 的 ACP sessionId 既非 proc_ 锚也无 serveUrl，`wao stop`
     //    恒报 "no serveUrl"。
-    //      - serve 形：spawn 托管 + `wao stop`（serve abort 车道），既有语义保持。
+    //      - serve 形：run --background 托管 + `wao stop`（serve abort 车道），既有语义保持。
     //      - 进程形：owning-supervisor 车道真实驱动 stop——daemon 持有 run
     //        （daemon run），优雅停机（daemon stop → abortAll → handle.abort →
     //        worker 进程树终止 → run.aborted fact + aborted 终态）。对
     //        claude-code/codex/deepseek-acp 统一适用（不按 backend 名
     //        分支）；进程被终止 + 终态事实一致 + seq 单调由 backendStopChecks
     //        按形态断言，无跳过/不适用通道（ADR-0032 §8）。
-    //    spawn 车道的 --cwd 与其余探针同款显式绝对 cwd（tmpDir）——绝不挂靠装配
+    //    后台车道的 --cwd 与其余探针同款显式绝对 cwd（tmpDir）——绝不挂靠装配
     //    cwd 的相对形态：deepseek-acp 把 cwd 原样转发给 ACP session/new，相对路径
     //    （"."）被 runtime 以 -32602 拒绝（首修后重跑实证的 src 层发现，如实上报，
     //    本层不掩盖：start 失败路径由 startupFailureExplicit 独立断言）。daemon
@@ -2300,31 +2300,43 @@ export function createComponentDrills(deps) {
     //    registry 落实（cwd: tmpDir）。
     if (backendStopFormOf(readAssemblyEntry(agentId)) === "serve") {
       const runDir = backgroundRunDir("stop-runs");
-      const spawnOut = runCli([
-        "spawn", agentId, "--prompt", "Begin this task and wait quietly until stopped.",
+      const runOut = runCli([
+        "run", agentId, "--prompt", "Begin this task and wait quietly until stopped.", "--background",
         "--registry", registry, "--run-dir", runDir, "--cwd", tmpDir,
       ], { cwd: root });
-      const spawned = extractJson(spawnOut.stdout || "") ?? null;
-      if (!spawned?.runId) {
+      const dispatched = extractJson(runOut.stdout || "") ?? null;
+      if (!dispatched?.runId) {
         checks.push(...backendStopChecks({
           form: "serve",
           stopAccepted: false,
           events: [],
-          errorDetail: `spawn did not return a runId (ok=${spawnOut.ok}, stderr=${JSON.stringify((spawnOut.stderr ?? "").slice(0, 160))})`,
+          errorDetail: `run --background did not return a runId (ok=${runOut.ok}, stderr=${JSON.stringify((runOut.stderr ?? "").slice(0, 160))})`,
         }));
       } else {
-        waitForTranscript(runDir, spawned.runId, 15000);
-        const sessionAnchorSeen = waitForSessionAnchor(runDir, spawned.runId);
-        const stopOut = runCli([
-          "stop", spawned.runId, "--run-dir", runDir, "--registry", registry,
+        waitForTranscript(runDir, dispatched.runId, 15000);
+        const sessionAnchorSeen = waitForSessionAnchor(runDir, dispatched.runId);
+        const statusOut = runCli([
+          "status", dispatched.runId, "--format", "json", "--run-dir", runDir,
         ], { cwd: root });
+        const status = extractJson(statusOut.stdout || "") ?? null;
+        const observedSeq = status?.observedSeq;
+        const hasObservedSeq = Number.isInteger(observedSeq) && observedSeq >= 0;
+        const stopOut = hasObservedSeq
+          ? runCli([
+            "stop", dispatched.runId,
+            "--observed-seq", String(observedSeq), "--reason", "component drill: serve stop",
+            "--run-dir", runDir, "--registry", registry,
+          ], { cwd: root })
+          : { ok: false, stdout: "", stderr: "status did not return observedSeq", error: "missing observedSeq" };
+        const observationError = hasObservedSeq ? "" : `, statusError=${JSON.stringify(String((statusOut.stderr ?? "").trim() || (statusOut.error ?? "missing observedSeq")).slice(0, 160))}`;
         const stopped = extractJson(stopOut.stdout || "") ?? null;
-        const events = readRunEvents(spawned.runId, runDir);
+        const events = readRunEvents(dispatched.runId, runDir);
         checks.push(...backendStopChecks({
           form: "serve",
           stopAccepted: stopped?.stopped === true,
           events,
           errorDetail: `${sessionAnchorSeen ? "" : "; no session.created anchor observed before stop"}`
+            + observationError
             + `${stopOut.ok ? "" : `, stopError=${JSON.stringify(String((stopOut.stderr ?? "").trim() || (stopOut.error ?? "")).slice(0, 160))}`}`,
         }));
       }

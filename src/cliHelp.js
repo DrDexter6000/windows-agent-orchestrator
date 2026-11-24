@@ -6,11 +6,14 @@
 // any other consumer import HELP_TEXT from here without loading the whole CLI.
 //
 // 帮助页是给用户的速查：每条命令一行语法，需要说明的同行一句短话；内部
-// 编号（决定号/TD 号/批次号）不进帮助页，长解释归使用手册（wao manual）。run/spawn
+// 编号（决定号/TD 号/批次号）不进帮助页，长解释归使用手册（wao manual）。run
 // 的用法行与 RUN_USAGE_TEXT 列出 src/commands/run.js 读取的面向用户的参数；
 // 程序内部穿线/高级覆盖用的旗标（--run-id、--state-dir 等）统一收在 Notes 的
 // 内部旗标一行，不逐条写进命令行（test/isolation-infra/cliHelpCoverage.test.js
 // 双向守卫子命令与旗标：已实现 ⊆ 帮助）。
+
+export const SPAWN_RETIRED_MESSAGE = 'Command "spawn" was retired. Use "run" for foreground waiting ("spawn --wait") or "run --background" for one background agent; for multiple agents, dispatch one "run --background" per agent, then use "runs wait <id1> <id2> ... --until-settled".';
+export const WAO_ASK_RETIRED_MESSAGE = 'Command "wao ask" was retired. Use "run" instead; for read-only tasks, use "run --read-only".';
 
 export const HELP_TEXT = `Windows Agent Orchestrator PoC
 
@@ -25,7 +28,6 @@ Commands:
   registry list [--registry FILE] [--run-dir DIR] [--format json] [--cert-evidence]   # 车道清单与各车道的认证状态；--cert-evidence 附只读认证证据详情
   registry validate [--registry FILE] [--format json] [--run-dir DIR]  # 静态 schema 校验，不改任何文件
   registry align [--registry FILE] [--lane <id>]... [--apply --expect-sha256 <hex>]   # 私有注册表跟随车道表：先预览（零写入，给 SHA-256），逐车道显式采用；--apply 必须点名车道并带当前文件哈希
-  spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--require-certified]   # 单 agent 不带 --wait = 后台托管；--scorecard-mode / --require-certified 只在这条路径生效
   run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--format json|line] [--run-dir DIR]   # 缺省多行 JSON（--format json 同缺省）；line 打单行（自由文本带引号，null/缺失=unknown）
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
@@ -94,7 +96,6 @@ Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor
   wao decision show <id> [--cwd DIR]
   wao declare --task T --reason <code> [--note N] [--cwd DIR]  # Lead 自做声明（reason 为闭集码）；裸 wao declare 列出现有声明
   wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>] [--registry FILE] [--run-dir DIR] [--cwd DIR]  # 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记）；裸 wao stage 列出进度与缺口
-  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--format json|text]  # 快捷派工（默认只读并注入边界声明；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b] [--cwd DIR]
   wao handoff read <role> [--format json] [--cwd DIR]   # 最新一份写给该角色的 handoff
   wao doctor [--cwd DIR] [--registry FILE] [--format json] [--warn-as-error] [--strict]   # 环境体检（车道/凭据/工具链）
@@ -107,15 +108,15 @@ Notes:
   - 完整用法与场景说明见使用手册（wao manual 列各页；wao manual <页> <节> 按节读；没有全局 wao 时在安装根 npm run cli -- manual）。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
-  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台与单 agent 后台 spawn；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
+  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
-// （如 `run status ...`）做 did-you-mean 提示。恰 21 名；与 HELP_TEXT 的关系是
-// 双向守卫（HELP_TEXT 每个两空格命令行首词必须在闭集内，闭集每个成员在
-// HELP_TEXT 有行锚定条目）；不含 help（HELP_TEXT 无 help 命令行）。
+// （如 `run status ...`）做 did-you-mean 提示。与 HELP_TEXT 的关系是双向守卫
+// （HELP_TEXT 每个两空格命令行首词必须在闭集内，闭集每个成员在 HELP_TEXT
+// 有行锚定条目）；不含 help（HELP_TEXT 无 help 命令行）。
 export const COMMAND_NAMES = Object.freeze([
-  "version", "consult", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
+  "version", "consult", "registry", "retry", "resume", "run", "status", "tail", "collect",
   "stop", "runs", "dashboard", "worktree", "wao", "daemon", "mcp", "playbook", "serve",
   "feedback", "skill", "manual",
 ]);
@@ -174,7 +175,7 @@ Notes:
     the provider when the worker starts — the echoed "effective model" in the
     dispatch output is advisory: it shows what WAO threaded, not that the
     provider accepts the id. --model exists only on run and retry (not
-    spawn/daemon); a persistent model change belongs in the registry
+    daemon); a persistent model change belongs in the registry
     model policy.
   - --reasoning VALUE must be one of the closed effort set
     minimal/low/medium/high/xhigh/max; anything else is refused with a fixed
@@ -190,7 +191,7 @@ Notes:
     through its existing policy gate with a hint naming --reasoning. The
     echoed "effective reasoning" is advisory in the same sense as the model
     echo. --reasoning exists only on run and retry (not
-    spawn/daemon); a persistent reasoning change belongs in the
+    daemon); a persistent reasoning change belongs in the
     registry reasoning policy.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

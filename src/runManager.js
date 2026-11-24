@@ -69,7 +69,7 @@ const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
 // two dispatch/execution authorities — RunManager.start (foreground family:
 // `run` without --background, daemon `start`, `retry`)
 // plus RunManager.resume's replay re-spawn branch (R7-C C-5), and dispatchRun
-// (background family: `run --background` / `spawn` / MCP run_dispatch). One
+// (background family: `run --background` / MCP run_dispatch). One
 // class definition; runDispatch.js imports it DOWNWARD (application→core,
 // same direction as its existing ../transcript.js / ../delivery.js imports)
 // and re-exports it so its established typed-error import surface stays
@@ -689,7 +689,7 @@ export class RunManager {
   }
 
   async start(agentId, options = {}) {
-    // 0047 L1：防向下派发门（一切派发的单一咽喉——CLI run/spawn、MCP run_dispatch、
+    // 0047 L1：防向下派发门（一切派发的单一咽喉——CLI run、MCP run_dispatch、
     // consult 扇出、resume 全经此）。worker 上下文（env 标记或 worktree cwd）即拒，
     // 先于任何转录/分叉副作用。判定 SSOT=nestedDispatchGuard（纯函数）。
     assertNotNestedDispatchContext();
@@ -717,7 +717,7 @@ export class RunManager {
       scorecardMode = "warn",
       // fire-and-forget 语义：调用方是否会在 backend 起来后立即返回（不进 waitForCompletion）。
       // 默认 false = 安全（run/resume 等都会 wait 或由调用方管理生命周期）。
-      // 仅 CLI spawnCommand 在不带 --wait 时显式传 true，触发 P0-1 护栏。
+      // 嵌入调用方显式传 true 时启用 P0-1 护栏。
       fireAndForget = false,
       // P1-1 认证新鲜度强制门（opt-in，06-18 事故教训"调度安全不能建立在模型行为假设上"）。
       // 启用时：目标 worker 必须在 runDir/reliability-summary.json 里、记录身份与当前
@@ -1717,7 +1717,7 @@ export class RunManager {
         + `(sessionOutlivesProcess=true). Without an owner driving waitForCompletion, this run would bypass `
         + `the token-budget gate, event polling, and cleanup abort — the exact path of the 2026-06-18 quota-drain `
         + `incident (7.4h runaway session). Either call waitForCompletion, or use the detached background runner `
-        + `(\`run/spawn --background\`) which owns the lifecycle. See docs/incidents/2026-06-18-glm-quota-drain.md + TD-39.`
+        + `(\`run --background\`) which owns the lifecycle. See docs/incidents/2026-06-18-glm-quota-drain.md + TD-39.`
       );
     }
 

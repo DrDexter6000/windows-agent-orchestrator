@@ -19,7 +19,6 @@ Commands:
   registry list [--registry FILE] [--run-dir DIR] [--format json] [--cert-evidence]   # 车道清单与各车道的认证状态；--cert-evidence 附只读认证证据详情
   registry validate [--registry FILE] [--format json] [--run-dir DIR]  # 静态 schema 校验，不改任何文件
   registry align [--registry FILE] [--lane <id>]... [--apply --expect-sha256 <hex>]   # 私有注册表跟随车道表：先预览（零写入，给 SHA-256），逐车道显式采用；--apply 必须点名车道并带当前文件哈希
-  spawn <agentId> [agentId2 ...] --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate|--no-isolate] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--require-certified]   # 单 agent 不带 --wait = 后台托管；--scorecard-mode / --require-certified 只在这条路径生效
   run <agentId>|--lane <lane> --role <role> --prompt "..." [--prompt-file FILE] [--explain] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate|--no-isolate] [--require-certified] [--background] [--tag key=value] [--scorecard-rules JSON] [--scorecard-rules-file FILE] [--scorecard-mode warn|hard|off] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--format json|line] [--run-dir DIR]   # 缺省多行 JSON（--format json 同缺省）；line 打单行（自由文本带引号，null/缺失=unknown）
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
@@ -88,7 +87,6 @@ Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor
   wao decision show <id> [--cwd DIR]
   wao declare --task T --reason <code> [--note N] [--cwd DIR]  # Lead 自做声明（reason 为闭集码）；裸 wao declare 列出现有声明
   wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] [--reviewed-run <runId>[,<runId>]] | --panel-skip-reason <code>] [--registry FILE] [--run-dir DIR] [--cwd DIR]  # 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记）；裸 wao stage 列出进度与缺口
-  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--format json|text]  # 快捷派工（默认只读并注入边界声明；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b] [--cwd DIR]
   wao handoff read <role> [--format json] [--cwd DIR]   # 最新一份写给该角色的 handoff
   wao doctor [--cwd DIR] [--registry FILE] [--format json] [--warn-as-error] [--strict]   # 环境体检（车道/凭据/工具链）
@@ -101,5 +99,5 @@ Notes:
   - 完整用法与场景说明见使用手册（wao manual 列各页；wao manual <页> <节> 按节读；没有全局 wao 时在安装根 npm run cli -- manual）。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
-  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台与单 agent 后台 spawn；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
+  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 ```

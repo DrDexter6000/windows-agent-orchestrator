@@ -25,19 +25,16 @@ import { dashboardCommand } from "./commands/dashboard.js";
 // TD-98 阶段 2c：worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
 import { worktreeCommand } from "./commands/worktree.js";
 // TD-98 阶段 2d：wao + doctor 命令族拆到 src/commands/（行为不变，纯搬迁）。
-// wao.js 的 waoCommand 接受 deps.askHandler（= cli.js 的 waoAskCommand）。
-// waoAskCommand 留 cli.js，调用 commands/run.js 导出的 runCommand（下方 import）。
-// DI 的目的：让 wao.js 不反向 import cli.js，保持依赖方向 cli.js -> wao.js。
-import { waoCommand as waoCommandCore, resolveArtifactPath, WAO_SUBCOMMANDS } from "./commands/wao.js";
+import { waoCommand, resolveArtifactPath, WAO_SUBCOMMANDS } from "./commands/wao.js";
 // TD-98 阶段 2e-1a：只读 observe 命令族（status/tail/collect）拆到 src/commands/observe.js。
 import { statusCommand, tailCommand, collectCommand } from "./commands/observe.js";
 // TD-98 阶段 2e-1b：stop 命令拆到 src/commands/stop.js（杀进程 + verification + alert，非只读）。
 import { stopCommand } from "./commands/stop.js";
 // TD-98 阶段 2e-2：retry/resume 命令拆到 src/commands/lifecycle.js。
 import { retryCommand, resumeCommand } from "./commands/lifecycle.js";
-// TD-98 阶段 2e-3：run/spawn 命令族（runCommand/spawnCommand/runAndWait + scorecard helper
-// + spawnBackgroundRunner）拆到 src/commands/run.js。waoAskCommand 仍留 cli.js，调 run.js 的 runCommand。
-import { spawnCommand, runCommand, runAndWait } from "./commands/run.js";
+// TD-98 阶段 2e-3：run 命令族（runCommand/runAndWait + scorecard helper
+// + spawnBackgroundRunner）拆到 src/commands/run.js。
+import { runCommand, runAndWait } from "./commands/run.js";
 // M10 P0-1: mcp bind/status/unbind 命令族（项目级 workspace activation）。
 import { mcpCommand } from "./commands/mcp.js";
 // 决定 0107：skill link/unlink 命令族（技能槽位 junction 的唯一改动口子）。
@@ -60,7 +57,7 @@ import { manualCommand } from "./commands/manual.js";
 // P4-乙 Phase 1a：help 文本抽到 src/cliHelp.js（命名导出 HELP_TEXT，字节不变）。
 // 生成器（scripts/gen-surface.mjs）只 import 这个小模块，不必加载整个 CLI；
 // CLI 打印的仍是同一份 SSOT。
-import { HELP_TEXT } from "./cliHelp.js";
+import { HELP_TEXT, SPAWN_RETIRED_MESSAGE, WAO_ASK_RETIRED_MESSAGE } from "./cliHelp.js";
 // v0.2.0（决定 0038）：CLI 版本常量，单一来源 package.json（同 MCP SERVER_VERSION）。
 import { WAO_VERSION } from "./version.js";
 // TD-319：CLI 报错输出口统一渲染——配置值里混进的控制字符显示为转义写法，
@@ -119,17 +116,8 @@ async function getConfig() {
 // _doctorParseSmoke / whichCli 已移至 src/commands/doctor.js（TD-98 阶段 2d，
 // 随 doctor 族搬迁）。
 
-/**
- * waoCommand 派遣器包装：注入 askHandler（= waoAskCommand）。
- * waoAskCommand 留 cli.js，调用 commands/run.js 导出的 runCommand。
- * wao.js 的 waoCommandCore 不 import ../cli.js，ask 子命令靠这里注入，保持依赖方向。
- */
-async function waoCommand(args, config) {
-  await waoCommandCore(args, config, { askHandler: waoAskCommand });
-}
-
 // TD-98 阶段 2c：newRunManager / resolveIsolateFlag / backendFor 已移至 commands/shared.js。
-// cli.js 不再直接用 newRunManager/resolveIsolateFlag（run/spawn 已迁出）；
+// cli.js 不再直接用 newRunManager/resolveIsolateFlag（run 已迁出）；
 // commands/run.js 等从 shared.js import 使用。
 
 // TD-98 阶段 1：daemon 命令族已拆到 src/commands/daemon.js（行为不变）。
@@ -169,8 +157,7 @@ async function main(argv) {
     return;
   }
   if (command === "spawn") {
-    await spawnCommand(rest, config);
-    return;
+    throw new Error(SPAWN_RETIRED_MESSAGE);
   }
   if (command === "retry") {
     await retryCommand(rest, config);
@@ -211,6 +198,9 @@ async function main(argv) {
   if (command === "worktree") {
     await worktreeCommand(rest, config);
     return;
+  }
+  if (command === "ask") {
+    throw new Error(WAO_ASK_RETIRED_MESSAGE);
   }
   if (command === "wao") {
     await waoCommand(rest, config);
@@ -269,14 +259,14 @@ async function main(argv) {
 
 // TD-98 阶段 1：registryCheck/Validate 已拆到 src/commands/registry.js（行为不变）。
 
-// TD-98 阶段 2e-3：run/spawn 命令族（spawnCommand/spawnBackgroundRunner/
-// loadScorecardFromTranscript/runCommand）已移至 src/commands/run.js（上方 import + re-export）。
+// TD-98 阶段 2e-3：run 命令族（spawnBackgroundRunner/loadScorecardFromTranscript/
+// runCommand）已移至 src/commands/run.js（上方 import + re-export）。
 
 
 // TD-98 阶段 2e-1a：只读 observe 命令族（statusCommand/tailCommand/collectCommand +
 // describeActivity/summarizeToolInput/truncate/reconstructProcessEvent）已移至
 // src/commands/observe.js（上方 import + re-export statusCommand/collectCommand）。
-// stop/retry/resume/run/spawn 也已分别拆到 stop.js/lifecycle.js/run.js（TD-98 全部完成）。
+// stop/retry/resume/run 也已分别拆到 stop.js/lifecycle.js/run.js（TD-98 全部完成）。
 
 
 // TD-98 阶段 2a：extractFlag/displayModel 已移至 commands/shared.js（上方 import）。
@@ -292,59 +282,6 @@ async function main(argv) {
 
 // TD-98 阶段 2d：wao 命令族（waoCommand 派遣器 + waoDoctorCommand + waoInit/Handoff/Decision/
 // Declare/Stage 子命令 + doctor 专用 helper）已移至 src/commands/wao.js + doctor.js。
-// 仅 waoAskCommand 留 cli.js——它调用 commands/run.js 导出的 runCommand（上方 import）。
-
-
-/**
- * wao ask：快捷派工（TD-88 派工摩擦反转）。
- * 降低单次派工的命令构造成本——Lead 不用每次拼 run <agentId> --prompt "..." + 手写边界声明。
- *
- * 用法：
- *   wao ask researcher "读 src/foo.js 给摘要"              # 默认只读边界（注入禁写/禁装声明）
- *   wao ask coder_hq "修 src/foo.js 的 bug" --mode write   # 写模式（不注入只读边界）
- *   wao ask researcher "..." --cwd D:/projects/xxx          # 跨项目（走 resolveTargetCwd）
- *
- * 内部：构造带边界模板的 prompt，调 runCommand（复用，不重写 run 逻辑）。
- */
-async function waoAskCommand(args, config) {
-  const [agentId, ...rest] = args;
-  if (!agentId) {
-    throw new Error('wao ask requires <agentId> "<一句话任务>". 例：wao ask researcher "读 src/foo.js 给摘要"');
-  }
-  // 提取一句话任务（第一个非 -- 的位置参数，agentId 之后的）
-  const task = rest.find((a) => !a.startsWith("--"));
-  if (!task) {
-    throw new Error(`wao ask requires 一句话任务. 例：wao ask ${agentId} "读 src/foo.js 给摘要"`);
-  }
-  const options = parseOptions(rest);
-  const mode = options.mode ?? "readonly";
-
-  // 只读模式：注入边界声明（来自 SKILL.md 安全铁律 + 派工边界要求）
-  // 写模式（--mode write）：不注入，让 worker 能改文件
-  let prompt = task;
-  if (mode === "readonly") {
-    prompt = [
-      task,
-      "",
-      "—— 只读边界（wao ask 自动注入）——",
-      "本任务只读：不得修改任何文件，不得安装依赖（pip install/npm install 等），不得改变环境。",
-      "如有需要，结果直接在回复里给出，不要写文件。",
-    ].join("\n");
-  }
-
-  // 构造 run 命令的参数，调 commands/run.js 导出的 runCommand（上方 import）
-  const runArgs = [agentId];
-  runArgs.push("--prompt", prompt);
-  // 透传 Lead 给的 --cwd / --registry / --format 等（resolveTargetCwd 在 runCommand 内生效）
-  for (const opt of ["cwd", "registry", "format", "run-dir"]) {
-    const flag = `--${opt}`;
-    if (rest.includes(flag)) {
-      const idx = rest.indexOf(flag);
-      runArgs.push(flag, rest[idx + 1]);
-    }
-  }
-  await runCommand(runArgs, config);
-}
 
 // parseDuration 已移至 src/commands/runs.js（runs prune 专用 helper，随 runs 族搬迁）。
 
@@ -354,8 +291,8 @@ async function waoAskCommand(args, config) {
 // backendFor 已移至 commands/shared.js（TD-98 阶段 2c：newRunManager 的后端选择器，随
 // newRunManager 一起搬走；cli.js 不再直接调用）。
 
-// parseAgentList / loadScorecardRules / parseScorecardRules / runAndWait 已移至
-// src/commands/run.js（TD-98 阶段 2e-3，随 run/spawn 族搬迁；上方 import + re-export runAndWait）。
+// loadScorecardRules / parseScorecardRules / runAndWait 已移至
+// src/commands/run.js（TD-98 阶段 2e-3，随 run 族搬迁；上方 import + re-export runAndWait）。
 
 
 // worktreeCommand 已移至 src/commands/worktree.js（TD-98 阶段 2c，随 worktree 族搬迁；上方 import）。

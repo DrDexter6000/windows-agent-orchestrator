@@ -1,13 +1,13 @@
 // test/run-lifecycle/dispatchHold.test.js
 //
 // TD-283（Owner 批准，车道"暂停派发"成为结构化事实）的派发面钉：
-//   - CLI run / spawn 的 stderr advisory：恰一行、只提示不拦截、派发照常完成、
+//   - CLI run 的 stderr advisory：恰一行、只提示不拦截、派发照常完成、
 //     退出码不变。
 // 车道表走夹具（经 config.loadLanesConfigFn 测试缝注入）——本文件不读真实
 // config/lanes.json（解除暂停改表后这里不红），Owner 原话不抄第二份。
 // 注册表与 backend 全注入，零真实派发。
 //
-// 嵌套派发门说明：runCommand/spawnCommand 经 RunManager.start（嵌套派发门咽喉），
+// 嵌套派发门说明：runCommand 经 RunManager.start（嵌套派发门咽喉），
 // 测试自身不向下派发任何真实 worker，但保留显式豁免（WAO_ALLOW_NESTED_DISPATCH=1，
 // src/nestedDispatchGuard.js，f3-shortHeadExpectation 同款先例）。
 process.env.WAO_ALLOW_NESTED_DISPATCH = "1";
@@ -21,7 +21,7 @@ import { execSync } from "node:child_process";
 
 import { laneDispatchHold } from "../../src/dispatchResolution.js";
 import { readRegistry } from "../../src/registry.js";
-import { runCommand, spawnCommand } from "../../src/commands/run.js";
+import { runCommand } from "../../src/commands/run.js";
 import { lanesDocForCall } from "../../src/commands/shared.js";
 
 // 夹具车道表：一条带 dispatchHold 的车道 + 一条无说明车道。
@@ -86,7 +86,7 @@ async function withCapturedConsole(fn) {
   return { stderr, stdout };
 }
 
-// ── CLI run / spawn 的 stderr advisory ──────────────────────────────────────
+// ── CLI run 的 stderr advisory ──────────────────────────────────────────────
 
 test("TD-283 CLI run：目标车道带说明 → stderr 恰一行 advisory，派发照常完成、退出码不变", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td283-cli-"));
@@ -118,32 +118,6 @@ test("TD-283 CLI run：目标车道带说明 → stderr 恰一行 advisory，派
     });
     assert.equal(stderr2.filter((l) => l.includes("dispatchHold=")).length, 0, "非车道目标 → 零 advisory");
     assert.equal(capture.spawned, 2, "第二次派发也照常完成");
-  } finally { cleanupDir(dir); }
-});
-
-test("TD-283 CLI spawn：裸键 spawn 到带说明车道 → 同一行 advisory；派发照常完成", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-td283-spawn-"));
-  try {
-    makeGitRepo(dir);
-    const registryPath = writeRegistry(dir, [HELD.id]);
-    const capture = { spawned: 0 };
-    const cfg = {
-      registry: registryPath,
-      runDir: join(dir, "runs"),
-      readRegistry: async () => readRegistry(registryPath),
-      backendFor: () => fakeBackendFactory(capture),
-      loadLanesConfigFn: () => LANES,
-    };
-    const prevExit = process.exitCode;
-    const { stderr } = await withCapturedConsole(async () => {
-      await spawnCommand([HELD.id, "--prompt", "t", "--wait"], cfg);
-    });
-    const holdLines = stderr.filter((l) => l.includes("dispatchHold="));
-    assert.equal(holdLines.length, 1, "恰一行");
-    assert.ok(holdLines[0].includes(HELD.dispatchHold), "夹具说明原文入行");
-    assert.equal(capture.spawned, 1, "spawn 照常进行");
-    assert.equal(process.exitCode ?? 0, prevExit ?? 0, "退出码不变");
-    assert.equal(laneDispatchHold(LANES, HELD.id), HELD.dispatchHold, "选样自夹具车道表（守恒自检）");
   } finally { cleanupDir(dir); }
 });
 
