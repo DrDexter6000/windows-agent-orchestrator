@@ -1853,6 +1853,7 @@ const STUB_CLI_SOURCE = [
   "  say({ runId, background: true });",
   "} else if (cmd === \"status\") {",
   "  say({ observedSeq: 3 });",
+  "  if (process.env.STUB_STATUS_FAIL) process.exitCode = 1;",
   "} else if (cmd === \"stop\") {",
   "  if (!args.includes(\"--observed-seq\") || !args.includes(\"--reason\")) {",
   "    process.stderr.write(\"stop 需要 --observed-seq 与 --reason。\\n\");",
@@ -1863,6 +1864,7 @@ const STUB_CLI_SOURCE = [
   "      { type: \"run.state_change\", from: \"running\", to: \"aborted\" },",
   "    ]);",
   "    say({ stopped: true });",
+  "    if (process.env.STUB_STOP_FAIL) process.exitCode = 1;",
   "  }",
   "} else if (cmd === \"daemon\" && args[1] === \"start\") {",
   "  writeFileSync(join(runDir, \"daemon.json\"), JSON.stringify({ pid: 1, pipe: opts.pipe, heartbeatAt: Date.now() }), \"utf8\");",
@@ -1928,6 +1930,21 @@ test("glue【集成 dry】: stop 按执行形态分车道——serve 走 run --b
     assert.equal(serveBy.get("stopAcknowledged").pass, true);
     assert.equal(serveBy.get("stopStateAborted").pass, true);
     assert.equal(serveBy.get("stopSeqMonotonic").pass, true);
+
+    // 复核（sol）：status 打印了序号却非零退出 → 不发 stop、判红；stop 打印 stopped:true
+    // 却非零退出 → 不算确认（与进程形同口径）。
+    const serveAssembly = { backend: "kimi-web", serveUrl: "http://127.0.0.1:4297", cwd: "." };
+    process.env.STUB_STATUS_FAIL = "1";
+    const statusFail = runLane(serveAssembly);
+    delete process.env.STUB_STATUS_FAIL;
+    assert.doesNotMatch(statusFail.argv, /stop run_stub_serve /, "status 非零退出时不发 stop");
+    assert.equal(new Map(statusFail.checks.map((c) => [c.name, c])).get("stopAcknowledged").pass, false);
+    process.env.STUB_STOP_FAIL = "1";
+    const stopFail = runLane(serveAssembly);
+    delete process.env.STUB_STOP_FAIL;
+    assert.match(stopFail.argv, /stop run_stub_serve --observed-seq 3 /);
+    assert.equal(new Map(stopFail.checks.map((c) => [c.name, c])).get("stopAcknowledged").pass, false,
+      "stop 非零退出不算确认");
 
     const refused = spawnSync(process.execPath, [
       join(fakeRoot, "src", "cli.js"), "stop", "run_stub_serve", "--run-dir", tmp,

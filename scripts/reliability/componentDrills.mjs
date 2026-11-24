@@ -2320,7 +2320,8 @@ export function createComponentDrills(deps) {
         ], { cwd: root });
         const status = extractJson(statusOut.stdout || "") ?? null;
         const observedSeq = status?.observedSeq;
-        const hasObservedSeq = Number.isInteger(observedSeq) && observedSeq >= 0;
+        // 复核（sol）：status 非零退出时不信它打印的序号——只在成功退出且序号合法时发停。
+        const hasObservedSeq = statusOut.ok && Number.isInteger(observedSeq) && observedSeq >= 0;
         const stopOut = hasObservedSeq
           ? runCli([
             "stop", dispatched.runId,
@@ -2333,7 +2334,8 @@ export function createComponentDrills(deps) {
         const events = readRunEvents(dispatched.runId, runDir);
         checks.push(...backendStopChecks({
           form: "serve",
-          stopAccepted: stopped?.stopped === true,
+          // 与进程形同口径：stop 成功退出且回执 stopped:true 才算确认。
+          stopAccepted: stopOut.ok && stopped?.stopped === true,
           events,
           errorDetail: `${sessionAnchorSeen ? "" : "; no session.created anchor observed before stop"}`
             + observationError
