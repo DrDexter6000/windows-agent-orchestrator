@@ -3,6 +3,7 @@
   "groups": {
     "pure": [
       "application/claudeSessionNotFoundDiagnosis.test.js",
+      "application/ownerAttention.test.js",
       "application/ownerLeaseWrite.test.js",
       "application/ownerLivenessIdentity.test.js",
       "application/runSettle.test.js",
@@ -74,6 +75,7 @@
       "isolation-infra/modelFamily.test.js",
       "isolation-infra/nodeVersionGuard.test.js",
       "isolation-infra/onboarding.test.js",
+      "isolation-infra/ownerDashboardApi.test.js",
       "isolation-infra/ownerDashboardBoard.test.js",
       "isolation-infra/ownerDashboardCli.test.js",
       "isolation-infra/ownerDashboardServer.test.js",

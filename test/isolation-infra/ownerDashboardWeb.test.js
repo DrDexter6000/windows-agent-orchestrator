@@ -134,7 +134,7 @@ test("TRAVERSAL: unknown + traversal path forms → 404 (pathname never reaches 
     "/images/logo.png",
     "/app.js.bak",
     "/_app.js",
-    "/api",                    // no trailing slash → 404 (only /api/runs|activity)
+    "/api",                    // no trailing slash → 404 (routes are exact /api/<name> paths)
     "/run", "/runs", "/activity",
   ];
   for (const url of cases) {
