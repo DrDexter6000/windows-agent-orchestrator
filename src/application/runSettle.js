@@ -23,7 +23,10 @@
 //      这条事实，不收窄；
 //   4. 静默窗（只筛候选，不替代第 3 条）；
 //   5. 会话形状：无会话须有 background_submitted；proc_/hostPid 须判 gone；
-//      serveUrl 拒（该用 wao stop）；
+//      serveUrl 拒（该用 wao stop）；取不出本机 pid 时，若本机开机晚于该运行
+//      最后可见活动（owner 租约心跳与最后一条绑定事件取较晚者）则按
+//      session_rebooted 放行（TD-348；Windows 快速启动关机不重置 os.uptime()，
+//      那种关机后本判据不成立，照旧拒 session_ambiguous）；
 //   6. 没有活着的 daemon（resume-on-start 会接管 orphan）。
 //
 // 同模块另导出只读的 proveVerifierGone：终态、交付验证显式 pending 的运行，
@@ -66,7 +69,7 @@ import {
 } from "../transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
-import { readOwnerLease, checkOwnerLiveness, identifyProcessIdentity } from "./ownerLiveness.js";
+import { readOwnerLease, checkOwnerLiveness, identifyProcessIdentity, machineBootTimeMs, rebootedSinceLastActivity } from "./ownerLiveness.js";
 import { parseProcPid } from "./processRecovery.js";
 
 /** 候选筛用的静默窗：最后一条绑定事件须早于该时长之前。 */
@@ -259,6 +262,9 @@ function _defaultDeps(deps = {}) {
     daemonAliveFn: deps.daemonAliveFn,
     readTranscriptFn: deps.readTranscriptFn ?? readTranscript,
     listFilesFn: deps.listFilesFn ?? listTranscriptsDeep,
+    // TD-348: machine boot time for the gate-5 reboot relation (same injection
+    // shape as runSettlementWait.js bootTimeFn).
+    bootTimeFn: typeof deps.bootTimeFn === "function" ? deps.bootTimeFn : machineBootTimeMs,
   };
 }
 
@@ -287,7 +293,7 @@ async function _evaluateOwnerLeaseGate(now, runDir, runId, d, facts) {
       return { ok: false, refusal: why };
     }
     _gateFactsPush(facts, "owner_lease", true, `租约过期且 owner pid 判 gone（${ownerIdentity.basis}）`);
-    return { ok: true, basis: ownerIdentity.basis };
+    return { ok: true, basis: ownerIdentity.basis, heartbeatAt: lease.heartbeatAt };
   }
   _gateFactsPush(facts, "owner_lease", true, "无租约文件（runner 可能已清理退出）");
   return { ok: true, basis: "lease_missing" };
@@ -305,6 +311,24 @@ async function _evaluateOwnerLeaseGate(now, runDir, runId, d, facts) {
 function _backgroundSubmittedMs(bound) {
   const submitted = bound.filter((e) => e.type === "run.background_submitted");
   return submitted.length === 1 ? Date.parse(submitted[0].ts) : NaN;
+}
+
+/**
+ * TD-348 (review fix): 本 runId 所有绑定事件 ts 的**最大值**（epoch ms）；没有
+ * 可解析的 ts 返回 NaN。门 5 的重启关系用它与 owner 租约心跳（门 2 已读到）
+ * 取较晚者。取最大值而不是文件里最后一条事件：转录允许乱序追加，最后一行未必
+ * 是最后可见活动。
+ * @param {object[]} bound
+ * @returns {number}
+ */
+function _lastBoundEventMs(bound) {
+  if (!Array.isArray(bound) || bound.length === 0) return NaN;
+  let latest = NaN;
+  for (const event of bound) {
+    const ts = Date.parse(event?.ts);
+    if (Number.isFinite(ts) && (!Number.isFinite(latest) || ts > latest)) latest = ts;
+  }
+  return latest;
 }
 
 /**
@@ -507,17 +531,43 @@ async function _evaluateGates(events, runId, runDir, d) {
   } else {
     const target = _resolveSessionPidAndAnchor(events, runId);
     if (!target) {
-      _gateFactsPush(facts, "session", false, "取不出唯一的本机进程 pid 与时刻锚（会话 id 不是 proc_<pid> 且未记 hostPid，或重放记录与会话记录对不上）");
-      return { ok: false, refusal: "session_ambiguous", facts };
+      // TD-348: pre-B92 runs (deepseek-acp and other upstream-UUID sessions)
+      // recorded no host pid, so the session shape can never be anchored to a
+      // local process. Before refusing, accept a NEGATIVE proof that the
+      // machine has rebooted since the run's last visible activity: every
+      // process from before the boot (including any runner holding that
+      // session) is gone. lastEventAt = the run's last bound event ts;
+      // heartbeatAt = the owner lease heartbeat already read by gate 2 (when
+      // present); the later one anchors the activity. bootAt is injected
+      // (default machineBootTimeMs) for deterministic tests.
+      //
+      // Known boundary: Windows Fast Startup shutdowns do not reset
+      // os.uptime(), so a "boot time" read after such a shutdown still points
+      // before it and this criterion does not fire — the run is refused with
+      // session_ambiguous as before.
+      const bootAt = d.bootTimeFn();
+      const rebooted = rebootedSinceLastActivity({
+        bootAt,
+        lastEventAt: _lastBoundEventMs(bound),
+        heartbeatAt: leaseGate.heartbeatAt,
+        now,
+      });
+      if (!rebooted) {
+        _gateFactsPush(facts, "session", false, "取不出唯一的本机进程 pid 与时刻锚（会话 id 不是 proc_<pid> 且未记 hostPid，或重放记录与会话记录对不上），且本机开机不晚于该运行最后可见活动");
+        return { ok: false, refusal: "session_ambiguous", facts };
+      }
+      sessionShape = "session_rebooted";
+      _gateFactsPush(facts, "session", true, "取不出本机 pid，但本机开机晚于该运行最后可见活动（rebooted_since_anchor）");
+    } else {
+      const identity = await d.identifyFn(target.pid, target.anchorAt);
+      if (identity.verdict !== "gone") {
+        const why = identity.verdict === "same" ? "process_alive" : "process_identity_unknown";
+        _gateFactsPush(facts, "session", false, `会话进程判 ${identity.verdict}（${identity.basis}）`);
+        return { ok: false, refusal: why, facts };
+      }
+      sessionShape = "process_session";
+      _gateFactsPush(facts, "session", true, `会话进程判 gone（${identity.basis}）`);
     }
-    const identity = await d.identifyFn(target.pid, target.anchorAt);
-    if (identity.verdict !== "gone") {
-      const why = identity.verdict === "same" ? "process_alive" : "process_identity_unknown";
-      _gateFactsPush(facts, "session", false, `会话进程判 ${identity.verdict}（${identity.basis}）`);
-      return { ok: false, refusal: why, facts };
-    }
-    sessionShape = "process_session";
-    _gateFactsPush(facts, "session", true, `会话进程判 gone（${identity.basis}）`);
   }
 
   // 门 6：无活 daemon。
@@ -692,8 +742,8 @@ export async function proveVerifierGone({ events, runId, runDir, deps = {} } = {
  * @param {string} input.reasonText — Lead 结算理由（调用方已校验非空）
  * @param {boolean} [input.apply=false]
  * @param {object} [input.deps] — 测试注入（nowFn/ownerLeaseReader/identifyFn/
- *   runnerScanFn/readTranscriptFn；handshakeReader + daemonAliveFn 为必注入——
- *   daemon 握手 SSOT 在 adapters 层，由 CLI 命令提供真实实现）
+ *   runnerScanFn/readTranscriptFn/bootTimeFn；handshakeReader + daemonAliveFn
+ *   为必注入——daemon 握手 SSOT 在 adapters 层，由 CLI 命令提供真实实现）
  * @returns {Promise<object>} { eligible, gates, note? } | { settled, … } |
  *   { refused, gates }（refused ∈ SETTLE_REJECTION_REASONS）
  */

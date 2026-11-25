@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { projectCollectResult } from "../../src/application/runCollectProjection.js";
 import { collectRunMessages } from "../../src/application/runCollect.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
+import { ISOLATION_DESTINATIONS } from "../../src/diagnosis.js";
 import { Run } from "../../src/runManager.js";
 import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 
@@ -211,7 +212,25 @@ for (const [label, pathFactory] of [
           && event.eventKind === "write_intent",
       ));
       const rawTranscript = await readFile(fixture.transcriptPath, "utf8");
-      assert.ok(!rawTranscript.includes("escaped.js"), "untrusted rejected path is not persisted");
+      const violation = output.events.find((event) => event.type === "run.isolation_violation");
+      // TD-373: a confirmed-outside fact now records the redacted destination
+      // fields (Owner-approved); the rejected event itself is still absent.
+      assert.ok(ISOLATION_DESTINATIONS.includes(violation?.destination), "destination is a closed-set member");
+      if (label !== "blank path") {
+        assert.ok(violation?.reportedPath?.includes("escaped.js"), "the reported outside path is recorded redacted");
+        assert.ok(rawTranscript.includes("escaped.js"), "the redacted path reaches the transcript");
+        for (const line of rawTranscript.split(/\r?\n/).filter((l) => l.length > 0)) {
+          if (line.includes("escaped.js")) {
+            assert.ok(line.includes("run.isolation_violation"),
+              "the outside path appears only on the run.isolation_violation line");
+          }
+        }
+      }
+      assert.equal(
+        output.events.some((event) => event.type === "run.event" && event.kind === "write_intent"),
+        false,
+        "the rejected write event itself is not persisted",
+      );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -432,7 +451,7 @@ test("M12-4B-P1: unresolved intent blocks packaging after ancestor becomes an ou
   }
 });
 
-test("M12-4B-G: successful result without materialized target fails strict confirmation", async () => {
+test("M12-4B-G/TD-372: accepts this evidence shape — successful result + post-write missing + same-id/same-path inside intent", async () => {
   const fixture = await makeFixture();
   const parser = new ClaudeStreamParser();
   const parsed = parser.feed(
@@ -445,15 +464,20 @@ test("M12-4B-G: successful result without materialized target fails strict confi
   });
   try {
     const output = await finishFixture(fixture);
-    assert.equal(fixture.getPackageCount(), 0);
-    assert.equal(output.result.isolationViolation, true);
+    // TD-372: the intent was classified inside, the file_written carries the
+    // same toolCallId and the exact same raw path, and the post-write ENOENT
+    // comes from the target. That is the evidence shape this batch accepts; it
+    // does NOT prove the file was written and then deleted.
+    assert.equal(fixture.getPackageCount(), 1);
+    assert.equal(output.result.isolationViolation, undefined);
+    assert.ok(!output.events.some((event) => event.type === "run.isolation_violation"));
     const raw = await collectRunMessages({
       runId: RUN_ID,
       runDir: fixture.runDir,
       deferAppend: true,
     });
     const projected = projectCollectResult(raw, { runId: RUN_ID, mode: "compact" });
-    assert.equal(projected.evidenceCounts.fileWritten, 0);
+    assert.equal(projected.evidenceCounts.fileWritten, 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

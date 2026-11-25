@@ -182,6 +182,26 @@ export function errorLines(value) {
 }
 
 /**
+ * UTF-16 安全切片：截断点落在代理对中间时整体让出一格，不切开代理对。
+ * 只做切片，不做脱敏/控制字符清洗（调用方按各自顺序组合）。核心层只读投影
+ * （isolation violation 的路径字段）与诊断展示共用这一份实现。
+ *
+ * @param {string} str
+ * @param {number} start
+ * @param {number} end — 不含
+ * @returns {string}
+ */
+export function safeSliceUtf16(str, start, end) {
+  if (typeof str !== "string") return "";
+  let adjustedEnd = end;
+  if (adjustedEnd < str.length) {
+    const cc = str.charCodeAt(adjustedEnd - 1);
+    if (cc >= 0xD800 && cc <= 0xDBFF) adjustedEnd -= 1; // don't split a surrogate pair
+  }
+  return str.slice(start, adjustedEnd);
+}
+
+/**
  * 输出口唯一的报错渲染函数（TD-319，不抛错）：
  *   - 自有属性 lines 为数组的 Error：各行分别 escapeControlChars 后用 "\n" 连接
  *     （有意分行的报错保持行数，行内控制字符可见化）；

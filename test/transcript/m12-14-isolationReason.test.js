@@ -40,12 +40,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { execSync } from "node:child_process";
 
-import { diagnoseFailure, ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES } from "../../src/diagnosis.js";
+import { diagnoseFailure, ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES, ISOLATION_DESTINATIONS } from "../../src/diagnosis.js";
 import {
   gatherDeliveryView,
   projectDeliveryReadiness,
@@ -56,7 +56,12 @@ import {
   Run,
   classifyReportedWriteContainment,
   classifyReportedWriteIntentContainment,
+  classifyIsolationDestination,
+  readIsolationDestinationRoots,
+  isTd372RelaxableConfirmation,
+  hasNonCanonicalWindowsSegment,
 } from "../../src/runManager.js";
+import { listWorktreePaths, LIST_WORKTREE_PATHS_TIMEOUT_MS } from "../../src/isolation.js";
 import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 
 const WIN32 = process.platform === "win32";
@@ -75,7 +80,7 @@ const MINIMUM_REASONS = [
 
 // ===== runManager delivery fixture (same shape as m12-4b) =====
 
-async function makeFixture({ delivery = true, runId = "run_m1214_reason", redact } = {}) {
+async function makeFixture({ delivery = true, runId = "run_m1214_reason", redact, isolationRootsFn, containmentDeps } = {}) {
   const root = await mkdtemp(join(tmpdir(), "wao-m1214-reason-"));
   const effectiveCwd = join(root, "delivery-worktree");
   const runDir = join(root, "runs");
@@ -119,6 +124,8 @@ async function makeFixture({ delivery = true, runId = "run_m1214_reason", redact
     initialState: "submitted",
     effectiveCwd,
     deliveryContext: delivery ? { runId } : null,
+    ...(isolationRootsFn ? { isolationRootsFn } : {}),
+    ...(containmentDeps ? { containmentDeps } : {}),
     packageDeliveryFn: async () => {
       packageCount += 1;
       const error = new Error("fixture stops after containment check");
@@ -166,15 +173,40 @@ async function createJunctionOrSkip(t, target, path) {
   }
 }
 
+async function createFileLinkOrSkip(t, target, path) {
+  try {
+    await symlink(target, path, "file");
+    return true;
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip(`file symlink creation denied by platform: ${error.code}`);
+      return false;
+    }
+    throw error;
+  }
+}
+
 // Assert the durable violation fact carries EXACTLY the safe closed-set fields
-// (plus transcript envelope) and never the rejected absolute raw path.
+// (plus transcript envelope) and never an ungated absolute raw path.
 // `errorCode` is expected only for the physical_unresolved reasons that carry
 // it; passing it pins both its value and its presence, and omitting it keeps
 // the assertion that no errorCode key was persisted at all. Same pinning rule
 // for the TD-336 extras: `path` (workspace-relative, redacted) and
 // `observedErrorCode` (raw last-failure code) are pinned when passed and
 // asserted ABSENT when omitted.
-function assertViolationFact(events, { eventKind, reason, errorCode, path, observedErrorCode }) {
+//
+// TD-373: for a confirmed-outside reason the fact additionally carries
+// `destination` (closed set) and the redacted `reportedPath`; `resolvedPath`
+// may be withheld by the TD-336 layer-1 rule, and `escapedAt` is physical-only
+// and best-effort. `outside` pins the values that the caller knows must exist.
+function assertViolationFact(events, {
+  eventKind,
+  reason,
+  errorCode,
+  path,
+  observedErrorCode,
+  outside,
+}) {
   const violation = events.find((event) => event.type === "run.isolation_violation");
   assert.ok(violation, "a run.isolation_violation fact is persisted");
   assert.equal(violation.code, "workdir_escape", "code stays workdir_escape (compat)");
@@ -183,10 +215,43 @@ function assertViolationFact(events, { eventKind, reason, errorCode, path, obser
   if (errorCode !== undefined) assert.equal(violation.errorCode, errorCode);
   if (path !== undefined) assert.equal(violation.path, path);
   if (observedErrorCode !== undefined) assert.equal(violation.observedErrorCode, observedErrorCode);
+  const outsideReason = typeof reason === "string"
+    && (reason.endsWith("_lexical_outside") || reason.endsWith("_physical_outside"));
+  if (outsideReason) {
+    assert.ok(ISOLATION_DESTINATIONS.includes(violation.destination),
+      `destination is a closed-set member: ${violation.destination}`);
+    if (Object.hasOwn(violation, "reportedPath")) assert.equal(typeof violation.reportedPath, "string");
+    if (Object.hasOwn(violation, "resolvedPath")) assert.equal(typeof violation.resolvedPath, "string");
+    if (Object.hasOwn(violation, "escapedAt")) assert.equal(typeof violation.escapedAt, "string");
+  } else {
+    for (const key of ["destination", "reportedPath", "resolvedPath", "escapedAt"]) {
+      assert.ok(!Object.hasOwn(violation, key), `${reason} never carries TD-373 field ${key}`);
+    }
+  }
+  if (outside) {
+    assert.equal(violation.destination, outside.destination);
+    if (outside.reportedPath !== undefined) assert.equal(violation.reportedPath, outside.reportedPath);
+    if (outside.reportedPathContains !== undefined) {
+      assert.ok(violation.reportedPath.includes(outside.reportedPathContains));
+    }
+    if (outside.resolvedPath !== undefined) assert.equal(violation.resolvedPath, outside.resolvedPath);
+    if (outside.resolvedPathContains !== undefined) {
+      assert.ok(violation.resolvedPath.includes(outside.resolvedPathContains));
+    }
+    if (outside.resolvedPathAbsent === true) assert.ok(!Object.hasOwn(violation, "resolvedPath"));
+    if (outside.escapedAt !== undefined) assert.equal(violation.escapedAt, outside.escapedAt);
+    if (outside.escapedAtAbsent === true) assert.ok(!Object.hasOwn(violation, "escapedAt"));
+  }
   const expectedKeys = ["agentId", "code", "eventKind", "reason", "runId", "seq", "ts", "type"];
   if (errorCode !== undefined) expectedKeys.push("errorCode");
   if (path !== undefined) expectedKeys.push("path");
   if (observedErrorCode !== undefined) expectedKeys.push("observedErrorCode");
+  if (outsideReason) {
+    expectedKeys.push("destination");
+    for (const key of ["reportedPath", "resolvedPath", "escapedAt"]) {
+      if (Object.hasOwn(violation, key)) expectedKeys.push(key);
+    }
+  }
   assert.deepEqual(
     Object.keys(violation).sort(),
     expectedKeys.sort(),
@@ -200,6 +265,21 @@ function toMsysDrivePath(nativePath) {
   return nativePath
     .replace(/^([A-Za-z]):[\\/]/, (m, d) => `/${d.toLowerCase()}/`)
     .replaceAll("\\", "/");
+}
+
+// Test-side mirror of the documented display rule for native absolute paths:
+// a leading user-home prefix becomes "~" (win32 case-insensitive).
+function tildeNative(nativePath) {
+  const value = String(nativePath);
+  const home = resolve(homedir());
+  const insensitive = process.platform === "win32";
+  const left = insensitive ? value.toLowerCase() : value;
+  const right = insensitive ? home.toLowerCase() : home;
+  if (left === right) return "~";
+  if (left.startsWith(`${right}${sep}`) || left.startsWith(`${right}/`)) {
+    return `~${value.slice(home.length)}`;
+  }
+  return value;
 }
 
 // ===== seeded-transcript helpers (projection + MCP sections) =====
@@ -232,6 +312,18 @@ function seedIsolationRun({ runDir, runId = "run_x", cwd = "/w", violationExtra 
     jl({ type: "run.state_change", from: "running", to: "failed", reason: "workdir_escape", runId, agentId: "coder_low", seq: 3 }),
     jl({ type: "run.isolation_violation", code: "workdir_escape", eventKind: "write_intent", runId, agentId: "coder_low", seq: 4, ...violationExtra }),
   ]);
+}
+
+function assertPathOnlyOnViolationLine(rawTranscript, marker) {
+  const lines = rawTranscript.split(/\r?\n/).filter((line) => line.length > 0);
+  const hits = lines.filter((line) => line.includes(marker));
+  assert.ok(hits.length >= 1, `the redacted path marker appears somewhere: ${marker}`);
+  for (const line of lines) {
+    if (line.includes(marker)) {
+      assert.ok(line.includes("run.isolation_violation"),
+        "the outside path appears only on the run.isolation_violation line");
+    }
+  }
 }
 
 // =====================================================================
@@ -281,8 +373,14 @@ test("M12-14-W1: write_intent lexical outside persists write_intent_lexical_outs
     assertViolationFact(output.events, {
       eventKind: "write_intent",
       reason: "write_intent_lexical_outside",
+      outside: {
+        destination: "temp",
+        reportedPathContains: "outside-w1",
+        resolvedPathContains: "outside-w1",
+        escapedAtAbsent: true,
+      },
     });
-    assert.ok(!output.rawTranscript.includes("outside-w1"), "rejected raw path is never persisted");
+    assertPathOnlyOnViolationLine(output.rawTranscript, "outside-w1");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -307,8 +405,14 @@ test("M12-14-W2: write_intent through an outside junction ancestor persists writ
     assertViolationFact(output.events, {
       eventKind: "write_intent",
       reason: "write_intent_physical_outside",
+      outside: {
+        destination: "temp",
+        reportedPath: join("linked-w2", "new.js"),
+        resolvedPath: tildeNative(join(resolve(outside), "new.js")),
+        escapedAt: "linked-w2",
+      },
     });
-    assert.ok(!output.rawTranscript.includes("outside-w2"), "rejected raw path is never persisted");
+    assertPathOnlyOnViolationLine(output.rawTranscript, "outside-w2");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -451,8 +555,14 @@ test("M12-14-W9: file_written lexical outside persists file_written_lexical_outs
     assertViolationFact(output.events, {
       eventKind: "file_written",
       reason: "file_written_lexical_outside",
+      outside: {
+        destination: "temp",
+        reportedPathContains: "outside-w9",
+        resolvedPathContains: "outside-w9",
+        escapedAtAbsent: true,
+      },
     });
-    assert.ok(!output.rawTranscript.includes("outside-w9"), "rejected raw path is never persisted");
+    assertPathOnlyOnViolationLine(output.rawTranscript, "outside-w9");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -478,8 +588,14 @@ test("M12-14-W10: file_written through an outside junction persists file_written
     assertViolationFact(output.events, {
       eventKind: "file_written",
       reason: "file_written_physical_outside",
+      outside: {
+        destination: "temp",
+        reportedPath: join("linked-w10", "escaped.js"),
+        resolvedPath: tildeNative(join(resolve(outside), "escaped.js")),
+        escapedAt: "linked-w10",
+      },
     });
-    assert.ok(!output.rawTranscript.includes("outside-w10"), "rejected raw path is never persisted");
+    assertPathOnlyOnViolationLine(output.rawTranscript, "outside-w10");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -711,6 +827,7 @@ test("TD-357-L3: a dangling link at the leaf still fails closed (physical_unreso
       verdict: "physical_unresolved",
       errorCode: "ENOENT",
       path: "src/dangling-file.js",
+      unresolvedAt: "target",
     }, "an unresolvable target fails closed");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -798,6 +915,833 @@ test("TD-357-L8 (sol scenario): in-tree junction → write through it → juncti
 });
 
 // =====================================================================
+// Section TD-372 — post-write leaf ENOENT with an inside intent
+// =====================================================================
+//
+// A deepseek-acp worker wrote an in-worktree file with its write tool and then
+// removed it; the post-write realpath got ENOENT and three retries ended the
+// run as file_written_physical_unresolved. The classifier stays strict (the
+// leaf-missing verdict is unchanged); only the delivery violation classifier
+// relaxes THIS shape: physical_unresolved + ENOENT + the same toolCallId had a
+// write_intent that was classified INSIDE at intent time. A write-through-link
+// escape is caught at intent time (the link exists then); swapping the link
+// between the intent check and the write is known TOCTOU, not defended.
+
+test("TD-372-A: honest in-worktree write then delete, with an inside intent, is accepted", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_a" });
+  const relativePath = join("src", "transient-td372.js");
+  const absolute = join(fixture.effectiveCwd, relativePath);
+  fixture.setEvents(async function* events() {
+    yield {
+      kind: "write_intent",
+      path: relativePath,
+      toolCallId: "td372_inside",
+      correlationStatus: "tracked",
+    };
+    await createFile(absolute);
+    await rm(absolute, { force: true });
+    yield { kind: "file_written", path: relativePath, toolCallId: "td372_inside" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 1, "the honest write must reach packaging");
+    assert.ok(!output.events.some((event) => event.type === "run.isolation_violation"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-B: file_written ENOENT with no matching intent stays file_written_physical_unresolved", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_b" });
+  const relativePath = join("src", "never-created-td372.js");
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: relativePath, toolCallId: "td372_no_intent" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: relativePath.split(sep).join("/"),
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-C: file_written ENOENT whose toolCallId does not match the inside intent stays a violation", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_c" });
+  fixture.setEvents(async function* events() {
+    yield {
+      kind: "write_intent",
+      path: join("src", "intent-td372.js"),
+      toolCallId: "td372_intent",
+      correlationStatus: "tracked",
+    };
+    yield {
+      kind: "file_written",
+      path: join("src", "other-td372.js"),
+      toolCallId: "td372_other_call",
+    };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "src/other-td372.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-D: an inside intent does not relax a post-write physical_outside verdict", async (t) => {
+  const fixture = await makeFixture({ runId: "run_td372_d" });
+  const outside = join(fixture.root, "outside-td372-d");
+  await mkdir(outside, { recursive: true });
+  await createFile(join(outside, "escaped.js"));
+  const link = join(fixture.effectiveCwd, "late-link-td372");
+  const probe = join(fixture.effectiveCwd, "junction-probe-td372");
+  if (!await createJunctionOrSkip(t, outside, probe)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  await rm(probe, { force: true });
+  fixture.setEvents(async function* events() {
+    // Intent arrives while the link does not exist yet → inside.
+    yield {
+      kind: "write_intent",
+      path: join("late-link-td372", "escaped.js"),
+      toolCallId: "td372_swap",
+      correlationStatus: "tracked",
+    };
+    await symlink(outside, link, "junction");
+    yield { kind: "file_written", path: join("late-link-td372", "escaped.js"), toolCallId: "td372_swap" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0, "physical_outside is never relaxed");
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_outside",
+      outside: {
+        destination: "temp",
+        reportedPath: join("late-link-td372", "escaped.js"),
+        resolvedPath: tildeNative(join(resolve(outside), "escaped.js")),
+        escapedAt: "late-link-td372",
+      },
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-S2b-a: intent while the junction exists is blocked as write_intent_physical_outside", async (t) => {
+  const fixture = await makeFixture({ runId: "run_td372_s2b_a" });
+  const outside = join(fixture.root, "outside-td372-s2b");
+  await mkdir(outside, { recursive: true });
+  const link = join(fixture.effectiveCwd, "linked-td372-s2b");
+  if (!await createJunctionOrSkip(t, outside, link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  fixture.setEvents(async function* events() {
+    yield {
+      kind: "write_intent",
+      path: join("linked-td372-s2b", "escaped.js"),
+      toolCallId: "td372_s2b_intent",
+      correlationStatus: "tracked",
+    };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "write_intent",
+      reason: "write_intent_physical_outside",
+      outside: {
+        destination: "temp",
+        reportedPath: join("linked-td372-s2b", "escaped.js"),
+        resolvedPath: tildeNative(join(resolve(outside), "escaped.js")),
+        escapedAt: "linked-td372-s2b",
+      },
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-S2b-b: no intent — write through a junction, remove it, recreate an empty dir → still a violation", async (t) => {
+  const fixture = await makeFixture({ runId: "run_td372_s2b_b" });
+  const outside = join(fixture.root, "outside-td372-s2b-b");
+  await mkdir(outside, { recursive: true });
+  const link = join(fixture.effectiveCwd, "linked-td372-s2b-b");
+  if (!await createJunctionOrSkip(t, outside, link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  await writeFile(join(link, "escaped.js"), "outside", "utf8");
+  await rm(link, { recursive: true, force: true });
+  await mkdir(link, { recursive: true }); // empty directory in the original place
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: join("linked-td372-s2b-b", "escaped.js") };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(await readFile(join(outside, "escaped.js"), "utf8"), "outside");
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "linked-td372-s2b-b/escaped.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-S8-a: intent while the leaf file link exists is blocked as write_intent_physical_outside", async (t) => {
+  const fixture = await makeFixture({ runId: "run_td372_s8_a" });
+  const outsideFile = join(fixture.root, "outside-td372-s8-a.js");
+  await writeFile(outsideFile, "outside", "utf8");
+  const link = join(fixture.effectiveCwd, "leaf-td372-s8-a.js");
+  if (!await createFileLinkOrSkip(t, outsideFile, link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  fixture.setEvents(async function* events() {
+    yield {
+      kind: "write_intent",
+      path: "leaf-td372-s8-a.js",
+      toolCallId: "td372_s8_intent",
+      correlationStatus: "tracked",
+    };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "write_intent",
+      reason: "write_intent_physical_outside",
+      outside: {
+        destination: "temp",
+        reportedPath: "leaf-td372-s8-a.js",
+        resolvedPath: tildeNative(resolve(outsideFile)),
+        escapedAt: "leaf-td372-s8-a.js",
+      },
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-S8-b: no intent — write through the file link, delete the link → still a violation", async (t) => {
+  const fixture = await makeFixture({ runId: "run_td372_s8_b" });
+  const outsideFile = join(fixture.root, "outside-td372-s8-b.js");
+  await writeFile(outsideFile, "before", "utf8");
+  const link = join(fixture.effectiveCwd, "leaf-td372-s8-b.js");
+  if (!await createFileLinkOrSkip(t, outsideFile, link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  await writeFile(link, "outside", "utf8");
+  await rm(link, { force: true });
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: "leaf-td372-s8-b.js" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(await readFile(outsideFile, "utf8"), "outside");
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "leaf-td372-s8-b.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// ===== TD-372 review fix: qualification is exact, one-shot, canonical =====
+
+test("TD-372-R1: a real junction + `j./x.txt` stays file_written_physical_unresolved", async (t) => {
+  if (!WIN32) { t.skip("win32 trailing-dot resolution"); return; }
+  const fixture = await makeFixture({ runId: "run_td372_r1" });
+  const outside = join(fixture.root, "outside-td372-r1");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "x.txt"), "outside", "utf8");
+  const junction = join(fixture.effectiveCwd, "j");
+  if (!await createJunctionOrSkip(t, outside, junction)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  fixture.setEvents(async function* events() {
+    // Node does not strip the trailing dot, so the intent walks to the inside
+    // ancestor; Win32 writers do strip it and write through the junction.
+    yield { kind: "write_intent", path: join("j.", "x.txt"), toolCallId: "td372_r1", correlationStatus: "tracked" };
+    yield { kind: "file_written", path: join("j.", "x.txt"), toolCallId: "td372_r1" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(await readFile(join(outside, "x.txt"), "utf8"), "outside");
+    assert.equal(fixture.getPackageCount(), 0, "a trailing-dot segment must not be relaxed");
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "j./x.txt",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-R1b: `j/../x.txt` through a real junction is never relaxed", async (t) => {
+  if (!WIN32) { t.skip("win32 junction semantics"); return; }
+  const fixture = await makeFixture({ runId: "run_td372_r1b" });
+  const outside = join(fixture.root, "outside-td372-r1b");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "x.txt"), "outside", "utf8");
+  const junction = join(fixture.effectiveCwd, "j");
+  if (!await createJunctionOrSkip(t, outside, junction)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  const reportedPath = "j/../x.txt";
+  fixture.setEvents(async function* events() {
+    // Node collapses `..` lexically, so the intent walks to the inside
+    // ancestor; POSIX-physical writers walk through the junction first.
+    yield { kind: "write_intent", path: reportedPath, toolCallId: "td372_r1b", correlationStatus: "tracked" };
+    yield { kind: "file_written", path: reportedPath, toolCallId: "td372_r1b" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0, "a `..` segment must not be relaxed");
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "x.txt",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const [label, reportedPath] of [
+  ["NUL", "NUL"],
+  ["nul.txt", "nul.txt"],
+  ["NUL.", "NUL."],
+  ["alternate data stream", "x.txt:s"],
+  ["COM superscript", "COM\u00B9"],
+  ["trailing space segment", "trail "],
+]) {
+  test(`TD-372-R2 (${label}): a non-canonical Win32 segment is never relaxed`, async (t) => {
+    if (!WIN32) { t.skip("win32 segment semantics"); return; }
+    const fixture = await makeFixture({ runId: `run_td372_r2_${label.replaceAll(/[^a-z0-9]/gi, "_")}` });
+    fixture.setEvents(async function* events() {
+      yield { kind: "write_intent", path: reportedPath, toolCallId: "td372_r2", correlationStatus: "tracked" };
+      yield { kind: "file_written", path: reportedPath, toolCallId: "td372_r2" };
+      yield { kind: "done", reason: "completed" };
+    });
+    try {
+      const output = await finishFixture(fixture);
+      assert.equal(fixture.getPackageCount(), 0);
+      assertViolationFact(output.events, {
+        eventKind: "file_written",
+        reason: "file_written_physical_unresolved",
+        errorCode: "ENOENT",
+        path: reportedPath.split(sep).join("/"),
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("TD-372-R3: intent path and file_written path must match byte-for-byte", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_r3" });
+  fixture.setEvents(async function* events() {
+    yield { kind: "write_intent", path: join("src", "a.js"), toolCallId: "td372_r3", correlationStatus: "tracked" };
+    yield { kind: "file_written", path: join("src", "b.js"), toolCallId: "td372_r3" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "src/b.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-R4: the relaxation is one-shot — a second file_written for the same id is a violation", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_r4" });
+  const relativePath = join("src", "twice.js");
+  fixture.setEvents(async function* events() {
+    yield { kind: "write_intent", path: relativePath, toolCallId: "td372_r4", correlationStatus: "tracked" };
+    yield { kind: "file_written", path: relativePath, toolCallId: "td372_r4" };
+    yield { kind: "file_written", path: relativePath, toolCallId: "td372_r4" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "src/twice.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-R4b: a first INSIDE confirmation also consumes the qualification", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_r4b" });
+  const relativePath = join("src", "twice-inside.js");
+  const absolute = join(fixture.effectiveCwd, relativePath);
+  fixture.setEvents(async function* events() {
+    yield { kind: "write_intent", path: relativePath, toolCallId: "td372_r4b", correlationStatus: "tracked" };
+    await createFile(absolute);
+    yield { kind: "file_written", path: relativePath, toolCallId: "td372_r4b" };
+    await rm(absolute, { force: true });
+    yield { kind: "file_written", path: relativePath, toolCallId: "td372_r4b" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "src/twice-inside.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-R5: an ENOENT from the worktree root's realpath is never relaxed", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_r5" });
+  const base = resolve(fixture.effectiveCwd);
+  let baseCalls = 0;
+  const realpath = (p) => {
+    if (resolve(p) === base) {
+      baseCalls += 1;
+      if (baseCalls >= 3) throw fsError("ENOENT"); // intent needs two base resolutions
+    }
+    return realpathSync.native(p);
+  };
+  fixture.run.containmentDeps = { realpath, sleep: async () => {} };
+  fixture.setEvents(async function* events() {
+    yield { kind: "write_intent", path: "root-failure.js", toolCallId: "td372_r5", correlationStatus: "tracked" };
+    yield { kind: "file_written", path: "root-failure.js", toolCallId: "td372_r5" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "root-failure.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+test("TD-372-R6: a redaction marker in the reported path is never relaxed", async () => {
+  const fixture = await makeFixture({ runId: "run_td372_r6" });
+  const reportedPath = join("src", "[REDACTED]-td372.js");
+  fixture.setEvents(async function* events() {
+    yield { kind: "write_intent", path: reportedPath, toolCallId: "td372_r6", correlationStatus: "tracked" };
+    yield { kind: "file_written", path: reportedPath, toolCallId: "td372_r6" };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "src/[REDACTED]-td372.js",
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-372-R7: prefixes and a non-target ENOENT fail the pure predicate", () => {
+  const base = {
+    verdict: "physical_unresolved",
+    errorCode: "ENOENT",
+    unresolvedAt: "target",
+    intentPath: "x.js",
+    fileWrittenPath: "x.js",
+  };
+  assert.equal(isTd372RelaxableConfirmation(base), true);
+  assert.equal(isTd372RelaxableConfirmation({ ...base, unresolvedAt: "base" }), false, "root ENOENT");
+  assert.equal(isTd372RelaxableConfirmation({ ...base, unresolvedAt: "ancestor" }), false, "ancestor ENOENT");
+  for (const parentTraversal of ["real/../x.txt", "a/b/../../c.txt"]) {
+    assert.equal(isTd372RelaxableConfirmation({
+      ...base,
+      intentPath: parentTraversal,
+      fileWrittenPath: parentTraversal,
+    }), false, `.. is resolved by the writer: ${parentTraversal}`);
+  }
+  assert.equal(isTd372RelaxableConfirmation({
+    ...base,
+    intentPath: "dir/./x.js",
+    fileWrittenPath: "dir/./x.js",
+  }), true, "`.` remains exempt");
+  for (const prefix of ["\\\\?\\C:\\work\\x.js", "\\\\.\\C:\\work\\x.js", "\\\\server\\share\\x.js"]) {
+    assert.equal(isTd372RelaxableConfirmation({
+      ...base,
+      intentPath: prefix,
+      fileWrittenPath: prefix,
+    }), false, prefix);
+  }
+  if (WIN32) {
+    for (const bad of ["NUL", "nul.txt", "NUL.", "x.txt:s", "COM\u00B9", "trail ", "NUL .txt", "nul .tar.gz", "COM1 .log"]) {
+      assert.equal(hasNonCanonicalWindowsSegment(bad), true, bad);
+      assert.equal(isTd372RelaxableConfirmation({
+        ...base,
+        intentPath: bad,
+        fileWrittenPath: bad,
+      }), false, `device base name after trimming: ${bad}`);
+    }
+    for (const good of ["src/x.js", ".", "..", "dir/./x.js", "C:\\work\\src\\x.js"]) {
+      assert.equal(hasNonCanonicalWindowsSegment(good), false, good);
+    }
+  }
+});
+
+test("TD-373-G: listWorktreePaths uses the 5s timeout and parses porcelain", () => {
+  let seenOptions = null;
+  const paths = listWorktreePaths(tmpdir(), {
+    execFn: (file, args, options) => {
+      seenOptions = { file, args, options };
+      return "worktree C:\\main-checkout\nHEAD abc\n\nworktree C:\\run\nHEAD def\n\n";
+    },
+  });
+  assert.equal(seenOptions.file, "git");
+  assert.equal(seenOptions.options.timeout, 5000);
+  assert.equal(LIST_WORKTREE_PATHS_TIMEOUT_MS, 5000);
+  assert.deepEqual(paths, ["C:\\main-checkout", "C:\\run"]);
+});
+
+// =====================================================================
+// Section TD-373 — destination / redacted paths on outside violations
+// =====================================================================
+
+test("TD-373-A: lexical outside records destination + redacted paths (home ~, controls, 300-char bound)", async () => {
+  const fixture = await makeFixture({ runId: "run_td373_a" });
+  const longName = `td373-${"x".repeat(400)}.js`;
+  const reported = join(homedir(), "wao-td373", `evil\u0007name-${longName}`);
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: reported };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    const violation = assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_lexical_outside",
+      outside: { destination: "home", escapedAtAbsent: true },
+    });
+    assert.ok(violation.reportedPath.startsWith("~"), "user home prefix is replaced by ~");
+    assert.ok(!violation.reportedPath.includes("\u0007"), "raw control characters are removed");
+    assert.ok(violation.reportedPath.length <= 300, "reportedPath is bounded to 300 UTF-16 units");
+    assert.ok(violation.resolvedPath.startsWith("~"), "resolvedPath uses the same home replacement");
+    assert.ok(!violation.resolvedPath.includes("\u0007"));
+    assert.ok(violation.resolvedPath.length <= 300);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-A2: equivalent home spellings are redacted or the whole field is omitted", async (t) => {
+  if (!WIN32) { t.skip("win32 home-path spellings"); return; }
+  const home = resolve(homedir());
+  const drive = /^([A-Za-z]):/.exec(home)?.[1] ?? "C";
+  const user = home.split(sep).filter(Boolean).at(-1);
+  assert.ok(user && user.length > 0, "the test machine has a user-name home segment");
+  const cases = [
+    ["mixed separators", `${home.replaceAll("\\", "/")}/wao-td373-mixed.js`, false],
+    ["extended prefix", `\\\\?\\${join(home, "wao-td373-ext.js")}`, false],
+    ["extended UNC", `\\\\?\\UNC\\localhost\\${drive}$\\Users\\${user}\\wao-td373-ext-unc.js`, true],
+    ["admin share", `\\\\localhost\\${drive}$\\Users\\${user}\\wao-td373-admin.js`, true],
+    ["dot segment", `${drive}:\\Users\\.\\${user}\\wao-td373-dot.js`, false],
+    ["user trailing dot", `${home}.\\wao-td373-tail-dot.js`, true],
+  ];
+  for (const [label, reportedPath, omitted] of cases) {
+    const fixture = await makeFixture({ runId: `run_td373_a2_${label.replaceAll(/[^a-z0-9]/gi, "_")}` });
+    fixture.setEvents(async function* events() {
+      yield { kind: "file_written", path: reportedPath };
+      yield { kind: "done", reason: "completed" };
+    });
+    try {
+      const output = await finishFixture(fixture);
+      assert.equal(fixture.getPackageCount(), 0);
+      const violation = output.events.find((event) => event.type === "run.isolation_violation");
+      assert.ok(ISOLATION_DESTINATIONS.includes(violation?.destination), `${label}: destination closed set`);
+      if (omitted) {
+        assert.ok(!Object.hasOwn(violation, "reportedPath"), `${label}: reportedPath omitted`);
+        assert.ok(!Object.hasOwn(violation, "resolvedPath"), `${label}: resolvedPath omitted`);
+        assert.ok(!output.rawTranscript.toLowerCase().includes(user.toLowerCase()),
+          `${label}: the user name never reaches the transcript`);
+      } else {
+        assert.ok(violation.reportedPath.startsWith("~"), `${label}: home prefix becomes ~`);
+        assert.ok(!violation.reportedPath.toLowerCase().split(/[\\/]+/).includes(user.toLowerCase()),
+          `${label}: the user name is not left as a segment`);
+      }
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("TD-373-A3: escapedAt follows the TD-336 layer-1 withholding of resolvedPath", async (t) => {
+  const fixture = await makeFixture({
+    runId: "run_td373_a3",
+    redact: (value) => (typeof value === "string" ? value.replaceAll("secret-link", "[REDACTED]") : value),
+  });
+  const outside = join(fixture.root, "outside-td373-a3");
+  await mkdir(outside, { recursive: true });
+  await createFile(join(outside, "escaped.js"));
+  const link = join(fixture.effectiveCwd, "secret-link");
+  if (!await createJunctionOrSkip(t, outside, link)) {
+    await rm(fixture.root, { recursive: true, force: true });
+    return;
+  }
+  const reportedPath = join("secret-link", "escaped.js");
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: reportedPath };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_outside",
+      outside: {
+        destination: "temp",
+        reportedPathContains: "[REDACTED]",
+        resolvedPathAbsent: true,
+        escapedAtAbsent: true,
+      },
+    });
+    assert.ok(!output.rawTranscript.includes("secret-link"), "the raw link name is never persisted");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-A4: home stream syntax and a TAB-terminated user segment omit the whole field", async (t) => {
+  if (!WIN32) { t.skip("win32 stream/control-character spellings"); return; }
+  const home = resolve(homedir());
+  const user = home.split(sep).filter(Boolean).at(-1);
+  assert.ok(user && user.length > 0, "the test machine has a user-name home segment");
+  for (const [label, reportedPath] of [
+    ["directory stream", `${home}::$INDEX_ALLOCATION\\x.txt`],
+    ["named stream", `${home}:$I30:$INDEX_ALLOCATION\\x.txt`],
+    ["TAB-terminated user segment", `${home}\t\\x.txt`],
+  ]) {
+    const fixture = await makeFixture({ runId: `run_td373_a4_${label.replaceAll(/[^a-z0-9]/gi, "_")}` });
+    fixture.setEvents(async function* events() {
+      yield { kind: "file_written", path: reportedPath };
+      yield { kind: "done", reason: "completed" };
+    });
+    try {
+      const output = await finishFixture(fixture);
+      assert.equal(fixture.getPackageCount(), 0);
+      const violation = output.events.find((event) => event.type === "run.isolation_violation");
+      assert.ok(ISOLATION_DESTINATIONS.includes(violation?.destination), `${label}: destination closed set`);
+      assert.ok(!Object.hasOwn(violation, "reportedPath"), `${label}: reportedPath omitted`);
+      assert.ok(!Object.hasOwn(violation, "resolvedPath"), `${label}: resolvedPath omitted`);
+      assert.ok(!output.rawTranscript.toLowerCase().includes(user.toLowerCase()),
+        `${label}: the user name never reaches the transcript`);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("TD-373-B: an injected exact secret withholds resolvedPath and never persists the plaintext", async () => {
+  const marker = "td373-injected-secret-value";
+  const fixture = await makeFixture({
+    runId: "run_td373_b",
+    redact: (value) => (typeof value === "string" ? value.replaceAll(marker, "[REDACTED]") : value),
+  });
+  const reported = join(fixture.root, marker, "escaped.js");
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: reported };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    const violation = assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_lexical_outside",
+      outside: { destination: "temp", resolvedPathAbsent: true, escapedAtAbsent: true },
+    });
+    assert.ok(!output.rawTranscript.includes(marker), "the injected secret value never reaches the transcript");
+    assert.ok(violation.reportedPath.includes("[REDACTED]"), "reportedPath keeps the redacted form");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-C: a secret-shaped token is replaced and withholds the normalized resolvedPath", async () => {
+  const fixture = await makeFixture({ runId: "run_td373_c" });
+  const token = `ghp_${"A".repeat(24)}`;
+  const reported = join(fixture.root, token, `${"z".repeat(500)}.js`);
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: reported };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    const violation = assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_lexical_outside",
+      outside: { destination: "temp", resolvedPathAbsent: true, escapedAtAbsent: true },
+    });
+    assert.ok(!output.rawTranscript.includes(token), "the secret-shaped token never reaches the transcript");
+    assert.ok(violation.reportedPath.includes("[REDACTED]"));
+    assert.ok(violation.reportedPath.length <= 300, "the final redaction marker is still bounded");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-D: a throwing destination-roots reader degrades to destination other; the violation is unchanged", async () => {
+  const fixture = await makeFixture({
+    runId: "run_td373_d",
+    isolationRootsFn: () => { throw new Error("roots reader exploded"); },
+  });
+  const outside = join(fixture.root, "outside-td373-d", "escaped.js");
+  fixture.setEvents(async function* events() {
+    yield { kind: "file_written", path: outside };
+    yield { kind: "done", reason: "completed" };
+  });
+  try {
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0);
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_lexical_outside",
+      outside: {
+        destination: "other",
+        reportedPathContains: "outside-td373-d",
+        resolvedPathContains: "outside-td373-d",
+        escapedAtAbsent: true,
+      },
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// Destination roots against a real temporary git repository + worktrees. The
+// fixture lives under os.tmpdir() and is removed afterwards.
+function makeDestinationRepo() {
+  const root = mkdtempSync(join(tmpdir(), "wao-td373-roots-"));
+  const repo = join(root, "main-checkout");
+  const runWorktree = join(repo, ".wao-worktrees", "run-td373");
+  const otherWorktree = join(repo, ".wao-worktrees", "other-td373");
+  mkdirSync(repo, { recursive: true });
+  makeGitRepo(repo);
+  execSync(`git worktree add "${runWorktree}" -b td373-run`, { cwd: repo, stdio: "ignore" });
+  execSync(`git worktree add "${otherWorktree}" -b td373-other`, { cwd: repo, stdio: "ignore" });
+  return { root, repo, runWorktree, otherWorktree };
+}
+
+test("TD-373-E: destination roots classify main checkout / other worktree / temp / home / other and deepest wins", () => {
+  const fixture = makeDestinationRepo();
+  try {
+    assert.deepEqual(
+      readIsolationDestinationRoots(fixture.runWorktree).map((root) => root.kind).sort(),
+      ["home", "main_checkout", "other_worktree", "temp"],
+      "the run's own worktree is not a root; main checkout first, other worktrees next",
+    );
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(fixture.repo, "src", "main.js"),
+      effectiveCwd: fixture.runWorktree,
+    }), "main_checkout");
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(fixture.otherWorktree, "src", "other.js"),
+      effectiveCwd: fixture.runWorktree,
+    }), "other_worktree", "the deepest matching root wins (other worktree inside main checkout)");
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(tmpdir(), "wao-td373-temp-landing.js"),
+      effectiveCwd: fixture.runWorktree,
+    }), "temp", "temp nested under home wins over home");
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(homedir(), "wao-td373-home-landing.js"),
+      effectiveCwd: fixture.runWorktree,
+    }), "home");
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(dirname(homedir()), "wao-td373-other-landing.js"),
+      effectiveCwd: fixture.runWorktree,
+    }), "other");
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(fixture.repo, "src", "main.js"),
+      physical: true,
+      effectiveCwd: fixture.runWorktree,
+    }), "main_checkout", "physical mode compares realpath()'d roots");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-F: win32 destination matching is case-insensitive", (t) => {
+  if (!WIN32) { t.skip("win32-only path identity"); return; }
+  const fixture = makeDestinationRepo();
+  try {
+    assert.equal(classifyIsolationDestination({
+      landingPath: join(fixture.repo.toUpperCase(), "src", "main.js"),
+      effectiveCwd: fixture.runWorktree,
+    }), "main_checkout");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+
+// =====================================================================
 // Section T — transient filesystem-error retry (both verdict functions)
 // =====================================================================
 //
@@ -868,6 +1812,7 @@ test("M12-14-T2: an always-EBUSY intent verdict stays physical_unresolved and re
     verdict: "physical_unresolved",
     errorCode: "EBUSY",
     path: "src/locked.js",
+    unresolvedAt: "target",
   });
   assert.deepEqual(sleeps, RETRY_WAITS, "three redos, each after its wait");
   assert.equal(targetRealpathCalls, 4, "the initial pass plus three redos");
@@ -922,6 +1867,7 @@ test("M12-14-T4: an ELOOP verdict is retried with everything else, stays unresol
     verdict: "physical_unresolved",
     errorCode: "ELOOP",
     path: "src/loop.js",
+    unresolvedAt: "target",
   });
   assert.deepEqual(sleeps, RETRY_WAITS, "three redos before the final verdict");
   assert.equal(targetRealpathCalls, 4, "the initial pass plus three redos");
@@ -945,6 +1891,7 @@ test("M12-14-T5: an error without a code is retried, recorded as other, and carr
     verdict: "physical_unresolved",
     errorCode: "other",
     path: "src/codeless.js",
+    unresolvedAt: "target",
   });
   assert.deepEqual(sleeps, RETRY_WAITS, "a codeless failure is retried like any unresolved one");
 });
@@ -1015,6 +1962,7 @@ test("M12-14-T8: an always-EACCES file_written verdict stays physical_unresolved
     verdict: "physical_unresolved",
     errorCode: "EACCES",
     path: "src/written.js",
+    unresolvedAt: "target",
   });
   assert.deepEqual(sleeps, RETRY_WAITS);
 });
@@ -1106,6 +2054,7 @@ test("M12-14-T12: a persistent UNKNOWN rides along as observedErrorCode next to 
       errorCode: "other",
       path: "src/opaque.js",
       observedErrorCode: "UNKNOWN",
+      unresolvedAt: "target",
     }, classify.name);
     assert.deepEqual(sleeps, RETRY_WAITS, classify.name);
   }
@@ -1134,6 +2083,7 @@ test("M12-14-T13: a code that does not fit the observed-token shape carries no o
       verdict: "physical_unresolved",
       errorCode: "other",
       path: "src/shaped.js",
+      unresolvedAt: "target",
     }, `code ${JSON.stringify(bad)} must not surface as observedErrorCode`);
   }
 });
@@ -1154,6 +2104,7 @@ test("M12-14-T14: a reported target that IS the worktree root stays unresolved w
     assert.deepEqual(result, {
       verdict: "physical_unresolved",
       errorCode: "EPERM",
+      unresolvedAt: "base",
     }, `${classify.name}: root-target unresolved verdict has no path key`);
   }
 });
@@ -1221,11 +2172,18 @@ test("M12-14-M3: outside MSYS write_intent stays rejected as lexical outside", a
   try {
     const output = await finishFixture(fixture);
     assert.equal(fixture.getPackageCount(), 0, "an outside /d/... path must still be rejected");
-    assertViolationFact(output.events, {
+    const violation = assertViolationFact(output.events, {
       eventKind: "write_intent",
       reason: "write_intent_lexical_outside",
+      outside: {
+        destination: "temp",
+        reportedPathContains: "outside-m3",
+        resolvedPathContains: "outside-m3",
+        escapedAtAbsent: true,
+      },
     });
-    assert.ok(!output.rawTranscript.includes("outside-m3"), "rejected raw path is never persisted");
+    assert.ok(violation.reportedPath.startsWith("~"), "MSYS home prefix is replaced by ~");
+    assertPathOnlyOnViolationLine(output.rawTranscript, "outside-m3");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -1244,11 +2202,18 @@ test("M12-14-M4: outside MSYS file_written stays rejected as lexical outside", a
   try {
     const output = await finishFixture(fixture);
     assert.equal(fixture.getPackageCount(), 0, "an outside /d/... path must still be rejected");
-    assertViolationFact(output.events, {
+    const violation = assertViolationFact(output.events, {
       eventKind: "file_written",
       reason: "file_written_lexical_outside",
+      outside: {
+        destination: "temp",
+        reportedPathContains: "outside-m4",
+        resolvedPathContains: "outside-m4",
+        escapedAtAbsent: true,
+      },
     });
-    assert.ok(!output.rawTranscript.includes("outside-m4"), "rejected raw path is never persisted");
+    assert.ok(violation.reportedPath.startsWith("~"), "MSYS home prefix is replaced by ~");
+    assertPathOnlyOnViolationLine(output.rawTranscript, "outside-m4");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -1272,6 +2237,7 @@ test("M12-14-M5: non-drive absolute slash paths are not widened", async (t) => {
       assertViolationFact(output.events, {
         eventKind: "file_written",
         reason: "file_written_lexical_outside",
+        outside: { destination: "other", reportedPath: reported, escapedAtAbsent: true },
       });
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
@@ -1293,6 +2259,82 @@ test("M12-14-M6: uppercase MSYS drive letter normalizes too", async (t) => {
     const output = await finishFixture(fixture);
     assert.equal(fixture.getPackageCount(), 1, "uppercase /D/... in-worktree path must pass");
     assert.ok(!output.events.some((event) => event.type === "run.isolation_violation"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================
+// Section M2 — Windows path-shape pins (TD-373: pin current behavior only)
+// =====================================================================
+//
+// These shapes are deliberately NOT widened by this batch. They are pinned so a
+// future containment change must make its effect on them explicit.
+
+test("TD-373-WIN1 (pin): a drive-relative path on another drive is outside", async (t) => {
+  if (!WIN32) { t.skip("win32 drive-relative semantics"); return; }
+  const fixture = await classifierLandingFixture();
+  try {
+    const noSleep = { sleep: async () => {} };
+    assert.deepEqual(
+      await classifyReportedWriteIntentContainment("E:foo", fixture.base, noSleep),
+      { verdict: "lexical_outside" },
+      "E:foo resolves against the E: current directory, not the worktree",
+    );
+    assert.deepEqual(
+      await classifyReportedWriteContainment("E:foo", fixture.base, noSleep),
+      { verdict: "lexical_outside" },
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-WIN2 (pin): a \\\\?\\ extended-length path pointing inside is still rejected", async (t) => {
+  if (!WIN32) { t.skip("win32 extended-length path syntax"); return; }
+  const fixture = await classifierLandingFixture();
+  try {
+    const noSleep = { sleep: async () => {} };
+    // Unsupported reported form: the containment contract accepts ordinary
+    // drive paths (and the MSYS drive form above), not \\?\ extended-length
+    // paths. Rejection is intentional; this pins it.
+    const extended = `\\\\?\\${resolve(fixture.base, "src", "inside.js")}`;
+    assert.deepEqual(
+      await classifyReportedWriteIntentContainment(extended, fixture.base, noSleep),
+      { verdict: "lexical_outside" },
+    );
+    assert.deepEqual(
+      await classifyReportedWriteContainment(extended, fixture.base, noSleep),
+      { verdict: "lexical_outside" },
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("TD-373-WIN3 (pin): NUL with an inside intent still violates at the delivery layer and never packages", async (t) => {
+  if (!WIN32) { t.skip("Windows device-name semantics"); return; }
+  const fixture = await makeFixture({ runId: "run_td373_win3" });
+  try {
+    // KNOWN LIMITATION, pinned not fixed: a reported target named NUL is a
+    // Windows device name, not an ordinary worktree file. The intent
+    // classifier treats lstat ENOENT as "not created yet" and walks to the
+    // in-worktree ancestor → inside; writing to that name actually goes to the
+    // device (\\.\NUL). The TD-372 review fix keeps this delivery-level result
+    // fail-closed: the canonical-segment rule refuses the relaxation.
+    fixture.setEvents(async function* events() {
+      yield { kind: "write_intent", path: "NUL", toolCallId: "td373_win3", correlationStatus: "tracked" };
+      yield { kind: "file_written", path: "NUL", toolCallId: "td373_win3" };
+      yield { kind: "done", reason: "completed" };
+    });
+    const output = await finishFixture(fixture);
+    assert.equal(fixture.getPackageCount(), 0, "NUL must never be relaxed/packaged");
+    assertViolationFact(output.events, {
+      eventKind: "file_written",
+      reason: "file_written_physical_unresolved",
+      errorCode: "ENOENT",
+      path: "NUL",
+    });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

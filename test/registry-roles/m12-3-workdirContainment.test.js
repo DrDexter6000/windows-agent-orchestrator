@@ -136,20 +136,23 @@ test("M12-3-ISO-R1: delivery run rejects an absolute file_written outside effect
         eventKind: "file_written",
       },
     );
-    assert.ok(!output.rawTranscript.includes("source-checkout"), "unsafe path is never persisted");
-    assert.deepEqual(
-      diagnoseFailure(output.events, "run_m123_containment"),
-      {
-        category: "workdir_escape",
-        // M12-6 FR-02: code is the nullable closed-set provider diagnosis code —
-        // null for every non-provider_auth category.
-        code: null,
-        evidence: [{
-          eventType: "run.isolation_violation",
-          fact: "worker reported a file write outside the authorized delivery worktree",
-        }],
-      },
-    );
+    assert.ok(!Object.hasOwn(violation ?? {}, "path"), "outside reasons use the TD-373 fields, not the unresolved path field");
+    // TD-373 (Owner approved 2026-11-25): the redacted destination fields are
+    // now intentionally recorded on a confirmed-outside fact.
+    assert.equal(violation.destination, "temp");
+    assert.ok(violation.reportedPath.includes("source-checkout"));
+    assert.ok(violation.resolvedPath.includes("source-checkout"));
+    const diagnosis = diagnoseFailure(output.events, "run_m123_containment");
+    assert.equal(diagnosis.category, "workdir_escape");
+    // M12-6 FR-02: code is the nullable closed-set provider diagnosis code —
+    // null for every non-provider_auth category.
+    assert.equal(diagnosis.code, null);
+    assert.equal(diagnosis.evidence.length, 1);
+    assert.equal(diagnosis.evidence[0].eventType, "run.isolation_violation");
+    assert.match(diagnosis.evidence[0].fact, /^worker reported a file write outside the authorized delivery worktree/);
+    // TD-373: the CLI-side fact now quotes the redacted destination facts.
+    assert.match(diagnosis.evidence[0].fact, /destination: temp/);
+    assert.match(diagnosis.evidence[0].fact, /worker-reported path: .*source-checkout/);
     assert.notEqual(
       diagnoseFailure(output.events, "run_other").category,
       "workdir_escape",
@@ -184,9 +187,11 @@ test("M12-3-ISO-R2: delivery run rejects relative traversal before packaging", a
 test("M12-3-ISO-R3: containment uses the raw path before redaction can rewrite it", async () => {
   const output = await runFixtureWithRedactor(
     ({ root }) => createReportedFile(join(root, "secret-source", "escaped.js")),
-    (value) => value?.kind === "file_written"
-      ? { ...value, path: join("src", "apparently-inside.js") }
-      : value,
+    (value) => (typeof value === "string"
+      ? value.replaceAll("secret-source", "REDACTED-SOURCE")
+      : (value?.kind === "file_written"
+        ? { ...value, path: join("src", "apparently-inside.js") }
+        : value)),
   );
   try {
     assert.equal(output.getPackageCount(), 0);
@@ -270,7 +275,14 @@ test("M12-3-ISO-R4: junction to an outside directory fails before packaging", as
       (event) => event.type === "run.isolation_violation"
         && event.code === "workdir_escape",
     ));
-    assert.ok(!output.rawTranscript.includes("outside-target"));
+    const violation = output.events.find((event) => event.type === "run.isolation_violation");
+    // TD-373: a physical outside fact records the redacted reported path and
+    // the physical resolved path (Owner approved 2026-11-25).
+    assert.equal(violation.destination, "temp");
+    assert.ok(violation.reportedPath.endsWith(join("linked", "escaped.js")),
+      "reportedPath quotes the worker-reported target (home prefix redacted)");
+    assert.ok(violation.resolvedPath.includes("outside-target"));
+    assert.equal(violation.escapedAt, "linked");
   } finally {
     await rm(output.root, { recursive: true, force: true });
   }

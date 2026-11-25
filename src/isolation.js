@@ -551,6 +551,35 @@ export function listWorktrees(cwd) {
   return Promise.resolve(parseWorktreeList(out));
 }
 
+export const LIST_WORKTREE_PATHS_TIMEOUT_MS = 5_000;
+
+/**
+ * TD-373: synchronous read-only worktree paths for the isolation-destination
+ * classifier — `git worktree list --porcelain` executed in the run's own
+ * worktree. The first entry is the main checkout; callers exclude their own
+ * worktree. `--no-optional-locks` is requested explicitly (the classifier path
+ * must not take index locks) and the child environment is the repository's
+ * gitChildEnv/gitProbeEnv SSOT. The timeout is deliberately shorter than the
+ * owner heartbeat threshold (10s): a hung git must not delay a violation
+ * decision past the liveness window. A read failure throws; the caller treats
+ * the whole destination determination as "other".
+ *
+ * @param {string} cwd — the run's worktree
+ * @param {{execFn?: Function}} [opts] — test seam (default execFileSync)
+ * @returns {string[]} absolute worktree paths, main checkout first
+ */
+export function listWorktreePaths(cwd, { execFn = execFileSync } = {}) {
+  const out = execFn("git", ["--no-optional-locks", "worktree", "list", "--porcelain"], {
+    cwd: resolve(cwd),
+    encoding: "utf8",
+    env: gitProbeEnv(),
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+    timeout: LIST_WORKTREE_PATHS_TIMEOUT_MS,
+  });
+  return parseWorktreeList(out).map((entry) => entry.path);
+}
+
 /**
  * TD-260（决定 0062 丙′，审核修订版）：回收 ephemeral 只读 run 的 `wao/<runId>` 分支。
  *

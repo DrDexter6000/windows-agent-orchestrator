@@ -1,17 +1,19 @@
 import { mkdir } from "node:fs/promises";
 import { lstatSync, existsSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections, transcriptPathFor, isPersistableOwnerTaskType, parseTags, persistedOwnerTaskType } from "./transcript.js";
 import { projectFactFromCwd, identifyProjectFromCwd, productionProjectIo } from "./projectIdentity.js";
 import { resolveRunDirForWrite, readFirstProjectFact, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, projectFactForWrite, TranscriptResolutionError, listTranscriptsDeep } from "./projectBuckets.js";
-import { createWorktree, createReadOnlyClone, removeWorktree, removeWorktreeNoForce, removeReadOnlyClone, recycleRunBranch, probeReadOnlyClone, terminalWorktreeVerdict } from "./isolation.js";
+import { createWorktree, createReadOnlyClone, removeWorktree, removeWorktreeNoForce, removeReadOnlyClone, recycleRunBranch, probeReadOnlyClone, terminalWorktreeVerdict, listWorktreePaths } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
-import { createSecretRedactor } from "./secretRedaction.js";
+import { createSecretRedactor, redactSecretShapes } from "./secretRedaction.js";
+import { escapeControlChars, safeSliceUtf16 } from "./safeText.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
@@ -22,7 +24,10 @@ import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
-import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES } from "./diagnosis.js";
+import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES, ISOLATION_DESTINATIONS, ISOLATION_DISPLAY_PATH_MAX_CHARS } from "./diagnosis.js";
+// One definition (diagnosis.js) with a compatibility re-export here; both
+// consumers resolve the same binding.
+export { ISOLATION_DISPLAY_PATH_MAX_CHARS };
 // R11-1: the closed effort set SSOT lives in the registry (its historical
 // home since M11-9); the per-dispatch override validators below are hosted
 // HERE, with the synthesis site, mirroring the MODEL_OVERRIDE precedent.
@@ -453,11 +458,19 @@ function resolveLexicallyContainedWrite(rawPath, effectiveCwd) {
 // along on every unresolved verdict for the durable fact; the target BEING the
 // worktree root carries no path. TD-336: without it an unresolved failure used
 // to be persisted without any pointer to which reported write stayed unproven.
-function physicalUnresolved({ base, target }, errorCode) {
+// TD-372 (review fix): `unresolvedAt` records WHICH step of the classification
+// failed (base = the worktree root's realpath, target = the reported target,
+// ancestor = an ancestor of a missing target). It is an INTERNAL field used by
+// the file_written relaxation predicate only and is never persisted on the
+// durable event.
+const ISOLATION_UNRESOLVED_STAGES = Object.freeze(["base", "target", "ancestor"]);
+
+function physicalUnresolved({ base, target }, errorCode, unresolvedAt) {
   const rel = relative(base, target);
   return {
     verdict: "physical_unresolved",
     errorCode,
+    ...(ISOLATION_UNRESOLVED_STAGES.includes(unresolvedAt) ? { unresolvedAt } : {}),
     ...(rel !== "" ? { path: rel.split(sep).join("/") } : {}),
   };
 }
@@ -467,13 +480,20 @@ function physicalUnresolved({ base, target }, errorCode) {
 function classifyReportedWriteContainmentOnce(rawPath, effectiveCwd, { realpath }) {
   const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
   if (!lexical) return { verdict: "lexical_outside" };
+  let physicalBase;
   try {
     // A junction/symlink inside the worktree may resolve to an outside target.
-    const physicalBase = realpath(lexical.base);
+    // Keep the root failure distinct from a target failure (TD-372 review fix):
+    // only "root resolved, target ENOENT" can ever qualify for the relaxation.
+    physicalBase = realpath(lexical.base);
+  } catch (error) {
+    return physicalUnresolved(lexical, error?.code, "base");
+  }
+  try {
     const physicalTarget = realpath(lexical.target);
     return { verdict: isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside" };
   } catch (error) {
-    return physicalUnresolved(lexical, error?.code);
+    return physicalUnresolved(lexical, error?.code, "target");
   }
 }
 
@@ -484,7 +504,7 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
   try {
     physicalBase = realpath(lexical.base);
   } catch (error) {
-    return physicalUnresolved(lexical, error?.code);
+    return physicalUnresolved(lexical, error?.code, "base");
   }
   try {
     // lstat distinguishes a genuinely missing target from a dangling link.
@@ -492,7 +512,7 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
     lstat(lexical.target);
   } catch (error) {
     if (error?.code !== "ENOENT") {
-      return physicalUnresolved(lexical, error?.code);
+      return physicalUnresolved(lexical, error?.code, "target");
     }
     let ancestor = dirname(lexical.target);
     while (true) {
@@ -503,12 +523,12 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
         // An ENOENT while climbing is the normal "not created yet" shape, not
         // a failed call: keep climbing. Any other code fails closed.
         if (ancestorError?.code !== "ENOENT") {
-          return physicalUnresolved(lexical, ancestorError?.code);
+          return physicalUnresolved(lexical, ancestorError?.code, "ancestor");
         }
         const parent = dirname(ancestor);
         // Every ancestor reported ENOENT up to the filesystem root: still
         // unprovable. The last observed failure is the recorded code.
-        if (parent === ancestor) return physicalUnresolved(lexical, "ENOENT");
+        if (parent === ancestor) return physicalUnresolved(lexical, "ENOENT", "ancestor");
         ancestor = parent;
       }
     }
@@ -519,7 +539,7 @@ function classifyReportedWriteIntentContainmentOnce(rawPath, effectiveCwd, { rea
   } catch (error) {
     // Existing but unresolvable targets (for example dangling links) fail
     // closed; ancestor walking is reserved for lstat ENOENT above.
-    return physicalUnresolved(lexical, error?.code);
+    return physicalUnresolved(lexical, error?.code, "target");
   }
 }
 
@@ -574,6 +594,9 @@ async function classifyWithPhysicalRetry(classifyOnce, sleep) {
     verdict: outcome.verdict,
     errorCode,
     ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+    ...(ISOLATION_UNRESOLVED_STAGES.includes(outcome.unresolvedAt)
+      ? { unresolvedAt: outcome.unresolvedAt }
+      : {}),
     ...(errorCode === "other"
       && typeof outcome.errorCode === "string"
       && OBSERVED_FS_ERROR_CODE_RE.test(outcome.errorCode)
@@ -590,12 +613,13 @@ async function classifyWithPhysicalRetry(classifyOnce, sleep) {
  *   lstat is accepted for signature parity with the intent classifier below;
  *   a post-write verdict resolves the reported target only.
  * @returns {Promise<{verdict: string, errorCode?: string, path?: string,
- *   observedErrorCode?: string}>} verdict ∈ inside | lexical_outside |
- *   physical_outside | physical_unresolved. On physical_unresolved: errorCode
- *   (a closed-set ISOLATION_PHYSICAL_ERROR_CODES member), path (the
- *   workspace-relative "/"-separated target; absent when the target IS the
- *   worktree root) and — only when errorCode reduced to "other" — the
- *   well-formed raw last-failure code as observedErrorCode.
+ *   observedErrorCode?: string, unresolvedAt?: string}>} verdict ∈ inside |
+ *   lexical_outside | physical_outside | physical_unresolved. On
+ *   physical_unresolved: errorCode (a closed-set ISOLATION_PHYSICAL_ERROR_CODES
+ *   member), path (the workspace-relative "/"-separated target; absent when the
+ *   target IS the worktree root), — only when errorCode reduced to "other" — the
+ *   well-formed raw last-failure code as observedErrorCode, and the INTERNAL
+ *   unresolvedAt stage (base | target | ancestor; never persisted).
  */
 export async function classifyReportedWriteContainment(
   rawPath,
@@ -627,6 +651,454 @@ export async function classifyReportedWriteIntentContainment(
     sleep,
   );
 }
+
+// ===== TD-373: destination of a confirmed-outside write ==========================
+//
+// Owner-approved (2026-11-25) redacted path recording for *_lexical_outside /
+// *_physical_outside isolation facts. The destination classification is purely
+// advisory: it NEVER changes the containment verdict, and any failure (git
+// unreadable, realpath failure, malformed root) collapses to "other" instead of
+// throwing on the violation path.
+//
+// Roots: main checkout + other worktrees of the same repository (git worktree
+// list --porcelain, first entry = main checkout; the run's own worktree is not
+// a root), os.tmpdir(), os.homedir(). Matching is segment-boundary based and
+// case-insensitive on win32; when several roots match, the deepest one wins
+// (so <main>/.wao-worktrees/<id> is other_worktree, and a temp directory under
+// the user profile is temp).
+
+function _samePathFold(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const identity = (value) => {
+    const lexical = resolve(value);
+    try {
+      return realpathSync.native(lexical);
+    } catch {
+      return lexical;
+    }
+  };
+  const left = identity(a);
+  const right = identity(b);
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function _isPathAtOrUnder(candidate, root) {
+  if (typeof candidate !== "string" || typeof root !== "string") return false;
+  const rel = relative(resolve(root), resolve(candidate));
+  return rel === ""
+    || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function _pathDepth(root) {
+  const normalized = resolve(root);
+  return process.platform === "win32" ? normalized.toLowerCase().length : normalized.length;
+}
+
+/**
+ * Read the destination roots for one run worktree. Each root source is read
+ * independently: an unreadable source is skipped (never fatal). The run's own
+ * worktree is excluded. The classify-level `rootsFn` seam is authoritative and
+ * its failure collapses the whole determination to "other"; a failing
+ * `listWorktreesFn` here only skips the git root family.
+ *
+ * @param {string} effectiveCwd — the run's worktree
+ * @param {{listWorktreesFn?: Function, tmpdirFn?: Function, homedirFn?: Function}} [deps]
+ * @returns {{kind: string, path: string}[]}
+ */
+export function readIsolationDestinationRoots(effectiveCwd, deps = {}) {
+  const listWorktreesFn = deps.listWorktreesFn ?? listWorktreePaths;
+  const tmpdirFn = deps.tmpdirFn ?? tmpdir;
+  const homedirFn = deps.homedirFn ?? homedir;
+  const roots = [];
+  const ownWorktree = typeof effectiveCwd === "string" && effectiveCwd.length > 0
+    ? resolve(effectiveCwd) : null;
+
+  // Main checkout + other worktrees. A git read failure skips this whole root
+  // family; temp/home are still usable.
+  try {
+    const worktreePaths = listWorktreesFn(ownWorktree ?? effectiveCwd);
+    if (Array.isArray(worktreePaths)) {
+      worktreePaths.forEach((worktreePath, index) => {
+        if (typeof worktreePath !== "string" || worktreePath.length === 0) return;
+        if (ownWorktree !== null && _samePathFold(worktreePath, ownWorktree)) return;
+        roots.push({ kind: index === 0 ? "main_checkout" : "other_worktree", path: worktreePath });
+      });
+    }
+  } catch { /* git roots unreadable → skip */ }
+
+  for (const [kind, reader] of [["temp", tmpdirFn], ["home", homedirFn]]) {
+    try {
+      const root = reader();
+      if (typeof root === "string" && root.length > 0) roots.push({ kind, path: root });
+    } catch { /* this root is unreadable → skip */ }
+  }
+  return roots;
+}
+
+/**
+ * Classify the closed-set destination of an outside landing path.
+ *
+ * @param {object} input
+ * @param {string} input.landingPath — lexical resolve() result (physical=false)
+ *   or the physical landing (physical=true)
+ * @param {boolean} [input.physical=false] — compare against realpath()'d roots
+ * @param {string} input.effectiveCwd — the run's worktree
+ * @param {object} [input.deps] — test seams (listWorktreesFn/tmpdirFn/homedirFn/
+ *   realpathFn)
+ * @returns {"main_checkout"|"other_worktree"|"temp"|"home"|"other"}
+ */
+export function classifyIsolationDestination({
+  landingPath,
+  physical = false,
+  effectiveCwd,
+  deps = {},
+} = {}) {
+  try {
+    if (typeof landingPath !== "string" || landingPath.trim().length === 0) return "other";
+    const realpathFn = deps.realpathFn ?? realpathSync.native;
+    const landing = resolve(landingPath);
+    // A directly injected roots reader is authoritative: if it throws, the
+    // whole destination determination fails closed to "other". The production
+    // reader (readIsolationDestinationRoots) already skips individual
+    // unreadable root sources itself.
+    const roots = typeof deps.rootsFn === "function"
+      ? deps.rootsFn(effectiveCwd)
+      : readIsolationDestinationRoots(effectiveCwd, deps);
+    let best = null;
+    for (const root of roots) {
+      let rootPath;
+      try {
+        rootPath = physical ? realpathFn(root.path) : resolve(root.path);
+      } catch {
+        continue; // unreadable root → skipped
+      }
+      if (typeof rootPath !== "string" || rootPath.length === 0) continue;
+      if (!_isPathAtOrUnder(landing, rootPath)) continue;
+      const depth = _pathDepth(rootPath);
+      if (best === null || depth > best.depth) best = { kind: root.kind, depth };
+    }
+    return best?.kind ?? "other";
+  } catch {
+    return "other";
+  }
+}
+
+function _lexicalIsolationLanding(rawPath, effectiveCwd) {
+  if (typeof rawPath !== "string" || rawPath.trim().length === 0) return null;
+  if (typeof effectiveCwd !== "string" || effectiveCwd.trim().length === 0) return null;
+  const base = resolve(effectiveCwd);
+  return resolve(base, normalizeMsysDrivePath(rawPath));
+}
+
+// "Deepest existing prefix" realpath + the still-missing suffix (Owner's TD-373
+// rule for a physical resolvedPath). Any failure returns null (field omitted).
+function _physicalIsolationLanding(target, { realpath = realpathSync.native, lstat = lstatSync } = {}) {
+  if (typeof target !== "string" || target.length === 0) return null;
+  const resolvedTarget = resolve(target);
+  let ancestor = resolvedTarget;
+  while (true) {
+    try {
+      lstat(ancestor);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      ancestor = parent;
+      continue;
+    }
+    try {
+      const physicalAncestor = realpath(ancestor);
+      const suffix = relative(ancestor, resolvedTarget);
+      return suffix === "" ? physicalAncestor : join(physicalAncestor, suffix);
+    } catch {
+      return null;
+    }
+  }
+}
+
+// TD-373 escapedAt: walk from the worktree root through the reported target;
+// the first existing prefix whose realpath lands outside the worktree names the
+// level, as a "/"-separated worktree-relative path. Best effort: null when it
+// cannot be computed (missing prefix, dangling link, realpath failure).
+function _physicalIsolationEscapedAt(target, effectiveCwd, {
+  realpath = realpathSync.native,
+  lstat = lstatSync,
+} = {}) {
+  try {
+    const base = resolve(effectiveCwd);
+    const physicalBase = realpath(base);
+    const resolvedTarget = resolve(target);
+    const rel = relative(base, resolvedTarget);
+    if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+    const segments = rel.split(sep);
+    let current = base;
+    for (let index = 0; index < segments.length; index += 1) {
+      current = join(current, segments[index]);
+      try {
+        lstat(current);
+      } catch {
+        return null;
+      }
+      let physical;
+      try {
+        physical = realpath(current);
+      } catch {
+        return null;
+      }
+      if (!isPathInside(physicalBase, physical)) {
+        return segments.slice(0, index + 1).join("/");
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ===== TD-373: redacted display form for the outside-write fields ===============
+//
+// ONE function for reportedPath and resolvedPath, in this order:
+//   1. this._redact (exact values) → redactSecretShapes (shapes)
+//   2. user-home prefix → "~" after a comparison normalization: separators
+//      unified, `\\?\` / `\\?\UNC\` stripped, `.` segments removed; native,
+//      mixed-separator and MSYS drive forms all match. Only a LEADING home
+//      prefix is replaced.
+//   2b. Username leak guard: after normalization/home replacement, if the
+//      home's last path segment (the user name) still appears as a complete
+//      path segment anywhere (case-insensitive; Win32 trailing dots/spaces
+//      folded), the WHOLE field is omitted — we cannot prove the redaction.
+//   3. control characters escaped (the repository's shared escapeControlChars)
+//   4. UTF-16-safe slice to the shared limit (the repository's safeSliceUtf16)
+//   5. this._redact + redactSecretShapes again on the final string
+//   6. UTF-16-safe slice AGAIN after the final redaction (markers added in step
+//      5 may lengthen the string past the limit).
+function _normalizeHomeCompareParts(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
+  let normalized = text;
+  if (process.platform === "win32") {
+    // MSYS drive form (/c/Users/...) before unifying separators.
+    normalized = normalized.replace(/^\/([A-Za-z])(?=\/|$)/, (match, drive) => `${drive.toUpperCase()}:`);
+    normalized = normalized.replaceAll("/", "\\");
+  }
+  normalized = normalized.replace(/^\\\\\?\\UNC\\/i, "\\\\");
+  normalized = normalized.replace(/^\\\\\?\\/i, "");
+  return normalized
+    .split(/[\\/]+/)
+    .filter((part) => part.length > 0 && part !== ".");
+}
+
+function _homeCompareParts(homeDir) {
+  return _normalizeHomeCompareParts(resolve(homeDir));
+}
+
+function _partsStartWith(parts, prefix) {
+  if (!Array.isArray(parts) || !Array.isArray(prefix) || prefix.length === 0) return false;
+  if (parts.length < prefix.length) return false;
+  const insensitive = process.platform === "win32";
+  for (let index = 0; index < prefix.length; index += 1) {
+    const left = insensitive ? parts[index].toLowerCase() : parts[index];
+    const right = insensitive ? prefix[index].toLowerCase() : prefix[index];
+    if (left !== right) return false;
+  }
+  return true;
+}
+
+function _replaceHomePrefix(text, homeDir) {
+  if (typeof text !== "string" || typeof homeDir !== "string") return text;
+  const homeParts = _homeCompareParts(homeDir);
+  const parts = _normalizeHomeCompareParts(text);
+  if (!_partsStartWith(parts, homeParts)) return text;
+  const rest = parts.slice(homeParts.length).join(sep);
+  return rest.length > 0 ? `~${sep}${rest}` : "~";
+}
+
+// Win32 name identity for the user-name guard: an ADS/stream suffix starts at
+// the first colon (`Alice::$INDEX_ALLOCATION` is the Alice directory), and
+// trailing dots/spaces are ignored by the OS (`Alice.` is `Alice`).
+function _segmentIdentity(segment) {
+  const colon = segment.indexOf(":");
+  const baseName = colon >= 0 ? segment.slice(0, colon) : segment;
+  return baseName.replace(/[ .]+$/, "");
+}
+
+function _containsHomeUserNameSegment(text, homeDir) {
+  if (typeof text !== "string" || typeof homeDir !== "string") return false;
+  const homeParts = _homeCompareParts(homeDir);
+  const userName = homeParts.at(-1);
+  // A drive-root home (`C:\`) has no meaningful user segment; never let `C:`
+  // cause every path on that drive to be omitted.
+  if (typeof userName !== "string" || userName.length === 0 || /^[A-Za-z]:$/.test(userName)) return false;
+  const wanted = userName.toLowerCase();
+  return _normalizeHomeCompareParts(text).some((part) => {
+    if (part === "." || part === "..") return false;
+    return _segmentIdentity(part).toLowerCase() === wanted;
+  });
+}
+
+function _finishIsolationDisplayPath(prepared, redact, homeDir) {
+  const homeReplaced = _replaceHomePrefix(prepared, homeDir);
+  // The user-name guard runs on the already normalized/replaced value: if an
+  // equivalent spelling still exposes the user name as a whole segment, the
+  // caller omits the field entirely.
+  if (_containsHomeUserNameSegment(homeReplaced, homeDir)) return null;
+  const controlsEscaped = escapeControlChars(homeReplaced);
+  const bounded = safeSliceUtf16(controlsEscaped, 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+  const redactedAgain = redactSecretShapes(redact(bounded));
+  const finalText = safeSliceUtf16(redactedAgain, 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+  // Re-run the guard on the FINAL text: control-character escaping can turn a
+  // raw `Alice<TAB>` segment into `Alice\t`, and the escape backslash then acts
+  // as a path separator for the segment check, making the user name a complete
+  // segment in the persisted text. Same for markers added by the final
+  // redaction pass.
+  if (_containsHomeUserNameSegment(finalText, homeDir)) return null;
+  return finalText;
+}
+
+function _isolationDisplayPath(rawText, redact, homeDir) {
+  if (typeof rawText !== "string" || rawText.length === 0) return null;
+  const prepared = redactSecretShapes(redact(rawText));
+  return _finishIsolationDisplayPath(prepared, redact, homeDir);
+}
+
+/**
+ * Build the TD-373 additive fields for one confirmed-outside violation.
+ * Never throws: any classification/redaction failure degrades to destination
+ * "other" and omits the optional path fields. `reported`/`resolved` are NOT
+ * persisted here — the caller re-redacts defensively before the append.
+ *
+ * @param {object} input
+ * @param {string} input.rawPath — the worker-reported path (unredacted)
+ * @param {string} input.verdict — lexical_outside | physical_outside
+ * @param {string} input.effectiveCwd
+ * @param {Function} input.redact — this._redact
+ * @param {Function} input.rootsFn — destination roots reader (Run seam)
+ * @returns {{destination:string, reportedPath?:string, resolvedPath?:string, escapedAt?:string}}
+ */
+export function describeIsolationOutsideWrite({
+  rawPath,
+  verdict,
+  effectiveCwd,
+  redact,
+  rootsFn = readIsolationDestinationRoots,
+} = {}) {
+  try {
+    if (typeof redact !== "function") return { destination: "other" };
+    const homeDir = homedir();
+    const lexicalLanding = _lexicalIsolationLanding(rawPath, effectiveCwd);
+    const physical = verdict === "physical_outside";
+    const resolvedLanding = physical
+      ? _physicalIsolationLanding(lexicalLanding)
+      : lexicalLanding;
+    const firstRedacted = typeof rawPath === "string"
+      ? redactSecretShapes(redact(rawPath))
+      : null;
+    // TD-336 layer 1: resolve()/normalization can stitch a secret literal back
+    // together. If the raw report changed under the first redaction, do not
+    // persist the normalized landing.
+    const resolvedWithheld = typeof rawPath === "string" && firstRedacted !== rawPath;
+    const destination = classifyIsolationDestination({
+      landingPath: physical ? resolvedLanding : lexicalLanding,
+      physical,
+      effectiveCwd,
+      deps: { rootsFn },
+    });
+    const reportedPath = _isolationDisplayPath(rawPath, redact, homeDir);
+    const resolvedPath = resolvedWithheld || resolvedLanding === null
+      ? null
+      : _isolationDisplayPath(resolvedLanding, redact, homeDir);
+    const escapedAt = physical && !resolvedWithheld && typeof lexicalLanding === "string"
+      ? _physicalIsolationEscapedAt(lexicalLanding, effectiveCwd)
+      : null;
+    return {
+      destination,
+      ...(typeof reportedPath === "string" && reportedPath.length > 0 ? { reportedPath } : {}),
+      ...(typeof resolvedPath === "string" && resolvedPath.length > 0 ? { resolvedPath } : {}),
+      ...(physical
+        && typeof escapedAt === "string"
+        && escapedAt.length > 0
+        ? { escapedAt: _isolationDisplayPath(escapedAt, redact, homeDir) }
+        : {}),
+    };
+  } catch {
+    return { destination: "other" };
+  }
+}
+
+// ===== TD-372 review fix: qualification for the file_written relaxation =========
+//
+// The relaxation is only for ONE provable ordinary file write: the file_written
+// report must be byte-identical to the intent's raw report, the ENOENT must come
+// from the target (not the worktree root), and the path must not be a Win32
+// device/ADS/trailing-dot/trailing-space shape. Prefixes and redaction markers
+// disable it too (DeepSeek redacts the whole event before enqueueing it, so the
+// classified path may no longer be the real one).
+const WIN32_RESERVED_DEVICE_RE =
+  /^(?:CON|PRN|AUX|NUL|COM[0-9\u00B9\u00B2\u00B3]|LPT[0-9\u00B9\u00B2\u00B3]|CONIN\$|CONOUT\$)$/i;
+
+function _hasUnsupportedPrefix(rawPath) {
+  return /^(?:[\\/]{2})/.test(rawPath);
+}
+
+// All platforms: `..` is resolved by the WRITER, and POSIX writers (Git Bash
+// and friends) apply physical semantics — `j/../x` walks through the junction
+// first and then `..`. The lexical containment check cannot see that, so any
+// `..` segment disqualifies the TD-372 relaxation. `.` remains exempt.
+function _hasParentTraversalSegment(rawPath) {
+  return typeof rawPath === "string"
+    && rawPath.split(/[\\/]+/).some((segment) => segment === "..");
+}
+
+/**
+ * True when every reported segment is a canonical Win32 segment. Only called on
+ * win32. A drive prefix (`X:`) is not a segment; `.`/`..` are the only allowed
+ * special segments. Any other segment with a trailing dot/space, a colon (ADS),
+ * or a reserved device base name disqualifies.
+ * @param {string} rawPath
+ * @returns {boolean}
+ */
+export function hasNonCanonicalWindowsSegment(rawPath) {
+  if (typeof rawPath !== "string") return true;
+  const withoutDrive = rawPath.replace(/^[A-Za-z]:/, "");
+  for (const segment of withoutDrive.split(/[\\/]+/)) {
+    if (segment.length === 0 || segment === "." || segment === "..") continue;
+    if (segment.replace(/[ .]+$/, "") !== segment) return true;
+    if (segment.includes(":")) return true;
+    const baseName = segment.split(".")[0].replace(/[ .]+$/, "");
+    if (WIN32_RESERVED_DEVICE_RE.test(baseName)) return true;
+  }
+  return false;
+}
+
+/**
+ * The complete TD-372 relaxation predicate (pure; exported for tests). The
+ * caller separately requires a confirmable toolCallId and the map entry (which
+ * is consumed before this is called).
+ * @param {object} input
+ * @param {string} input.verdict
+ * @param {string} input.errorCode
+ * @param {string} [input.unresolvedAt]
+ * @param {string} input.intentPath — the write_intent's raw reported path
+ * @param {string} input.fileWrittenPath — the file_written's raw reported path
+ * @returns {boolean}
+ */
+export function isTd372RelaxableConfirmation({
+  verdict,
+  errorCode,
+  unresolvedAt,
+  intentPath,
+  fileWrittenPath,
+} = {}) {
+  if (verdict !== "physical_unresolved" || errorCode !== "ENOENT") return false;
+  if (unresolvedAt !== "target") return false;
+  if (typeof intentPath !== "string" || typeof fileWrittenPath !== "string") return false;
+  if (intentPath !== fileWrittenPath) return false;
+  if (_hasParentTraversalSegment(fileWrittenPath)) return false;
+  if (fileWrittenPath.includes("[REDACTED")) return false;
+  if (_hasUnsupportedPrefix(fileWrittenPath)) return false;
+  if (process.platform === "win32" && hasNonCanonicalWindowsSegment(fileWrittenPath)) return false;
+  return true;
+}
+
 
 export class RunManager {
   constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery, userEnvReader, createWorktreeFn = createWorktree, createReadOnlyCloneFn = createReadOnlyClone }) {
@@ -2729,6 +3201,8 @@ export class Run {
     probeReadOnlyCloneForRelease = probeReadOnlyClone,
     sessionReuse = null,
     runsRoot = null,
+    isolationRootsFn = readIsolationDestinationRoots,
+    containmentDeps = null,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -2800,6 +3274,15 @@ export class Run {
     // 缺席（测试直接构造 Run 等）→ 占用扫描判不了 → 按占用保留（fail-closed）。
     this.runsRoot = typeof runsRoot === "string" && runsRoot.length > 0 ? runsRoot : null;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
+    // TD-373: destination-roots reader seam. Production reads git worktree
+    // list + os.tmpdir()/os.homedir(); tests can inject a throwing reader to
+    // prove a destination-classification failure only degrades to "other".
+    this.isolationRootsFn = typeof isolationRootsFn === "function"
+      ? isolationRootsFn : readIsolationDestinationRoots;
+    // TD-372 review fix: test seam for the containment classifiers' filesystem
+    // readers (realpath/lstat/sleep). Production leaves this null.
+    this.containmentDeps = containmentDeps && typeof containmentDeps === "object"
+      ? containmentDeps : null;
     this.scorecardRules = scorecardRules;
     // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
     // （run.read_only_declared），scorecard 的合成事件序列里没有该事实 → TD-145
@@ -2991,7 +3474,39 @@ export class Run {
     // gates below).
     let isolationViolationPath = null;
     let isolationViolationObservedErrorCode = null;
+    // TD-373: the additive redacted destination fields for a confirmed-outside
+    // reason (lexical_outside / physical_outside).
+    let isolationViolationDestination = null;
+    let isolationViolationReportedPath = null;
+    let isolationViolationResolvedPath = null;
+    let isolationViolationEscapedAt = null;
     const pendingDeliveryWriteToolCallIds = new Set();
+    // TD-372: tool call ids whose write_intent was classified INSIDE at intent
+    // time, mapped to the intent's EXACT raw path. Kept independently of
+    // pendingDeliveryWriteToolCallIds (which is removed on confirmation);
+    // bounded by the same cap, oldest evicted first (= no relaxation for the
+    // evicted ids, fail closed). The path value is what makes the relaxation
+    // one-shot and byte-bound to the reported intent.
+    const insideDeliveryWriteIntentPathByToolCallId = new Map();
+    const rememberInsideDeliveryWriteIntent = (toolCallId, intentPath) => {
+      if (!isConfirmableToolCallId(toolCallId) || typeof intentPath !== "string") return;
+      if (insideDeliveryWriteIntentPathByToolCallId.has(toolCallId)) {
+        insideDeliveryWriteIntentPathByToolCallId.delete(toolCallId);
+      }
+      if (insideDeliveryWriteIntentPathByToolCallId.size >= MAX_PENDING_DELIVERY_WRITE_INTENTS) {
+        const oldest = insideDeliveryWriteIntentPathByToolCallId.keys().next().value;
+        insideDeliveryWriteIntentPathByToolCallId.delete(oldest);
+      }
+      // Re-inserting moves the id to the newest position (Map preserves order).
+      insideDeliveryWriteIntentPathByToolCallId.set(toolCallId, intentPath);
+    };
+    const describeOutsideViolation = (rawPath, verdict) => describeIsolationOutsideWrite({
+      rawPath,
+      verdict,
+      effectiveCwd: this.effectiveCwd,
+      redact: this._redact,
+      rootsFn: this.isolationRootsFn,
+    });
     // M12-14: classify WHY a reported write fails the delivery containment
     // gate. Returns null when the event is not a violating write, otherwise
     // { reason } — a closed-set ISOLATION_VIOLATION_REASONS member — plus, for a
@@ -3037,29 +3552,70 @@ export class Run {
         const { verdict, errorCode, path, observedErrorCode } = await classifyReportedWriteIntentContainment(
           rawEvent.path,
           this.effectiveCwd,
+          this.containmentDeps ?? undefined,
         );
-        return verdict === "inside"
-          ? null
-          : {
-            reason: `write_intent_${verdict}`,
-            errorCode,
-            observedErrorCode,
-            ...gatePersistedPath(rawEvent.path, path),
-          };
+        if (verdict === "inside") {
+          rememberInsideDeliveryWriteIntent(rawEvent.toolCallId, rawEvent.path);
+          return null;
+        }
+        return {
+          reason: `write_intent_${verdict}`,
+          errorCode,
+          observedErrorCode,
+          ...gatePersistedPath(rawEvent.path, path),
+          ...((verdict === "lexical_outside" || verdict === "physical_outside")
+            ? describeOutsideViolation(rawEvent.path, verdict)
+            : {}),
+        };
       }
       if (rawEvent?.kind === "file_written") {
-        const { verdict, errorCode, path, observedErrorCode } = await classifyReportedWriteContainment(
+        const { verdict, errorCode, path, observedErrorCode, unresolvedAt } = await classifyReportedWriteContainment(
           rawEvent.path,
           this.effectiveCwd,
+          this.containmentDeps ?? undefined,
         );
-        return verdict === "inside"
-          ? null
-          : {
-            reason: `file_written_${verdict}`,
+        // The qualification is consumed by the FIRST confirmation for this
+        // tool call, even when that confirmation is not itself relaxed: a
+        // second file_written can never enjoy the relaxation.
+        const intentPath = isConfirmableToolCallId(rawEvent.toolCallId)
+          ? insideDeliveryWriteIntentPathByToolCallId.get(rawEvent.toolCallId)
+          : undefined;
+        if (intentPath !== undefined) {
+          insideDeliveryWriteIntentPathByToolCallId.delete(rawEvent.toolCallId);
+        }
+        if (verdict === "inside") return null;
+        // TD-372 (review fix): the qualification is bound to the intent's EXACT
+        // raw path and is one-shot. It only covers one provable ordinary file
+        // write: ENOENT from the target itself (not a failed worktree-root
+        // realpath), identical raw paths, no `\\?\`/`\\.\`/UNC prefix, a
+        // canonical Win32 segment shape (no trailing dot/space, ADS colon, or
+        // reserved device name such as NUL), and no redaction marker (DeepSeek
+        // redacts the event before enqueueing it). Everything else keeps the
+        // pre-batch fail-closed behavior: no toolCallId (kimi-web/zcode/codex
+        // file_written events carry none), no matching inside intent, a
+        // non-ENOENT error, physical_outside, or a failed root realpath.
+        // Known boundary (not defended): swapping the junction between the
+        // intent check and the write is TOCTOU; the backend-reported intent is a
+        // signal, and the control plane guarantees "fail and withhold delivery",
+        // not the disk.
+        const relaxedByInsideIntent = intentPath !== undefined
+          && isTd372RelaxableConfirmation({
+            verdict,
             errorCode,
-            observedErrorCode,
-            ...gatePersistedPath(rawEvent.path, path),
-          };
+            unresolvedAt,
+            intentPath,
+            fileWrittenPath: rawEvent.path,
+          });
+        if (relaxedByInsideIntent) return null;
+        return {
+          reason: `file_written_${verdict}`,
+          errorCode,
+          observedErrorCode,
+          ...gatePersistedPath(rawEvent.path, path),
+          ...((verdict === "lexical_outside" || verdict === "physical_outside")
+            ? describeOutsideViolation(rawEvent.path, verdict)
+            : {}),
+        };
       }
       return null;
     };
@@ -3167,6 +3723,10 @@ export class Run {
             isolationViolationErrorCode = writeViolation.errorCode ?? null;
             isolationViolationPath = writeViolation.path ?? null;
             isolationViolationObservedErrorCode = writeViolation.observedErrorCode ?? null;
+            isolationViolationDestination = writeViolation.destination ?? null;
+            isolationViolationReportedPath = writeViolation.reportedPath ?? null;
+            isolationViolationResolvedPath = writeViolation.resolvedPath ?? null;
+            isolationViolationEscapedAt = writeViolation.escapedAt ?? null;
             break;
           }
           await markRunningOnce(STATE_CHANGE_REASON.first_event);
@@ -3268,21 +3828,29 @@ export class Run {
     }
 
     if (isolationViolationKind) {
-      // M12-14: persist ONLY the closed-set code/eventKind/reason — plus, since
-      // TD-336, a physical_unresolved reason also carries the workspace-relative
-      // reported path (redacted by the same this._redact the run.event stream
-      // goes through — never the absolute raw path) and the raw last-failure
-      // code as a bounded well-formed token. The additive reason is persisted
-      // only when it is an exact closed-set member; readers treat an absent
-      // reason as unknown. The same closed-set rule governs the additive
-      // errorCode: it is persisted only for a physical_unresolved reason and
-      // only as an ISOLATION_PHYSICAL_ERROR_CODES member (an unexpected code was
-      // already normalized to "other" at classification time). Reasons without a
-      // lexically contained target (lexical_outside / physical_outside /
-      // correlation) never carry a path — an outside path is not quoted back.
-      // The persisted path is UNTRUSTED worker text (JSON-escaped when written):
-      // any future display surface must sanitize control characters and bound
-      // its length itself.
+      // M12-14: persist the closed-set code/eventKind/reason. TD-336: a
+      // physical_unresolved reason also carries the workspace-relative reported
+      // path (redacted by the same this._redact the run.event stream goes
+      // through) and the raw last-failure code as a bounded well-formed token.
+      // The additive reason is persisted only when it is an exact closed-set
+      // member; readers treat an absent reason as unknown. The same closed-set
+      // rule governs the additive errorCode: it is persisted only for a
+      // physical_unresolved reason and only as an ISOLATION_PHYSICAL_ERROR_CODES
+      // member (an unexpected code was already normalized to "other" at
+      // classification time).
+      //
+      // TD-373 (Owner approved 2026-11-25): a CONFIRMED-outside reason
+      // (lexical_outside / physical_outside) now also records where the worker
+      // tried to write — a closed-set `destination`, the redacted
+      // `reportedPath`, the redacted `resolvedPath`, and (physical only, best
+      // effort) the `escapedAt` level. Both path fields went through the one
+      // redaction pipeline (exact + shape redaction, home → "~", control
+      // escaping, 300-char bound, final redaction pass); they are still
+      // UNTRUSTED worker text (JSON-escaped when written) and every display
+      // surface must sanitize/bound again itself. The rejected call's body,
+      // first line, hash and byte count are never recorded. Correlation and
+      // physical_unresolved reasons keep their existing fields only; those
+      // reasons never carry the new destination fields.
       const isolationReasonPayload = ISOLATION_VIOLATION_REASONS.includes(isolationViolationReason)
         ? { reason: isolationViolationReason }
         : {};
@@ -3306,6 +3874,29 @@ export class Run {
         && OBSERVED_FS_ERROR_CODE_RE.test(isolationViolationObservedErrorCode)
         ? { observedErrorCode: isolationViolationObservedErrorCode }
         : {};
+      const isolationOutsideReason = typeof isolationViolationReason === "string"
+        && (isolationViolationReason.endsWith("_lexical_outside")
+          || isolationViolationReason.endsWith("_physical_outside"));
+      const isolationOutsidePayload = isolationOutsideReason
+        ? {
+          destination: ISOLATION_DESTINATIONS.includes(isolationViolationDestination)
+            ? isolationViolationDestination
+            : "other",
+          ...(typeof isolationViolationReportedPath === "string"
+            && isolationViolationReportedPath.length > 0
+            ? { reportedPath: this._redact(isolationViolationReportedPath) }
+            : {}),
+          ...(typeof isolationViolationResolvedPath === "string"
+            && isolationViolationResolvedPath.length > 0
+            ? { resolvedPath: this._redact(isolationViolationResolvedPath) }
+            : {}),
+          ...(isolationViolationReason.endsWith("_physical_outside")
+            && typeof isolationViolationEscapedAt === "string"
+            && isolationViolationEscapedAt.length > 0
+            ? { escapedAt: this._redact(isolationViolationEscapedAt) }
+            : {}),
+        }
+        : {};
       const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.workdir_escape, {
         factEvents: [
           {
@@ -3317,6 +3908,7 @@ export class Run {
               ...isolationErrorCodePayload,
               ...isolationPathPayload,
               ...isolationObservedCodePayload,
+              ...isolationOutsidePayload,
             },
           },
           {

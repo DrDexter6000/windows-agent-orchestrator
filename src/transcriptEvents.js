@@ -214,6 +214,10 @@ export const TRANSCRIPT_EVENT_REGISTRY = Object.freeze([
     type: "run.delivery_reverification_unavailable",
     description: "reverify 链 outcome：unavailable（每链恰一条，按 transcript 顺序绑定其所属请求；非空 unavailableReason；不可作为第二条链的资格来源）。",
   },
+  // TD-348: sessionShape on this fact is one of the closed-set values
+  // no_session / process_session / session_rebooted. The value is payload-only
+  // (no MCP output schema consumes it); adding session_rebooted does not change
+  // any wire schema.
   {
     type: "run.process_missing_confirmed",
     description: "Lead 授权的孤儿进程零模型结算确认事实（常量 PROCESS_MISSING_CONFIRMED_TYPE 写出）：`wao runs settle` 写 {settledBy: \"lead_settle\", sessionShape, reason, reasonSha256}，repackage 的孤儿结算写空载荷；与 terminal failed（reason=process_missing）转移经 transitionState factEvents 原子同批落盘，恰一条；无配套转移的孤立事实不构成可恢复证明（fail-closed）。",

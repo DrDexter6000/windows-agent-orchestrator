@@ -2483,3 +2483,81 @@ test("DX-ISO-3: a reason that is not physical_unresolved never grows the suffix"
   assert.match(malformed.evidence[0].fact, /no trusted reason recorded/);
   assert.ok(!malformed.evidence[0].fact.includes("filesystem error code"));
 });
+
+// TD-373: the CLI-side isolation fact appends the redacted destination fields
+// for confirmed-outside reasons. Every field is untrusted transcript text on
+// this side: wrong types are ignored, control characters are escaped again and
+// the value is bounded again. MCP run_diagnose keeps projecting event types
+// only (its separate surface is pinned in mcpRunDiagnose.test.js).
+test("DX-ISO-4: outside reasons append destination + worker-reported path + resolved path + escapedAt", () => {
+  const d = diagnoseIsolationViolation({
+    reason: "file_written_physical_outside",
+    destination: "temp",
+    reportedPath: "linked/evil\u0007name.js",
+    resolvedPath: "C:\\outside\\evil.js",
+    escapedAt: "linked",
+  });
+  assert.equal(d.category, "workdir_escape");
+  const fact = d.evidence[0].fact;
+  assert.match(fact, /destination: temp/);
+  assert.match(fact, /worker-reported path: linked\/evil\\u0007name\.js/);
+  assert.match(fact, /resolved path: C:\\outside\\evil\.js/);
+  assert.match(fact, /escaped at: linked/);
+  assert.ok(!fact.includes("\u0007"), "raw control character is not echoed");
+});
+
+test("DX-ISO-5: malformed TD-373 fields are not echoed; missing fields keep the old fact", () => {
+  const base = "worker reported a file write outside the authorized delivery worktree";
+  const malformed = diagnoseIsolationViolation({
+    reason: "file_written_lexical_outside",
+    destination: "NOT_A_MEMBER",
+    reportedPath: 42,
+    resolvedPath: null,
+    escapedAt: { path: "x" },
+  });
+  assert.equal(malformed.evidence[0].fact, base, "no malformed value enters the fact and no suffix is invented");
+  const withOnlyDestination = diagnoseIsolationViolation({
+    reason: "write_intent_lexical_outside",
+    destination: "home",
+  });
+  assert.equal(
+    withOnlyDestination.evidence[0].fact,
+    "worker reported an intended write path outside the authorized delivery worktree (destination: home)",
+  );
+});
+
+test("DX-ISO-6: the read side bounds every quoted path field again (untrusted transcript text)", () => {
+  const long = "y".repeat(1000);
+  const d = diagnoseIsolationViolation({
+    reason: "file_written_lexical_outside",
+    destination: "other",
+    reportedPath: long,
+    resolvedPath: long,
+    escapedAt: long,
+  });
+  const fact = d.evidence[0].fact;
+  assert.ok(!fact.includes(long), "the full oversized value is never echoed");
+  for (const match of fact.matchAll(/y+/g)) {
+    assert.ok(match[0].length <= 300, "each quoted path is bounded to 300 UTF-16 units");
+  }
+});
+
+test("DX-ISO-7: escapedAt is displayed only for a physical-outside reason", () => {
+  const physical = diagnoseIsolationViolation({
+    reason: "file_written_physical_outside",
+    destination: "temp",
+    reportedPath: "linked/x.js",
+    resolvedPath: "C:\\outside\\x.js",
+    escapedAt: "linked",
+  });
+  assert.match(physical.evidence[0].fact, /escaped at: linked/);
+  const lexical = diagnoseIsolationViolation({
+    reason: "file_written_lexical_outside",
+    destination: "temp",
+    reportedPath: "C:\\outside\\x.js",
+    resolvedPath: "C:\\outside\\x.js",
+    escapedAt: "forged-level",
+  });
+  assert.ok(!lexical.evidence[0].fact.includes("escaped at:"), "lexical reasons never display escapedAt");
+  assert.ok(!lexical.evidence[0].fact.includes("forged-level"), "the field is not echoed either");
+});

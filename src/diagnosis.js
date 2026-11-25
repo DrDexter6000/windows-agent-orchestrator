@@ -72,6 +72,7 @@ import { findState, TERMINAL_STATES, STATE_CHANGE_REASON, PROCESS_MISSING_CONFIR
 import { boundReportScope } from "./metrics.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { isObservedVitalSign } from "./runEvent.js";
+import { escapeControlChars, safeSliceUtf16 } from "./safeText.js";
 import { PROVIDER_SESSION_NOT_FOUND_ERROR } from "./backends/parsers/claudeCode.js";
 
 /**
@@ -209,6 +210,22 @@ export const ISOLATION_VIOLATION_REASONS = Object.freeze([
   "file_written_physical_unresolved", // physical location of the write cannot be proven
 ]);
 
+// TD-373: the frozen closed-set destination of an outside write. Persisted on
+// run.isolation_violation ONLY for the confirmed-outside reasons, and admitted
+// on the read/display side only as an exact member. Hosted beside the reason
+// SSOT so the write side (runManager) and the diagnosis wording consume ONE set.
+export const ISOLATION_DESTINATIONS = Object.freeze([
+  "main_checkout", // the repository's main checkout
+  "other_worktree", // another worktree of the same repository
+  "temp", // os.tmpdir()
+  "home", // os.homedir()
+  "other", // no root matched, or the destination could not be determined
+]);
+
+// TD-373: ONE bound for the redacted outside-write path fields, shared by the
+// write side (runManager) and the read/display side (this module).
+export const ISOLATION_DISPLAY_PATH_MAX_CHARS = 300;
+
 // The frozen closed-set SSOT of filesystem error codes an isolation violation may
 // record when the physical location of a reported write stayed unprovable. Both
 // the closed-set errorCode field and the diagnosis fact wording use ONLY these
@@ -264,19 +281,56 @@ const ISOLATION_VIOLATION_FACT_UNKNOWN =
  * exact ISOLATION_PHYSICAL_ERROR_CODES member, so no value outside the closed
  * set can ever enter the fact text. An absent or non-member code leaves the
  * wording byte-identical to the reason-only fact (historical transcripts).
+ *
+ * TD-373: a confirmed-outside reason additionally quotes the redacted,
+ * Owner-approved destination facts (destination ∈ ISOLATION_DESTINATIONS,
+ * worker-reported path, resolved path, escaped-at level). Every field is
+ * UNTRUSTED transcript text on this side: a non-string is ignored, control
+ * characters are escaped again and the value is bounded again before it enters
+ * the fact. Malformed values are never echoed.
  * @param {unknown} reason
  * @param {unknown} errorCode
+ * @param {object} [event] — the durable run.isolation_violation event
  * @returns {string}
  */
-function factForIsolationViolation(reason, errorCode) {
+function factForIsolationViolation(reason, errorCode, event = {}) {
   const knownReason = typeof reason === "string" && Object.hasOwn(ISOLATION_VIOLATION_FACTS, reason);
-  const fact = knownReason ? ISOLATION_VIOLATION_FACTS[reason] : ISOLATION_VIOLATION_FACT_UNKNOWN;
-  return knownReason
+  let fact = knownReason ? ISOLATION_VIOLATION_FACTS[reason] : ISOLATION_VIOLATION_FACT_UNKNOWN;
+  if (knownReason
     && reason.endsWith("_physical_unresolved")
     && typeof errorCode === "string"
-    && ISOLATION_PHYSICAL_ERROR_CODES.includes(errorCode)
-    ? `${fact} (filesystem error code: ${errorCode})`
-    : fact;
+    && ISOLATION_PHYSICAL_ERROR_CODES.includes(errorCode)) {
+    fact = `${fact} (filesystem error code: ${errorCode})`;
+  }
+  if (knownReason && (reason.endsWith("_lexical_outside") || reason.endsWith("_physical_outside"))) {
+    const detail = isolationOutsideDetail(event, { physical: reason.endsWith("_physical_outside") });
+    if (detail.length > 0) fact = `${fact} (${detail.join("; ")})`;
+  }
+  return fact;
+}
+
+// Display-side re-sanitization for the TD-373 outside-write fields: escape
+// control characters again, bound again to the same shared limit, and never
+// echo a non-string. The persisted values were already redacted; this is the
+// read-side "untrusted text" pass.
+function isolationDisplayText(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return safeSliceUtf16(escapeControlChars(value), 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+}
+
+function isolationOutsideDetail(event, { physical = false } = {}) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return [];
+  const out = [];
+  if (typeof event.destination === "string" && ISOLATION_DESTINATIONS.includes(event.destination)) {
+    out.push(`destination: ${event.destination}`);
+  }
+  const reportedPath = isolationDisplayText(event.reportedPath);
+  if (reportedPath !== null) out.push(`worker-reported path: ${reportedPath}`);
+  const resolvedPath = isolationDisplayText(event.resolvedPath);
+  if (resolvedPath !== null) out.push(`resolved path: ${resolvedPath}`);
+  const escapedAt = physical ? isolationDisplayText(event.escapedAt) : null;
+  if (escapedAt !== null) out.push(`escaped at: ${escapedAt}`);
+  return out;
 }
 
 // Provider access denial facts that classify as provider_auth even when they
@@ -725,7 +779,11 @@ function diagnoseFailureInner(events, expectedRunId) {
       category: "workdir_escape",
       evidence: [{
         eventType: "run.isolation_violation",
-        fact: factForIsolationViolation(isolationViolation.reason, isolationViolation.errorCode),
+        fact: factForIsolationViolation(
+          isolationViolation.reason,
+          isolationViolation.errorCode,
+          isolationViolation,
+        ),
       }],
     };
   }

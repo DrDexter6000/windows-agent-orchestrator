@@ -3169,3 +3169,37 @@ test("TD-341-C3: 未证明 runnerGone 的普通 run → 输出形状逐字节不
     rmrfRetry(dir);
   }
 });
+
+// TD-373: `runs diagnose` text quotes the redacted destination fields for a
+// confirmed-outside isolation fact. The read side treats them as untrusted:
+// control characters are escaped again (never printed raw).
+test("TD-373 CLI: runs diagnose text carries destination + redacted paths, control-safe", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td373-cli-"));
+  try {
+    const runId = "run_td373_cli";
+    const violation = {
+      type: "run.isolation_violation",
+      runId,
+      agentId: "coder_low",
+      seq: 1,
+      ts: "2026-11-25T00:00:00.000Z",
+      code: "workdir_escape",
+      eventKind: "file_written",
+      reason: "file_written_physical_outside",
+      destination: "home",
+      reportedPath: "~/evil\u0007name.js",
+      resolvedPath: "~/outside/evil.js",
+      escapedAt: "linked",
+    };
+    writeFileSync(join(dir, `${runId}.jsonl`), `${JSON.stringify(violation)}\n`, "utf8");
+    const { runsCommand } = await import("../../src/commands/runs.js");
+    const text = await captureLog(() => runsCommand(["diagnose", runId, "--run-dir", dir], { runDir: dir }));
+    assert.match(text, /destination: home/);
+    assert.match(text, /worker-reported path: ~\/evil\\u0007name\.js/);
+    assert.match(text, /resolved path: ~\/outside\/evil\.js/);
+    assert.match(text, /escaped at: linked/);
+    assert.ok(!text.includes("\u0007"), "raw control character is never printed");
+  } finally {
+    rmrfRetry(dir);
+  }
+});

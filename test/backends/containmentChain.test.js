@@ -43,6 +43,7 @@ import { CodexBackend } from "../../src/backends/codex.js";
 import { ClaudeStreamParser } from "../../src/backends/parsers/claudeCode.js";
 import { CodexStreamParser } from "../../src/backends/parsers/codex.js";
 import { Run } from "../../src/runManager.js";
+import { ISOLATION_DESTINATIONS } from "../../src/diagnosis.js";
 import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 
 const KIMI_WEB_TOKEN_ENV = "KIMI_WEB_CONTAINMENT_TEST_TOKEN";
@@ -135,9 +136,10 @@ async function createInsideFile(effectiveCwd, relPath, content = "confirmed") {
 }
 
 /**
- * 越界用例的统一断言面：终态 failed、闭集 reason、越界类违规事实不带 path、
- * 被拒的写事件本身不落 transcript、打包零调用。marker 是被拒路径里独有的
- * 子串——deepseek-acp 例外（见其用例注释）。
+ * 越界用例的统一断言面：终态 failed、闭集 reason、越界类违规事实不带未解析类
+ * path 字段、被拒的写事件本身不落 transcript、打包零调用。marker 是被拒路径里
+ * 独有的子串——TD-373 起 confirmed-outside 事实会记录脱敏后的上报路径，所以
+ * marker 现在应当出现在 reportedPath 里（不是"不得出现"）。
  */
 function assertEscapeBlocked(fixture, output, { eventKind, reason, marker }) {
   assert.equal(fixture.getPackageCount(), 0, "packager must not run on an escaped write");
@@ -158,7 +160,9 @@ function assertEscapeBlocked(fixture, output, { eventKind, reason, marker }) {
       reason,
     },
   );
-  assert.ok(!Object.hasOwn(violation ?? {}, "path"), "violation fact never carries the rejected path");
+  assert.ok(!Object.hasOwn(violation ?? {}, "path"), "outside facts never carry the unresolved path field");
+  assert.ok(ISOLATION_DESTINATIONS.includes(violation?.destination), "TD-373 destination is a closed-set member");
+  assert.equal(typeof violation?.reportedPath, "string", "TD-373 recorded path is present");
   assert.ok(output.events.some(
     (event) => event.type === "run.error"
       && event.phase === "isolation"
@@ -173,7 +177,8 @@ function assertEscapeBlocked(fixture, output, { eventKind, reason, marker }) {
     "the rejected write event itself is never persisted",
   );
   if (marker !== undefined) {
-    assert.ok(!output.rawTranscript.includes(marker), "rejected path marker must not reach the transcript");
+    assert.ok(violation.reportedPath.includes(marker),
+      "TD-373: the redacted worker-reported path reaches the violation fact");
   }
 }
 
@@ -955,7 +960,8 @@ for (const [label, pathFactory, marker] of [
         marker,
       });
       const violation = output.events.find((event) => event.type === "run.isolation_violation");
-      assert.ok(!JSON.stringify(violation ?? {}).includes(marker));
+      assert.ok(JSON.stringify(violation ?? {}).includes(marker),
+        "TD-373: the redacted worker-reported path is intentionally recorded on the fact");
     } finally {
       await cleanupFixture(fixture);
       if (scenario) await rm(scenario.dir, { recursive: true, force: true });

@@ -73,7 +73,9 @@ function seedProcSession(tp, runId, pid = 4321) {
   ]);
 }
 
-/** 全部通过的注入集；各测试按需覆写单门。handshakeReader 是三态读器契约。 */
+/** 全部通过的注入集；各测试按需覆写单门。handshakeReader 是三态读器契约。
+ * bootTimeFn 缺省取 OLD 之前（现有无 pid 用例的机器"开机早于最后活动"），
+ * TD-348 的放行用例显式覆写成更晚的开机时刻。 */
 function settleDeps(overrides = {}) {
   return {
     nowFn: () => NOW,
@@ -82,6 +84,7 @@ function settleDeps(overrides = {}) {
     runnerScanFn: async () => ({ alive: false }),
     handshakeReader: () => ({ present: false }),
     daemonAliveFn: () => false,
+    bootTimeFn: () => Date.parse(OLD) - 86_400_000,
     ...overrides,
   };
 }
@@ -380,6 +383,120 @@ test("SET-15b (B92): deepseek-acp 会话（UUID + hostPid）过得了门 5", asy
     assert.equal(r.eligible, true, "UUID 会话 id + hostPid → 门 5 可锚定");
     assert.equal(r.sessionShape, "process_session");
     assert.equal(seenPid, 4321, "pid 取 session.created.hostPid（UUID 解析不出 pid）");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── TD-348：重启之后的僵尸运行可以结算（门 5 的 session_rebooted 出口） ──────
+
+/** 只有上游 UUID 会话、没有本机 pid 的旧 deepseek-acp 形状（TD-348 的目标）。 */
+function seedUuidSessionOnly(tp, runId) {
+  writeLines(tp, [
+    ev(runId, 1, "run.started", OLD, { backend: "deepseek-acp" }),
+    ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+    ev(runId, 3, "session.created", OLD, { backend: "deepseek-acp", backendSessionId: "native-uuid-td348" }),
+    ev(runId, 4, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
+  ]);
+}
+
+test("SET-15c (TD-348): 取不出 pid，但开机晚于最后可见活动 → 门 5 放行 session_rebooted", async () => {
+  const dir = tempDir("wao-set-15c-");
+  try {
+    const runId = "run_set15c";
+    const tp = join(dir, `${runId}.jsonl`);
+    seedUuidSessionOnly(tp, runId);
+    const bootAt = Date.parse(OLD) + 60_000;
+    const r = await settleRun({
+      runId,
+      runDir: dir,
+      reasonText: REASON,
+      apply: true,
+      deps: settleDeps({ bootTimeFn: () => bootAt }),
+    });
+    assert.equal(r.settled, true, "重启证据成立即放行门 5，结算成功");
+    assert.equal(r.sessionShape, "session_rebooted");
+    const sessionGate = r.gates.find((g) => g.gate === "session");
+    assert.equal(sessionGate.ok, true);
+    assert.match(sessionGate.detail, /rebooted_since_anchor/);
+    const after = await readTranscript(tp);
+    assert.equal(after.find((e) => e.type === "run.process_missing_confirmed").sessionShape, "session_rebooted");
+    assert.equal(after.find((e) => e.type === "run.state_change" && e.to === "failed").reason, "process_missing");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-15d (TD-348): 开机不晚于最后可见活动 → 照旧拒 session_ambiguous", async () => {
+  const dir = tempDir("wao-set-15d-");
+  try {
+    const runId = "run_set15d";
+    seedUuidSessionOnly(join(dir, `${runId}.jsonl`), runId);
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      bootTimeFn: () => Date.parse(OLD), // 不严格晚于最后活动
+    }) });
+    assert.equal(r.refused, "session_ambiguous");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-15e (TD-348): 开机时刻不是有限数 → 照旧拒 session_ambiguous", async () => {
+  const dir = tempDir("wao-set-15e-");
+  try {
+    for (const bad of [NaN, Infinity, -Infinity, "2026-09-02", null]) {
+      const runId = `run_set15e_${String(bad).replaceAll(/[^a-z0-9]/gi, "_")}`;
+      seedUuidSessionOnly(join(dir, `${runId}.jsonl`), runId);
+      const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+        bootTimeFn: () => bad,
+      }) });
+      assert.equal(r.refused, "session_ambiguous", `bootAt=${String(bad)}`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-15f (TD-348): owner 租约心跳比最后事件晚 → 以心跳为最后活动锚（开机不晚于心跳则拒）", async () => {
+  const dir = tempDir("wao-set-15f-");
+  try {
+    const runId = "run_set15f";
+    seedUuidSessionOnly(join(dir, `${runId}.jsonl`), runId);
+    const heartbeatAt = Date.parse(OLD) + 3_600_000;
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt, pid: 777 }),
+      // 开机晚于最后事件、但早于租约心跳 → 重启关系不成立。
+      bootTimeFn: () => Date.parse(OLD) + 60_000,
+    }) });
+    assert.equal(r.refused, "session_ambiguous", "心跳是最后可见活动，开机早于它不算重启后");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-15g (TD-348): 能取到 pid 的会话不读开机时刻（行为不变）", async () => {
+  const dir = tempDir("wao-set-15g-");
+  try {
+    const runId = "run_set15g";
+    seedProcSession(join(dir, `${runId}.jsonl`), runId);
+    let bootReads = 0;
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      bootTimeFn: () => { bootReads += 1; throw new Error("boot time must not be read for a pid session"); },
+    }) });
+    assert.equal(r.eligible, true);
+    assert.equal(r.sessionShape, "process_session");
+    assert.equal(bootReads, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SET-15h (TD-348 review): last activity is the MAX bound-event ts, not the file's last line", async () => {
+  const dir = tempDir("wao-set-15h-");
+  try {
+    const runId = "run_set15h";
+    const recent = "2026-09-20T00:00:00.000Z"; // later than OLD, but appended before the last line
+    writeLines(join(dir, `${runId}.jsonl`), [
+      ev(runId, 1, "run.started", OLD, { backend: "deepseek-acp" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "session.created", OLD, { backend: "deepseek-acp", backendSessionId: "native-uuid-out-of-order" }),
+      ev(runId, 4, "run.state_change", recent, { from: null, to: "running", reason: "first_event" }),
+      // Out-of-order tail: the last line is OLD, but the run's latest activity
+      // is `recent` above.
+      ev(runId, 5, "run.event", OLD, { kind: "message", data: "late append" }),
+    ]);
+    const r = await settleRun({ runId, runDir: dir, reasonText: REASON, deps: settleDeps({
+      bootTimeFn: () => Date.parse(OLD) + 60_000, // after OLD, before `recent`
+    }) });
+    assert.equal(r.refused, "session_ambiguous", "boot is not later than the MAX activity ts");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

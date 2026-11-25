@@ -139,6 +139,32 @@ test("CLI-SETTLE-3: apply——写入终态与确认事实", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("CLI-SETTLE-3b: TD-348 dry-run——取不出 pid 但开机晚于最后活动 → session_rebooted + 门事实", async () => {
+  const dir = tempDir("wao-cli-settle3b-");
+  try {
+    const runId = "run_cli_rebooted";
+    writeFileSync(join(dir, `${runId}.jsonl`), `${[
+      ev(runId, 1, "run.started", OLD, { backend: "deepseek-acp" }),
+      ev(runId, 2, "run.background_submitted", OLD, { background: true }),
+      ev(runId, 3, "session.created", OLD, { backend: "deepseek-acp", backendSessionId: "native-uuid-td348" }),
+      ev(runId, 4, "run.state_change", OLD, { from: null, to: "running", reason: "first_event" }),
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const reasonFile = join(dir, "reason.txt");
+    writeFileSync(reasonFile, "机器重启后 runner 不在了。\n", "utf8");
+    const out = await capture(() => runsCommand(
+      ["settle", "--run-id", runId, "--reason-file", reasonFile, "--run-dir", dir],
+      { runDir: dir },
+      { ...cliDeps(), bootTimeFn: () => Date.parse(OLD) + 60_000 },
+    ));
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.eligible, true);
+    assert.equal(parsed.sessionShape, "session_rebooted");
+    const sessionGate = parsed.gates.find((g) => g.gate === "session");
+    assert.equal(sessionGate.ok, true);
+    assert.match(sessionGate.detail, /rebooted_since_anchor/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("CLI-SETTLE-4: 拒绝时 refused + 退出码 1", async () => {
   const dir = tempDir("wao-cli-settle4-");
   try {
