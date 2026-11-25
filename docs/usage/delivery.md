@@ -45,7 +45,7 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 
 ### 写入意图与越界检查
 
-WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。Lead 看到什么：意图与确认写入经词法路径 + filesystem realpath 证明不了位于该 worktree（或意图无法关联、run 完成时仍未确认）时，run 在 packaging 前以 `workdir_escape` 失败，transcript 只保留固定安全事实、不保留越界路径。怎么判：`write_intent` 不是"文件已写入"的证据；该检查不解析 worker command，也不是 OS filesystem sandbox（codex 车道例外）——语义判断与处置权仍在 Lead 手里。意图/确认的匹配机制见[架构](../02-architecture.md) §4.6「写入边界」。
+WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。Lead 看到什么：意图与确认写入经词法路径 + filesystem realpath 证明不了位于该 worktree（或意图无法关联、run 完成时仍未确认）时，run 在 packaging 前以 `workdir_escape` 失败；越界原因记闭集去向与脱敏的上报路径、落点（`wao runs diagnose`）。写后找不到的文件，只在同一调用、同一路径的意图已判树内时放行。怎么判：`write_intent` 不是"文件已写入"的证据；该检查不解析 worker command，也不是 OS filesystem sandbox（codex 车道例外）。机制见[架构](../02-architecture.md) §4.6「写入边界」。
 
 限制：仅支持 `run`（foreground 和 background 均可）。Background delivery 需要 `--isolate`。
 

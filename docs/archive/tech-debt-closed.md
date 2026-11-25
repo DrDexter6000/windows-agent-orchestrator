@@ -184,3 +184,6 @@
 | TD-199 | zcode 工具事件改为增量落盘之后，读侧投影与在途包容门没有在真实的交付运行里验证过 | 2026-11-24 复审：第 104 批起几十批 glm-pro（zcode 后端）真实交付里 run_activity 在途展示命令与写入、scopeObservation 判写域（如第 137a 批）；越界写入拦截按决定 0084 实测认证 |
 | TD-222 | workspace 绑定下 readOnly 席位建隔离 worktree 确定性失败，consult 不可用 | 2026-11-24 复审（sol）：与 TD-269 同因，d5751560 修席位 cwd、bcb40220 改用调用指定的 Git 根；决定 0102 起只读席位用私有克隆，11 月几十场会审都正常建树 |
 | TD-369 | 发版检查单只写做什么、不写怎么做，v0.11.0 发版时要翻上一版记录才找到做法 | 2026-11-24 v0.11.0 打 tag 后：§9 补上在哪做、SSOT 核查每段一份任务书、可靠性门逐车道跳过暂停车道、快照的节结构 |
+| TD-348 | 第 92 批之前派发的 deepseek-acp 运行取不出本机 pid，runner 死后 settle 门 5 拒于 `session_ambiguous`，运行永远停在非终态 | 第 148 批：门 5 取不出 pid 时，本机开机晚于该运行最后可见活动即放行（`session_rebooted`）；落地后结算了 d2-domain 的 run_20261109074759649pcpi1m |
+| TD-372 | 写后隔离检查把在工作树里建了又删的文件判成越界（`file_written_physical_unresolved`/ENOENT） | 第 148 批：同一 toolCallId、同一原文路径的意图在意图时刻已判树内、无 `..` 段且每段是规范 Win32 段、ENOENT 来自目标本身时放行一次；不发意图的车道见 TD-361 |
+| TD-373 | 隔离违规事件不说拦下了什么，Lead 分不清真越界和误报 | 第 148 批：越界原因记闭集 `destination` 与脱敏的 `reportedPath`、`resolvedPath`、物理越界的 `escapedAt`（Owner 2026-11-25 批准），`wao runs diagnose` 显示（8.3 短名认不出）；MCP 与看板见第 141 批 |
