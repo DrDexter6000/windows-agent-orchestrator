@@ -978,6 +978,10 @@ function rgPreflightInput({ candidates, probeFn, listResult } = {}) {
     runnerGoneDeps: { handshakeReader: () => ({ present: false }), daemonAliveFn: () => false },
     // 确定性：本节与 0113 open items 同判法，worker 上下文抑制——显式注入非 worker。
     workerContextFn: () => null,
+    // 第 147 批：候选探针的夹具根 "/repo" 不是真仓库；0113 的待收口收集器现在会把
+    // "分支账读不出"作为一行事实报出来（不再静默省略）。本节只测 runner 缺席证明，
+    // 把 open items 收集器注入为空，两条来源互不干扰。
+    openItemsFn: async () => [],
   };
 }
 

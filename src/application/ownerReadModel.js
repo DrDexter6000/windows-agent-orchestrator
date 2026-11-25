@@ -147,7 +147,7 @@ import {
 import { projectExecutionStage } from "./runStageProjection.js";
 import { lastActualEffectAtMs, lastEffectAtMs, lastVitalSignAtMs } from "./runQuietAdvisory.js";
 import { readOwnerLease } from "./ownerLiveness.js";
-import { execGitReadOnly, listRunBranchRunIds } from "./runBranches.js";
+import { execGitReadOnly, listRunBranchRunIds, runCreatedAtMs } from "./runBranches.js";
 import { listArchiveTranscriptFiles } from "./serveMaintenance.js";
 import {
   deliveryWasRequested,
@@ -559,33 +559,6 @@ function lineageRootsOf(events, runId) {
     if (isValidRunId(e.rootRunId)) roots.add(e.rootRunId);
   }
   return [...roots].sort();
-}
-
-/**
- * runId 里的创建时刻（epoch ms）。WAO 生成的 runId 是 `run_` + 17 位 UTC 时间戳
- * （YYYYMMDDHHmmss + 毫秒）+ 随机后缀；不是这个形状（测试合成值、别的工具造的值）
- * 就是 null——时间序不可比。
- */
-function runCreatedAtMs(runId) {
-  if (typeof runId !== "string" || !runId.startsWith("run_")) return null;
-  const digits = runId.slice(4, 21);
-  if (!/^\d{17}$/.test(digits)) return null;
-  const year = Number(digits.slice(0, 4));
-  const month = Number(digits.slice(4, 6));
-  const day = Number(digits.slice(6, 8));
-  const hour = Number(digits.slice(8, 10));
-  const minute = Number(digits.slice(10, 12));
-  const second = Number(digits.slice(12, 14));
-  const milli = Number(digits.slice(14, 17));
-  const value = Date.UTC(year, month - 1, day, hour, minute, second, milli);
-  if (timeMs(value) === null) return null;
-  const at = new Date(value);
-  // 越界字段（13 月、32 日）会被 Date.UTC 归一化到别的时刻：按"时间序不可比"处理。
-  return at.getUTCFullYear() === year && at.getUTCMonth() === month - 1 && at.getUTCDate() === day
-    && at.getUTCHours() === hour && at.getUTCMinutes() === minute && at.getUTCSeconds() === second
-    && at.getUTCMilliseconds() === milli
-    ? value
-    : null;
 }
 
 /**

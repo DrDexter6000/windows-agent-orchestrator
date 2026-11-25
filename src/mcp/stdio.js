@@ -30,6 +30,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createWaoMcpServer } from "./server.js";
 import { armMcpParentImage } from "./parentImage.js";
 import { isEntryModule } from "../entryPoint.js";
+import {
+  sampleDispatchResourceAdvisory,
+  commitDispatchResourceAdvisory,
+} from "../dispatchResourceAdvisory.js";
 
 const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
@@ -173,10 +177,14 @@ async function main() {
   // M10-pre closeout: load server-owned global waitTimeout so the MCP dispatch
   // path threads it to the detached runner — same precedence as CLI background.
   const globalWaitTimeout = await loadGlobalWaitTimeout();
+  // 第 147 批修正一：分支帽提示的采样/记账只在部署入口接线（工厂缺省不采样，
+  // 避免直接构造服务的测试写真实 %LOCALAPPDATA%；CLI 行为不变）。
   const server = createWaoMcpServer({
     registryPath: resolve(registryPath),
     runDir: resolve(runDir),
     globalWaitTimeout,
+    dispatchResourceAdvisorySampleFn: sampleDispatchResourceAdvisory,
+    dispatchResourceAdvisoryCommitFn: commitDispatchResourceAdvisory,
     ...(validatedWorkspaceRoot ? { workspaceRoot: validatedWorkspaceRoot } : {}),
   });
   const transport = new StdioServerTransport();

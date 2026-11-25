@@ -26,6 +26,12 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { dispatchRun as realDispatchRun } from "../../src/application/runDispatch.js";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
+// 第 147 批：分支帽提示的 SSOT 与采样/记账拆分（MCP 回执用例注入同一对函数）。
+import {
+  sampleDispatchResourceAdvisory,
+  commitDispatchResourceAdvisory,
+  BRANCH_CAP,
+} from "../../src/dispatchResourceAdvisory.js";
 // 2026-10-04 drift pin: 后端闭集 SSOT（resolver parity 遍历源）。
 import { KNOWN_BACKENDS } from "../../src/registry.js";
 // TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
@@ -73,7 +79,17 @@ async function buildInMemoryClient(server) {
 
 async function buildStdioSubprocessTransport({ registryPath, runDir, workspaceRoot, env = {} }) {
   const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
-  const childEnv = { ...process.env, WAO_SKIP_VERSION_GUARD: "1", ...env };
+  // 第 147 批修正一：stdio 入口会接真实的分支帽采样/记账——子进程状态目录指到
+  // os.tmpdir()（测试套件已把 TEMP 隔离成一次性目录），不碰用户真实 %LOCALAPPDATA%。
+  // LOCALAPPDATA 被改写后版本守卫找不到用户级 Node 22 安装，故同时钉 WAO_NODE
+  // 到本测试进程的 v22 可执行文件（守卫的既有逃生口）。
+  const childEnv = {
+    ...process.env,
+    WAO_SKIP_VERSION_GUARD: "1",
+    WAO_NODE: process.execPath,
+    LOCALAPPDATA: join(tmpdir(), "wao-mcp-advisory-state"),
+    ...env,
+  };
   const args = [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir];
   if (workspaceRoot) args.push("--workspace-root", workspaceRoot);
   const transport = new StdioClientTransport({
@@ -1496,4 +1512,359 @@ test("136-L2b: 110 字符 runId + contractAdvisories → 整句 479 放得下：
   assert.ok(next.length <= 480, `整句 ${next.length} ≤ 480`);
   assert.match(next, new RegExp(
     `wao runs wait ${longId} --until-settled there; one command waits until settlement\\. Review contractAdvisories in this receipt first; stop and re-dispatch if needed\\.$`));
+});
+
+// =====================================================================
+// 第 147 批（修正一）：分支帽提示进 MCP 受理回执——与 CLI 同一采样/静默规则；
+// 只挂既有 nextStep（不改 output schema、不加字段）；采样只读、提示真正带出才记账。
+// 工厂默认不采样（部署入口接真实函数），所以这些用例显式注入采样/记账对。
+// =====================================================================
+
+const DISPATCH_ACCEPTED_BASE =
+  "Background run accepted. Before ending the turn, keep a wait attached: "
+  + "call run_await_result repeatedly with its default waitMs on this run until it settles.";
+
+/** dispatchResourceAdvisory 的 fake 执行器：脚本化两个计数 + repo 根。 */
+function fakeAdvisoryExec({ worktrees = 1, branches = 1, root = "D:/fake/advisory-repo" } = {}) {
+  return (command) => {
+    if (command === "git worktree list --porcelain") {
+      return Array.from({ length: worktrees }, (_, i) =>
+        `worktree D:/fake/wt${i}\nHEAD ${"a".repeat(40)}\n`).join("\n");
+    }
+    if (command === 'git branch --list "wao/run_*"') {
+      return Array.from({ length: branches }, (_, i) => `  wao/run_adv${i}`).join("\n");
+    }
+    if (command === "git rev-parse --show-toplevel") return `${root}\n`;
+    throw new Error(`unexpected advisory command: ${command}`);
+  };
+}
+
+function fakeAcceptedDispatch(runId) {
+  return async () => ({
+    accepted: true, runId, agentId: "coder_low", state: "pending",
+    providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+  });
+}
+
+const ADVISORY_LINE = (worktrees, branches) =>
+  `[wao] advisory: worktrees=${worktrees} waoRunBranches=${branches} `
+  + "(reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")";
+
+test("147-MCP-0: 直接构造的工厂缺省不采样分支帽提示（测试/嵌入方不碰真实状态目录；部署入口 stdio 才接线）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp0-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeAcceptedDispatch("run_147_mcp0"),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined, "受理成功");
+      assert.doesNotMatch(res.structuredContent.nextStep, /\[wao\] advisory/,
+        "缺省采样器为 null → 回执不带提示（不向真实 %LOCALAPPDATA% 写状态）");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("147-MCP-1: 超帽 → 受理回执的既有 nextStep 带与 CLI 同一采样结果（不新增字段/schema 不变），并记账", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp1-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "wao-147-mcp1-state-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let advisoryCalls = 0;
+    let advisoryCwd = null;
+    let dispatchCwd = null;
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: async (input) => {
+        dispatchCwd = input.cwd;
+        return {
+          accepted: true, runId: "run_147_mcp1", agentId: "coder_low", state: "pending",
+          providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+        };
+      },
+      dispatchResourceAdvisorySampleFn: (cwd) => {
+        advisoryCalls += 1;
+        advisoryCwd = cwd;
+        return sampleDispatchResourceAdvisory(cwd, {
+          exec: fakeAdvisoryExec({ worktrees: 2, branches: BRANCH_CAP + 1 }),
+          stateDir,
+        });
+      },
+      dispatchResourceAdvisoryCommitFn: commitDispatchResourceAdvisory,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined, "受理成功");
+      assert.equal(advisoryCalls, 1, "受理回执采样一次资源提示");
+      assert.ok(
+        advisoryCwd != null && advisoryCwd === dispatchCwd,
+        "采样目录 = 本次派发证明的工作区根（与 CLI 的 --cwd 口径对应）",
+      );
+      const sc = res.structuredContent;
+      const advisory = ADVISORY_LINE(2, BRANCH_CAP + 1);
+      assert.ok(sc.nextStep.endsWith(` ${advisory}`), `既有 nextStep 末尾承载同一行: ${sc.nextStep}`);
+      assert.ok(sc.nextStep.startsWith(DISPATCH_ACCEPTED_BASE), "MCP 等待模板不变，提示追加在后");
+      assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
+      assert.ok(!sc.nextStep.includes("npm run hygiene"), "文案不再指向只在 WAO 仓存在的命令");
+      assert.deepEqual(Object.keys(sc).sort(),
+        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "回执键集不变（没加字段、没改 schema）");
+      assert.equal(readdirSync(stateDir).length, 1, "提示带出后写入采样状态");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(stateDir);
+    cleanupDir(dir);
+  }
+});
+
+test("147-MCP-2: 帽内且与上次一致 → 采样返回 null，第二次受理回执不带提示（记账发生在第一次带出之后）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp2-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "wao-147-mcp2-state-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let n = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: async () => {
+        n += 1;
+        return {
+          accepted: true, runId: `run_147_mcp2_${n}`, agentId: "coder_low", state: "pending",
+          providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+        };
+      },
+      dispatchResourceAdvisorySampleFn: (cwd) => sampleDispatchResourceAdvisory(cwd, {
+        exec: fakeAdvisoryExec({ worktrees: 1, branches: 3 }),
+        stateDir,
+      }),
+      dispatchResourceAdvisoryCommitFn: commitDispatchResourceAdvisory,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const first = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(first.isError, undefined, "第一次受理成功");
+      assert.match(first.structuredContent.nextStep,
+        /\[wao\] advisory: worktrees=1 waoRunBranches=3 \(/,
+        "首次观测（计数有变化）→ 带提示");
+      const second = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(second.isError, undefined, "第二次受理成功");
+      assert.equal(second.structuredContent.nextStep, DISPATCH_ACCEPTED_BASE
+        + " If your host has a background shell, you can instead run wao runs wait run_147_mcp2_2 --until-settled "
+        + "there; one command waits until settlement.",
+      "帽内且计数与上次一致 → 静默（与 CLI 同一规则，handler 不另写一份）");
+      assert.doesNotMatch(second.structuredContent.nextStep, /\[wao\] advisory/, "第二次不带提示");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(stateDir);
+    cleanupDir(dir);
+  }
+});
+
+test("147-MCP-3: 提示采样抛错 → 只省略提示，派发照常受理（fail-open）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let dispatchCalls = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: async () => {
+        dispatchCalls += 1;
+        return {
+          accepted: true, runId: "run_147_mcp3", agentId: "coder_low", state: "pending",
+          providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+        };
+      },
+      dispatchResourceAdvisorySampleFn: () => { throw new Error("advisory counting blew up"); },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined, "提示失败不影响派发");
+      assert.equal(dispatchCalls, 1, "派发恰好受理一次");
+      const sc = res.structuredContent;
+      assert.equal(sc.accepted, true);
+      assert.equal(sc.nextStep, DISPATCH_ACCEPTED_BASE
+        + " If your host has a background shell, you can instead run wao runs wait run_147_mcp3 --until-settled "
+        + "there; one command waits until settlement.");
+      assert.ok(!JSON.stringify(res).includes("blew up"), "不回显提示计算的错误原文");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("147-MCP-4: 提示放不下 480 上限 → 只丢提示、受理不变成 run_dispatch failed，且不记账", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp4-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const longId = "run_" + "y".repeat(96); // 100 字符 runId + 长提示 → 整句必超 480
+    let commitCalls = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeAcceptedDispatch(longId),
+      dispatchResourceAdvisorySampleFn: () => ({ line: `[wao] advisory: ${"z".repeat(400)}`, state: null }),
+      dispatchResourceAdvisoryCommitFn: () => { commitCalls += 1; },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined, `受理不能变成报错（实测：${res.content?.[0]?.text ?? ""}）`);
+      const sc = res.structuredContent;
+      assert.equal(sc.accepted, true);
+      assert.ok(!sc.nextStep.includes("[wao] advisory"), `放不下的提示被省略: ${sc.nextStep}`);
+      assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
+      assert.equal(commitCalls, 0, "提示没带出 → 不记账（下次仍会弹）");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("147-MCP-5: 派发被拒没带出提示 → 不吞采样（下一次相同计数仍弹）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp5-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "wao-147-mcp5-state-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let calls = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: async () => {
+        calls += 1;
+        if (calls === 1) {
+          // 结构化的不受理回执（accepted:false）：没有 nextStep，提示带不出去。
+          return {
+            accepted: false, runId: "run_147_mcp5_refused", agentId: "coder_low", state: "failed",
+            providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+          };
+        }
+        return {
+          accepted: true, runId: "run_147_mcp5_ok", agentId: "coder_low", state: "pending",
+          providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+        };
+      },
+      dispatchResourceAdvisorySampleFn: (cwd) => sampleDispatchResourceAdvisory(cwd, {
+        exec: fakeAdvisoryExec({ worktrees: 1, branches: 2 }),
+        stateDir,
+      }),
+      dispatchResourceAdvisoryCommitFn: commitDispatchResourceAdvisory,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const refused = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(refused.isError, undefined);
+      assert.equal(refused.structuredContent.accepted, false);
+      assert.equal("nextStep" in refused.structuredContent, false, "不受理回执没有 nextStep");
+      assert.equal(readdirSync(stateDir).length, 0, "被拒派发不写采样状态（不吞提示）");
+
+      const accepted = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(accepted.isError, undefined, "第二次受理成功");
+      assert.match(accepted.structuredContent.nextStep, /\[wao\] advisory: worktrees=1 waoRunBranches=2 \(/,
+        "相同计数仍弹（被拒那次的提示没有被当成已展示）");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(stateDir);
+    cleanupDir(dir);
+  }
+});
+
+test("147-MCP-6: 合同提醒 + 超帽提示 → CLI 等待半句不被挤掉（提示放不下只丢提示、不记账）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-147-mcp6-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runId = "run_" + "a".repeat(23); // 27 字符（opus 实测长度）
+    assert.equal(runId.length, 27);
+    let commitCalls = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeAcceptedDispatch(runId),
+      dispatchResourceAdvisorySampleFn: () => ({
+        line: ADVISORY_LINE(1, BRANCH_CAP + 1),
+        state: { stateDir: "/unused", root: "/unused", counts: { worktrees: 1, waoRunBranches: BRANCH_CAP + 1 } },
+      }),
+      dispatchResourceAdvisoryCommitFn: () => { commitCalls += 1; },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: dir,
+          delivery: {
+            mode: "git_commit_v1",
+            allowedPaths: ["src"],
+            verificationCommands: ["node --test test/definitely-missing-dir/"],
+          },
+        },
+      });
+      assert.equal(res.isError, undefined, "受理成功");
+      const sc = res.structuredContent;
+      assert.ok(Array.isArray(sc.contractAdvisories) && sc.contractAdvisories.length > 0, "带合同提醒");
+      assert.match(sc.nextStep, /Review contractAdvisories in this receipt first; stop and re-dispatch if needed\./,
+        "合同提醒在场");
+      assert.match(sc.nextStep, new RegExp(`wao runs wait ${runId} --until-settled`),
+        `CLI 等待半句不被提示挤掉: ${sc.nextStep}`);
+      assert.ok(!sc.nextStep.includes("[wao] advisory"), `放不下的资源提示被省略: ${sc.nextStep}`);
+      assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
+      assert.equal(commitCalls, 0, "提示没带出 → 不记账");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
 });

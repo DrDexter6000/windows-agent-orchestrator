@@ -4,9 +4,21 @@
 // 回答"哪些事还欠 Lead 一步"，两路来源、各自独立结算：
 //
 //   A. 运行分支——候选集是绑定工作区所属仓库的 refs/heads/wao/run_* 分支
-//      （不按时间窗扫转录：交付运行一定有自己的分支，未裁定的交付不会被
-//      回收，回收会删分支，所以候选集随 Lead 收口变小、不随历史增长）。
-//      按提交时间新到旧至多查看 50 条，逐条读转录、核对归属，先看收口判定
+//      （不按时间窗扫转录：交付运行一定有自己的分支）。回收会删分支，但宿主
+//      项目不一定会按期回收（2026-11-25 取证：两个宿主仓库积了三百多条，
+//      最旧的未裁定运行早在查看帽之外），所以**全部**分支都参与归类、各行计数
+//      是全量——旧的"只看最新若干条"会让最旧的未裁定运行永远看不见。输出仍有
+//      界：每行至多点名 OPEN_ITEM_RUNIDS_CAP 个 runId；"等裁决"一行按 runId 内
+//      的创建时刻从旧到新排列，并写明最老一条已等几天（从该运行绑定的终态事件
+//      时间算，用 transcript 的 findStateEvidence，不另写判法；runId 的创建时刻
+//      与 Owner 读模型共用 runBranches.runCreatedAtMs——越界字段/数字 ts 都按
+//      "取不到"处理，不猜）。
+//      解析逐条、读取有界并发，**读出一条就归类一条**：只有还会走到谱系派生的
+//      "收口未裁决且有谱系引用"运行才把转录留到预筛之后，其余归类完即丢（第 147
+//      批修正一：300 份 × 4MB 不再同时留在堆里）。
+//      分支帽只对**全部 wao/run_* 分支名**计数（与 dispatchResourceAdvisory 同口径，
+//      形状不合法的也占帽）；超帽单独一行写总数与上限，不依赖"留待回收"行。
+//      逐条核对归属，先看收口判定
 //      （determineRunSettlement SSOT）再看裁定（只认绑定本 runId 的
 //      run.delivery_accepted / run.delivery_rejected）：
 //        - 收口且原因 delivery_settled、未裁定 → 等 Lead 裁定（其中 0112 的
@@ -53,7 +65,8 @@
 // 架构契约：
 //   - 只读：零转录写入、零状态变更、零 spawn git 写命令（转录解析经
 //     resolveTranscriptPathDetailed 统一入口，只读）；任何来源读失败都不抛
-//     ——枚举失败省略整段，单条转录读不出只计数，收件箱读不出省略该行。
+//     ——分支枚举失败给一行固定文案（分支账读不出，不是"没有旧账"），单条
+//     转录读不出只计数，收件箱读不出省略该行。
 //   - git 只经注入缝 execGitFn（结构化 argv、不经 shell、--no-optional-locks，
 //     写法照 serverBuildFacts.js）；文件系统只经 readDirFn/existsSync。
 //   - 不读 config/agents.json，不 import src/commands/**、src/mcp/**、SDK、zod。
@@ -74,14 +87,23 @@ import {
   identityOfFirstEvent,
   productionProjectIo,
 } from "../projectIdentity.js";
-import { readTranscript } from "../transcript.js";
+import { readTranscript, findStateEvidence, TERMINAL_STATES } from "../transcript.js";
+// 第 147 批：分支帽 SSOT 仍在 dispatchResourceAdvisory.js（不另写 60）。修正一：
+// 超帽按"全部 wao/run_* 分支名"判（与派发提示同一口径），并且单独一行。
+import { BRANCH_CAP } from "../dispatchResourceAdvisory.js";
 import { determineRunSettlement } from "./runSettlement.js";
 import { deliveryContinuableHint } from "./runContinue.js";
 // 第 120 批：谱系派生事实（显式关闭 / 被取代）与交付读面、回收共用同一份实现。
 import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGate } from "./lineageSupersession.js";
 import { findRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { parseWorktreePorcelain, RECENT_BOUND_EVENT_MS } from "./worktreeReclaim.js";
-import { listRunBranchRunIds, RUN_BRANCH_GIT_TIMEOUT_MS } from "./runBranches.js";
+import {
+  RUN_BRANCH_GIT_TIMEOUT_MS,
+  WAO_BRANCH_PREFIX,
+  listWaoRunBranches,
+  runCreatedAtMs,
+} from "./runBranches.js";
+import { lineageClosedIn } from "./lineageClose.js";
 import {
   FEEDBACK_FILE_RE,
   defaultPackageRoot,
@@ -93,10 +115,15 @@ import {
 export const OPEN_ITEM_PREFIX = "open item: ";
 /** 单行上限 = src/mcp/server.js lead_preflight observations 的 z.string().max(512)。 */
 export const OPEN_ITEM_MAX_CHARS = 512;
-/** A 分支候选查看帽（决定 0113 第 2 条：按提交时间新到旧至多查看 50 条）。 */
-export const OPEN_ITEM_BRANCH_CAP = 50;
 /** 每行至多点名的 runId 个数（决定 0113：个数 + 至多 5 个 runId）。 */
 export const OPEN_ITEM_RUNIDS_CAP = 5;
+/** 全量分支下转录读取的有界并发：一次最多读这么多份，不一次起几百个读。 */
+const TRANSCRIPT_READ_CONCURRENCY = 8;
+/** 分支枚举失败时的固定行（不含路径与错误原文；回收命令写成可直接跑的只读形式）。 */
+const BRANCH_LEDGER_UNREADABLE =
+  `${OPEN_ITEM_PREFIX}the wao/run_* branch ledger could not be read `
+  + "(git enumeration failed; this is not \"no old branches\" — check the bound repository with "
+  + "`git branch --list \"wao/run_*\"` and `wao worktree reclaim --out <plan.json>`)";
 
 // 只读 git：结构化 argv、--no-optional-locks、不经 shell（serverBuildFacts 写法）。
 // env 走 gitProbeEnv()：去掉继承的 GIT_DIR 等定位变量——本收集器问的是绑定工作区
@@ -167,11 +194,86 @@ function boundedLine(text) {
   return text.length > OPEN_ITEM_MAX_CHARS ? text.slice(0, OPEN_ITEM_MAX_CHARS) : text;
 }
 
+/** Date 能表示的最大 epoch ms（±8.64e15）；超出就不是时刻。 */
+const MAX_TIME_MS = 8.64e15;
+
+/**
+ * ISO 时间串 → epoch ms；不是字符串或读不出 → null（数字 12 绝不落成某个年份）。
+ * 与 Owner 读模型的 tsMs 同一口径：字符串、可解析、在 Date 范围内。
+ */
+function isoTimeMs(ts) {
+  if (typeof ts !== "string") return null;
+  const value = new Date(ts).getTime();
+  return Number.isFinite(value) && Math.abs(value) <= MAX_TIME_MS ? value : null;
+}
+
+/**
+ * 该运行绑定的终态事件时刻（epoch ms）。终态事件的挑选用 transcript 的
+ * findStateEvidence（与 Owner 读模型的 terminalAt 同一判法，不另写一份）；
+ * 状态不是终态或事件 ts 不是可解析的 ISO 字符串 → null（调用方不写年龄）。
+ */
+function boundTerminalEventMs(events, runId) {
+  if (!Array.isArray(events)) return null;
+  const bound = events.filter((e) => e && e.runId === runId);
+  const evidence = findStateEvidence(bound);
+  if (evidence.index < 0 || !TERMINAL_STATES.includes(evidence.state)) return null;
+  return isoTimeMs(bound[evidence.index]?.ts);
+}
+
+/**
+ * 按 runId 内的创建时刻从旧到新（第 147 批修正：创建时刻的解析与 Owner 读模型
+ * 共用 runBranches.runCreatedAtMs，形状/越界字段对不上就是"时间序不可比"）。
+ * 取不到时刻的排在后面，按枚举顺序（新到旧的原顺序）稳定排列。
+ */
+function sortAwaitingOldestFirst(entries) {
+  return [...entries].sort((a, b) => {
+    const aAt = runCreatedAtMs(a.runId);
+    const bAt = runCreatedAtMs(b.runId);
+    if (aAt != null && bAt != null) return aAt - bAt || a.order - b.order;
+    if (aAt != null) return -1;
+    if (bAt != null) return 1;
+    return a.order - b.order;
+  });
+}
+
+/** 等待天数（向下取整、不为负）；任一时刻取不到 → null。 */
+function waitedDays(nowMs, terminalMs) {
+  if (!Number.isFinite(nowMs) || terminalMs == null) return null;
+  const days = Math.floor((nowMs - terminalMs) / 86_400_000);
+  return Number.isFinite(days) ? Math.max(0, days) : null;
+}
+
+/** 按枚举顺序排（并发读取/归类会打乱完成顺序，输出仍稳定）。 */
+function byEnumerationOrder(ordering) {
+  return (a, b) => (ordering.get(a) ?? Number.MAX_SAFE_INTEGER) - (ordering.get(b) ?? Number.MAX_SAFE_INTEGER);
+}
+
+/**
+ * 有界并发读：保持输入顺序，最多 limit 个读取同时在途（全量分支下不会一次
+ * 起几百个读）。读取失败由 readFn 自己收敛（返回 null 占位）。
+ */
+async function readItemsBounded(items, readFn) {
+  const results = new Array(items.length).fill(null);
+  let nextIndex = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await readFn(items[index]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(TRANSCRIPT_READ_CONCURRENCY, items.length) }, () => worker()),
+  );
+  return results;
+}
+
 // ── A. 运行分支 ──────────────────────────────────────────────────────────────
 
 /**
- * 枚举绑定仓库的 wao/run_* 分支并按收口/裁定归类，返回 0–5 行。
- * 枚举失败 → 空数组（整段 A 省略，决定 0113 第 4 条）。
+ * 枚举绑定仓库的 wao/run_* 分支并按收口/裁定归类，返回 0–6 行。
+ * 全部分支参与归类；枚举失败 → 一行固定文案（"分支账读不出"，不再静默省略）。
  */
 async function collectRunBranchOpenItems({
   authorizedWorkspaceRoot,
@@ -183,25 +285,30 @@ async function collectRunBranchOpenItems({
   readBytesFn,
   projectIo = productionProjectIo(),
   parseWorktreePorcelainFn = parseWorktreePorcelain,
+  // 第 147 批：年龄用的当前时刻（测试注入；缺省 Date.now）。
+  nowFn = Date.now,
+  // 测试缝：数得清"为延迟派生保留了几条转录"（生产不注入，零开销）。
+  onBranchEventsRetainedFn,
 }) {
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return [];
   const resolvedRunDir = resolve(runDir);
 
-  // 1) 枚举（新到旧；只认 wao/run_ 前缀且 runId 合法的——命令与判法在 runBranches.js，
-  //    与 Owner 看板的读模型共用同一份答案）。
-  let runIds;
+  // 1) 枚举（新到旧；命令与判法在 runBranches.js，与 Owner 看板/派发提示共用同一份
+  //    答案）。第 147 批修正一：超帽按**全部分支名**判（与 dispatchResourceAdvisory
+  //    同一计数口径——形状不合法的 wao/run_* 分支也占帽）；待办归类只用合法 runId。
+  //    读不出 → 固定一行，不静默当作"没有旧账"。
+  let branchNames;
   try {
-    runIds = await listRunBranchRunIds(execGitFn, authorizedWorkspaceRoot);
+    branchNames = await listWaoRunBranches(execGitFn, authorizedWorkspaceRoot);
   } catch {
-    return []; // 枚举失败 → 整个 A 省略
+    return [boundedLine(BRANCH_LEDGER_UNREADABLE)];
   }
-  const total = runIds.length;
-  const examined = runIds.slice(0, OPEN_ITEM_BRANCH_CAP);
-  const truncated = total > examined.length;
-  // 超出查看帽时每行计数写明"已查看部分"并给出总条数（决定 0113 第 2 条）。
-  const truncSuffix = truncated
-    ? `; counts cover the ${examined.length} newest of ${total} wao/run_* branch(es)`
-    : "";
+  const total = branchNames.length;
+  const runIds = [];
+  for (const branch of branchNames) {
+    const runId = branch.slice(WAO_BRANCH_PREFIX.length);
+    if (isValidRunId(runId)) runIds.push(runId);
+  }
 
   // 2) 转录解析：统一入口 resolveTranscriptPathDetailed（决定 0100——按
   //    runId 解析看全部桶，查重完整；conflict/unreadable 绝不静默择一）。
@@ -222,11 +329,12 @@ async function collectRunBranchOpenItems({
     boundKey = null;
   }
 
+  // 等裁决一行只存 {runId, terminalMs, order}——不在内存里留转录（第 147 批修正一）。
   const awaitingDecision = [];
   const terminalUnsettled = [];
   const undeterminable = [];
   // 第 120 批：一次请求内按根缓存的谱系派生（显式关闭 / 被取代）。只在
-  // "收口且未裁定"的运行上求值；非续修谱系成员不会派生（没有已证明的后代），
+  // "收口且未裁决"的运行上求值；非续修谱系成员不会派生（没有已证明的后代），
   // 且只有会走到 forRoot 的运行才被收根做全库预筛（第 120 批续修 E1）。
   const supersession = createLineageSupersession({
     runDir: resolvedRunDir,
@@ -239,12 +347,120 @@ async function collectRunBranchOpenItems({
   let reclaimBranches = 0;
   let missingTranscripts = 0;
   let continuable = 0;
+  // 枚举顺序（新到旧）：并发读取/归类会打乱完成顺序，输出按它稳定排序。
+  const enumerationOrder = new Map(runIds.map((runId, index) => [runId, index]));
+  // 第 147 批修正一（内存）：每条读完就归类；只有确实会走到谱系派生的"收口且
+  // 未裁决"运行才保留转录到 prepare 之后（门与 forRun 共用 supersessionCandidateGate
+  // 的 lineageRef 判定；无谱系引用时 forRun 的结论只取决于本转录的
+  // run.lineage_closed，可当场判完）。其余归类完即丢，300 份 × 4MB 不会攒在堆里。
+  const retainedLineage = [];
+  const pendingRoots = new Set();
 
-  // 3a) 解析 + 读取（先全部读进来，再一次性按根预筛——审查 B3：多个根共用
-  //     一次全库字节扫描）。found 才读；conflict/unreadable/未找到/解析抛错
-  //     都不分类，与单条读失败一起计入"找不到或有冲突副本"。
-  const branchReads = [];
-  for (const runId of examined) {
+  const recordAwaiting = async (runId, events, fromAnotherWorktree) => {
+    let terminalMs = null;
+    try {
+      terminalMs = boundTerminalEventMs(events, runId);
+    } catch {
+      terminalMs = null;
+    }
+    awaitingDecision.push({
+      runId,
+      terminalMs,
+      order: enumerationOrder.get(runId) ?? Number.MAX_SAFE_INTEGER,
+    });
+    if (fromAnotherWorktree) crossTree.awaiting = true;
+    try {
+      if (await deliveryContinuableHint({ events, runId, runDir: resolvedRunDir, readTranscriptFn })) {
+        continuable += 1;
+      }
+    } catch {
+      // 可续判定读不出当不可续（提示性计数，不猜）。
+    }
+  };
+
+  // 3a) 归属 + 收口判定 + 归类，一条流水做完（3b/3c 合并；不再先攒全量事件）。
+  const classifyRead = async (runId, events) => {
+    // 3b) 归属（记录的项目身份，0113 修订）：首事件在档的 project 事实优先
+    //     （identityOfFirstEvent，与 `runs list --project` 同语义——派发时算
+    //     好落档，开发树删了也认得出），没有记录的旧运行由它退回按 cwd 推导
+    //     （不另写第二份回退）。factError 非空 = 在档事实损坏 → 不分类，计入
+    //     "找不到或冲突"行；任一侧不是 kind:"project" 或 key 不同 → 跳过不计。
+    const { identity, factError } = identityOfFirstEvent(events[0], projectIo);
+    if (factError != null) {
+      missingTranscripts += 1;
+      return;
+    }
+    if (boundKey == null || identity?.kind !== "project" || identity.key !== boundKey) return;
+    // 跨工作树提示口径不变：按运行的 cwd（findRunWorkspaceOwnership 的归属
+    // 事实）与绑定根比较；归属事实缺失/读不出 → 当同树、不提示（归属判定
+    // 本身已不依赖它）。
+    let runCwd = null;
+    try {
+      runCwd = findRunWorkspaceOwnership(events, runId)?.cwd ?? null;
+    } catch {
+      runCwd = null;
+    }
+    const fromAnotherWorktree = typeof runCwd === "string" && runCwd.length > 0
+      && !sameNormalizedPath(runCwd, authorizedWorkspaceRoot);
+    // 3c) 先收口判定，再裁定。
+    const settlement = determineRunSettlement(events, runId);
+    if (!settlement.facts.terminal) return; // 未终态 → 活跃运行一节管，不报
+    if (settlement.status === "settled") {
+      if (settlement.reason === "delivery_settled") {
+        const decided = events.some(
+          (e) => e && e.runId === runId
+            && (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected"),
+        );
+        if (decided) {
+          reclaimBranches += 1; // 已裁定 → 留待回收
+          return;
+        }
+        // 第 120 批：优先级 自身显式裁决 > 谱系显式关闭 > 派生被取代 > 待裁决。
+        // 谱系已显式关闭、或已有被采纳的后代（派生事实）时不再催 Lead 裁决
+        //（关闭/被取代都不写事件，也不计入可续计数）。派生读不出时保持待裁决。
+        // 第 147 批修正一：有谱系引用的才需要 forRoot/根转录，保留到 prepare 后；
+        // 无谱系引用的运行，forRun 的结论就是本转录的 run.lineage_closed。
+        if (supersessionCandidateGate(events, runId).lineageRef) {
+          const declared = declaredLineageRoot(events, runId);
+          if (!declared.conflict && typeof declared.rootRunId === "string") pendingRoots.add(declared.rootRunId);
+          retainedLineage.push({ runId, events, fromAnotherWorktree });
+          if (typeof onBranchEventsRetainedFn === "function") onBranchEventsRetainedFn(runId);
+          return;
+        }
+        if (lineageClosedIn(events, runId)) {
+          reclaimBranches += 1;
+          return;
+        }
+        await recordAwaiting(runId, events, fromAnotherWorktree);
+      } else {
+        // no_delivery_requested / packaging_failed / isolation_failed → 留待回收
+        reclaimBranches += 1;
+      }
+      return;
+    }
+    if (settlement.status === "unsettled") {
+      // 已有 Lead 决定（第 87 批的 pending 拒收：验证永无结果、拒收已定）→ 按
+      // 已裁定留待回收：迟到的验证结果只改显示，Lead 无事可做；收口语义仍归
+      // 决定 0095（已拒收也要等结果），不在这里改。
+      if (settlement.facts.acceptanceStatus === "accepted"
+        || settlement.facts.acceptanceStatus === "rejected") {
+        reclaimBranches += 1;
+      } else {
+        // 验证/reverify 还没结果 → 终态未收口。
+        terminalUnsettled.push(runId);
+        if (fromAnotherWorktree) crossTree.unsettled = true;
+      }
+      return;
+    }
+    // undeterminable：交付事实判不出收口——与"还没结果"分开（#2），单独
+    // 一行指向诊断。
+    undeterminable.push(runId);
+    if (fromAnotherWorktree) crossTree.undeterminable = true;
+  };
+
+  // 3a) 解析逐条（保留原逻辑）；读取有界并发，**读出来就地归类**，不留全量。
+  const toRead = [];
+  for (const runId of runIds) {
     let detail;
     try {
       detail = resolveTranscript(resolvedRunDir, runId);
@@ -259,29 +475,25 @@ async function collectRunBranchOpenItems({
       missingTranscripts += 1;
       continue;
     }
+    toRead.push({ runId, path: d.path });
+  }
+  await readItemsBounded(toRead, async ({ runId, path }) => {
     let events;
     try {
-      events = await readTranscriptFn(d.path);
+      events = await readTranscriptFn(path);
       if (!Array.isArray(events)) throw new Error("transcript not an event array");
     } catch {
       missingTranscripts += 1;
-      continue;
+      return null;
     }
-    branchReads.push({ runId, events });
-  }
+    await classifyRead(runId, events);
+    return null; // 归类完即丢：不留转录
+  });
+
   // 一次性预筛：只把**真会走到 forRoot** 的运行声明的根交给读器（第 120 批续修
   // E1）——自身有谱系引用、已打包、自身未裁决、已收口，且属于绑定项目。普通
   // 运行对自己返回自己的 runId，若照收会让每个被查看的分支都触发一次全库字节
-  // 扫描（50 个分支 = 50 次）。判定函数从派生模块导入，与 forRun 的门共用。
-  const pendingRoots = new Set();
-  for (const { runId, events } of branchReads) {
-    if (!supersessionCandidateGate(events, runId).candidate) continue;
-    const { identity, factError } = identityOfFirstEvent(events[0], projectIo);
-    if (factError != null) continue;
-    if (boundKey == null || identity?.kind !== "project" || identity.key !== boundKey) continue;
-    const declared = declaredLineageRoot(events, runId);
-    if (!declared.conflict && typeof declared.rootRunId === "string") pendingRoots.add(declared.rootRunId);
-  }
+  // 扫描（全量分支下更不可接受）。判定函数从派生模块导入，与 forRun 的门共用。
   if (pendingRoots.size > 0) {
     try {
       await supersession.prepare([...pendingRoots]);
@@ -289,88 +501,21 @@ async function collectRunBranchOpenItems({
       // 预筛失败：各 run 的派生各自兜底为"不推导"（保持待裁决）。
     }
   }
-
-  for (const { runId, events } of branchReads) {
-    // 3b) 归属（记录的项目身份，0113 修订）：首事件在档的 project 事实优先
-    //     （identityOfFirstEvent，与 `runs list --project` 同语义——派发时算
-    //     好落档，开发树删了也认得出），没有记录的旧运行由它退回按 cwd 推导
-    //     （不另写第二份回退）。factError 非空 = 在档事实损坏 → 不分类，计入
-    //     "找不到或冲突"行；任一侧不是 kind:"project" 或 key 不同 → 跳过不计。
-    const { identity, factError } = identityOfFirstEvent(events[0], projectIo);
-    if (factError != null) {
-      missingTranscripts += 1;
-      continue;
-    }
-    if (boundKey == null || identity?.kind !== "project" || identity.key !== boundKey) continue;
-    // 跨工作树提示口径不变：按运行的 cwd（findRunWorkspaceOwnership 的归属
-    // 事实）与绑定根比较；归属事实缺失/读不出 → 当同树、不提示（归属判定
-    // 本身已不依赖它）。
-    let runCwd = null;
+  // 只处理为谱系派生保留的那几条；处理完立即释放。
+  for (const { runId, events, fromAnotherWorktree } of retainedLineage) {
+    let lineage = null;
     try {
-      runCwd = findRunWorkspaceOwnership(events, runId)?.cwd ?? null;
+      lineage = await supersession.forRun({ runId, events });
     } catch {
-      runCwd = null;
+      lineage = null;
     }
-    const fromAnotherWorktree = typeof runCwd === "string" && runCwd.length > 0
-      && !sameNormalizedPath(runCwd, authorizedWorkspaceRoot);
-    // 3c) 先收口判定，再裁定。
-    const settlement = determineRunSettlement(events, runId);
-    if (!settlement.facts.terminal) continue; // 未终态 → 活跃运行一节管，不报
-    if (settlement.status === "settled") {
-      if (settlement.reason === "delivery_settled") {
-        const decided = events.some(
-          (e) => e && e.runId === runId
-            && (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected"),
-        );
-        if (decided) {
-          reclaimBranches += 1; // 已裁定 → 留待回收
-        } else {
-          // 第 120 批：优先级 自身显式裁决 > 谱系显式关闭 > 派生被取代 > 待裁决。
-          // 谱系已显式关闭、或已有被采纳的后代（派生事实）时不再催 Lead 裁决
-          //（关闭/被取代都不写事件，也不计入可续计数）。派生读不出时保持待裁决。
-          let lineage = null;
-          try {
-            lineage = await supersession.forRun({ runId, events });
-          } catch {
-            lineage = null;
-          }
-          if (lineage?.lineageClosed === true || typeof lineage?.supersededByRunId === "string") {
-            reclaimBranches += 1;
-          } else {
-            awaitingDecision.push(runId);
-            if (fromAnotherWorktree) crossTree.awaiting = true;
-            try {
-              if (await deliveryContinuableHint({ events, runId, runDir: resolvedRunDir, readTranscriptFn })) {
-                continuable += 1;
-              }
-            } catch {
-              // 可续判定读不出当不可续（提示性计数，不猜）。
-            }
-          }
-        }
-      } else {
-        // no_delivery_requested / packaging_failed / isolation_failed → 留待回收
-        reclaimBranches += 1;
-      }
-    } else if (settlement.status === "unsettled") {
-      // 已有 Lead 决定（第 87 批的 pending 拒收：验证永无结果、拒收已定）→ 按
-      // 已裁定留待回收：迟到的验证结果只改显示，Lead 无事可做；收口语义仍归
-      // 决定 0095（已拒收也要等结果），不在这里改。
-      if (settlement.facts.acceptanceStatus === "accepted"
-        || settlement.facts.acceptanceStatus === "rejected") {
-        reclaimBranches += 1;
-      } else {
-        // 验证/reverify 还没结果 → 终态未收口。
-        terminalUnsettled.push(runId);
-        if (fromAnotherWorktree) crossTree.unsettled = true;
-      }
+    if (lineage?.lineageClosed === true || typeof lineage?.supersededByRunId === "string") {
+      reclaimBranches += 1;
     } else {
-      // undeterminable：交付事实判不出收口——与"还没结果"分开（#2），单独
-      // 一行指向诊断。
-      undeterminable.push(runId);
-      if (fromAnotherWorktree) crossTree.undeterminable = true;
+      await recordAwaiting(runId, events, fromAnotherWorktree);
     }
   }
+  retainedLineage.length = 0;
 
   // 4) 运行树棵数（全仓 .wao-worktrees/<runId> 结尾的条目，#1；读不出 →
   //    null = 该数省略）。
@@ -388,16 +533,34 @@ async function collectRunBranchOpenItems({
   // 查别的工作树里的运行，按调用带那棵树的根（expectedWorkspaceRoot），或在那里跑 CLI。只在对应行确实列出
   // 这样的运行时出现；行内无绝对路径。
   const CROSS_TREE_HINT = "some runs were dispatched from another worktree: pass that worktree's root as expectedWorkspaceRoot (or run the CLI there) first";
+  // 第 147 批：等裁决行按 runId 内的创建时刻从旧到新（最旧的先点名），并写明
+  // 最老一条已等几天——年龄从它绑定的终态事件时间算；取不到就不写年龄。
+  // 修正一：创建时刻与读模型共用 runBranches.runCreatedAtMs（越界字段=取不到）。
+  const orderedAwaiting = sortAwaitingOldestFirst(awaitingDecision);
+  const orderedAwaitingIds = orderedAwaiting.map((entry) => entry.runId);
+  let oldestWaitingDays = null;
+  if (orderedAwaiting.length > 0) {
+    let nowMs = NaN;
+    try {
+      nowMs = nowFn();
+    } catch {
+      nowMs = NaN;
+    }
+    oldestWaitingDays = waitedDays(nowMs, orderedAwaiting[0].terminalMs);
+  }
+  terminalUnsettled.sort(byEnumerationOrder(enumerationOrder));
+  undeterminable.sort(byEnumerationOrder(enumerationOrder));
 
   const lines = [];
   if (awaitingDecision.length > 0) {
-    const ids = joinRunIdsBounded(awaitingDecision, 150, OPEN_ITEM_RUNIDS_CAP);
+    const ids = joinRunIdsBounded(orderedAwaitingIds, 150, OPEN_ITEM_RUNIDS_CAP);
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${awaitingDecision.length} settled delivery run(s) await a Lead decision `
       + `(run_delivery / run_delivery_review): ${ids.text}`
       + `${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
+      + `${oldestWaitingDays != null ? `; oldest waited ${oldestWaitingDays} day(s) since its terminal state` : ""}`
       + `${continuable > 0 ? `; ${continuable} continuable (run_continue hint)` : ""}`
-      + `${crossTree.awaiting ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,
+      + `${crossTree.awaiting ? `; ${CROSS_TREE_HINT}` : ""}`,
     ));
   }
   if (terminalUnsettled.length > 0) {
@@ -406,7 +569,7 @@ async function collectRunBranchOpenItems({
       `${OPEN_ITEM_PREFIX}${terminalUnsettled.length} terminal run(s) not settled `
       + `(verification/reverify without a result; run_delivery or \`wao runs wait <runId> --until-settled\`): `
       + `${ids.text}${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
-      + `${crossTree.unsettled ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,
+      + `${crossTree.unsettled ? `; ${CROSS_TREE_HINT}` : ""}`,
     ));
   }
   if (undeterminable.length > 0) {
@@ -414,7 +577,7 @@ async function collectRunBranchOpenItems({
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${undeterminable.length} run(s) with undeterminable settlement facts `
       + `(wao runs diagnose <runId>): ${ids.text}${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
-      + `${crossTree.undeterminable ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,
+      + `${crossTree.undeterminable ? `; ${CROSS_TREE_HINT}` : ""}`,
     ));
   }
   if (reclaimBranches > 0 || (worktreeCount ?? 0) > 0) {
@@ -433,7 +596,16 @@ async function collectRunBranchOpenItems({
       + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only; `
       + `the plan decides what is reclaimable — an empty plan can be normal, `
       + `runs with worker or WAO activity in the last ${keptRecentMinutes} minutes are kept; `
-      + `Lead decisions, lineage closes and collect records do not reset the window)${truncSuffix}`,
+      + `Lead decisions, lineage closes and collect records do not reset the window)`,
+    ));
+  }
+  // 第 147 批修正一：超帽是"仓库里 wao/run_* 分支总数"这一条事实，单独一行——
+  // 挂在"留待回收"行上时，没有回收候选（例如全是形状不合法的分支）就不显示。
+  // 计数口径与 dispatchResourceAdvisory 一致：全部分支名，不管 runId 形状。
+  if (total > BRANCH_CAP) {
+    lines.push(boundedLine(
+      `${OPEN_ITEM_PREFIX}${total} wao/run_* branch(es) in this repository exceed the cap of ${BRANCH_CAP} `
+      + `(reclaim: \`wao worktree reclaim --out <plan.json>\`)`,
     ));
   }
   if (missingTranscripts > 0) {
@@ -443,7 +615,7 @@ async function collectRunBranchOpenItems({
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${missingTranscripts} wao/run_* branch(es) without a usable transcript fact `
       + `(not found, unreadable, conflicting copies, or a broken recorded project fact; `
-      + `read-only \`wao worktree reclaim --out <plan.json>\` plan lists the branches)${truncSuffix}`,
+      + `read-only \`wao worktree reclaim --out <plan.json>\` plan lists the branches)`,
     ));
   }
   return lines;
@@ -504,7 +676,12 @@ async function collectInboxOpenItem({
  * @param {Function} [input.resolveTranscriptFn] — (runDir, runId) => detailed；
  *   缺省 resolveTranscriptPathDetailed（统一入口：全桶查重，conflict/
  *   unreadable 不静默择一）；注入返回 detailed 形状或路径字符串（=found）
- * @param {Function} [input.readTranscriptFn] — (path) => Promise<events[]>
+ * @param {Function} [input.readTranscriptFn] — (path) => Promise<events[]>；
+ *   读取有界并发（一次最多 8 份）
+ * @param {Function} [input.nowFn] — () => epoch ms；等裁决行年龄的当前时刻
+ *   （缺省 Date.now；测试注入）
+ * @param {Function} [input.onBranchEventsRetainedFn] — 测试缝：为延迟谱系派生
+ *   保留一条转录时调用（runId）——生产不注入
  * @param {object} [input.projectIo] — projectIdentity 的 io（realpath/tmpdir/
  *   readGitFile），归属两侧共用：绑定根的 identifyProjectFromCwd 与首事件的
  *   identityOfFirstEvent（0113 修订口径）；缺省 productionProjectIo()

@@ -28,6 +28,8 @@ import assert from "node:assert/strict";
 
 import {
   renderDispatchResourceAdvisory,
+  sampleDispatchResourceAdvisory,
+  commitDispatchResourceAdvisory,
   ADVISORY_GIT_TIMEOUT_MS,
 } from "../../src/dispatchResourceAdvisory.js";
 
@@ -69,7 +71,7 @@ test("S3-1: 正常计数 → 行出现且整行全等；两命令与 options 形
   const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
-    "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene; reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")",
+    "[wao] advisory: worktrees=2 waoRunBranches=3 (reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")",
   );
   assert.equal(calls.length, 3, "恰三次子进程调用（决定 0042 起第三拍 rev-parse 作状态键）");
   assert.equal(calls[0].command, "git worktree list --porcelain");
@@ -90,7 +92,7 @@ test("S3-2: CRLF 输出（Windows git 真实形态）→ 计数不漂", () => {
   const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
-    "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene; reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")",
+    "[wao] advisory: worktrees=2 waoRunBranches=3 (reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")",
   );
 });
 
@@ -100,7 +102,7 @@ test("S3-3: 零 wao/run_* 分支（空输出）→ waoRunBranches=0 照常成行
   const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
-    "[wao] advisory: worktrees=1 waoRunBranches=0 (npm run hygiene; reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")",
+    "[wao] advisory: worktrees=1 waoRunBranches=0 (reclaim: wao worktree reclaim, SOP wao manual maintenance \"批量清退\")",
   );
 });
 
@@ -193,4 +195,47 @@ test("决定 0042: BRANCH_CAP 帽只降不升（≤185；上调须 Owner 明示�
   // 保留棘轮报警灵敏度；记录=注释+本钉+0062）。只降方向，0042 允许。
   assert.equal(SRC_BRANCH_CAP, 60);
   assert.ok(SRC_BRANCH_CAP <= 185, "帽只降不升（决定 0042）——2026-10-02 的 175→185 系最后一次抬升");
+});
+
+// ===== 第 147 批修正一：采样只读 / 记账只在提示真正展示后 =====
+
+test("147-1: sample 只读——不写状态，连线两次同计数都返回行；commit 后才静默", () => {
+  const dir = makeTempStateDir();
+  const sample = () => sampleDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  const first = sample();
+  assert.ok(first && first.line.includes("waoRunBranches=3"), "首次采样返回行");
+  assert.ok(first.state, "计数有变化 → 带待写入的 state");
+  // 未 commit：同计数再采样仍然弹（提示没被吞）。
+  const second = sample();
+  assert.ok(second && second.line.includes("waoRunBranches=3"), "采样本身不记账——未展示的提示不会消失");
+  commitDispatchResourceAdvisory(second);
+  const third = sample();
+  assert.equal(third, null, "记账后帽内且计数一致 → 静默（与 CLI 同一规则）");
+});
+
+test("147-1: commit(null) 与无 state 的样本都是 no-op；render = sample + 立即 commit（CLI 行为不变）", () => {
+  assert.doesNotThrow(() => commitDispatchResourceAdvisory(null));
+  assert.doesNotThrow(() => commitDispatchResourceAdvisory({ line: "x", state: null }));
+  const dir = makeTempStateDir();
+  const line = renderDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  assert.ok(line !== null, "CLI 入口照旧弹出");
+  const next = sampleDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  assert.equal(next, null, "render 已立即记账（CLI 打印后即启动，行为保持原样）");
+});
+
+test("147-7: 行内不再出现 `npm run hygiene`（宿主项目没有这条命令），保留回收命令与手册指路", () => {
+  const { fakeExec } = makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, ROOT_OUT]);
+  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
+  assert.ok(!line.includes("npm run hygiene"), `不含只在 WAO 仓存在的命令: ${line}`);
+  assert.ok(line.includes("wao worktree reclaim"), "回收命令在场");
+  assert.ok(line.includes('SOP wao manual maintenance "批量清退"'), "手册指路在场");
 });
