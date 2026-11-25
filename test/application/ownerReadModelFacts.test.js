@@ -2311,6 +2311,35 @@ test("会审（F6）：保留上一轮条目只限同一个 key——slug 改指
   }
 });
 
+test("会审：同一个 slug 对应多个 key（定位不了记录目录）→ 项目行 consultRecords unknown，不是 available", async () => {
+  const s = makeStore("wao-owner-read-model-consult-");
+  try {
+    const keyA = join(s.base, "key-a");
+    const keyB = join(s.base, "key-b");
+    mkdirSync(keyA, { recursive: true });
+    mkdirSync(keyB, { recursive: true });
+    // 两个桶各有自己的 .project.json，却声明同一个 slug、不同的 key：说不清是哪个仓库。
+    s.writeProject({ ...ALPHA, key: keyA });
+    const secondDir = join(s.runDir, "projects", "alpha-second");
+    mkdirSync(secondDir, { recursive: true });
+    writeFileSync(join(secondDir, ".project.json"), JSON.stringify({
+      key: keyB, slug: ALPHA.slug, displayName: "alpha second", rulesVersion: "td190-r3", createdAt: iso(T0), aliases: [],
+    }), "utf8");
+    // 运行与会审记录都在 keyA 下：能读也不该拿它当"目录列得出来"。
+    s.write(s.bucket(ALPHA.slug), "run_a", completedEvents("run_a"));
+    writeConsult(consultsDirOf(keyA), "consult_20261124170000012aaaaaa", { seats: [] });
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    assert.equal(projectOf(snap, ALPHA.slug).consultRecords, "unknown",
+      "多个 key 指向同一个 slug：会审记录目录定位不了，不是 available");
+    assert.deepEqual(snap.consults, [], "定位不了目录就没有条目（不猜是哪一个仓库）");
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("会审：同一个 consultId 出现在两个项目 → 按 (项目 slug, consultId) 建键，后者不覆盖前者", async () => {
   const s = makeStore("wao-owner-read-model-consult-");
   try {

@@ -12,6 +12,12 @@
 //   - injected errors → fixed safe code, NO raw text (and never token/path/exception),
 //   - mandatory safe headers (no-store/nosniff/no-referrer/CSP) and NO CORS opt-in,
 //   - happy path threads bounded client facts to the read-only service.
+//
+// Batch 140c (decision 0131): the three read-model routes /api/overview,
+// /api/workers and /api/attention are positive cases here (they are no longer
+// 404s); their full contract — auth, closed query set, loading → ready → stale,
+// DTO whitelists, the refresh chain, close() — lives in ownerDashboardApi.test.js.
+// The import contract below pins the server's exact import set.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -180,6 +186,56 @@ test("ROUTE: unknown GET route → fixed 404", async () => {
     assert.deepEqual(jsonOf(r), { error: "not_found" });
     assertSafeHeaders(r);
   }
+});
+
+// =====================================================================
+// ROUTE (140c) — the three read-model routes are served (positive cases)
+// =====================================================================
+test("ROUTE (140c): /api/overview, /api/workers, /api/attention → 200; loading until refreshNow(), then ready", async () => {
+  let refreshes = 0;
+  const NOW = 1_000_000;
+  const s = createOwnerDashboardServer({
+    runDir: "/server/owned/runs", workspaceRoot: "/server/owned/ws",
+    knownAgentIds: ["coder_low"], env: {},
+    getOwnerRunsFn: async () => ({ runs: [], returnedCount: 0, matchedCount: 0, truncated: false }),
+    getOwnerActivityFn: async () => ({
+      runId: "run_x", available: true, unavailableReason: null,
+      activity: { entries: [], total: 0, counts: {}, nextCursor: null },
+      liveness: { ownerHeartbeat: "n/a", secondsSinceHeartbeat: null },
+    }),
+    nowFn: () => NOW,
+    createReadModelFn: () => ({
+      refresh: async () => { refreshes += 1; },
+      snapshot: ({ now }) => ({ generatedAt: new Date(now).toISOString(), projects: [], runs: [], consults: [] }),
+    }),
+  });
+  const auth = { authorization: "Bearer " + s.token };
+  const routes = ["/api/overview", "/api/workers", "/api/attention"];
+  for (const url of routes) {
+    const loading = await drive(s.handler, { url, headers: auth });
+    assert.equal(loading.status, 200, `${url} → 200 (not 404)`);
+    assert.deepEqual(jsonOf(loading), { status: "loading" }, "no data before the first refresh");
+    assertSafeHeaders(loading);
+    const unauthorized = await drive(s.handler, { url });
+    assert.equal(unauthorized.status, 401, `${url} without bearer → 401`);
+  }
+  assert.equal(refreshes, 0, "nothing refreshes until listen() / refreshNow()");
+  assert.equal(await s.refreshNow(), "ready");
+  assert.equal(refreshes, 1);
+  const generatedAt = new Date(NOW).toISOString();
+  const overview = jsonOf(await drive(s.handler, { url: "/api/overview", headers: auth }));
+  assert.equal(overview.status, "ready");
+  assert.deepEqual(overview.counts, {
+    running: 0, starting: 0,
+    liveness: { terminal: 0, progress: 0, process_only: 0, silent: 0, unknown: 0 },
+    verifying: 0, deliveryUnobservable: 0, decide: { open: 0, unknown: 0 }, anomalies: { open: 0, unknown: 0 },
+  });
+  assert.deepEqual(overview.projects, []);
+  assert.deepEqual(overview.lanes, []);
+  assert.deepEqual(jsonOf(await drive(s.handler, { url: "/api/workers", headers: auth })),
+    { status: "ready", generatedAt, truncated: false, workers: [] });
+  assert.deepEqual(jsonOf(await drive(s.handler, { url: "/api/attention", headers: auth })),
+    { status: "ready", generatedAt, decide: [], anomalies: [], resolved: [] });
 });
 
 // =====================================================================
@@ -433,16 +489,28 @@ test("ENV AUTHORITY: provided env threaded to the service; omitted env is NOT th
 });
 
 // =====================================================================
-// ARCHITECTURE — only node:http/crypto/url + the service; no SDK/zod/commands
+// ARCHITECTURE — the pinned import set: node builtins + application services;
+// no SDK/zod/commands. The list mirrors the module header ("Imports …").
 // =====================================================================
-test("ownerDashboardServer.js uses only node:http/crypto/url + the service (no SDK/zod/commands)", async () => {
+test("ownerDashboardServer.js imports exactly the pinned set (node builtins + application services; no SDK/zod/commands)", async () => {
   const { readFileSync: rf } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const src = rf(join(fileURLToPath(new URL(".", import.meta.url)), "../..", "src", "ownerDashboardServer.js"), "utf8");
-  assert.ok(src.includes('from "node:http"'), "uses node:http");
-  assert.ok(src.includes('from "node:crypto"'), "uses node:crypto");
-  assert.ok(src.includes('from "node:url"'), "uses node:url");
-  assert.ok(src.includes("ownerDashboard"), "uses the composition service");
+  // Multi-line `import {\n … \n} from "…";` declarations: anchor at line start, let the
+  // clause span lines, and require the from-path to close the line.
+  const sources = [...src.matchAll(/^import\s+(?:[\s\S]*?)\s+from\s+"([^"]+)";$/gm)].map((m) => m[1]).sort();
+  assert.deepEqual(sources, [
+    "./application/ownerAttention.js", // 140c: the attention derivation
+    "./application/ownerDashboard.js", // the composition service (legacy /api/runs + /api/activity)
+    "./application/ownerReadModel.js", // 140c: the Owner read model
+    "./application/runSummaryCache.js",
+    "./projectBuckets.js", // 140c: the project slug shape
+    "node:crypto",
+    "node:fs",
+    "node:http",
+    "node:path",
+    "node:url",
+  ]);
   assert.ok(!src.includes("@modelcontextprotocol/sdk"), "no SDK");
   assert.ok(!src.includes('from "zod"'), "no zod");
   assert.ok(!src.includes('from "./commands/'), "no commands/");
