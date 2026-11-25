@@ -23,6 +23,10 @@
 //   · fail-open：git 子进程失败/超时/输出不可解析 → 返回 null，调用方
 //     （src/commands/run.js）完全省略该行——不报错、不加失败码、不影响任何
 //     既有输出与 verdict，永不阻塞派发。没有"计数不可用"占位文案，失败面为零。
+//   · 第 147 批修正一：采样与记账拆开——sampleDispatchResourceAdvisory 只读，
+//     commitDispatchResourceAdvisory 只在提示真正展示后写状态（MCP 派发被拒、
+//     提示放不下时不能把计数记成"已展示"，否则下一次相同计数被静默吞掉）；
+//     CLI 用 renderDispatchResourceAdvisory（sample + 立即 commit），行为不变。
 //   · 计数 I/O 失败面：状态读失败 → 视为"变化"（保守弹一次——状态文件损坏
 //     不吃掉信号）；状态写失败 → 静默忽略（下次重弹，同样保守可见）。
 //   · 行内容纪律：除两个计数数字外不携带任何动态内容（无路径、无凭据、无
@@ -66,9 +70,11 @@ export const BRANCH_CAP = 60;
 
 /** ADR 0035 S3 固定行文案（两个计数是仅有的动态内容；无其他动态载荷）。
  * 行尾清退指路：指向 `wao worktree reclaim`（计划→sha256→
- * apply；规程见 wao manual maintenance "批量清退"）。仍为静态文本。 */
+ * apply；规程见 wao manual maintenance "批量清退"）。仍为静态文本。
+ * 第 147 批修正：不带 `npm run hygiene`——经 MCP 传到宿主项目时那条命令不存在；
+ * 回收命令与手册指路对两边都成立。 */
 function advisoryLine(worktrees, waoRunBranches) {
-  return `[wao] advisory: worktrees=${worktrees} waoRunBranches=${waoRunBranches} (npm run hygiene; reclaim: wao worktree reclaim, SOP wao manual maintenance "批量清退")`;
+  return `[wao] advisory: worktrees=${worktrees} waoRunBranches=${waoRunBranches} (reclaim: wao worktree reclaim, SOP wao manual maintenance "批量清退")`;
 }
 
 /**
@@ -138,18 +144,25 @@ function writeLastState(stateDir, root, counts) {
 }
 
 /**
- * 渲染 ADR 0035 S3 的派发启动 advisory 行，或返回 null（静默/失败均省略）。
+ * 只读采样：渲染 ADR 0035 S3 的派发启动 advisory 行，**不写状态文件**。
  * 决定 0042 弹行规则：变化 OR 超帽 才弹；帽内无变化静默。
+ *
+ * 第 147 批修正：消费方（MCP 受理回执）可能在采样后被拒、提示根本没送到 Lead；
+ * 那种情况下不能把计数记成"已展示"，否则下一次相同计数被吞掉。所以写状态拆成
+ * 单独的 `commitDispatchResourceAdvisory`，只有提示真正带出时调用；CLI 用下面的
+ * `renderDispatchResourceAdvisory`（算 + 立刻写），行为不变。
  *
  * @param {string} cwd — 采样目录（git 事实 repo 级一致）
  * @param {{exec?: Function, stateDir?: string, branchCap?: number}} [opts]
  *   · exec — 可注入子进程执行器（默认 node execSync）；
  *   · stateDir — 上次计数状态目录（默认 %LOCALAPPDATA%\wao；测试注入 temp）；
  *   · branchCap — 分支帽（默认本模块 BRANCH_CAP）。
- * @returns {string|null} 固定格式行；任一计数失败（含超时、非 git 目录、输出
- *   不可解析）→ null，绝不抛错
+ * @returns {{line: string, state: {stateDir: string, root: string, counts: {worktrees: number, waoRunBranches: number}}|null}|null}
+ *   应弹行时返回 {line, state}（state 非空表示计数有变化、需要在展示后写入；
+ *   超帽但计数未变时 state 为 null——写不写都不影响下次判定）；静默/失败返回 null。
+ *   绝不抛错（fail-open）。
  */
-export function renderDispatchResourceAdvisory(cwd, { exec = execSync, stateDir, branchCap = BRANCH_CAP } = {}) {
+export function sampleDispatchResourceAdvisory(cwd, { exec = execSync, stateDir, branchCap = BRANCH_CAP } = {}) {
   let worktrees;
   let waoRunBranches;
   let root;
@@ -172,8 +185,40 @@ export function renderDispatchResourceAdvisory(cwd, { exec = execSync, stateDir,
     // 决定 0042 ①②：帽内且与上次一致 → 静默（治警报疲劳）。
     return null;
   }
-  if (changed) {
-    writeLastState(dir, root, { worktrees, waoRunBranches });
+  return {
+    line: advisoryLine(worktrees, waoRunBranches),
+    state: changed ? { stateDir: dir, root, counts: { worktrees, waoRunBranches } } : null,
+  };
+}
+
+/**
+ * 把"已真正展示"的采样计数写入状态文件（供给下一次的"是否变化"判定）。
+ * 传入 null（静默/失败/未展示）即 no-op。写失败静默忽略（下次重弹，保守可见）。
+ *
+ * @param {ReturnType<typeof sampleDispatchResourceAdvisory>} sample
+ */
+export function commitDispatchResourceAdvisory(sample) {
+  if (!sample || !sample.state) return;
+  try {
+    writeLastState(sample.state.stateDir, sample.state.root, sample.state.counts);
+  } catch {
+    // 状态写失败：静默忽略——下次按"变化"重弹（保守可见，不丢信号）。
   }
-  return advisoryLine(worktrees, waoRunBranches);
+}
+
+/**
+ * CLI 兼容入口：采样 + 立刻写状态 + 返回行（CLI 在派发启动前打印，随后才启动
+ * 运行；即使启动失败，Lead 也已经在 stderr 看到这行，所以立即记账是正确的）。
+ * 渲染规则同 `sampleDispatchResourceAdvisory`；静默/失败返回 null。
+ *
+ * @param {string} cwd — 采样目录（git 事实 repo 级一致）
+ * @param {{exec?: Function, stateDir?: string, branchCap?: number}} [opts]
+ * @returns {string|null} 固定格式行；任一计数失败（含超时、非 git 目录、输出
+ *   不可解析）→ null，绝不抛错
+ */
+export function renderDispatchResourceAdvisory(cwd, opts = {}) {
+  const sample = sampleDispatchResourceAdvisory(cwd, opts);
+  if (sample == null) return null;
+  commitDispatchResourceAdvisory(sample);
+  return sample.line;
 }

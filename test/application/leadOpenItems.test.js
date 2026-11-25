@@ -18,7 +18,13 @@
 //   - 分类：等裁定（含可续计数正/负例）、终态未收口（验证 pending）、
 //     undeterminable 单独一行（与"还没结果"分开，指向 runs diagnose）、留待
 //     回收（已采纳/已拒收/无交付）、未终态不报、转录缺失只计数；
-//   - 枚举失败省略整段 A；运行树数全仓口径（.wao-worktrees/<合法 runId> 结尾）；
+//   - 枚举失败给一行固定文案（分支账读不出）；运行树数全仓口径
+//     （.wao-worktrees/<合法 runId> 结尾）；
+//   - 第 147 批修正一：畸形/越界时间按"取不到"处理（runId 创建时刻与读模型共用
+//     runBranches.runCreatedAtMs 的字段回读；终态 ts 只认 ISO 字符串）；超帽按
+//     **全部分支名**计数（与 dispatchResourceAdvisory 同口径）并单独一行；只有
+//     "收口未裁决且有谱系引用"的转录取留到谱系派生之后，其余归类完即丢（注入
+//     回调数保留条数）。
 //   - 收件箱仅同项目出行（可读收件箱在场时读函数 0 次调用）、只 readdir
 //     open/ 的合法文件名（closed/、ids/ 不碰，不调 listFeedback——结构上无该
 //     依赖，注入读函数钉"只碰 open/"）；
@@ -37,7 +43,7 @@ import {
   OPEN_ITEM_MAX_CHARS,
   OPEN_ITEM_RUNIDS_CAP,
 } from "../../src/application/leadOpenItems.js";
-import { BRANCH_CAP } from "../../src/dispatchResourceAdvisory.js";
+import { BRANCH_CAP, renderDispatchResourceAdvisory } from "../../src/dispatchResourceAdvisory.js";
 import { RECENT_BOUND_EVENT_MS } from "../../src/application/worktreeReclaim.js";
 import { determineRunSettlement } from "../../src/application/runSettlement.js";
 import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
@@ -170,6 +176,10 @@ function runIdAt(ms, tag = "aa") {
 function withTerminalTs(events, iso) {
   return events.map((e) => (e.type === "run.state_change" && e.to === "completed" ? { ...e, ts: iso } : e));
 }
+// 任意 ts 值（含数字/畸形串）——钉"只认 ISO 时间字符串"。
+function withTerminalTsValue(events, ts) {
+  return events.map((e) => (e.type === "run.state_change" && e.to === "completed" ? { ...e, ts } : e));
+}
 function deliveryFailed(runId, code = "backend_error") {
   return { type: "run.delivery_failed", runId, agentId: "coder_low", deliveryCode: code };
 }
@@ -253,6 +263,20 @@ function fakeGit({ refs = [], worktrees = [], sortByFlag = false } = {}) {
       }
       throw new Error(`unexpected git call: ${args.join(" ")}`);
     },
+  };
+}
+
+// dispatchResourceAdvisory 的 fake 执行器：分支帽口径与 leadOpenItems 对照用。
+function fakeAdvisoryExec(branchNames) {
+  return (command) => {
+    if (command === "git worktree list --porcelain") {
+      return `worktree D:/fake/wt\nHEAD ${"a".repeat(40)}\n`;
+    }
+    if (command === 'git branch --list "wao/run_*"') {
+      return branchNames.map((branch) => `  ${branch}`).join("\n");
+    }
+    if (command === "git rev-parse --show-toplevel") return "D:/fake/repo\n";
+    throw new Error(`unexpected advisory command: ${command}`);
   };
 }
 
@@ -800,33 +824,135 @@ test("OI-A17 (147): 全量读转录有界并发——最多 8 份同时在途（
   } finally { cleanupDir(root); }
 });
 
-test("OI-A18 (147): 分支总数超过帽才在留待回收行注明总数与上限——帽值取自 BRANCH_CAP；恰好等于帽时不注", async () => {
-  const root = mkdtempSync(join(tmpdir(), "wao-oi-a18-"));
+test("OI-A16c (147-1): 畸形 runId 时间戳（10 月 0 日）按取不到处理——不因 Date.UTC 归一化排到最前", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a16c-"));
   try {
     makeGitRepo(root);
-    const refsUpTo = (n) => {
-      const refs = [];
-      const eventsByRun = {};
-      for (let i = n - 1; i >= 0; i -= 1) {
-        const runId = `run_q${String(i).padStart(3, "0")}`;
-        refs.push(`wao/${runId}`);
-        eventsByRun[runId] = noDeliveryTerminal(runId, root);
-      }
-      return { refs, eventsByRun };
-    };
-    const atCap = await runCollect(root, { ...refsUpTo(BRANCH_CAP), worktrees: [] });
-    const atCapLine = atCap.lines.find((l) => l.includes("left for reclaim"));
-    assert.ok(atCapLine, atCapLine);
-    assert.ok(atCapLine.startsWith(`open item: ${BRANCH_CAP} decided`), atCapLine);
-    assert.ok(!atCapLine.includes("exceed the cap of"), `等于帽（${BRANCH_CAP}）不注: ${atCapLine}`);
+    // 17 位时间戳：2026-10-00 00:00:00.000（0 日）——Date.UTC 会归一化成 2026-09-30。
+    const malformed = "run_20261000000000000bbbbbb";
+    const valid = runIdAt(Date.UTC(2026, 10, 20, 0, 0, 0), "ok");
+    const { lines } = await runCollect(root, {
+      // 枚举新到旧：合法那条在前；buggy 归一化会把 malformed 排到 valid 之前。
+      refs: [`wao/${valid}`, `wao/${malformed}`],
+      worktrees: [],
+      eventsByRun: {
+        [valid]: settledUndecided(valid, root),
+        [malformed]: settledUndecided(malformed, root),
+      },
+    });
+    const awaiting = lines.find((l) => l.includes("await a Lead decision"));
+    assert.ok(awaiting, `等裁决行在场: ${JSON.stringify(lines)}`);
+    assert.equal(awaiting.match(/\): ([a-z0-9_, ]+)/)?.[1], `${valid}, ${malformed}`,
+      `畸形时间戳不算创建时刻（排在合法项之后）: ${awaiting}`);
+    assert.ok(awaiting.indexOf(valid) < awaiting.indexOf(malformed), "合法时间的那一刻在前");
+    assert.ok(!awaiting.includes("oldest waited"), "两条都没有终态 ts → 不写年龄");
+  } finally { cleanupDir(root); }
+});
 
-    const overCap = await runCollect(root, { ...refsUpTo(BRANCH_CAP + 1), worktrees: [] });
-    const overLine = overCap.lines.find((l) => l.includes("left for reclaim"));
-    assert.ok(overLine, overLine);
-    assert.ok(overLine.includes(`; ${BRANCH_CAP + 1} wao/run_* branch(es) in this repository exceed the cap of ${BRANCH_CAP}`),
-      `超帽一行内注明总数与上限: ${overLine}`);
-    assert.ok(!overCap.lines.some((l) => l.includes("counts cover the")), "没有旧截断后缀");
-    assertLineShape(overCap.lines);
+test("OI-A16d (147-1): 终态 ts 是数字（12）→ 不是 ISO 时间串，不写年龄（不再算出 9,125 天）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a16d-"));
+  try {
+    makeGitRepo(root);
+    const runId = runIdAt(Date.UTC(2026, 10, 20, 0, 0, 0), "n1");
+    const { lines } = await runCollect(root, {
+      refs: [`wao/${runId}`],
+      worktrees: [],
+      eventsByRun: { [runId]: withTerminalTsValue(settledUndecided(runId, root), 12) },
+      over: { nowFn: () => Date.UTC(2026, 10, 25, 12, 0, 0) },
+    });
+    const awaiting = lines.find((l) => l.includes("await a Lead decision"));
+    assert.ok(awaiting, `等裁决行在场: ${JSON.stringify(lines)}`);
+    assert.ok(!awaiting.includes("oldest waited"), `数字 ts 不是时间串 → 不写年龄: ${awaiting}`);
+  } finally { cleanupDir(root); }
+});
+
+test("OI-A18 (147-1): 超帽按全部 wao/run_* 分支名计数（与派发提示同口径），单独一行；恰好等于帽不出", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a18-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "wao-oi-a18-state-"));
+  try {
+    makeGitRepo(root);
+    // 全部形状不合法（runId 含 '.'）：0 条参与归类——没有任何归类行/回收行时，
+    // 超帽事实仍必须单独显示（旧实现挂在"留待回收"行上会整条消失）。
+    const badBranches = (n) => Array.from({ length: n }, (_, i) => `wao/run_bad.${i}`);
+    const atCap = await runCollect(root, { refs: badBranches(BRANCH_CAP), worktrees: [], eventsByRun: {} });
+    assert.deepEqual(atCap.lines, [], `帽内且无合法 runId → 零行: ${JSON.stringify(atCap.lines)}`);
+
+    const overCap = await runCollect(root, { refs: badBranches(BRANCH_CAP + 1), worktrees: [], eventsByRun: {} });
+    const capOnly = `open item: ${BRANCH_CAP + 1} wao/run_* branch(es) in this repository exceed the cap of ${BRANCH_CAP} `
+      + "(reclaim: `wao worktree reclaim --out <plan.json>`)";
+    assert.deepEqual(overCap.lines, [capOnly], `超帽单独一行（不依赖回收候选）: ${JSON.stringify(overCap.lines)}`);
+
+    // 口径对照：派发提示对同一批分支名（含形状不合法的）也数到 61 → 同样判超帽。
+    const advisory = renderDispatchResourceAdvisory("D:/fake/repo", {
+      exec: fakeAdvisoryExec(badBranches(BRANCH_CAP + 1)),
+      stateDir,
+    });
+    assert.ok(advisory && advisory.includes(`waoRunBranches=${BRANCH_CAP + 1}`),
+      `同一计数口径（全部 wao/run_* 分支名）: ${advisory}`);
+    assert.ok(BRANCH_CAP + 1 > BRANCH_CAP, "两侧对同一批分支都判超帽");
+
+    // 混合：坏形状 + 1 条合法无交付 → 回收行与超帽行是两条独立事实。
+    const mixed = await runCollect(root, {
+      refs: [...badBranches(BRANCH_CAP), "wao/run_ok"],
+      worktrees: [],
+      eventsByRun: { run_ok: noDeliveryTerminal("run_ok", root) },
+    });
+    const reclaimLine = mixed.lines.find((l) => l.includes("left for reclaim"));
+    const capLine = mixed.lines.find((l) => l.includes("exceed the cap of"));
+    assert.ok(reclaimLine, `回收行在场: ${JSON.stringify(mixed.lines)}`);
+    assert.ok(capLine, `超帽行在场: ${JSON.stringify(mixed.lines)}`);
+    assert.notEqual(capLine, reclaimLine, "两条独立行");
+    assert.ok(!reclaimLine.includes("exceed the cap of"), `超帽不挂在回收行上: ${reclaimLine}`);
+    assert.equal(capLine, capOnly, "超帽行文案与纯超帽场景一致");
+    assert.ok(!mixed.lines.some((l) => l.includes("counts cover the")), "没有旧截断后缀");
+    assertLineShape(mixed.lines);
+  } finally { cleanupDir(stateDir); cleanupDir(root); }
+});
+
+test("OI-A19 (147-1): 非候选转录不留到归类结束——只有收口未裁决且带谱系引用的转录取留", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-oi-a19-"));
+  const runDir = join(root, "runs");
+  try {
+    makeGitRepo(root);
+    mkdirSync(runDir, { recursive: true });
+    const toJsonl = (events) => events.map((e) => JSON.stringify(e)).join("\n") + "\n";
+    const eventsByRun = {};
+    const plainIds = [];
+    for (let i = 0; i < 6; i += 1) {
+      const runId = runIdAt(Date.UTC(2026, 9, 10, 0, 0, i), `p${i}`);
+      plainIds.push(runId);
+      eventsByRun[runId] = settledUndecided(runId, root); // 收口未裁决、无谱系引用 → 当场归类
+    }
+    // 两个带谱系引用的收口未裁决运行：forRun 需要 prepare 后的根派生 → 保留。
+    // 首事件带在档 project 事实（与写侧续修同形；否则归属判不出会跳过）。
+    const boundKey = identifyProjectFromCwd(root, TEST_PROJECT_IO).key;
+    const candidateIds = [];
+    for (let i = 0; i < 2; i += 1) {
+      const runId = runIdAt(Date.UTC(2026, 9, 12, 0, 0, i), `g${i}`);
+      candidateIds.push(runId);
+      eventsByRun[runId] = withRecordedFact([
+        { type: "run.session_reuse", runId, mode: "run_lineage", turn: "first", rootRunId: runId },
+        ...settledUndecided(runId, root),
+      ], projectFact(boundKey));
+      writeFileSync(join(runDir, `${runId}.jsonl`), toJsonl(eventsByRun[runId]), "utf8");
+    }
+    const retained = [];
+    const { lines } = await runCollect(root, {
+      refs: [...candidateIds, ...plainIds].reverse().map((id) => `wao/${id}`),
+      worktrees: [],
+      eventsByRun,
+      over: {
+        runDir,
+        onBranchEventsRetainedFn: (runId) => retained.push(runId),
+      },
+    });
+    assert.deepEqual([...retained].sort(), [...candidateIds].sort(),
+      `只为谱系候选保留转录（普通 6 条不留）: ${JSON.stringify(retained)}`);
+    const awaiting = lines.find((l) => l.includes("await a Lead decision"));
+    assert.ok(awaiting, `等裁决行在场: ${JSON.stringify(lines)}`);
+    assert.ok(awaiting.includes("8 settled delivery run(s)"), `归类仍覆盖全部 8 条: ${awaiting}`);
+    assert.ok(awaiting.includes(`): ${plainIds.slice(0, OPEN_ITEM_RUNIDS_CAP).join(", ")} (+3 more)`),
+      `最旧 5 条（普通运行）照常点名: ${awaiting}`);
   } finally { cleanupDir(root); }
 });
 
@@ -851,8 +977,8 @@ test("OI-A7 (147): 枚举失败 → 一行固定文案（分支账读不出，�
     assert.equal(lines[0],
       "open item: the wao/run_* branch ledger could not be read "
       + "(git enumeration failed; this is not \"no old branches\" — check the bound repository with "
-      + "`git branch --list \"wao/run_*\"` and `wao worktree reclaim`)",
-      "固定文案钉住（不掺错误原文）");
+      + "`git branch --list \"wao/run_*\"` and `wao worktree reclaim --out <plan.json>`)",
+      "固定文案钉住（不掺错误原文；回收命令可直接跑）");
     assert.ok(!lines[0].includes(root), "不含绝对路径");
     assert.ok(!lines[0].includes("git gone"), "不含动态错误文本");
     assertLineShape(lines);

@@ -75,7 +75,15 @@ function gitIn(dir, args) {
 async function buildStdioClient({ registryPath, runDir, workspaceRoot, env = {} }) {
   const { Client } = await import("@modelcontextprotocol/sdk/client");
   const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
-  const childEnv = { ...process.env, WAO_SKIP_VERSION_GUARD: "1", ...env };
+  // 第 147 批修正一：stdio 入口接真实分支帽提示——子进程走临时状态目录（套件的
+  // TEMP 已隔离）；LOCALAPPDATA 改写后版本守卫用 WAO_NODE 指向本进程的 v22。
+  const childEnv = {
+    ...process.env,
+    WAO_SKIP_VERSION_GUARD: "1",
+    WAO_NODE: process.execPath,
+    LOCALAPPDATA: join(tmpdir(), "wao-mcp-advisory-state"),
+    ...env,
+  };
   const args = [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir, "--workspace-root", workspaceRoot];
   const transport = new StdioClientTransport({
     command: process.execPath,

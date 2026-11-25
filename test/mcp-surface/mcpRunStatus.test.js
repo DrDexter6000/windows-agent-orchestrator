@@ -865,7 +865,14 @@ test("M9-3B-07: real stdio run_dispatch(pending) then run_status polls to failed
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir, "--workspace-root", dir],
-      env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+      // 第 147 批修正一：stdio 入口接真实分支帽提示——子进程走临时状态目录
+      // （套件的 TEMP 已隔离）；LOCALAPPDATA 改写后用 WAO_NODE 钉住本进程的 v22。
+      env: {
+        ...process.env,
+        WAO_SKIP_VERSION_GUARD: "1",
+        WAO_NODE: process.execPath,
+        LOCALAPPDATA: join(tmpdir(), "wao-mcp-advisory-state"),
+      },
     });
     await client.connect(transport);
 
