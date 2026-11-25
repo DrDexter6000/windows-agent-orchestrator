@@ -89,6 +89,16 @@
         "effort": "high"
       },
       "cwd": "."
+    },
+    "sonnet": {
+      "backend": "claude-code",
+      "model": {
+        "id": "claude-sonnet-5-5"
+      },
+      "reasoning": {
+        "effort": "xhigh"
+      },
+      "cwd": "."
     }
   }
 }

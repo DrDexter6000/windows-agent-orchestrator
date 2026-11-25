@@ -39,9 +39,9 @@ const REG = Object.fromEntries(Object.entries(REGISTRY_PROJECTION.agents).map(([
 
 // ── 活体基线钉（G7 冻结快照：改 lanes.json 必须同 diff 看到这里） ────────────
 
-test("W1 活体：config/lanes.json 9 车道/0 别名/4 角色，结构零 issue（0046 步⑧ -gpt-sol-56；第 98 批 +fable）", () => {
+test("W1 活体：config/lanes.json 10 车道/0 别名/4 角色，结构零 issue（0046 步⑧ -gpt-sol-56；第 98 批 +fable；第 149 批 +sonnet）", () => {
   assert.ok(LIVE.ok, `结构 issues 必须为空，实际：${JSON.stringify(LIVE.issues)}`);
-  assert.equal(LIVE.lanes.length, 9);
+  assert.equal(LIVE.lanes.length, 10);
   const aliases = LIVE.lanes.flatMap((l) => Object.keys(l.aliases ?? {}));
   assert.equal(aliases.length, 0, "0046 步⑥：旧席位名别名表全数清空（机制保留=空表合法）");
   assert.deepEqual(ROLES.sort(), ["auditor", "coder", "researcher", "tester"],
@@ -88,6 +88,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3.1-pro", effort: null, aliases: {} },
     { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: {} },
     { id: "sol", backend: "codex", modelId: "gpt-6.2-sol", effort: "high", aliases: {} },
+    { id: "sonnet", backend: "claude-code", modelId: "claude-sonnet-5-5", effort: "xhigh", aliases: {} },
   ]);
   // 0046 §5 步②（2026-10-06）：车道键模型名化重键（kimi-k3→kimi/gpt-astra→astra/
   // gpt-sol-61→sol/claude-opus→opus/ds-acp→deepseek-pro；glm 系与 gpt-sol-56 不变，
