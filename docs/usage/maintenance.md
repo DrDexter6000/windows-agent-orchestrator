@@ -41,7 +41,7 @@ npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 
 
 派发 advisory 弹行，或 `npm run hygiene` 的 W4/W5 变红时，按本规程处置。符合条件的干净 `persistent` 树终态已自动释放、分支一律保留（`docs/02-architecture.md` §4.3，决定 0085），本节清退的是残留树与分支。
 
-每批收尾三步：合入 → 每一轮都记裁决（被新派修正轮取代的前几轮也要；续修谱系只裁决最终候选）→ 按本节回收。合入尽量快进或合并以保留原交付提交；必须在 main 上重建时写 `WAO-Adopted-From` 与 `WAO-Original-Delivery` trailer（delivery 页「验证失败采纳协议」），文档记落地提交的 SHA——记交付分支的短 SHA 会让分支落进 `include_required`、回收不掉。
+每批收尾三步：合入 → 有交付的每一轮都记裁决（被新派修正轮取代的前几轮也要；续修谱系只裁决最终候选；无交付的不裁决）→ 按本节回收。合入尽量快进或合并以保留原交付提交；在 main 上重建、或验证失败后采纳的，按 delivery 页「验证失败采纳协议」写 `WAO-Adopted-From` 与 `WAO-Original-Delivery` trailer，文档记落地提交的 SHA——分支未并入 main 时，文档里记它的短 SHA 会让它落进 `include_required`、回收不掉。
 
 四步：
 
@@ -120,11 +120,11 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询；移动端 recent-runs 区域独立滚动。选中 run 的详情面板给出 backend、execution stage、terminal、事件总量、scope observation、liveness 与有界活动时间线；这些均是 transcript/application projection 的只读事实，不是语义进度判断。
 
-浏览器终态通知需人类显式 opt-in：只有 Owner 点击启用且浏览器授予 Notification permission 后，页面才在观察到同一选中 run 从非终态变为终态时通知恰好一次。首次加载/刷新时已终态的 run 不补发，重复 polling 不重复发送，拒绝权限会明确显示 `notifications blocked`。通知只含固定安全字段，不含 worker 消息、路径、command/tool payload、credential 或 session。所有异步 activity 请求同时绑定选中 `runId` 与 selection epoch，A→B→A 快速切换时旧响应不得覆盖当前 run 的详情。
+浏览器终态通知需人类显式 opt-in：只有 Owner 点击启用且浏览器授予 Notification permission 后，页面才在观察到同一选中 run 从非终态变为终态时通知恰好一次。首次加载/刷新时已终态的 run 不补发，重复 polling 不重复发送，拒绝权限会明确显示 `notifications blocked`。通知只含固定安全字段。所有异步 activity 请求同时绑定选中 `runId` 与 selection epoch，A→B→A 快速切换时旧响应不得覆盖当前 run 的详情。
 
-看板默认打开 Active 模式：只列出当前有新鲜 owner 心跳、经证明 active 的 run，每 5s 自动刷新。历史 run 仅在 Owner 显式选择 `1h`/`24h`/`7d` 预设或有界自定义 from/to（上限 7d；含未来、倒序、越界或未知参数时固定返回 HTTP 400）后按需加载一次；历史模式不自动轮询。Active 响应标注 `scanScope=active`，不带 `unresolvedCount`（不做全库存 unresolved 分类，恒缺失而非 0）；范围按 transcript 派生的 `updatedAt` 过滤（非文件系统 mtime）。模式切换绑定 runs-mode epoch：迟到的 Active 或 History 响应不得覆盖当前模式或更新的查询；run 从 active 集或有界历史窗口消失绝不构成终态迁移，也不触发通知。HTTP `/api/runs` 的 `scope` 为闭集 `{active,history}`、缺省即 active；MCP 运行清单（`lead_preflight` `recentRuns`，决定 0129）与 CLI 文本看板行为不变（仍是全库存扫描 + `unresolvedCount`）。
+看板默认打开 Active 模式：只列出当前有新鲜 owner 心跳、经证明 active 的 run，每 5s 自动刷新。历史 run 仅在 Owner 显式选择 `1h`/`24h`/`7d` 预设或有界自定义 from/to（上限 7d；含未来、倒序、越界或未知参数时固定返回 HTTP 400）后按需加载一次；历史模式不自动轮询。Active 响应标注 `scanScope=active`，不带 `unresolvedCount`（不做全库存 unresolved 分类，恒缺失而非 0）；范围按 transcript 派生的 `updatedAt` 过滤（非文件系统 mtime）。模式切换绑定 runs-mode epoch：迟到的 Active 或 History 响应不得覆盖当前模式或更新的查询；run 从 active 集或有界历史窗口消失绝不构成终态迁移，也不触发通知。HTTP `/api/runs` 的 `scope` 为闭集 `{active,history}`、缺省即 active；MCP 运行清单与 CLI 文本看板不变（全库存扫描 + `unresolvedCount`）。
 
-席位看板（board）视图是 mode-bar 上 `list ⇄ board` 的纯呈现切换：消费同一份当前 scope 的 `/api/runs` 数据（不重发请求、不动选中 run）。board 按运行身份分组为泳道：显式 lane/role 派发的 run 进自己的 `车道/角色` 泳道（标注 not a seat），别名派发的 run 随席位泳道；席位名 + 身份色轨（同席位同色）+ run 卡片（点击复用详情面板）；非终态 run 靠前、终态弱化；泳道按最新活动排序。board 顶部常驻当前 scope 标签与窗口截断提示（matched vs returned），并提醒窗口内无 run 不代表该席位空闲；agentId 未过 registry 校验的 run 归入置底的 unknown 泳道；registry 损坏时软降级为 unknown，不崩。无障碍：身份/状态不只靠颜色、卡片可键盘操作、正文对比度 ≥4.5:1；窄视口下泳道区内部滚动。
+席位看板（board）视图是 mode-bar 上 `list ⇄ board` 的纯呈现切换：消费同一份当前 scope 的 `/api/runs` 数据（不重发请求、不重置已选窗口、不动选中 run）。board 按运行身份分组为泳道：显式 lane/role 派发的 run 进自己的 `车道/角色` 泳道（标注 not a seat），别名派发的 run 随席位泳道；席位名 + 身份色轨（同席位同色）+ run 卡片（点击复用详情面板）；非终态 run 靠前、终态弱化；泳道按最新活动排序（平局按名排）。board 顶部常驻当前 scope 标签与窗口截断提示（matched vs returned），并提醒窗口内无 run 不代表该席位空闲；agentId 未过 registry 校验的 run 归入置底的 unknown 泳道（不占调色板槽位）；registry 损坏时软降级为 unknown，不崩。无障碍：身份/状态不只靠颜色、卡片是可键盘操作的按钮且有可见焦点、正文对比度 ≥4.5:1；窄视口下泳道区内部滚动。
 
 安全边界：loopback + 每进程随机 bearer + GET-only、固定静态资源与 no-store/nosniff/no-referrer/严格 CSP/无 CORS opt-in、页面无 mutation 控件（不会 stop/retry/continue/repackage/decide，也不写 transcript、worktree 或配置）；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。Owner 视图仍会隐藏 credential/secret、raw command/tool payload、PID/session/绝对路径；其余 worker 消息按 Owner 观察用途提供较丰富但有界的脱敏文本。分层合同见[架构](../02-architecture.md) §1 的可观测性条。
 
