@@ -4,6 +4,8 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 
 **Lean by default** (Owner: 简练就是美，灵活就是美；除非工程和技术必要，官僚就是丑). Prefer the smaller design, the shorter text and fewer rules, from architecture to wording; add a process step, rule, guard or abstraction only when engineering or technical necessity requires it.
 
+**和用户说话**：作为 lead agent，思考和处理工作可以用英文，但与用户交流应用大白话中文，尽可能少用行业黑话。
+
 ## Invariants
 
 1. WAO run state comes from the run's own transcript; agent memory may provide context but never overrides transcript facts.
@@ -15,11 +17,7 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 
 ## Read Before Changes
 
-Use the action-matched tier-1 row in `docs/ssot.md` §0.1. That table is the only
-file list: read the union of rows your action matches, including each stated
-condition. `SKILL.md` remains conditional on actually operating WAO.
-Workers dispatched with a task brief use the `worker-repo-change` row; the Lead
-and independent development agents without one use `repo-change`.
+Use the action-matched tier-1 row in `docs/ssot.md` §0.1. That table is the only file list: read the union of rows your action matches, including each stated condition. `SKILL.md` remains conditional on actually operating WAO. Workers dispatched with a task brief use the `worker-repo-change` row; the Lead and independent development agents without one use `repo-change`.
 
 For aggregation, parsing, or classification changes, green unit tests are not enough; smoke the result against real transcripts before declaring completion.
 
