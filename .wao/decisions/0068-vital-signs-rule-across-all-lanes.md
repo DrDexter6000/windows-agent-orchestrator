@@ -2,6 +2,7 @@
 
 - 日期：2026-10-12
 - 状态：accepted（Owner 2026-10-12 裁定，原话见"来源"）
+- 修订：2026-11-25（第 149 批）：owner 租约心跳已停、runner 未被证明不在时，静默 advisory 改说心跳停了几分钟、先干跑 `wao runs settle` 看各道门，不再点名 stop；下文"advisory 文本点名了出口"只适用于心跳新鲜或没有可用租约的运行。
 - 来源：Owner 2026-10-12 对决定 0067 收尾报告的七点回复（原话）——
   - "没有任何生命体征才自动收掉 —— 本质上来讲，这条原则应该应用于所有 worker agents 任务派发"
   - "我记得给 lead agent 开发过向下 drill down 的工具，让 lead agent 可以发现 worker agents 任务执行异常时可以向下钻探、看到/观察到 worker agent 在做什么 —— 从而帮助 lead agent 更好做下一步的决策，比如应不应当中止任务"

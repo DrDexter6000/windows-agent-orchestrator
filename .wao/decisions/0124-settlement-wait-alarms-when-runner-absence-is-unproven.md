@@ -2,6 +2,7 @@
 
 - 日期：2026-11-12
 - 状态：accepted
+- 修订：2026-11-25（第 149 批）：owner 租约心跳已停时，`run_status` 的静默 advisory 改给"心跳停了几分钟、先干跑 `wao runs settle`"那一句，不再带下文第 3 条的重启句；收口等待的退出输出照旧陈述重启关系。
 - 来源：
   - 宿主项目反馈 `fb_20261111T190914Z_9smrew`：主机重启杀掉了一个运行的 runner，运行一直是 `running`，Lead 挂在后台的 `runs wait --until-settled` 两个多小时既不退出也不告警。
   - 方案会审 `consult_20261112095946942740ift`（kimi RETHINK、sol PROCEED_WITH_CHANGES），交付会审 `consult_20261112110927801zokcva`（sol、deepseek-flash）。
