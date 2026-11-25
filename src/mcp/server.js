@@ -166,6 +166,11 @@ import { createRunSummaryCache } from "../application/runSummaryCache.js";
 // 工具名；第 136 批起派发/续修与会审回执末尾的 CLI 半句带受理的 runId /
 // consultId）。run_await_result 有意不加（它是取结果形态）。
 import { buildNextStep, buildInterruptedRerunNextStep } from "../application/runNextStep.js";
+// 第 147 批：分支帽提示——与 CLI 派发同一个 renderDispatchResourceAdvisory
+// （同一函数、同一静默规则）。只挂在受理回执既有的 nextStep 末尾承载：不加
+// 输出字段、不改 output schema（那会动工具面字节帽，需 Owner 另批）。任何
+// 失败/放不下都只省略这行提示（fail-open），绝不影响已受理的派发。
+import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
 import {
   runAwaitResult,
   RUN_AWAIT_RESULT_MIN_MS,
@@ -1078,6 +1083,28 @@ const RUN_DISPATCH_OUTPUT = z.object({
   contractAdvisories: z.array(CONTRACT_ADVISORY_ENTRY)
     .max(CONTRACT_CHECK_ADVISORY_CODES.length).optional(),
 }).strict();
+
+// 第 147 批：受理回执的 nextStep 末尾承载资源计数提示（contract reminder 与
+// 资源提示共用既有 suffix 通道）。nextStep 上限 480：资源提示放不下时只丢它，
+// 合同提醒照旧；都不放下的既有失败语义不变（由调用方的兜底统一收敛）。
+function buildDispatchAcceptedNextStep({ runId, contractAdvisories, resourceAdvisory }) {
+  const contractSuffix = contractAdvisories != null
+    ? " Review contractAdvisories in this receipt first; stop and re-dispatch if needed."
+    : "";
+  if (resourceAdvisory == null) {
+    return buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId, suffix: contractSuffix });
+  }
+  try {
+    return buildNextStep({
+      surface: "mcp",
+      situation: "dispatch_accepted",
+      runId,
+      suffix: `${contractSuffix} ${resourceAdvisory}`,
+    });
+  } catch {
+    return buildNextStep({ surface: "mcp", situation: "dispatch_accepted", runId, suffix: contractSuffix });
+  }
+}
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
 // reach external systems — it is destructive (not append-only) per the SDK
@@ -3758,6 +3785,10 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
  * @param {Function} [input.getLeadPlaybookFn] — injectable playbook get service for testing
  * @param {Function} [input.getRunDeliveryReviewFn] — injectable delivery review service for testing
  * @param {Function} [input.continueRunFn] — injectable Lead-authorized continuation service for testing (M12-7)
+ * @param {Function} [input.laneFactsLineFn] — injectable lane facts line for the dispatch receipt (fail-open)
+ * @param {Function} [input.dispatchResourceAdvisoryFn] — injectable dispatch resource advisory
+ *   line (第 147 批；defaults to the real renderDispatchResourceAdvisory shared with the CLI;
+ *   null/throw → receipt omits it)
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 
@@ -3854,6 +3885,10 @@ export function createWaoMcpServer({
   // 0097 §4：可注入的派发回显行（测试缝，同 laneFactsLineFn 模式；缺省=真实
   // laneFactsLine——fail-open，返回 null 时受理回执不带 laneFacts）。
   laneFactsLineFn,
+  // 第 147 批：可注入的派发资源计数提示（测试缝；缺省=真实
+  // renderDispatchResourceAdvisory，与 CLI 同一函数、同一静默规则）。返回
+  // null/抛错 → 受理回执不带这行提示，不影响派发。
+  dispatchResourceAdvisoryFn,
   // 0045 §1.4：车道表读取缝（测试注入别名夹具；缺省 loadLanesConfig——生产恒读
   // 仓库 config/lanes.json）。派发目标解析与 consult 共用。
   loadLanesConfigFn,
@@ -4731,6 +4766,19 @@ export function createWaoMcpServer({
         }
       }
 
+      // 第 147 批：分支帽/资源计数提示——与 CLI 同一个
+      // renderDispatchResourceAdvisory、同一静默规则（帽内且与上次一致返回
+      // null）。采样放在派发之前（与 CLI 一样在派发启动时刻看资源存量）：
+      // 派发后再跑 git 会推迟受理回执，让回执里的 pending 与实际状态脱节。
+      // 只有 accepted:true 的回执会承载这行；任何失败都只省略提示，绝不影响
+      // 派发（advisory discipline / fail-open）。
+      let resourceAdvisory = null;
+      try {
+        const line = (dispatchResourceAdvisoryFn ?? renderDispatchResourceAdvisory)(workspaceCwd);
+        if (typeof line === "string" && line.length > 0) resourceAdvisory = line;
+      } catch {
+        resourceAdvisory = null;
+      }
       // M11-7 (CTO closeout): the MCP adapter does NOT re-read the registry or
       // re-implement readiness. dispatchRun owns the background-preflight: it
       // reads the registry, assesses credential availability via the shared SSOT
@@ -4963,15 +5011,14 @@ export function createWaoMcpServer({
           // 有 contractAdvisories 时 nextStep 追加半句（先看提醒，需要就停掉重派）。
           // 第 136 批续修：后缀交给 buildNextStep 与 CLI 半句一起算长度——合法的
           // 长 runId 下整句放不下时只是不加半句，不让已受理的派发变成报错。
+          // 第 147 批：分支帽提示也挂在既有 nextStep 末尾（不放新字段/不改 schema）；
+          // 放不下时只丢这行提示，合同提醒与受理结果照旧。
           ...(result.accepted === true
             ? {
-                nextStep: buildNextStep({
-                  surface: "mcp",
-                  situation: "dispatch_accepted",
+                nextStep: buildDispatchAcceptedNextStep({
                   runId: result.runId,
-                  suffix: contractAdvisories != null
-                    ? " Review contractAdvisories in this receipt first; stop and re-dispatch if needed."
-                    : "",
+                  contractAdvisories,
+                  resourceAdvisory,
                 }),
               }
             : {}),

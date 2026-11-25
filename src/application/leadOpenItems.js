@@ -4,9 +4,14 @@
 // 回答"哪些事还欠 Lead 一步"，两路来源、各自独立结算：
 //
 //   A. 运行分支——候选集是绑定工作区所属仓库的 refs/heads/wao/run_* 分支
-//      （不按时间窗扫转录：交付运行一定有自己的分支，未裁定的交付不会被
-//      回收，回收会删分支，所以候选集随 Lead 收口变小、不随历史增长）。
-//      按提交时间新到旧至多查看 50 条，逐条读转录、核对归属，先看收口判定
+//      （不按时间窗扫转录：交付运行一定有自己的分支）。回收会删分支，但宿主
+//      项目不一定会按期回收（2026-11-25 取证：两个宿主仓库积了三百多条，
+//      最旧的未裁定运行早在查看帽之外），所以**全部**分支都参与归类、各行计数
+//      是全量——旧的"只看最新若干条"会让最旧的未裁定运行永远看不见。输出仍有
+//      界：每行至多点名 OPEN_ITEM_RUNIDS_CAP 个 runId；"等裁决"一行按 runId 内
+//      的创建时刻从旧到新排列，并写明最老一条已等几天（从该运行绑定的终态事件
+//      时间算，用 transcript 的 findStateEvidence，不另写判法）。
+//      解析逐条、读取有界并发，逐条核对归属，先看收口判定
 //      （determineRunSettlement SSOT）再看裁定（只认绑定本 runId 的
 //      run.delivery_accepted / run.delivery_rejected）：
 //        - 收口且原因 delivery_settled、未裁定 → 等 Lead 裁定（其中 0112 的
@@ -53,7 +58,8 @@
 // 架构契约：
 //   - 只读：零转录写入、零状态变更、零 spawn git 写命令（转录解析经
 //     resolveTranscriptPathDetailed 统一入口，只读）；任何来源读失败都不抛
-//     ——枚举失败省略整段，单条转录读不出只计数，收件箱读不出省略该行。
+//     ——分支枚举失败给一行固定文案（分支账读不出，不是"没有旧账"），单条
+//     转录读不出只计数，收件箱读不出省略该行。
 //   - git 只经注入缝 execGitFn（结构化 argv、不经 shell、--no-optional-locks，
 //     写法照 serverBuildFacts.js）；文件系统只经 readDirFn/existsSync。
 //   - 不读 config/agents.json，不 import src/commands/**、src/mcp/**、SDK、zod。
@@ -74,7 +80,10 @@ import {
   identityOfFirstEvent,
   productionProjectIo,
 } from "../projectIdentity.js";
-import { readTranscript } from "../transcript.js";
+import { readTranscript, findStateEvidence, TERMINAL_STATES } from "../transcript.js";
+// 第 147 批：分支帽 SSOT 仍在 dispatchResourceAdvisory.js（不另写 60）；"留待
+// 回收"行在总数超帽时用它注明上限。
+import { BRANCH_CAP } from "../dispatchResourceAdvisory.js";
 import { determineRunSettlement } from "./runSettlement.js";
 import { deliveryContinuableHint } from "./runContinue.js";
 // 第 120 批：谱系派生事实（显式关闭 / 被取代）与交付读面、回收共用同一份实现。
@@ -93,10 +102,15 @@ import {
 export const OPEN_ITEM_PREFIX = "open item: ";
 /** 单行上限 = src/mcp/server.js lead_preflight observations 的 z.string().max(512)。 */
 export const OPEN_ITEM_MAX_CHARS = 512;
-/** A 分支候选查看帽（决定 0113 第 2 条：按提交时间新到旧至多查看 50 条）。 */
-export const OPEN_ITEM_BRANCH_CAP = 50;
 /** 每行至多点名的 runId 个数（决定 0113：个数 + 至多 5 个 runId）。 */
 export const OPEN_ITEM_RUNIDS_CAP = 5;
+/** 全量分支下转录读取的有界并发：一次最多读这么多份，不一次起几百个读。 */
+const TRANSCRIPT_READ_CONCURRENCY = 8;
+/** 分支枚举失败时的固定行（不含路径与错误原文）。 */
+const BRANCH_LEDGER_UNREADABLE =
+  `${OPEN_ITEM_PREFIX}the wao/run_* branch ledger could not be read `
+  + "(git enumeration failed; this is not \"no old branches\" — check the bound repository with "
+  + "`git branch --list \"wao/run_*\"` and `wao worktree reclaim`)";
 
 // 只读 git：结构化 argv、--no-optional-locks、不经 shell（serverBuildFacts 写法）。
 // env 走 gitProbeEnv()：去掉继承的 GIT_DIR 等定位变量——本收集器问的是绑定工作区
@@ -167,11 +181,81 @@ function boundedLine(text) {
   return text.length > OPEN_ITEM_MAX_CHARS ? text.slice(0, OPEN_ITEM_MAX_CHARS) : text;
 }
 
+// runId 形状：run_ + 17 位 UTC 时间戳（YYYYMMDDHHmmssSSS）+ 后缀。取不到时间
+// 的（测试/旧形状）交给稳定排序保持枚举顺序。
+const RUN_ID_TIMESTAMP_RE = /^run_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{3})/;
+
+/** runId 里的创建时刻（epoch ms）；形状不认得 → null。 */
+function runIdCreatedAtMs(runId) {
+  const m = RUN_ID_TIMESTAMP_RE.exec(String(runId));
+  if (!m) return null;
+  const ms = Date.UTC(
+    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+    Number(m[4]), Number(m[5]), Number(m[6]), Number(m[7]),
+  );
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** 按 runId 内的创建时刻从旧到新；取不到时刻的排在后面、保持原相对顺序。 */
+function sortRunIdsOldestFirst(ids) {
+  return ids
+    .map((id, index) => ({ id, order: index, createdAtMs: runIdCreatedAtMs(id) }))
+    .sort((a, b) => {
+      if (a.createdAtMs != null && b.createdAtMs != null) return a.createdAtMs - b.createdAtMs;
+      if (a.createdAtMs != null) return -1;
+      if (b.createdAtMs != null) return 1;
+      return a.order - b.order;
+    })
+    .map((entry) => entry.id);
+}
+
+/**
+ * 该运行绑定的终态事件时刻（epoch ms）。终态事件的挑选用 transcript 的
+ * findStateEvidence（与 Owner 读模型的 terminalAt 同一判法，不另写一份）；
+ * 状态不是终态或事件没有可解析的 ts → null（调用方不写年龄）。
+ */
+function boundTerminalEventMs(events, runId) {
+  if (!Array.isArray(events)) return null;
+  const bound = events.filter((e) => e && e.runId === runId);
+  const evidence = findStateEvidence(bound);
+  if (evidence.index < 0 || !TERMINAL_STATES.includes(evidence.state)) return null;
+  const ms = Date.parse(bound[evidence.index]?.ts);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** 等待天数（向下取整、不为负）；任一时刻取不到 → null。 */
+function waitedDays(nowMs, terminalMs) {
+  if (!Number.isFinite(nowMs) || terminalMs == null) return null;
+  const days = Math.floor((nowMs - terminalMs) / 86_400_000);
+  return Number.isFinite(days) ? Math.max(0, days) : null;
+}
+
+/**
+ * 有界并发读：保持输入顺序，最多 limit 个读取同时在途（全量分支下不会一次
+ * 起几百个读）。读取失败由 readFn 自己收敛（返回 null 占位）。
+ */
+async function readItemsBounded(items, readFn) {
+  const results = new Array(items.length).fill(null);
+  let nextIndex = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await readFn(items[index]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(TRANSCRIPT_READ_CONCURRENCY, items.length) }, () => worker()),
+  );
+  return results;
+}
+
 // ── A. 运行分支 ──────────────────────────────────────────────────────────────
 
 /**
- * 枚举绑定仓库的 wao/run_* 分支并按收口/裁定归类，返回 0–5 行。
- * 枚举失败 → 空数组（整段 A 省略，决定 0113 第 4 条）。
+ * 枚举绑定仓库的 wao/run_* 分支并按收口/裁定归类，返回 0–6 行。
+ * 全部分支参与归类；枚举失败 → 一行固定文案（"分支账读不出"，不再静默省略）。
  */
 async function collectRunBranchOpenItems({
   authorizedWorkspaceRoot,
@@ -183,25 +267,21 @@ async function collectRunBranchOpenItems({
   readBytesFn,
   projectIo = productionProjectIo(),
   parseWorktreePorcelainFn = parseWorktreePorcelain,
+  // 第 147 批：年龄用的当前时刻（测试注入；缺省 Date.now）。
+  nowFn = Date.now,
 }) {
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return [];
   const resolvedRunDir = resolve(runDir);
 
   // 1) 枚举（新到旧；只认 wao/run_ 前缀且 runId 合法的——命令与判法在 runBranches.js，
-  //    与 Owner 看板的读模型共用同一份答案）。
+  //    与 Owner 看板的读模型共用同一份答案）。读不出 → 固定一行，不静默当作"没有旧账"。
   let runIds;
   try {
     runIds = await listRunBranchRunIds(execGitFn, authorizedWorkspaceRoot);
   } catch {
-    return []; // 枚举失败 → 整个 A 省略
+    return [boundedLine(BRANCH_LEDGER_UNREADABLE)];
   }
   const total = runIds.length;
-  const examined = runIds.slice(0, OPEN_ITEM_BRANCH_CAP);
-  const truncated = total > examined.length;
-  // 超出查看帽时每行计数写明"已查看部分"并给出总条数（决定 0113 第 2 条）。
-  const truncSuffix = truncated
-    ? `; counts cover the ${examined.length} newest of ${total} wao/run_* branch(es)`
-    : "";
 
   // 2) 转录解析：统一入口 resolveTranscriptPathDetailed（决定 0100——按
   //    runId 解析看全部桶，查重完整；conflict/unreadable 绝不静默择一）。
@@ -223,6 +303,8 @@ async function collectRunBranchOpenItems({
   }
 
   const awaitingDecision = [];
+  // 第 147 批：等裁决行的年龄要读最旧那条绑定的终态事件，按 runId 存一份事件。
+  const awaitingEventsByRunId = new Map();
   const terminalUnsettled = [];
   const undeterminable = [];
   // 第 120 批：一次请求内按根缓存的谱系派生（显式关闭 / 被取代）。只在
@@ -242,9 +324,10 @@ async function collectRunBranchOpenItems({
 
   // 3a) 解析 + 读取（先全部读进来，再一次性按根预筛——审查 B3：多个根共用
   //     一次全库字节扫描）。found 才读；conflict/unreadable/未找到/解析抛错
-  //     都不分类，与单条读失败一起计入"找不到或有冲突副本"。
-  const branchReads = [];
-  for (const runId of examined) {
+  //     都不分类，与单条读失败一起计入"找不到或有冲突副本"。解析保持逐条；
+  //     读取走有界并发（全量分支下不一次起几百个读）。
+  const toRead = [];
+  for (const runId of runIds) {
     let detail;
     try {
       detail = resolveTranscript(resolvedRunDir, runId);
@@ -259,20 +342,22 @@ async function collectRunBranchOpenItems({
       missingTranscripts += 1;
       continue;
     }
-    let events;
+    toRead.push({ runId, path: d.path });
+  }
+  const branchReads = (await readItemsBounded(toRead, async ({ runId, path }) => {
     try {
-      events = await readTranscriptFn(d.path);
+      const events = await readTranscriptFn(path);
       if (!Array.isArray(events)) throw new Error("transcript not an event array");
+      return { runId, events };
     } catch {
       missingTranscripts += 1;
-      continue;
+      return null;
     }
-    branchReads.push({ runId, events });
-  }
+  })).filter((read) => read != null);
   // 一次性预筛：只把**真会走到 forRoot** 的运行声明的根交给读器（第 120 批续修
   // E1）——自身有谱系引用、已打包、自身未裁决、已收口，且属于绑定项目。普通
   // 运行对自己返回自己的 runId，若照收会让每个被查看的分支都触发一次全库字节
-  // 扫描（50 个分支 = 50 次）。判定函数从派生模块导入，与 forRun 的门共用。
+  // 扫描（全量分支下更不可接受）。判定函数从派生模块导入，与 forRun 的门共用。
   const pendingRoots = new Set();
   for (const { runId, events } of branchReads) {
     if (!supersessionCandidateGate(events, runId).candidate) continue;
@@ -338,6 +423,7 @@ async function collectRunBranchOpenItems({
             reclaimBranches += 1;
           } else {
             awaitingDecision.push(runId);
+            awaitingEventsByRunId.set(runId, events);
             if (fromAnotherWorktree) crossTree.awaiting = true;
             try {
               if (await deliveryContinuableHint({ events, runId, runDir: resolvedRunDir, readTranscriptFn })) {
@@ -388,16 +474,42 @@ async function collectRunBranchOpenItems({
   // 查别的工作树里的运行，按调用带那棵树的根（expectedWorkspaceRoot），或在那里跑 CLI。只在对应行确实列出
   // 这样的运行时出现；行内无绝对路径。
   const CROSS_TREE_HINT = "some runs were dispatched from another worktree: pass that worktree's root as expectedWorkspaceRoot (or run the CLI there) first";
+  // 第 147 批：等裁决行按 runId 内的创建时刻从旧到新（最旧的先点名），并写明
+  // 最老一条已等几天——年龄从它绑定的终态事件时间算；取不到就不写年龄。
+  const orderedAwaiting = sortRunIdsOldestFirst(awaitingDecision);
+  let oldestWaitingDays = null;
+  if (orderedAwaiting.length > 0) {
+    const oldestRunId = orderedAwaiting[0];
+    let terminalMs = null;
+    try {
+      terminalMs = boundTerminalEventMs(awaitingEventsByRunId.get(oldestRunId), oldestRunId);
+    } catch {
+      terminalMs = null;
+    }
+    let nowMs = NaN;
+    try {
+      nowMs = nowFn();
+    } catch {
+      nowMs = NaN;
+    }
+    oldestWaitingDays = waitedDays(nowMs, terminalMs);
+  }
+  // 第 147 批：分支总数超过帽时在"留待回收"行写明总数与上限（帽值来自
+  // dispatchResourceAdvisory 的 SSOT，不另写 60）。
+  const overCapNote = total > BRANCH_CAP
+    ? `; ${total} wao/run_* branch(es) in this repository exceed the cap of ${BRANCH_CAP}`
+    : "";
 
   const lines = [];
   if (awaitingDecision.length > 0) {
-    const ids = joinRunIdsBounded(awaitingDecision, 150, OPEN_ITEM_RUNIDS_CAP);
+    const ids = joinRunIdsBounded(orderedAwaiting, 150, OPEN_ITEM_RUNIDS_CAP);
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${awaitingDecision.length} settled delivery run(s) await a Lead decision `
       + `(run_delivery / run_delivery_review): ${ids.text}`
       + `${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
+      + `${oldestWaitingDays != null ? `; oldest waited ${oldestWaitingDays} day(s) since its terminal state` : ""}`
       + `${continuable > 0 ? `; ${continuable} continuable (run_continue hint)` : ""}`
-      + `${crossTree.awaiting ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,
+      + `${crossTree.awaiting ? `; ${CROSS_TREE_HINT}` : ""}`,
     ));
   }
   if (terminalUnsettled.length > 0) {
@@ -406,7 +518,7 @@ async function collectRunBranchOpenItems({
       `${OPEN_ITEM_PREFIX}${terminalUnsettled.length} terminal run(s) not settled `
       + `(verification/reverify without a result; run_delivery or \`wao runs wait <runId> --until-settled\`): `
       + `${ids.text}${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
-      + `${crossTree.unsettled ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,
+      + `${crossTree.unsettled ? `; ${CROSS_TREE_HINT}` : ""}`,
     ));
   }
   if (undeterminable.length > 0) {
@@ -414,7 +526,7 @@ async function collectRunBranchOpenItems({
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${undeterminable.length} run(s) with undeterminable settlement facts `
       + `(wao runs diagnose <runId>): ${ids.text}${ids.rest > 0 ? ` (+${ids.rest} more)` : ""}`
-      + `${crossTree.undeterminable ? `; ${CROSS_TREE_HINT}` : ""}${truncSuffix}`,
+      + `${crossTree.undeterminable ? `; ${CROSS_TREE_HINT}` : ""}`,
     ));
   }
   if (reclaimBranches > 0 || (worktreeCount ?? 0) > 0) {
@@ -426,14 +538,15 @@ async function collectRunBranchOpenItems({
     // 内有计入活动的运行，Lead 做出空计划不是出错；分钟数由常量派生，不另写
     // 数字。第 133 批：计入活动不含 Lead 的记账事件（裁决、谱系关闭、收集），
     // 文案如实写明。第 120 批：这一行如实覆盖"已裁决、被取代、谱系已关闭、
-    // 无交付"四种来源（后两种不写事件，也不再催裁决）。
+    // 无交付"四种来源（后两种不写事件，也不再催裁决）。第 147 批：超帽时在
+    // 行内写明仓库里的分支总数与上限。
     const keptRecentMinutes = Math.round(RECENT_BOUND_EVENT_MS / 60_000);
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${reclaimBranches} decided / superseded / lineage-closed / no-delivery wao/run_* branch(es)${wt} `
       + `left for reclaim (\`wao worktree reclaim --out <plan.json>\` plans it; read-only; `
       + `the plan decides what is reclaimable — an empty plan can be normal, `
       + `runs with worker or WAO activity in the last ${keptRecentMinutes} minutes are kept; `
-      + `Lead decisions, lineage closes and collect records do not reset the window)${truncSuffix}`,
+      + `Lead decisions, lineage closes and collect records do not reset the window)${overCapNote}`,
     ));
   }
   if (missingTranscripts > 0) {
@@ -443,7 +556,7 @@ async function collectRunBranchOpenItems({
     lines.push(boundedLine(
       `${OPEN_ITEM_PREFIX}${missingTranscripts} wao/run_* branch(es) without a usable transcript fact `
       + `(not found, unreadable, conflicting copies, or a broken recorded project fact; `
-      + `read-only \`wao worktree reclaim --out <plan.json>\` plan lists the branches)${truncSuffix}`,
+      + `read-only \`wao worktree reclaim --out <plan.json>\` plan lists the branches)`,
     ));
   }
   return lines;
@@ -504,7 +617,10 @@ async function collectInboxOpenItem({
  * @param {Function} [input.resolveTranscriptFn] — (runDir, runId) => detailed；
  *   缺省 resolveTranscriptPathDetailed（统一入口：全桶查重，conflict/
  *   unreadable 不静默择一）；注入返回 detailed 形状或路径字符串（=found）
- * @param {Function} [input.readTranscriptFn] — (path) => Promise<events[]>
+ * @param {Function} [input.readTranscriptFn] — (path) => Promise<events[]>；
+ *   读取有界并发（一次最多 8 份）
+ * @param {Function} [input.nowFn] — () => epoch ms；等裁决行年龄的当前时刻
+ *   （缺省 Date.now；测试注入）
  * @param {object} [input.projectIo] — projectIdentity 的 io（realpath/tmpdir/
  *   readGitFile），归属两侧共用：绑定根的 identifyProjectFromCwd 与首事件的
  *   identityOfFirstEvent（0113 修订口径）；缺省 productionProjectIo()

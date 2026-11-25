@@ -541,7 +541,7 @@ test("NS-M7: run_dispatch accepted:true → nextStep（MCP 写法在前、CLI �
       providerSessionRouting: "not_used",
     });
     const { server, client } = await buildServerClient({
-      dir, registryPath: makeRegistry(dir), overrides: { dispatchRunFn: fakeDispatch },
+      dir, registryPath: makeRegistry(dir), overrides: { dispatchRunFn: fakeDispatch, dispatchResourceAdvisoryFn: () => null },
     });
     try {
       const res = await client.callTool({
@@ -559,7 +559,7 @@ test("NS-M7: run_dispatch accepted:true → nextStep（MCP 写法在前、CLI �
       await client.close(); await server.close();
     }
     const { server: s2, client: c2 } = await buildServerClient({
-      dir, registryPath: makeRegistry(dir), overrides: { dispatchRunFn: fakeDispatchRefused },
+      dir, registryPath: makeRegistry(dir), overrides: { dispatchRunFn: fakeDispatchRefused, dispatchResourceAdvisoryFn: () => null },
     });
     try {
       const res = await c2.callTool({
