@@ -9,6 +9,9 @@
 // 第 107 批：静默 advisory 之上的重启关系陈述（rebootedSinceLastActivity 成立
 // 时）：中文句 rebootRelationAdvisoryText（替下生命体征建议）+ wire 变体模板
 // leadAdvisoryRebootWireText（判定本身是 ownerLiveness 的纯函数，这里只有模板）。
+// 第 149 批：owner 心跳已停（租约在、格式正确、心跳不新鲜）时的模板
+// （ownerHeartbeatStoppedAdvisoryText / ownerHeartbeatStoppedWireText）——改指
+// settle 干跑，不再建议 stop。
 //
 // "动作或正文"与 completed_empty 判定同一口径（runEventIsUsableEffect）；
 // runtime_activity / thinking 只说明运行时还活着。陈述的是转录可见的事实：有的
@@ -157,6 +160,26 @@ function lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsS
   return kind ? `${kind}${status}${age}` : "none";
 }
 
+/** wire 静默模板共用的开头句（普通 / 重启变体 / owner 心跳已停三份模板同一写法）。 */
+function quietWireHead({ secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity }) {
+  const last = lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity);
+  return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `;
+}
+
+/**
+ * CLI 面静默 advisory 共用的开头句（普通模板与 owner 心跳已停模板同一写法）。
+ * lastActivityLabel 沿用既有 CLI 面的"最近活动"标签（runStatus 的 describeActivity 产出）。
+ *
+ * @param {object} facts
+ * @param {number} facts.secondsSinceEffect
+ * @param {string|null} [facts.lastActivityLabel]
+ * @param {number|null} [facts.secondsSinceActivity]
+ * @returns {string}
+ */
+export function quietHeadText({ secondsSinceEffect, lastActivityLabel, secondsSinceActivity }) {
+  return `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null && secondsSinceActivity !== undefined ? `，${secondsSinceActivity}s 前` : ""}）。`;
+}
+
 /**
  * MCP 面的 advisory 文本：固定英文模板 + 整数 + 闭集标签，不含任何转录文本。
  * 闭集外的 kind / status 一律不回显。
@@ -169,11 +192,10 @@ function lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsS
  * @returns {string}
  */
 export function leadAdvisoryWireText({ secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity }) {
-  const last = lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity);
   const recent = Number.isFinite(secondsSinceActivity) && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS
     ? `A vital sign was seen within the last ${VITAL_SIGN_RECENT_SECONDS / 60} min: WAO advises against stopping now without a specific reason. `
     : "";
-  return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `
+  return quietWireHead({ secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity })
     + recent
     + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.";
 }
@@ -195,8 +217,7 @@ export function leadAdvisoryRebootWireText({
   secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity,
   bootMinutesAgo, activityMinutesAgo,
 }) {
-  const last = lastActivityWireEcho(lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity);
-  return `No new worker action or text in the transcript for ${Math.floor(secondsSinceEffect / 60)} min (last activity: ${last}). `
+  return quietWireHead({ secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity })
     + `This machine booted ${Math.max(0, Math.floor(bootMinutesAgo))} min ago, after the run's last activity ${Math.max(0, Math.floor(activityMinutesAgo))} min ago; `
     + "a pre-reboot runner cannot have survived it, but a runner started after the boot is not ruled out. "
     + "Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.";
@@ -249,4 +270,78 @@ export function runnerGoneAdvisoryText({ runId, quietMinutes }) {
   const minutes = Math.max(0, Math.floor(quietMinutes));
   return `观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 ${minutes} 分钟），继续等待不会自行收口。`
     + `是否结算由 Lead 决定：先干跑 wao runs settle --run-id ${runId} --reason-file <文件>，确认后再加 --apply。`;
+}
+
+/**
+ * 第 149 批：静默 advisory 在场、runner 未被证明不在、owner 租约存在且格式正确但
+ * 心跳已不新鲜（isFreshHeartbeat）时的 advisory——监督进程可能已被外力停掉，此时
+ * 建议 `wao stop` 不是该走的路（没有 runner 可停），改指 settle 干跑，由各道门说话。
+ * 不建议 stop；不证明 runner 不在（以干跑为准）；去留仍由 Lead 决定。固定模板 +
+ * 整数，不叠加重启关系句也不带生命体征建议。
+ *
+ * 数字只以十进制整数出现（不出现科学计数法）：心跳年龄只在"心跳在过去、分钟数是非负
+ * 安全整数"时才写"停在 N 分钟前"；心跳在未来（时钟回拨、残留未来租约）或算不出可信
+ * 整数时，改写固定的时间异常句、不写分钟数。静默分钟与最近活动秒数钳在安全整数上界。
+ * 判活口径（isFreshHeartbeat）与"先干跑 settle"的出口都不变。
+ *
+ * 英文模板（wire；runId 以 <id> 占位——整体逐字节固定，长度守 LEAD_ADVISORY_WIRE_MAX_LEN）。
+ *
+ * @param {object} facts — leadAdvisoryWireText 的四个字段，另加：
+ * @param {number} facts.heartbeatMinutes — owner 心跳距今的整数分钟（原始差值：负数 / 非安全整数 = 时间不可信）
+ * @returns {string}
+ */
+export function ownerHeartbeatStoppedWireText({
+  secondsSinceEffect, lastActivityEventKind, lastRuntimeStatus, secondsSinceActivity, heartbeatMinutes,
+}) {
+  const minutes = trustedHeartbeatMinutes(heartbeatMinutes);
+  return quietWireHead({
+    secondsSinceEffect: plainSeconds(secondsSinceEffect) ?? 0,
+    lastActivityEventKind,
+    lastRuntimeStatus,
+    secondsSinceActivity: plainSeconds(secondsSinceActivity),
+  })
+    + (minutes === null
+      ? "The owner heartbeat timestamp is in the future or not trustworthy and was treated as not fresh. "
+      : `The owner heartbeat stopped ${minutes} min ago. `)
+    + "Next, dry-run wao runs settle --run-id <id> --reason-file <file> and read its gates; whether a runner still exists is decided by the dry-run result. "
+    + "Whether to keep waiting is the Lead's decision.";
+}
+
+/**
+ * 同一条 advisory 的 CLI 面（中文固定模板；命令带实际 runId）。lastActivityLabel 必须是
+ * 闭集活动类别（runStatus 的 closedActivityLabel 产出）——本模板不夹转录里的自由文本。
+ *
+ * @param {object} facts
+ * @param {string} facts.runId
+ * @param {number} facts.secondsSinceEffect
+ * @param {string|null} [facts.lastActivityLabel]
+ * @param {number|null} [facts.secondsSinceActivity]
+ * @param {number} facts.heartbeatMinutes — 同 ownerHeartbeatStoppedWireText
+ * @returns {string}
+ */
+export function ownerHeartbeatStoppedAdvisoryText({
+  runId, secondsSinceEffect, lastActivityLabel, secondsSinceActivity, heartbeatMinutes,
+}) {
+  const minutes = trustedHeartbeatMinutes(heartbeatMinutes);
+  return quietHeadText({
+    secondsSinceEffect: plainSeconds(secondsSinceEffect) ?? 0,
+    lastActivityLabel,
+    secondsSinceActivity: plainSeconds(secondsSinceActivity),
+  })
+    + (minutes === null
+      ? "owner 心跳的时间戳在未来或不可信，已按不新鲜处理。"
+      : `owner 心跳停在 ${minutes} 分钟前。`)
+    + `下一步先干跑 wao runs settle --run-id ${runId} --reason-file <文件>，看各道门；runner 是否还在，以干跑结果为准。`
+    + "是否继续等待由 Lead 决定。";
+}
+
+/** 秒数 → 十进制整数：非数 / NaN → null（不写），其余四舍五入并钳在 [0, 安全整数上界]。 */
+function plainSeconds(n) {
+  if (typeof n !== "number" || Number.isNaN(n)) return null;
+  return Math.min(Math.max(Math.round(n), 0), Number.MAX_SAFE_INTEGER);
+}
+
+/** 心跳年龄分钟数：只有非负安全整数可信（负数 = 心跳在未来）；其余 → null（写时间异常句）。 */
+function trustedHeartbeatMinutes(n) {
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }

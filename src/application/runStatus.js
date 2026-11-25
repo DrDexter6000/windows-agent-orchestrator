@@ -27,6 +27,7 @@ import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } f
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
+import { RUN_EVENT_KINDS, RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 // 批 119（A4）：带调用目标根时的归属核验（与 readRunActivity 同一 SSOT 入口）。
 import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { projectExecutionStage } from "./runStageProjection.js";
@@ -38,6 +39,7 @@ import {
   LEAD_ADVISORY_QUIET_SECONDS, VITAL_SIGN_RECENT_SECONDS, secondsSinceLastEffect, leadAdvisoryWireText,
   runnerGoneAdvisoryText, runnerGoneAdvisoryWireText,
   leadAdvisoryRebootWireText, rebootRelationAdvisoryText,
+  ownerHeartbeatStoppedAdvisoryText, ownerHeartbeatStoppedWireText, quietHeadText,
   vitalSignAgeMs,
 } from "./runQuietAdvisory.js";
 // TD-341（第 89 批 C）：runner 已不在的证明入口 + 读面节流（前置筛选 + 缓存 +
@@ -46,7 +48,7 @@ import { probeRunnerGoneCached } from "./runnerGoneProof.js";
 // B92 续修 1：静默分钟数与证明门 4 同一取法（被拒的重打包审计不算活动）。
 import { lastQuietWindowBoundMs } from "./runSettle.js";
 // 第 107 批：重启关系陈述（开机时刻 + 纯函数判定 + 租约心跳读法，全在共享层）。
-import { machineBootTimeMs, rebootedSinceLastActivity, readOwnerLease } from "./ownerLiveness.js";
+import { machineBootTimeMs, rebootedSinceLastActivity, readOwnerLease, isFreshHeartbeat } from "./ownerLiveness.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -407,6 +409,20 @@ export async function getRunStatus({
   const observedSeq = Number.isInteger(last?.seq) ? last.seq : 0;
   const quiet = !terminal && secondsSinceEffect !== null && secondsSinceEffect >= LEAD_ADVISORY_QUIET_SECONDS;
   const lastActivityLabel = lastActivity?.kind === "runtime_activity" ? lastActivitySummary : lastActivityKind;
+  // 第 149 批修正一/二：心跳已停的新 CLI 提示只用闭集活动类别——describeActivity 的标签里
+  // tool_use 带转录里的工具名、闭集外的 kind 原样回显，都是自由文本，这里换成固定类别。
+  // kind 与运行时状态都先做严格成员判断（includes 比较值，不读对象下标：下标会读到原型链
+  // 上的 constructor / __proto__，并把数组键转成字符串），命中闭集才取固定文案，其余固定
+  // 落"未知" / "provider 状态未知"。旧回退模板仍用上面的原标签，字节不变。
+  const closedActivityLabel = lastActivity === null
+    ? null
+    : !RUN_EVENT_KINDS.includes(lastActivity.kind)
+      ? "未知"
+      : lastActivity.kind === "tool_use"
+        ? "用工具"
+        : lastActivity.kind === "runtime_activity" && !RUNTIME_ACTIVITY_STATUSES.includes(lastActivity.status)
+          ? "provider 状态未知"
+          : lastActivityLabel;
   // 第 107 批：重启关系陈述——非终态、普通静默 advisory 已在场、runner 未被
   // 证明不在、且 rebootedSinceLastActivity 成立时附加（中文一句，放在"是否继续等待"
   // 之前并替下生命体征建议；wire 换变体模板，见 runQuietAdvisory.js）。最后活动与 B92 同一取法
@@ -414,31 +430,45 @@ export async function getRunStatus({
   // 的较晚者；开机时刻经 runnerGoneDeps.bootTimeFn 注入缝可测（缺省真读
   // machineBootTimeMs）；任一读取失败 → 不陈述（rebooted 为 null，输出字节不
   // 变）。它只陈述"本机开机晚于该运行最后可见活动"，不证明此刻没有新 runner。
+  // 第 149 批：同一处读到的 owner 租约存在、格式正确但心跳不新鲜（isFreshHeartbeat，
+  // 门限同口径）时，监督进程多半已不在——此时静默 advisory 改用"心跳已停"模板
+  //（指向 settle 干跑，不再建议 stop），不叠加重启句；租约缺失/损坏/心跳新鲜 → 不变。
   let rebootMinutes = null;
+  let heartbeatStoppedMinutes = null;
   if (quiet && !runnerGone) {
     try {
       const at = _now();
-      const bootTimeFn = typeof runnerGoneDeps?.bootTimeFn === "function"
-        ? runnerGoneDeps.bootTimeFn
-        : machineBootTimeMs;
       const leaseReader = typeof runnerGoneDeps?.ownerLeaseReader === "function"
         ? runnerGoneDeps.ownerLeaseReader
         : readOwnerLease;
       const lease = leaseReader(runDir, runId, at);
-      const rebooted = rebootedSinceLastActivity({
-        bootAt: bootTimeFn(),
-        lastEventAt: lastQuietWindowBoundMs(events.filter((e) => e && e.runId === runId)),
-        heartbeatAt: lease?.present === true && lease?.wellFormed === true ? lease.heartbeatAt : undefined,
-        now: at,
-      });
-      if (rebooted !== null) {
-        rebootMinutes = {
-          bootMinutesAgo: Math.max(0, Math.floor((at - rebooted.bootAt) / 60000)),
-          activityMinutesAgo: Math.max(0, Math.floor((at - rebooted.lastActivityAt) / 60000)),
-        };
+      const heartbeatAt = lease?.present === true && lease?.wellFormed === true && Number.isFinite(lease.heartbeatAt)
+        ? lease.heartbeatAt
+        : undefined;
+      if (heartbeatAt !== undefined && !isFreshHeartbeat(heartbeatAt, at)) {
+        // 原始差值（不钳 0）：负数 = 心跳在未来、非安全整数 = 年龄不可信，由模板改写
+        // 固定的时间异常句，绝不把它们报成"N 分钟前"。
+        heartbeatStoppedMinutes = Math.floor((at - heartbeatAt) / 60000);
+      } else {
+        const bootTimeFn = typeof runnerGoneDeps?.bootTimeFn === "function"
+          ? runnerGoneDeps.bootTimeFn
+          : machineBootTimeMs;
+        const rebooted = rebootedSinceLastActivity({
+          bootAt: bootTimeFn(),
+          lastEventAt: lastQuietWindowBoundMs(events.filter((e) => e && e.runId === runId)),
+          heartbeatAt,
+          now: at,
+        });
+        if (rebooted !== null) {
+          rebootMinutes = {
+            bootMinutesAgo: Math.max(0, Math.floor((at - rebooted.bootAt) / 60000)),
+            activityMinutesAgo: Math.max(0, Math.floor((at - rebooted.lastActivityAt) / 60000)),
+          };
+        }
       }
     } catch {
       rebootMinutes = null;
+      heartbeatStoppedMinutes = null;
     }
   }
   // TD-341（第 89 批 C）：advisory 在场条件改为 quiet || runnerGone——证明只要求
@@ -451,27 +481,40 @@ export async function getRunStatus({
     ? null
     : runnerGone
       ? runnerGoneAdvisoryText({ runId, quietMinutes: runnerGoneQuietMinutes ?? 0 })
-      : `转录里已 ${Math.floor(secondsSinceEffect / 60)} 分钟没有新的动作或正文（最近活动：${lastActivityLabel ?? "无"}${secondsSinceActivity !== null ? `，${secondsSinceActivity}s 前` : ""}）。${rebootMinutes !== null ? rebootRelationAdvisoryText(rebootMinutes) : secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`;
+      : heartbeatStoppedMinutes !== null
+        ? ownerHeartbeatStoppedAdvisoryText({
+            runId, secondsSinceEffect, lastActivityLabel: closedActivityLabel, secondsSinceActivity, heartbeatMinutes: heartbeatStoppedMinutes,
+          })
+        : `${quietHeadText({ secondsSinceEffect, lastActivityLabel, secondsSinceActivity })}${rebootMinutes !== null ? rebootRelationAdvisoryText(rebootMinutes) : secondsSinceActivity !== null && secondsSinceActivity < VITAL_SIGN_RECENT_SECONDS ? `最近 ${VITAL_SIGN_RECENT_SECONDS / 60} 分钟内有生命体征，建议不要随意中止。` : ""}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq ${observedSeq} --reason "<理由>"`;
   // 同一条 advisory 的 MCP 面文本：固定英文模板 + 整数 + 闭集标签（决定 0068）；
-  // 重启关系成立时换用第 107 批的变体模板（同一批事实，长度守 480）。
+  // 重启关系成立时换用第 107 批的变体模板（同一批事实，长度守 480）；owner 心跳
+  // 已停时换用第 149 批的模板（同样守 480）。
   const leadAdvisoryWire = !advisoryPresent
     ? null
     : runnerGone
       ? runnerGoneAdvisoryWireText({ quietMinutes: runnerGoneQuietMinutes ?? 0 })
-      : quiet && rebootMinutes !== null
-        ? leadAdvisoryRebootWireText({
+      : heartbeatStoppedMinutes !== null
+        ? ownerHeartbeatStoppedWireText({
             secondsSinceEffect,
             lastActivityEventKind: lastActivity?.kind ?? null,
             lastRuntimeStatus: lastActivity?.status ?? null,
             secondsSinceActivity,
-            ...rebootMinutes,
+            heartbeatMinutes: heartbeatStoppedMinutes,
           })
-        : leadAdvisoryWireText({
-            secondsSinceEffect,
-            lastActivityEventKind: lastActivity?.kind ?? null,
-            lastRuntimeStatus: lastActivity?.status ?? null,
-            secondsSinceActivity,
-          });
+        : quiet && rebootMinutes !== null
+          ? leadAdvisoryRebootWireText({
+              secondsSinceEffect,
+              lastActivityEventKind: lastActivity?.kind ?? null,
+              lastRuntimeStatus: lastActivity?.status ?? null,
+              secondsSinceActivity,
+              ...rebootMinutes,
+            })
+          : leadAdvisoryWireText({
+              secondsSinceEffect,
+              lastActivityEventKind: lastActivity?.kind ?? null,
+              lastRuntimeStatus: lastActivity?.status ?? null,
+              secondsSinceActivity,
+            });
 
   return {
     runId,

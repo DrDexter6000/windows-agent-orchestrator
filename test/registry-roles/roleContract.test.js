@@ -10,7 +10,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -430,6 +430,110 @@ test("两条共用条款在只读合同与交付合同里逐字同一份（各�
   // 共用条款是整行（不是拼进别的条款）
   assert.ok(delivery.split("\n").some((l) => l === ro.split("\n").find((l2) => l2.startsWith(SHARED_CLAUSE_SECRETS_PREFIX))),
     "同一份 = 整行逐字相等，不是重写");
+});
+
+// 第 149 批：worker 曾按命令行匹配（含本运行 run id）停 node 进程，把 WAO 自己的 runner
+// 一并停掉，运行无终态事件。命令收尾共用条款补一句：只经启动它的工具或确切 pid 停进程，
+// 不按名称/命令行/路径匹配。只读合同与交付合同引用同一份常量，两份都得有。
+test("第 149 批: 命令收尾条款禁止按名称/命令行/路径匹配停进程——只读、交付、带授权清单的交付合同各一次", async () => {
+  const { composeReadOnlyExecutionContract, composeDeliveryExecutionContract } =
+    await import("../../src/application/roleContract.js");
+  const previousSentence = "Stop any server or process you started before you answer; leave nothing running.";
+  const stopRule = "Stop only processes your own commands started, by the exact process id you got when starting them or via the tool that started them; never match by name, command line or path: this run's WAO supervisor carries the run id on its command line, and stopping it ends your run.";
+  // 命令行预算：句子（含前导空格）≤280 字符。修正一的 323 字符句让 codex .cmd 带 15 条
+  // 授权路径的样本被预检拒绝（首轮 312 字符时还剩余量）——长度上限钉在这里。
+  assert.ok(stopRule.length + 1 <= 280, `停进程句 ${stopRule.length + 1} 字符 ≤ 280`);
+  for (const [label, contract] of [
+    ["只读合同", composeReadOnlyExecutionContract()],
+    ["交付合同", composeDeliveryExecutionContract()],
+    ["带授权清单的交付合同", composeDeliveryExecutionContract({ allowedPaths: ["src"] })],
+  ]) {
+    const clause = contract.split("\n").find((l) => l.startsWith(SHARED_CLAUSE_FINISH_PREFIX));
+    assert.ok(clause, `${label}携带命令收尾条款`);
+    assert.ok(clause.endsWith(`${previousSentence} ${stopRule}`), `${label}：原句保留，停进程边界句紧随其后`);
+    assert.equal(contract.split(stopRule).length - 1, 1, `${label}：边界句恰一次`);
+    // 事实核对：runner 命令行只带 run id / run dir / registry / 可选 cwd，没有工作树路径；
+    // 也不留"先扫描、记下 pid、再按 pid 停"的读法。
+    assert.ok(!clause.includes("worktree path"), `${label}：不再声称命令行带工作树路径`);
+    assert.ok(!clause.includes("noted down") && !clause.includes("your own command reported"), `${label}：pid 只来自自己启动时取得`);
+  }
+});
+
+// 第 149 批修正一：预算守卫用真实组装——RunManager.start 的拼法（交付/只读合同 + "\n\n---\n\n"
+// + composeRoleContractWithIdentity 的身份头与 WQ 纪律 + 角色正文），再走 claude-code 与
+// codex 各自真实的 buildArgs，最后按 compileInvocation 的现有口径断言 .cmd 与 .exe 预算。
+test("第 149 批: 真实组装的交付/只读合同（身份头 + WQ 纪律 + 最长角色）经两个后端的真实 argv 仍在 .cmd 与 .exe 预算内", async () => {
+  const { composeDeliveryExecutionContract, composeReadOnlyExecutionContract, composeRoleContractWithIdentity, loadRoleContract } =
+    await import("../../src/application/roleContract.js");
+  const { compileInvocation } = await import("../../src/backends/processBackend.js");
+  const rolesDir = resolve(import.meta.dirname, "../../config/roles");
+  const roles = readdirSync(rolesDir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => ({ id: f.slice(0, -3), body: loadRoleContract(`config/roles/${f}`) }))
+    .sort((a, b) => b.body.length - a.body.length);
+  assert.ok(roles.length > 0, "有真实角色文件");
+  const claude = new ClaudeCodeBackend();
+  const codex = new CodexBackend();
+  const agent = { model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" } };
+  const paths = ["src", "test", "docs", "scripts", "config"];
+  // 最长角色 + 两种身份头（agentId 头与 lane/role 头，取更长者都覆盖）。
+  const longest = roles[0];
+  const bodies = [
+    composeRoleContractWithIdentity({ roleContract: longest.body, agentId: "coder_hq" }),
+    composeRoleContractWithIdentity({ roleContract: longest.body, agentId: "coder_hq", identity: { laneId: "coder_hq", roleId: longest.id } }),
+  ];
+  for (const role of bodies) {
+    assert.ok(role.includes("WORKER EVIDENCE DISCIPLINE"), "真实正文带 WQ 纪律");
+    for (const [backendLabel, backend] of [["claude-code", claude], ["codex", codex]]) {
+      const shapes = [
+        ["交付", `${composeDeliveryExecutionContract({ allowedPaths: paths, backendSupplement: backend.deliveryContractSupplement })}\n\n---\n\n${role}`],
+        ["只读", `${composeReadOnlyExecutionContract()}\n\n---\n\n${role}`],
+      ];
+      for (const [shape, roleContract] of shapes) {
+        const builtArgs = getBuildArgs(backend)(agent, { prompt: "p", roleContract });
+        for (const binary of ["C:\\bin\\t.cmd", "C:\\bin\\t.exe"]) {
+          assert.doesNotThrow(
+            () => compileInvocation({ binary, builtArgs, platform: "win32" }),
+            `${backendLabel} ${shape} ${binary} 在预算内`,
+          );
+        }
+      }
+    }
+  }
+});
+
+// 第 149 批修正二：紧样本——codex 的 .cmd 兜底路径（TOML 转义 + cmd.exe 引号，最贵的一条）、
+// 最长角色 + 结构化身份头、codex 补充条款、15 条各 ~80 字符的授权路径。首轮（312 字符的停进程句）
+// 在这个样本上还剩约 10 字符，修正一的 323 字符句让它被预检拒绝；缩短后要回约 40 字符。
+// .cmd 预算含 ComSpec 的保守引号上界，样本里钉死 ComSpec，结果不随机器环境变。
+test("第 149 批: codex .cmd 带 15 条授权路径的紧样本在预算内", async () => {
+  const { composeDeliveryExecutionContract, composeRoleContractWithIdentity, loadRoleContract } =
+    await import("../../src/application/roleContract.js");
+  const { compileInvocation } = await import("../../src/backends/processBackend.js");
+  const rolesDir = resolve(import.meta.dirname, "../../config/roles");
+  const longest = readdirSync(rolesDir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => ({ id: f.slice(0, -3), body: loadRoleContract(`config/roles/${f}`) }))
+    .sort((a, b) => b.body.length - a.body.length)[0];
+  const codex = new CodexBackend();
+  const agent = { model: { id: "gpt-5.5" }, reasoning: { effort: "xhigh" } };
+  const paths = Array.from({ length: 15 }, (_, i) => `src/${"d".repeat(71)}/f${String(i).padStart(2, "0")}.js`);
+  const savedComSpec = process.env.ComSpec;
+  process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
+  try {
+    for (const identity of [undefined, { laneId: "coder_hq", roleId: longest.id }]) {
+      const role = composeRoleContractWithIdentity({ roleContract: longest.body, agentId: "coder_hq", ...(identity ? { identity } : {}) });
+      const roleContract = `${composeDeliveryExecutionContract({ allowedPaths: paths, backendSupplement: codex.deliveryContractSupplement })}\n\n---\n\n${role}`;
+      const builtArgs = getBuildArgs(codex)(agent, { prompt: "p", roleContract });
+      assert.doesNotThrow(
+        () => compileInvocation({ binary: "C:\\bin\\t.cmd", builtArgs, platform: "win32" }),
+        `codex .cmd 15 条授权路径（${identity ? "lane/role" : "agentId"} 身份头）在预算内`,
+      );
+    }
+  } finally {
+    if (savedComSpec === undefined) delete process.env.ComSpec;
+    else process.env.ComSpec = savedComSpec;
+  }
 });
 
 test("交付合同补齐：新写入边界行与 git 行扩展在场，共用条款在 allowedPaths 段之前", async () => {

@@ -1290,22 +1290,23 @@ test("第 107 批: runner 已被证明不在时不叠加——沿用 runnerGone 
 test("第 107 批: 租约心跳晚于事件时最后活动取心跳；wire 变体极端整数仍 ≤480", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-reboot-adv-hb-"));
   try {
-    // 事件 09:45；租约心跳 09:50（stale，证明照旧不成立面）；开机 09:55 →
-    // 晚于两者才成立；09:47 开机晚于事件但早于心跳 → 不成立。
+    // 事件 09:45；租约心跳 10:19:55（新鲜——第 149 批起心跳过期会改走"心跳已停"
+    // 模板，重启句只在租约缺失/损坏/心跳新鲜时出现）；开机 10:19:58 → 晚于两者才
+    // 成立；10:19:50 开机晚于事件但早于心跳 → 不成立。
     writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
-    const lease = { present: true, wellFormed: true, fresh: false, heartbeatAt: Date.parse("2026-10-12T09:50:00.000Z"), pid: 4242 };
+    const lease = { present: true, wellFormed: true, fresh: true, heartbeatAt: Date.parse("2026-10-12T10:19:55.000Z"), pid: 4242 };
     const base = { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => lease };
     const holds = await getRunStatus({
       runId: RG_RUN, runDir: dir,
       nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
-      runnerGoneDeps: { ...base, bootTimeFn: () => Date.parse("2026-10-12T09:55:00.000Z") },
+      runnerGoneDeps: { ...base, bootTimeFn: () => Date.parse("2026-10-12T10:19:58.000Z") },
     });
-    assert.ok(holds.leadAdvisory.includes("本机 25 分钟前开机，晚于该运行最后活动（30 分钟前）"),
-      `分钟数从心跳（09:50）起算: ${holds.leadAdvisory}`);
+    assert.ok(holds.leadAdvisory.includes("本机 0 分钟前开机，晚于该运行最后活动（0 分钟前）"),
+      `分钟数从心跳（10:19:55）起算，不是从事件（09:45）: ${holds.leadAdvisory}`);
     const notHolds = await getRunStatus({
       runId: RG_RUN, runDir: dir,
       nowFn: () => Date.parse("2026-10-12T10:20:00.000Z"),
-      runnerGoneDeps: { ...base, bootTimeFn: () => Date.parse("2026-10-12T09:47:00.000Z") },
+      runnerGoneDeps: { ...base, bootTimeFn: () => Date.parse("2026-10-12T10:19:50.000Z") },
     });
     assert.ok(!notHolds.leadAdvisory.includes("重启"), "开机晚于事件但早于心跳 → 不成立，不加句");
   } finally {
@@ -1322,4 +1323,339 @@ test("第 107 批: 租约心跳晚于事件时最后活动取心跳；wire 变�
     activityMinutesAgo: 99_999_999,
   });
   assert.ok(long.length <= LEAD_ADVISORY_WIRE_MAX_LEN, `长度 ${long.length}`);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第 149 批：owner 心跳已停（租约在、格式正确、心跳不新鲜）+ 普通静默 advisory 在场
+// + runner 未被证明不在 → advisory 改指 settle 干跑，不再建议 stop。其余情形输出
+// 逐字节不变。租约经 runnerGoneDeps.ownerLeaseReader 注入；时钟 10:20，转录最后
+// 动作 09:45（静默 35 分钟）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const B149_NOW = Date.parse("2026-10-12T10:20:00.000Z");
+const B149_CLI_HEAD = "转录里已 35 分钟没有新的动作或正文（最近活动：跑命令，2100s 前）。";
+const B149_WIRE_HEAD = "No new worker action or text in the transcript for 35 min (last activity: command, 2100s ago). ";
+const B149_QUIET_CLI = `${B149_CLI_HEAD}是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${RG_RUN} --observed-seq 4 --reason "<理由>"`;
+const B149_QUIET_WIRE = `${B149_WIRE_HEAD}Whether to keep waiting is the Lead's decision. Before stopping: read run_activity, then run_stop with observedSeq and a reason.`;
+// 第 149 批修正一：心跳时间戳在未来 / 年龄算不出安全整数分钟时，两面用固定的时间异常句
+// 取代"停在 N 分钟前"；其后的干跑出口与"是否继续等待"逐字不变。
+const B149_CLI_ANOMALY = "owner 心跳的时间戳在未来或不可信，已按不新鲜处理。";
+const B149_CLI_TAIL = `下一步先干跑 wao runs settle --run-id ${RG_RUN} --reason-file <文件>，看各道门；runner 是否还在，以干跑结果为准。是否继续等待由 Lead 决定。`;
+const B149_WIRE_ANOMALY = "The owner heartbeat timestamp is in the future or not trustworthy and was treated as not fresh. ";
+const B149_WIRE_TAIL = "Next, dry-run wao runs settle --run-id <id> --reason-file <file> and read its gates; whether a runner still exists is decided by the dry-run result. Whether to keep waiting is the Lead's decision.";
+const b149Lease = (heartbeatAgoMs, extra = {}) => ({
+  present: true, wellFormed: true, fresh: heartbeatAgoMs <= 10_000, heartbeatAt: B149_NOW - heartbeatAgoMs, pid: 4242, ...extra,
+});
+async function b149Status(dir, runnerGoneDeps) {
+  return getRunStatus({ runId: RG_RUN, runDir: dir, nowFn: () => B149_NOW, runnerGoneDeps });
+}
+
+test("第 149 批: 心跳过期 + 静默 → 两面换新模板（指向 settle 干跑，不含 stop），长度 ≤480", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-stale-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const status = await b149Status(dir, { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => b149Lease(12 * 60_000) });
+    assert.equal("runnerGone" in status, false, "证明不成立：仍不声称 runner 已不在");
+    assert.equal(
+      status.leadAdvisory,
+      `${B149_CLI_HEAD}owner 心跳停在 12 分钟前。`
+        + `下一步先干跑 wao runs settle --run-id ${RG_RUN} --reason-file <文件>，看各道门；runner 是否还在，以干跑结果为准。`
+        + "是否继续等待由 Lead 决定。",
+    );
+    assert.equal(
+      status.leadAdvisoryWire,
+      `${B149_WIRE_HEAD}The owner heartbeat stopped 12 min ago. `
+        + "Next, dry-run wao runs settle --run-id <id> --reason-file <file> and read its gates; whether a runner still exists is decided by the dry-run result. "
+        + "Whether to keep waiting is the Lead's decision.",
+    );
+    for (const text of [status.leadAdvisory, status.leadAdvisoryWire]) {
+      assert.ok(!/wao stop|run_stop/.test(text), `不再建议 stop：${text}`);
+    }
+    assert.ok(status.leadAdvisoryWire.length <= 480, `wire ${status.leadAdvisoryWire.length} ≤ 480`);
+    assert.ok(!status.leadAdvisoryWire.includes(RG_RUN), "wire 面用 <id> 占位，不带 runId");
+    // 极端整数（分/秒取大位数）也守 wire 上限。
+    const { ownerHeartbeatStoppedWireText, LEAD_ADVISORY_WIRE_MAX_LEN } = await import("../../src/application/runQuietAdvisory.js");
+    const long = ownerHeartbeatStoppedWireText({
+      secondsSinceEffect: 9_999_999 * 60,
+      lastActivityEventKind: "runtime_activity",
+      lastRuntimeStatus: "provider_retry",
+      secondsSinceActivity: 99_999_999,
+      heartbeatMinutes: 99_999_999,
+    });
+    assert.ok(long.length <= LEAD_ADVISORY_WIRE_MAX_LEN, `极端整数 ${long.length}`);
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批: 心跳过期时同样不带生命体征建议，也不叠加重启句", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-stale-extra-"));
+  try {
+    // 近 5 分钟有生命体征（旧模板会建议别停）+ 开机晚于最后活动（旧路径会叠加重启句）。
+    const base = { runId: RG_RUN, agentId: "coder_low" };
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" })
+      + ev({ type: "run.event", kind: "runtime_activity", status: "streaming", ts: "2026-10-12T10:15:00.000Z", seq: 5, ...base }));
+    const status = await b149Status(dir, {
+      ...rgProofDeps({ eligible: false }),
+      ownerLeaseReader: () => b149Lease(12 * 60_000),
+      bootTimeFn: () => Date.parse("2026-10-12T10:18:00.000Z"),
+    });
+    assert.ok(status.leadAdvisory.includes("owner 心跳停在 12 分钟前"), status.leadAdvisory);
+    assert.ok(status.leadAdvisory.includes("最近活动：provider 正在输出，300s 前"), "最近活动照现有提示写出");
+    assert.ok(!status.leadAdvisory.includes("建议不要随意中止"), "不带生命体征建议");
+    assert.ok(!status.leadAdvisory.includes("开机"), "不叠加重启句");
+    assert.ok(status.leadAdvisoryWire.includes("(last activity: runtime_activity/streaming, 300s ago)"), status.leadAdvisoryWire);
+    assert.ok(!status.leadAdvisoryWire.includes("advises against stopping"), "wire 面不带生命体征建议");
+    assert.ok(!status.leadAdvisoryWire.includes("booted"), "wire 面不叠加重启句");
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批: 心跳新鲜 → 两面与旧模板逐字节相同；门限同口径（isFreshHeartbeat，10 秒）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-fresh-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const withLease = (heartbeatAgoMs) => b149Status(dir, {
+      ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => b149Lease(heartbeatAgoMs),
+    });
+    for (const agoMs of [0, 1000, 10_000]) {
+      const status = await withLease(agoMs);
+      assert.equal(status.leadAdvisory, B149_QUIET_CLI, `心跳 ${agoMs}ms 前 → 旧模板`);
+      assert.equal(status.leadAdvisoryWire, B149_QUIET_WIRE, `心跳 ${agoMs}ms 前 → wire 旧模板`);
+    }
+    const justStale = await withLease(10_001);
+    assert.ok(justStale.leadAdvisory.includes("owner 心跳停在 0 分钟前"), "恰过门限一毫秒 → 新模板");
+    // 远未来的心跳同样不新鲜（TD-316 同一条规则）——但"停在 N 分钟前"在未来时间戳下不是
+    // 事实：两面改用固定的时间异常句，不写分钟数；干跑出口不变。
+    const future = await withLease(-3_600_000);
+    assert.equal(future.leadAdvisory, B149_CLI_HEAD + B149_CLI_ANOMALY + B149_CLI_TAIL);
+    assert.equal(future.leadAdvisoryWire, B149_WIRE_HEAD + B149_WIRE_ANOMALY + B149_WIRE_TAIL);
+    for (const text of [future.leadAdvisory, future.leadAdvisoryWire]) {
+      assert.ok(!/0 分钟前|stopped 0 min/.test(text), `未来心跳不报"0 分钟前"：${text}`);
+      assert.ok(!/wao stop|run_stop/.test(text), "仍不建议 stop");
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批修正一: 极端有限心跳时间戳 → 不输出科学计数法；算不出安全整数分钟就写时间异常句", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-extreme-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const statusAt = (heartbeatAt) => b149Status(dir, {
+      ...rgProofDeps({ eligible: false }),
+      ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt, pid: 4242 }),
+    });
+    // 过去方向与未来方向的极端有限值：分钟数超出安全整数（或为负）→ 一律异常句。
+    for (const heartbeatAt of [-1e300, 1e300, -Number.MAX_VALUE, Number.MAX_VALUE, -1e21, 1e21]) {
+      const status = await statusAt(heartbeatAt);
+      for (const text of [status.leadAdvisory, status.leadAdvisoryWire]) {
+        assert.ok(!text.includes("e+") && !text.includes("e-") && !/\d[eE][+-]?\d/.test(text), `${heartbeatAt}: 不含科学计数法：${text}`);
+      }
+      assert.equal(status.leadAdvisory, B149_CLI_HEAD + B149_CLI_ANOMALY + B149_CLI_TAIL, `${heartbeatAt}: CLI 异常句`);
+      assert.equal(status.leadAdvisoryWire, B149_WIRE_HEAD + B149_WIRE_ANOMALY + B149_WIRE_TAIL, `${heartbeatAt}: wire 异常句`);
+    }
+    // 很大但仍是安全整数分钟的过去时间戳：照写十进制整数，不出异常句。
+    const bigPast = await statusAt(-9e15);
+    assert.match(bigPast.leadAdvisory, /owner 心跳停在 \d+ 分钟前。/);
+    assert.match(bigPast.leadAdvisoryWire, /The owner heartbeat stopped \d+ min ago\./);
+    assert.ok(!/\d[eE][+-]?\d/.test(bigPast.leadAdvisory + bigPast.leadAdvisoryWire), "十进制整数");
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批修正一: 新模板的整数一律十进制文本——心跳分钟数不可信 → 异常句；静默分钟与活动秒数钳在安全上限", async () => {
+  const { ownerHeartbeatStoppedAdvisoryText, ownerHeartbeatStoppedWireText, LEAD_ADVISORY_WIRE_MAX_LEN } =
+    await import("../../src/application/runQuietAdvisory.js");
+  const base = {
+    runId: RG_RUN,
+    secondsSinceEffect: 2100,
+    lastActivityLabel: "跑命令",
+    lastActivityEventKind: "command",
+    lastRuntimeStatus: null,
+    secondsSinceActivity: 2100,
+  };
+  // 心跳分钟数：负数 / 非有限 / 超安全整数 / 缺席 → 异常句；0 与正常整数照写。
+  for (const bad of [-1, NaN, Infinity, 1e300, Number.MAX_SAFE_INTEGER + 1, 2.5e21, null, undefined]) {
+    assert.ok(ownerHeartbeatStoppedAdvisoryText({ ...base, heartbeatMinutes: bad }).includes(B149_CLI_ANOMALY), `CLI ${String(bad)}`);
+    assert.ok(ownerHeartbeatStoppedWireText({ ...base, heartbeatMinutes: bad }).includes(B149_WIRE_ANOMALY), `wire ${String(bad)}`);
+  }
+  assert.ok(ownerHeartbeatStoppedAdvisoryText({ ...base, heartbeatMinutes: 0 }).includes("owner 心跳停在 0 分钟前。"));
+  assert.ok(ownerHeartbeatStoppedWireText({ ...base, heartbeatMinutes: 0 }).includes("The owner heartbeat stopped 0 min ago."));
+  const huge = ownerHeartbeatStoppedWireText({ ...base, heartbeatMinutes: Number.MAX_SAFE_INTEGER });
+  assert.ok(huge.includes(`stopped ${Number.MAX_SAFE_INTEGER} min ago`), "安全整数上界照写十进制");
+  // 静默分钟数与最近活动秒数：不可信的大值也只出十进制整数。
+  for (const extreme of [1e300, Infinity, Number.MAX_VALUE, 2.5e21]) {
+    const cli = ownerHeartbeatStoppedAdvisoryText({ ...base, secondsSinceEffect: extreme, secondsSinceActivity: extreme, heartbeatMinutes: 5 });
+    const wire = ownerHeartbeatStoppedWireText({
+      ...base, secondsSinceEffect: extreme, secondsSinceActivity: extreme,
+      lastActivityEventKind: "runtime_activity", lastRuntimeStatus: "provider_retry", heartbeatMinutes: 5,
+    });
+    for (const text of [cli, wire]) {
+      assert.ok(!text.includes("e+") && !text.includes("e-") && !/\d[eE][+-]?\d/.test(text), `${extreme}: 不含科学计数法：${text}`);
+      assert.ok(!text.includes("Infinity") && !text.includes("NaN"), `${extreme}: 不含 Infinity/NaN`);
+    }
+    assert.ok(wire.length <= LEAD_ADVISORY_WIRE_MAX_LEN, `${extreme}: wire ${wire.length} ≤ 480`);
+  }
+  // 最长异常句 + 最长闭集活动回显 + 最大整数仍守 wire 上限。
+  const longest = ownerHeartbeatStoppedWireText({
+    ...base,
+    secondsSinceEffect: Number.MAX_SAFE_INTEGER,
+    secondsSinceActivity: Number.MAX_SAFE_INTEGER,
+    lastActivityEventKind: "runtime_activity",
+    lastRuntimeStatus: "provider_retry",
+    heartbeatMinutes: 1e300,
+  });
+  assert.ok(longest.length <= LEAD_ADVISORY_WIRE_MAX_LEN, `最长 ${longest.length} ≤ 480`);
+});
+
+// 第 149 批修正二：运行时状态的标签表查找必须是严格成员判断——对象下标会读到原型链
+//（"constructor" → 函数源码文本、"__proto__" → "[object Object]"）并把数组键转成字符串
+//（["streaming"] → "streaming" 的标签）。新分支用 RUNTIME_ACTIVITY_STATUSES / RUN_EVENT_KINDS
+// 的成员判断，没命中一律固定文案。
+test("第 149 批修正二: 新 CLI 提示的 status / kind 走严格闭集——原型链键、数组、对象都落固定文案", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-strict-"));
+  try {
+    const base = { runId: RG_RUN, agentId: "coder_low" };
+    const staleDeps = { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => b149Lease(12 * 60_000) };
+    const freshDeps = { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => b149Lease(1000) };
+    const lastAdvisory = async (event, deps) => {
+      writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" })
+        + ev({ type: "run.event", ...event, ts: "2026-10-12T09:45:00.000Z", seq: 5, ...base }));
+      return b149Status(dir, deps);
+    };
+    // 运行时状态：闭集成员照给固定文案；其余（含原型链键、数组、对象、空值）一律"provider 状态未知"。
+    for (const [status, expected] of [
+      ["initialized", "provider 已初始化"],
+      ["streaming", "provider 正在输出"],
+      ["provider_retry", "provider 正在重试"],
+      ["process_active", "工具子进程在干活"],
+      ["files_changed", "工作目录有文件变化"],
+      ["serve_active", "serve 报告本轮仍在跑"],
+      ["constructor", "provider 状态未知"],
+      ["__proto__", "provider 状态未知"],
+      ["toString", "provider 状态未知"],
+      ["hasOwnProperty", "provider 状态未知"],
+      ["valueOf", "provider 状态未知"],
+      [["streaming"], "provider 状态未知"],
+      [{ streaming: true }, "provider 状态未知"],
+      [null, "provider 状态未知"],
+      [42, "provider 状态未知"],
+      ["", "provider 状态未知"],
+    ]) {
+      const status_ = await lastAdvisory({ kind: "runtime_activity", status }, staleDeps);
+      assert.ok(status_.leadAdvisory.includes(`最近活动：${expected}，2100s 前）。owner 心跳停在 12 分钟前。`),
+        `status=${JSON.stringify(status)}: ${status_.leadAdvisory}`);
+      assert.ok(!/function|native code|\[object|undefined/.test(status_.leadAdvisory), `status=${JSON.stringify(status)}: 不回显内建值`);
+    }
+    // kind 同样走成员判断：原型链键、数组、对象 → "未知"。
+    for (const kind of ["constructor", "__proto__", "toString", "hasOwnProperty", ["tool_use"], ["runtime_activity"], {}, 7]) {
+      const out = await lastAdvisory({ kind }, staleDeps);
+      assert.ok(out.leadAdvisory.includes("最近活动：未知，2100s 前）。"), `kind=${JSON.stringify(kind)}: ${out.leadAdvisory}`);
+      assert.ok(!/function|native code|\[object|undefined/.test(out.leadAdvisory), `kind=${JSON.stringify(kind)}: 不回显内建值`);
+    }
+    // 旧回退模板（心跳新鲜）对合法状态逐字节不变。
+    const old = await lastAdvisory({ kind: "runtime_activity", status: "streaming" }, freshDeps);
+    assert.equal(old.leadAdvisory,
+      "转录里已 35 分钟没有新的动作或正文（最近活动：provider 正在输出，2100s 前）。是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行："
+      + `wao stop ${RG_RUN} --observed-seq 5 --reason "<理由>"`);
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批修正一: 新 CLI 提示的最近活动只用闭集类别——tool_use 的工具名与未知 kind 不进提示；旧模板字节不变", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-closed-"));
+  try {
+    const MARK_TOOL = "MARK_TOOL_a1b2c3_do_not_echo";
+    const MARK_KIND = "MARK_KIND_d4e5f6_do_not_echo";
+    const base = { runId: RG_RUN, agentId: "coder_low" };
+    const staleDeps = { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => b149Lease(12 * 60_000) };
+    const freshDeps = { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => b149Lease(1000) };
+    // ① 最后事件是 tool_use，工具名带标记。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" })
+      + ev({ type: "run.event", kind: "tool_use", tool: MARK_TOOL, input: { command: "x" }, ts: "2026-10-12T09:45:00.000Z", seq: 5, ...base }));
+    const stale = await b149Status(dir, staleDeps);
+    assert.ok(!stale.leadAdvisory.includes(MARK_TOOL), `新提示不回显工具名：${stale.leadAdvisory}`);
+    assert.ok(stale.leadAdvisory.startsWith("转录里已 35 分钟没有新的动作或正文（最近活动：用工具，2100s 前）。owner 心跳停在 12 分钟前。"), stale.leadAdvisory);
+    assert.ok(!stale.leadAdvisoryWire.includes(MARK_TOOL), "wire 面本来就是闭集");
+    // 旧回退模板（心跳新鲜）逐字节兼容：仍带"用工具 <名>"。
+    const fresh = await b149Status(dir, freshDeps);
+    assert.ok(fresh.leadAdvisory.startsWith(`转录里已 35 分钟没有新的动作或正文（最近活动：用工具 ${MARK_TOOL}，2100s 前）。是否继续等待由 Lead 决定；要中止`), fresh.leadAdvisory);
+    // ② 最后事件的 kind 不在闭集内（转录里的自由文本）。
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" })
+      + ev({ type: "run.event", kind: MARK_KIND, ts: "2026-10-12T09:45:00.000Z", seq: 5, ...base }));
+    const unknownKind = await b149Status(dir, staleDeps);
+    assert.ok(!unknownKind.leadAdvisory.includes(MARK_KIND), `未知 kind 不回显：${unknownKind.leadAdvisory}`);
+    assert.ok(unknownKind.leadAdvisory.includes("最近活动：未知，"), unknownKind.leadAdvisory);
+    assert.ok(!unknownKind.leadAdvisoryWire.includes(MARK_KIND));
+    // ③ 闭集内的其余 kind 与运行时状态照旧给出固定类别。
+    for (const [kind, extra, expected] of [
+      ["message", { role: "assistant" }, "在说话"],
+      ["thinking", {}, "在思考"],
+      ["command", { command: "x" }, "跑命令"],
+      ["tool_result", { tool: MARK_TOOL }, "收工具结果"],
+      ["file_written", { path: "a/b.js" }, "在写文件"],
+      ["runtime_activity", { status: "streaming" }, "provider 正在输出"],
+    ]) {
+      writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" })
+        + ev({ type: "run.event", kind, ...extra, ts: "2026-10-12T09:45:00.000Z", seq: 5, ...base }));
+      const status = await b149Status(dir, staleDeps);
+      assert.ok(status.leadAdvisory.includes(`最近活动：${expected}，`), `${kind}: ${status.leadAdvisory}`);
+      assert.ok(!status.leadAdvisory.includes(MARK_TOOL), `${kind}: 不回显自由文本`);
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批: 租约缺失 / 损坏 / 读取失败 → 两面与旧模板逐字节相同", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-nolease-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    for (const [label, lease] of [
+      ["缺失", { present: false }],
+      ["损坏", { present: true, wellFormed: false }],
+    ]) {
+      const status = await b149Status(dir, { ...rgProofDeps({ eligible: false }), ownerLeaseReader: () => lease });
+      assert.equal(status.leadAdvisory, B149_QUIET_CLI, `租约${label} → 旧模板`);
+      assert.equal(status.leadAdvisoryWire, B149_QUIET_WIRE, `租约${label} → wire 旧模板`);
+    }
+    // 状态读取处的租约读取抛错（证明内部的读取放行）→ 不陈述，输出不变。
+    let reads = 0;
+    const thrown = await b149Status(dir, {
+      ...rgProofDeps({ eligible: false }),
+      ownerLeaseReader: () => { reads += 1; if (reads > 1) throw new Error("boom"); return { present: false }; },
+    });
+    assert.equal(thrown.leadAdvisory, B149_QUIET_CLI, "读取失败 → 旧模板");
+    assert.equal(thrown.leadAdvisoryWire, B149_QUIET_WIRE);
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批: runner 已被证明不在 → 仍走 runnerGone 模板（心跳过期不改变优先级）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-gone-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const status = await b149Status(dir, { ...rgProofDeps(), ownerLeaseReader: () => b149Lease(12 * 60_000) });
+    assert.equal(status.runnerGone, true);
+    assert.equal(status.leadAdvisory,
+      "观察时没有 WAO 进程能继续驱动这个运行（owner 心跳已不在、本机无 runner 进程、转录静默已满 35 分钟），继续等待不会自行收口。"
+      + `是否结算由 Lead 决定：先干跑 wao runs settle --run-id ${RG_RUN} --reason-file <文件>，确认后再加 --apply。`);
+    assert.ok(status.leadAdvisoryWire.startsWith("At observation time no WAO process can still drive this run"));
+    assert.ok(!status.leadAdvisory.includes("owner 心跳停在"), "不叠加新模板");
+  } finally { cleanupDir(dir); }
+});
+
+test("第 149 批: 真读 owner 租约文件——过期 → 新模板；新鲜 / 损坏 → 旧模板；无 deps 同样生效", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-file-"));
+  try {
+    writeTranscript(dir, RG_RUN, rgEvents({ lastTs: "2026-10-12T09:45:00.000Z" }));
+    const ownerFile = join(dir, `.owner-${RG_RUN}`);
+    // 过期租约（真实 readOwnerLease 缺省读器；deps 缺席 = 证明不跑）。
+    writeFileSync(ownerFile, JSON.stringify({ heartbeatAt: B149_NOW - 12 * 60_000, pid: 4242 }), "utf8");
+    const stale = await b149Status(dir, undefined);
+    assert.ok(stale.leadAdvisory.includes("owner 心跳停在 12 分钟前"), stale.leadAdvisory);
+    assert.ok(stale.leadAdvisoryWire.includes("The owner heartbeat stopped 12 min ago."), stale.leadAdvisoryWire);
+    // 新鲜租约。开机时刻钉在 epoch 0（重启句永不成立，旧模板字节稳定）。
+    writeFileSync(ownerFile, JSON.stringify({ heartbeatAt: B149_NOW - 1000, pid: 4242 }), "utf8");
+    const fresh = await b149Status(dir, { bootTimeFn: () => 0 });
+    assert.equal(fresh.leadAdvisory, B149_QUIET_CLI);
+    assert.equal(fresh.leadAdvisoryWire, B149_QUIET_WIRE);
+    // 损坏租约（pid 缺失 = 格式不对）。
+    writeFileSync(ownerFile, JSON.stringify({ heartbeatAt: B149_NOW - 12 * 60_000 }), "utf8");
+    const corrupt = await b149Status(dir, { bootTimeFn: () => 0 });
+    assert.equal(corrupt.leadAdvisory, B149_QUIET_CLI);
+    assert.equal(corrupt.leadAdvisoryWire, B149_QUIET_WIRE);
+  } finally { cleanupDir(dir); }
 });

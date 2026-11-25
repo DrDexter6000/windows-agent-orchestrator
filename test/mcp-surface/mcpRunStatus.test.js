@@ -1056,3 +1056,144 @@ test("TD-341-C1: runnerGone 的新 advisory 上 wire，输出键集合不增（r
     await server.close();
   }
 });
+
+// ---------------------------------------------------------------------
+// 第 149 批：owner 心跳已停（租约在、格式正确、心跳不新鲜）+ 静默 → leadAdvisory 换
+// 固定英文模板，指向 settle 干跑、不含 run_stop；输出键集合不变、≤480。心跳新鲜 /
+// 租约缺失 → 旧模板逐字节不变；runner 已被证明不在 → 仍是 runnerGone 模板。
+// 租约经 runnerGoneDeps.ownerLeaseReader 注入；转录用真实时钟（40 分钟前）。
+// ---------------------------------------------------------------------
+
+const B149_OLD_WIRE = /^No new worker action or text in the transcript for \d+ min \(last activity: command, \d+s ago\)\. Whether to keep waiting is the Lead's decision\. Before stopping: read run_activity, then run_stop with observedSeq and a reason\.$/;
+const B149_STALE_WIRE = /^No new worker action or text in the transcript for \d+ min \(last activity: command, \d+s ago\)\. The owner heartbeat stopped 12 min ago\. Next, dry-run wao runs settle --run-id <id> --reason-file <file> and read its gates; whether a runner still exists is decided by the dry-run result\. Whether to keep waiting is the Lead's decision\.$/;
+
+async function b149RunStatus({
+  runnerGoneDeps, runId,
+  lastTs = new Date(Date.now() - 40 * 60_000).toISOString(),
+  lastEvent = { kind: "command", command: "npm test" },
+  getRunStatusFn,
+}) {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-"));
+  try {
+    const runDir = join(dir, "runs");
+    const base = { runId, agentId: "w" };
+    writeTranscript(runDir, runId, [
+      ev({ type: "run.background_submitted", ts: lastTs, seq: 1, ...base }),
+      ev({ type: "run.state_change", to: "pending", reason: "background_spawned", ts: lastTs, seq: 2, ...base }),
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: lastTs, seq: 3, ...base }),
+      ev({ type: "run.event", ...lastEvent, ts: lastTs, seq: 4, ...base }),
+    ].join(""));
+    const server = createWaoMcpServer({
+      registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }),
+      runDir,
+      runnerGoneDeps,
+      ...(getRunStatusFn ? { getRunStatusFn } : {}),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      assert.notEqual(res.isError, true, `run_status 不应崩成固定错误文本：${JSON.stringify(res.content)}`);
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      if (res.structuredContent) assert.deepEqual(res.structuredContent, parsed, "structuredContent mirrors");
+      return parsed;
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+}
+
+test("第 149 批 M1: 心跳过期 + 静默 → leadAdvisory 是心跳已停模板（无 run_stop），键集合不变、≤480", async () => {
+  const heartbeatAt = Date.now() - 12 * 60_000 - 5_000;
+  const parsed = await b149RunStatus({
+    runId: "run_b149_stale",
+    runnerGoneDeps: {
+      ...REFUSING_RUNNER_GONE_DEPS,
+      ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt, pid: 4242 }),
+    },
+  });
+  assert.deepEqual(Object.keys(parsed).sort(), [...RUN_STATUS_OUTPUT_KEYS, "leadAdvisory"].sort(),
+    "键集合与 0068 完全一致——不新增 MCP 输出字段");
+  assert.match(parsed.leadAdvisory, B149_STALE_WIRE);
+  assert.ok(!parsed.leadAdvisory.includes("run_stop") && !parsed.leadAdvisory.includes("wao stop"), "不再建议 stop");
+  assert.ok(parsed.leadAdvisory.length <= 480, `${parsed.leadAdvisory.length}`);
+});
+
+test("第 149 批 M2: 心跳新鲜 / 租约缺失 → leadAdvisory 与旧模板逐字节相同", async () => {
+  const fresh = await b149RunStatus({
+    runId: "run_b149_fresh",
+    runnerGoneDeps: {
+      ...REFUSING_RUNNER_GONE_DEPS,
+      ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: Date.now() - 1000, pid: 4242 }),
+    },
+  });
+  assert.match(fresh.leadAdvisory, B149_OLD_WIRE, "心跳新鲜 → 旧模板");
+  const missing = await b149RunStatus({
+    runId: "run_b149_missing",
+    runnerGoneDeps: { ...REFUSING_RUNNER_GONE_DEPS, ownerLeaseReader: () => ({ present: false }) },
+  });
+  assert.match(missing.leadAdvisory, B149_OLD_WIRE, "租约缺失 → 旧模板");
+});
+
+test("第 149 批 M3: runner 已被证明不在 → 仍是 runnerGone 模板（心跳过期不改变优先级）", async () => {
+  const heartbeatAt = Date.now() - 12 * 60_000 - 5_000;
+  const parsed = await b149RunStatus({
+    runId: "run_b149_gone",
+    runnerGoneDeps: {
+      handshakeReader: () => ({ present: false }),
+      daemonAliveFn: () => false,
+      heartbeatReader: () => ({ fresh: false }),
+      ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt, pid: 4242 }),
+      identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+      runnerScanFn: async () => ({ alive: false }),
+      bootTimeFn: () => 0,
+    },
+  });
+  assert.match(parsed.leadAdvisory, /^At observation time no WAO process can still drive this run \(owner heartbeat gone, no runner process on this machine, transcript quiet for \d+ min\)\./);
+  assert.ok(!parsed.leadAdvisory.includes("The owner heartbeat stopped"), "不叠加心跳已停模板");
+  assert.ok(parsed.leadAdvisory.length <= 480);
+});
+
+test("第 149 批修正一 M4: 心跳时间戳在未来 / 极端有限值 → leadAdvisory 是固定的时间异常句，不写分钟数、无科学计数法", async () => {
+  const ANOMALY_WIRE = /^No new worker action or text in the transcript for \d+ min \(last activity: command, \d+s ago\)\. The owner heartbeat timestamp is in the future or not trustworthy and was treated as not fresh\. Next, dry-run wao runs settle --run-id <id> --reason-file <file> and read its gates; whether a runner still exists is decided by the dry-run result\. Whether to keep waiting is the Lead's decision\.$/;
+  for (const [label, heartbeatAt] of [
+    ["未来一小时", () => Date.now() + 3_600_000],
+    ["极端正有限值", () => 1e300],
+    ["极端负有限值", () => -1e300],
+  ]) {
+    const parsed = await b149RunStatus({
+      runId: "run_b149_anomaly",
+      runnerGoneDeps: {
+        ...REFUSING_RUNNER_GONE_DEPS,
+        ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt: heartbeatAt(), pid: 4242 }),
+      },
+    });
+    assert.match(parsed.leadAdvisory, ANOMALY_WIRE, label);
+    assert.ok(!parsed.leadAdvisory.includes("e+") && !parsed.leadAdvisory.includes("e-"), `${label}: 无科学计数法`);
+    assert.ok(!parsed.leadAdvisory.includes("run_stop"), `${label}: 不再建议 stop`);
+    assert.ok(parsed.leadAdvisory.length <= 480, `${label}: ${parsed.leadAdvisory.length}`);
+  }
+});
+
+test("第 149 批修正一 M5: 极端整数（最长闭集活动回显 + 最大年代差）经 RUN_STATUS_OUTPUT.parse 后 leadAdvisory 仍 ≤480", async () => {
+  // 1970 年的事件 + 9999 年的时钟：静默分钟、活动秒数、心跳分钟都取到真实路径能到的最大位数；
+  // 最后事件取最长的闭集回显 runtime_activity/provider_retry。parse 超 480 会崩成固定错误文本
+  //（b149RunStatus 断言 isError 不成立）。
+  const FAR_NOW = Date.parse("9999-12-31T00:00:00.000Z");
+  const { getRunStatus } = await import("../../src/application/runStatus.js");
+  const parsed = await b149RunStatus({
+    runId: "run_b149_extreme",
+    lastTs: "1970-01-01T00:00:01.000Z",
+    lastEvent: { kind: "runtime_activity", status: "provider_retry" },
+    getRunStatusFn: (input) => getRunStatus({ ...input, nowFn: () => FAR_NOW }),
+    runnerGoneDeps: {
+      ...REFUSING_RUNNER_GONE_DEPS,
+      ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt: 1000, pid: 4242 }),
+    },
+  });
+  assert.match(parsed.leadAdvisory, /^No new worker action or text in the transcript for \d{9,} min \(last activity: runtime_activity\/provider_retry, \d{9,}s ago\)\. The owner heartbeat stopped \d{9,} min ago\. /);
+  assert.ok(!parsed.leadAdvisory.includes("e+") && !parsed.leadAdvisory.includes("e-"), "无科学计数法");
+  assert.ok(parsed.leadAdvisory.length <= 480, `${parsed.leadAdvisory.length}`);
+});

@@ -3170,6 +3170,78 @@ test("TD-341-C3: 未证明 runnerGone 的普通 run → 输出形状逐字节不
   }
 });
 
+// ── 第 149 批：status 的静默 advisory 在 owner 心跳已停时改指 settle 干跑 ────
+// 真实 getRunStatus + 注入的证明/租约读器（不起任何进程）；转录用真实时钟（40 分钟
+// 前静默）。心跳过期 → 新模板（无 wao stop）；心跳新鲜 / 租约缺失 → 旧模板；
+// runner 被证明不在 → 仍是 runnerGone 模板。
+
+const B149_REFUSING_DEPS = {
+  handshakeReader: () => ({ present: false }),
+  daemonAliveFn: () => false,
+  identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+  runnerScanFn: async () => ({ alive: true }),
+  bootTimeFn: () => 0,
+};
+
+async function b149CliAdvisory(runId, runnerGoneDeps) {
+  const dir = mkdtempSync(join(tmpdir(), "wao-b149-cli-"));
+  try {
+    const lastTs = new Date(Date.now() - 40 * 60_000).toISOString();
+    const base = { runId, agentId: "coder_low" };
+    writeFileSync(join(dir, `${runId}.jsonl`), [
+      { type: "run.background_submitted", ts: lastTs, seq: 1, ...base },
+      { type: "run.state_change", to: "pending", reason: "background_spawned", ts: lastTs, seq: 2, ...base },
+      { type: "run.state_change", to: "running", reason: "started", ts: lastTs, seq: 3, ...base },
+      { type: "run.event", kind: "command", command: "npm test", ts: lastTs, seq: 4, ...base },
+    ].map((e) => JSON.stringify(e) + "\n").join(""), "utf8");
+    const elements = await captureElements(async () => {
+      await statusCommand([runId, "--run-dir", dir], { runDir: dir }, { runnerGoneDeps });
+    });
+    return cliJsonBlock(elements).advisory;
+  } finally {
+    rmrfRetry(dir);
+  }
+}
+
+test("第 149 批 CLI: 心跳过期 + 静默 → advisory 是心跳已停模板（带实际 runId，无 wao stop）", async () => {
+  const runId = "run_b149_cli_stale";
+  const heartbeatAt = Date.now() - 12 * 60_000 - 5_000;
+  const advisory = await b149CliAdvisory(runId, {
+    ...B149_REFUSING_DEPS,
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt, pid: 4242 }),
+  });
+  assert.match(advisory, new RegExp(
+    `^转录里已 \\d+ 分钟没有新的动作或正文（最近活动：跑命令，\\d+s 前）。owner 心跳停在 12 分钟前。`
+    + `下一步先干跑 wao runs settle --run-id ${runId} --reason-file <文件>，看各道门；runner 是否还在，以干跑结果为准。`
+    + "是否继续等待由 Lead 决定。$"));
+  assert.ok(!advisory.includes("wao stop"), "不再建议 wao stop");
+});
+
+test("第 149 批 CLI: 心跳新鲜 / 租约缺失 → advisory 与旧模板逐字节相同；runnerGone 优先", async () => {
+  const runId = "run_b149_cli_old";
+  const oldTemplate = new RegExp(
+    `^转录里已 \\d+ 分钟没有新的动作或正文（最近活动：跑命令，\\d+s 前）。是否继续等待由 Lead 决定；要中止，先看最新状态，再带理由执行：wao stop ${runId} --observed-seq 4 --reason "<理由>"$`);
+  const fresh = await b149CliAdvisory(runId, {
+    ...B149_REFUSING_DEPS,
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: true, heartbeatAt: Date.now() - 1000, pid: 4242 }),
+  });
+  assert.match(fresh, oldTemplate, "心跳新鲜 → 旧模板");
+  const missing = await b149CliAdvisory(runId, { ...B149_REFUSING_DEPS, ownerLeaseReader: () => ({ present: false }) });
+  assert.match(missing, oldTemplate, "租约缺失 → 旧模板");
+  // 证明成立：心跳再过期也只走 runnerGone 模板。
+  const gone = await b149CliAdvisory(runId, {
+    handshakeReader: () => ({ present: false }),
+    daemonAliveFn: () => false,
+    heartbeatReader: () => ({ fresh: false }),
+    ownerLeaseReader: () => ({ present: true, wellFormed: true, fresh: false, heartbeatAt: Date.now() - 12 * 60_000 - 5_000, pid: 4242 }),
+    identifyFn: async () => ({ verdict: "gone", basis: "pid_exited" }),
+    runnerScanFn: async () => ({ alive: false }),
+    bootTimeFn: () => 0,
+  });
+  assert.ok(gone.startsWith("观察时没有 WAO 进程能继续驱动这个运行"), gone);
+  assert.ok(!gone.includes("owner 心跳停在"), "不叠加心跳已停模板");
+});
+
 // TD-373: `runs diagnose` text quotes the redacted destination fields for a
 // confirmed-outside isolation fact. The read side treats them as untrusted:
 // control characters are escaped again (never printed raw).

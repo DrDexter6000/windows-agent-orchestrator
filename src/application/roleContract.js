@@ -401,8 +401,13 @@ export function declaredScopeExpansion(messages) {
 // 一次（改一处两份同步）。定义在 compose 之前，保持"条款文字单一权威"。
 const SHARED_CLAUSE_SECRETS_AND_ENV =
   "- Do not read credential or secret stores (token files, key files, .env files, private registries). Do not list the environment or print the values of environment variables; you may use a variable and report whether it is set. Tool output may be sent to your model provider.";
+// 命令收尾条款末句（第 149 批）：只停自己的命令启动的进程，按启动时取得的确切 pid 或经启动
+// 它的工具停，不按名称/命令行/路径匹配——本运行的 WAO runner 命令行带 run id（另有 run dir、
+// registry、可选 cwd，没有工作树路径），按命令行匹配会把它一起停掉。这句经命令行传给
+// claude-code / codex，Windows .cmd 预算已很紧（codex 带 15 条授权路径的样本只剩几十字符），
+// 句子（含前导空格）守 ≤280 字符，测试钉住。
 const SHARED_CLAUSE_FINISH_COMMANDS =
-  "- Do not end your turn while a command you started is still running: wait for it to finish and collect its output and exit status. Stop any server or process you started before you answer; leave nothing running.";
+  "- Do not end your turn while a command you started is still running: wait for it to finish and collect its output and exit status. Stop any server or process you started before you answer; leave nothing running. Stop only processes your own commands started, by the exact process id you got when starting them or via the tool that started them; never match by name, command line or path: this run's WAO supervisor carries the run id on its command line, and stopping it ends your run.";
 
 // TD-352：续修（resume）轮重述交付合同的固定开头。claude-code 与 codex 的会话级通道在
 // resume 时不刷新，后端把本轮合同放进用户消息；codex 不让用户消息改写 developer 级指令，
