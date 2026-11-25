@@ -6,7 +6,7 @@
 // 必须给出同一个答案。
 //
 //   listRunBranchRunIds(execGitFn, repoRoot) → Promise<runId[]>（async）：按提交时间
-//     新到旧，不截断。查看帽是调用方的事——leadOpenItems 只看前若干条，读模型要全量。
+//     新到旧，不截断。两个调用方都要全量（leadOpenItems 只限制列出的条数）。
 //     git 失败原样抛出（拒绝），怎么处置由调用方决定：leadOpenItems 省略整段，读模型
 //     记 unknown。同步与异步执行器都能用（内部一律 await）。
 //   execGitReadOnly(args, cwd) → 缺省的只读 git 执行器（Promise<string>，读模型用）：

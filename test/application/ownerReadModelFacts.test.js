@@ -1453,7 +1453,7 @@ test("listRunBranchRunIds：只认 wao/run_ 前缀 + 合法 runId；保持新到
     args: ["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads/wao/"],
     cwd: "D:/fake/repo",
   }], "枚举命令与工作目录原样交给执行缝；用完整 refname，不用 short 名");
-  // 60 条分支全给（leadOpenItems 的查看帽是它自己的事）；同步与异步执行器都能用。
+  // 60 条分支全给（与 leadOpenItems 一样全量）；同步与异步执行器都能用。
   const many = Array.from({ length: 60 }, (_, i) => `refs/heads/wao/run_${i}`).join("\n");
   assert.equal((await listRunBranchRunIds(() => many, "D:/fake/repo")).length, 60, "不截断（同步执行器）");
   assert.equal((await listRunBranchRunIds(async () => many, "D:/fake/repo")).length, 60, "不截断（异步执行器）");
