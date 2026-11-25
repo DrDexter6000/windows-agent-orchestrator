@@ -32,12 +32,30 @@
 //     overlap).
 //   - Every successful round publishes { generatedAt, snapshot, attention } from
 //     the SAME now; all three endpoints read that one publication, so their
-//     counts agree. Before the first publication the status is "loading" (200,
-//     no data — never "0 runs"). A failed round keeps the previous publication
-//     and flips the status to "stale" (with the first failure time); the error
-//     text never crosses the boundary.
+//     counts agree. Status is the closed set loading | ready | stale |
+//     unavailable: before the first round finishes it is "loading" (200, no data
+//     — never "0 runs"); a failed round keeps the previous publication and flips
+//     to "stale" (with the first failure time); never published and the latest
+//     round failed → "unavailable" (with the first failure time). The error text
+//     never crosses the boundary. Any failure (sync throw, rejection, bad clock,
+//     snapshot/derivation throw) is a failed round and the chain still re-arms.
+//     The clock is validated at the START of every round: a finite value outside
+//     the Date range (or a non-finite one) fails the round before the read model
+//     is snapshotted or anything is published. Within one failure streak
+//     staleSince is set by the FIRST failed round only; if that round's clock is
+//     unreadable it stays null until recovery — later rounds never back-fill it.
+//   - close() is final and idempotent: repeated calls return the SAME promise
+//     (already settled or still in flight). A late "listening" never starts the
+//     chain, and after close() nothing is published or re-armed (refreshNow()
+//     returns without touching the read model). close() still waits for an
+//     in-flight round and for a pending listen() to settle, so a failed listen
+//     (e.g. EADDRINUSE) never leaves close() hanging and a successful one is
+//     always shut. listen() after close() rejects without opening a socket.
 //   - DTOs are whitelists: rows, items, counts and lanes carry only the fields
-//     the pages need — the snapshot is never passed through whole.
+//     the pages need — the snapshot is never passed through whole. Items carry
+//     projectSlugs (an item may belong to more than one project); ?project=X
+//     returns the items whose projectSlugs contain X, and Workers attentionIds
+//     use the same filter.
 //   - The legacy /api/runs and /api/activity do NOT read this publication.
 //
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
@@ -346,8 +364,8 @@ function parseActivityQuery(sp) {
 // accident, and not from a hostile extra key on the in-memory object.
 const COUNT_KEYS = Object.freeze(["running", "starting", "verifying", "deliveryUnobservable"]);
 const ITEM_KEYS = Object.freeze([
-  "id", "kind", "state", "runIds", "projectSlug", "since", "resolvedAt", "resolution", "evidence",
-  "laneKey", "followUp", "failure",
+  "id", "kind", "state", "runIds", "projectSlugs", "since", "resolvedAt", "resolution", "evidence",
+  "laneKey", "capacityCode", "followUp", "failure",
 ]);
 const EVIDENCE_KEYS = Object.freeze(["runId", "at", "seq"]);
 const FAILURE_KEYS = Object.freeze(["category", "code"]);
@@ -437,6 +455,8 @@ const READ_MODEL_ROUTES = new Map([
             slug: entry.slug,
             name: facts?.name ?? null,
             repo: facts?.repo ?? "unknown",
+            // repo 与观测时刻要一起读：才分得清"从没观测过"（null）与"上次观测失败"。
+            branchesObservedAt: facts?.branchesObservedAt ?? null,
             consultRecords: facts?.consultRecords ?? "unknown",
             counts: countsDto(entry),
           };
@@ -463,7 +483,8 @@ const READ_MODEL_ROUTES = new Map([
   ["/api/attention", {
     keys: ["project"],
     payload: ({ pub, project, status }) => {
-      const inProject = (item) => project === null || item.projectSlug === project;
+      // 事项带 projectSlugs（可跨项目）：/api/attention?project=X 只返回含 X 的事项。
+      const inProject = (item) => project === null || item.projectSlugs.includes(project);
       return {
         ...status,
         decide: pub.attention.decide.filter(inProject).map(itemDto),
@@ -494,7 +515,9 @@ function serveReadModelRoute(ctx, req, res, sp, route) {
     return sendJson(res, 400, ERR.bad_request);
   }
   const pub = ctx.published();
-  if (pub === null) return sendJson(res, 200, { status: "loading" });
+  // Never published: "loading" (first round still running / not started) or "unavailable"
+  // (never published and the latest round failed) — 200, no data, never "0 runs".
+  if (pub === null) return sendJson(res, 200, ctx.status());
   try {
     return sendJson(res, 200, route.payload({ pub, project, status: ctx.status() }));
   } catch {
@@ -643,8 +666,15 @@ function createHandler(ctx) {
  *   listen: Function, close: Function, address: Function, refreshNow: Function}}
  *   refreshNow() — run ONE refresh round and resolve to the status afterwards
  *   (tests drive rounds with it instead of real timing; it never rejects).
+ *   A closed server returns its current status without touching the read model.
  *   The refresh chain itself starts when the http server emits "listening",
- *   i.e. after listen() succeeds.
+ *   i.e. after listen() succeeds; a "listening" that arrives after close() does
+ *   not start it.
+ *   listen() — one attempt per server; rejects after close() without opening a
+ *   socket, and rejects on bind errors (e.g. EADDRINUSE).
+ *   close() — idempotent; every call returns the SAME promise. It waits for an
+ *   in-flight round and for a pending listen() to settle, resolves immediately
+ *   after a failed listen(), and shuts the socket after a successful one.
  */
 export function createOwnerDashboardServer(config) {
   const {
@@ -720,16 +750,39 @@ export function createOwnerDashboardServer(config) {
   // ONE publication { now, generatedAt, snapshot, attention } serves all three
   // read-model routes. A round = readModel.refresh() → one clock read →
   // snapshot({ now }) → deriveOwnerAttention(snapshot, { now }); the snapshot
-  // and the attention therefore always come from the SAME now. A failed round
-  // leaves the previous publication untouched. Rounds never overlap: a second
-  // refreshNow() while one is in flight joins it.
+  // and the attention therefore always come from the SAME now. Rounds never
+  // overlap: a second refreshNow() while one is in flight joins it.
+  //
+  // Failure handling: ANY failure of a round — an unusable clock (non-finite or
+  // outside the Date range, validated BEFORE anything is read), a synchronous
+  // throw from an injected readModel.refresh(), a rejection, a snapshot() throw,
+  // a derivation throw — is a failed round: the clock failure never reaches
+  // snapshot() and nothing is published; the previous publication is kept, the
+  // status flips to "stale" (or "unavailable" when nothing was ever published),
+  // and the chain still arms the next round. Status is the closed set loading |
+  // ready | stale | unavailable. staleSince belongs to the failure STREAK: only
+  // the first failed round sets it (null when that round's clock is unreadable);
+  // later failures in the same streak never back-fill it.
+  //
+  // close() is final and IDEMPOTENT: the `closed` flag is set first and the
+  // close promise is cached, so every later call returns the SAME promise. A
+  // late "listening" must NOT start the chain; a timer callback, refreshNow()
+  // and the end of an in-flight round all check the flag, so nothing is
+  // published or re-armed after close(). close() waits for an in-flight round
+  // and for a pending listen() to settle (a failed listen resolves it; a
+  // successful one is then shut). listen() after close() rejects without
+  // opening a socket.
   const readModel = (createReadModelFn ?? ((input) => createOwnerReadModel(input)))({ runDir, nowFn: ctx.now });
 
   let published = null;
   let failing = false; // the latest round failed
-  let staleSince = null; // first failure of the current failure streak (ISO)
+  let staleSince = null; // first failure of the current failure streak (ISO|null)
   let timer = null;
   let loopOn = false;
+  let closed = false;
+  let listenPromise = null; // the one listen() promise (idempotent)
+  let listenDone = null; // resolves true/false when listen() settles; never rejects
+  let closePromise = null; // the one close() promise (idempotent)
   let inflight = null;
 
   /** The clock, never throwing: a broken injected clock reads as "unknown". */
@@ -742,53 +795,79 @@ export function createOwnerDashboardServer(config) {
     }
   }
 
-  function status() {
-    return published === null ? "loading" : failing ? "stale" : "ready";
+  /** A representable epoch ms for this round, or null (never throws). */
+  function representableNow() {
+    const at = clockNow();
+    return at !== null && Math.abs(at) <= 8.64e15 ? at : null;
   }
 
-  // Common response fields; staleSince only while stale (cleared on recovery).
+  /** epoch ms → ISO; anything the Date range cannot represent → null (never throws). */
+  function isoOf(ms) {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return null;
+    return new Date(ms).toISOString();
+  }
+
+  function status() {
+    if (published !== null) return failing ? "stale" : "ready";
+    return failing ? "unavailable" : "loading";
+  }
+
+  // Common response fields; staleSince only while stale / unavailable (cleared on recovery).
   ctx.status = () => {
     const out = { status: status() };
     if (published !== null) out.generatedAt = published.generatedAt;
-    if (out.status === "stale") out.staleSince = staleSince;
+    if (out.status === "stale" || out.status === "unavailable") out.staleSince = staleSince;
     return out;
   };
   ctx.published = () => published;
 
+  /** One round; never rejects. Publication happens only when still open. */
+  function runRound() {
+    return (async () => {
+      try {
+        // Validate the clock at the START of the round: an unusable value is a
+        // failed round and must never reach snapshot() / the publication.
+        const now = representableNow();
+        if (now === null) throw new TypeError("owner dashboard: now is not a representable epoch ms");
+        await readModel.refresh();
+        if (closed) return; // closed while refreshing: publish nothing
+        const snapshot = readModel.snapshot({ now });
+        const attention = deriveOwnerAttention(snapshot, { now });
+        if (closed) return;
+        published = { now, generatedAt: snapshot.generatedAt, snapshot, attention };
+        failing = false;
+        staleSince = null;
+      } catch {
+        if (closed) return;
+        const firstFailure = !failing;
+        failing = true;
+        // The failure streak's start is the FIRST failed round; if its clock is
+        // unreadable it stays null until recovery (never back-filled later).
+        if (firstFailure) staleSince = isoOf(clockNow());
+      }
+    })();
+  }
+
   function refreshNow() {
+    if (closed) return Promise.resolve(status()); // closed: never touch the read model again
     if (inflight === null) {
-      inflight = (async () => {
-        try {
-          await readModel.refresh();
-          const now = ctx.now();
-          const snapshot = readModel.snapshot({ now });
-          published = {
-            now,
-            generatedAt: snapshot.generatedAt,
-            snapshot,
-            attention: deriveOwnerAttention(snapshot, { now }),
-          };
-          failing = false;
-          staleSince = null;
-        } catch {
-          failing = true;
-          if (staleSince === null) {
-            const at = clockNow();
-            staleSince = at === null ? null : new Date(at).toISOString();
-          }
-        } finally {
-          inflight = null;
-        }
-      })();
+      const round = runRound();
+      inflight = round;
+      round.then(() => {
+        if (inflight === round) inflight = null;
+        armNext(); // a failed round re-arms too; never overlaps
+      });
     }
     return inflight.then(() => status());
   }
 
   function armNext() {
-    if (!loopOn) return; // stopped (close) — never re-arm
+    if (!loopOn || closed) return; // stopped (close) — never re-arm
+    if (timer !== null) return; // one pending timer at a time
     timer = setTimeout(() => {
       timer = null;
-      refreshNow().then(armNext);
+      if (closed) return; // no publication after close
+      refreshNow();
     }, intervalMs);
     // The HTTP server (not this timer) holds the process open while listening.
     if (typeof timer.unref === "function") timer.unref();
@@ -796,9 +875,9 @@ export function createOwnerDashboardServer(config) {
 
   /** Start the chain: a cold round now, then one round per interval. Idempotent. */
   function startRefresh() {
-    if (loopOn) return;
+    if (loopOn || closed) return; // a late "listening" after close() must not start it
     loopOn = true;
-    refreshNow().then(armNext);
+    refreshNow();
   }
 
   // Refreshing begins exactly when the server starts listening — nothing reads
@@ -811,7 +890,9 @@ export function createOwnerDashboardServer(config) {
     server,
     refreshNow,
     listen() {
-      return new Promise((resolve, reject) => {
+      if (closed) return Promise.reject(new Error("owner dashboard server is closed"));
+      if (listenPromise !== null) return listenPromise; // one listen attempt per server
+      listenPromise = new Promise((resolve, reject) => {
         const onError = (err) => { server.off("listening", onListening); reject(err); };
         const onListening = () => {
           server.off("error", onError);
@@ -824,18 +905,29 @@ export function createOwnerDashboardServer(config) {
         server.once("listening", onListening);
         server.listen(resolvedPort, LOOPBACK_HOST);
       });
+      // Settles either way and never rejects: close() awaits this before deciding
+      // whether there is a socket to shut (a failed listen must not hang close).
+      listenDone = listenPromise.then(() => true, () => false);
+      return listenPromise;
     },
-    async close() {
+    close() {
+      if (closePromise !== null) return closePromise; // idempotent: same promise every call
+      closed = true; // first: a late "listening" and any timer callback must see it
       loopOn = false; // an in-flight round must not re-arm the chain
       if (timer !== null) {
         clearTimeout(timer);
         timer = null;
       }
-      if (inflight !== null) await inflight; // never rejects
-      await new Promise((resolve) => {
-        if (!server.listening) return resolve();
-        server.close(() => resolve());
-      });
+      closePromise = (async () => {
+        if (inflight !== null) await inflight; // never rejects; publishes nothing after close
+        // Let a pending listen() settle first: on failure there is no socket and
+        // close resolves immediately; on success the socket is then shut.
+        if (listenDone !== null) await listenDone;
+        if (server.listening) {
+          await new Promise((resolve) => server.close(() => resolve()));
+        }
+      })();
+      return closePromise;
     },
     address() {
       const a = server.address();

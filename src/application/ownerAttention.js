@@ -3,9 +3,9 @@
 // 决定 0131 §7（第 140c 批）：Owner 看板的事项推导。从一份快照（ownerReadModel.snapshot
 // 的返回值）算出三栏事项与各处计数：
 //   - decide：    值得你拿主意——交付会审结论不一致、交付验证没过 / 没验成 / 收口判定不清、
-//                 等裁决超过 2 小时、车道额度耗尽或被限流；
+//                 等裁决超过 2 小时、车道额度耗尽；
 //   - anomalies： 异常——24 小时内失败且没有后续成功的运行、静默超过 30 分钟的运行、
-//                 只剩进程体征超过 30 分钟的运行；
+//                 只剩进程体征超过 30 分钟的运行、车道被限流 / 上游过载；
 //   - resolved：  上面各类里已了结、且了结时刻在 24 小时内的，按了结时刻倒序。
 //
 // 边界：
@@ -15,15 +15,21 @@
 //     复验通过、后续成功）；该解除的字段读不到、因而确认不了"仍未解除"的，事项状态写
 //     unknown。见下文"unknown 的来历"。
 //   - id 是稳定的组 ID：同一份快照、同一个 now 算多少次都一样；换 now 只改时效。
-//   - 时间一律照抄快照里的 ISO 串，读不到或形状不对就是 null；不替快照补时刻。
+//   - 时间一律照抄快照里的 ISO 串；读不到（不是字符串）就是 null。这里只查类型、不校验
+//     ISO 形状：形状不合的串原样留在 since / evidence.at 里，参与时间比较时按读不出处理
+//     （事项不成立，或不进"已了结"栏）；不替快照补时刻。
 //
 // 事项（Item）的字段：
-//   id、kind、state（open | unknown | resolved）、runIds（事项挂着的运行）、projectSlug、
+//   id、kind、state（open | unknown | resolved）、runIds（事项挂着的运行）、
+//   projectSlugs（事项归属的项目，去重排序：会审事项含会审所在项目与被审运行的项目，
+//   其余事项含它全部 runIds 的项目）、
 //   since（证据事件自己的时间，不是"被观测到"的时间，所以服务重启后能从转录事实重建）、
 //   evidence（[{ runId, at, seq }]；快照还没有事件号，seq 一律 null）。
 //   resolvedAt 与 resolution 只在 resolved 时有；此时 evidence 末尾多一条解除证据。
-//   个别种类带自己的字段：额度事项带 laneKey；failed 事项带 failure（快照里的
-//   failure.{category, code}），未了结时再带 followUp（running | unknown）。
+//   个别种类带自己的字段：额度事项带 laneKey 与 capacityCode（quota_exhausted |
+//   rate_limited | overloaded，最后一次观测的码）；failed 事项带 failure（快照里的
+//   failure.{category, code}），未了结时再带 followUp（running | unknown：后续是否还在跑，
+//   "后续"同样要求在失败之后才开始）。
 //
 // 各类事项的 since 与证据取自哪里：
 //   - consult_split：since 是会审的 createdAt；证据是每个给了结论的席位（runId 是席位
@@ -32,14 +38,18 @@
 //     Q1 为 null 的席位不参与判定，也不进证据。
 //   - verification_failed / verification_unavailable：有效验证状态是 failed / unavailable；
 //     since 与证据是 settledAt（收口时刻 = 终态与有效验证结果事件里较晚的那个）。
-//   - delivery_ambiguous：收口判定为 undeterminable，或理由是 terminal_delivery_ambiguous；
-//     since 与证据是终态时刻（undeterminable 没有收口时刻）。
+//   - delivery_ambiguous：收口判定为 undeterminable，或理由是 terminal_delivery_ambiguous，
+//     且**确有交付记录**（commit 读得到，或交付视图 ambiguous 为真——读模型对"创建与验证
+//     引用了不同提交"的交付故意不给 commit、只给 ambiguous）。没有交付记录的失败 / 中止
+//     运行（commit 与 ambiguous 都读不出）不算交付事项。since 与证据是终态时刻
+//     （undeterminable 没有收口时刻）。
 //   - awaiting_decision：delivery_settled、待裁决、等了超过 2 小时；since 与证据是 settledAt。
 //     "等了多久"算到解除那一刻：仍待裁决算到现在，已裁决 / 已被取代的算到 resolvedAt。所以
 //     收口后不到 2 小时就被裁决的交付哪一栏都不在；等过 3 小时才被裁决的，裁决当下就进
 //     "已了结"栏（resolvedAt 在 24 小时内）。
-//   - quota_exhausted / rate_limited：capacity 事实，按车道键分组，since 是最后一次观测的
-//     observedAt，证据是窗口内的每一次观测。
+//   - quota_exhausted：额度耗尽，进 decide；rate_limited / overloaded 归 rate_limited，进
+//     anomalies（同一运行另有 failed 异常照留）。都按车道键分组，since 是最后一次观测的
+//     observedAt，证据是最新的 10 次观测（按观测时刻升序；解除证据附在末尾）。
 //   - failed：since 与证据是失败的终态时刻。
 //   - silent / process_only：since 与证据是 quietSince。
 //
@@ -51,7 +61,9 @@
 //     时它就是复验结果事件的时间）。种类记 verification_failed：能开复验链的原始验证只
 //     可能是 failed（runDeliveryReverify 的前置条件），快照本身不留原始状态。
 //   - later_success：同车道（额度事项）或同谱系 / retryOf（failed 事项）里，有运行在证据
-//     时刻之后完成；多个取最早的那个，resolvedAt = 它的 terminalAt。
+//     时刻之后完成；多个取最早的那个，resolvedAt = 它的 terminalAt。failed 的"后续"
+//     （解除用的后续成功，与未了结时的 followUp: running）还要求后续运行在失败运行的
+//     terminalAt 之后才开始（startedAt >= terminalAt）：并发跑着的兄弟运行不算后续。
 //   同一事项多种解除并存时按上面的先后取第一种。awaiting_decision 只认 decided 与
 //   superseded；consult_split 不认 reverify_passed。
 //
@@ -63,7 +75,15 @@
 //   - silent / process_only：quietSince 读不到；
 //   - 额度事项：最后一次观测之后没有同车道的运行完成，且证据超过 6 小时（说不清现在是否
 //     仍然耗尽）。
-//   列入窗口（24 小时）靠的是"证据时刻在窗口内"，时刻读不到就不在窗口内，事项不成立。
+//   列入窗口（24 小时）按种类——不是所有种类都看年龄：
+//   - failed 与额度事项的未了结项（open / unknown）按证据时刻列：证据在 24 小时内才列；
+//   - 交付类与会审事项（consult_split、verification_failed / verification_unavailable、
+//     delivery_ambiguous、awaiting_decision）不设年龄窗口：只要分支还在
+//     （delivery.branchPresent === true）就列，收口 / 会审多老都不影响；
+//   - silent / process_only 只看现时状态（活性不再是 silent / process_only 就消失）；
+//   - resolved 一律按 resolvedAt 的 24 小时窗口列，与证据多老无关（25 小时前失败、
+//     1 小时前有后续成功 → 只进"已了结"栏）。
+//   时刻读不到就不在窗口内，事项不成立（交付类与会审事项不受年龄窗口限制）。
 //
 // 交付类事项的前提（consult_split、三个交付验证类、awaiting_decision）：只看
 // delivery.branchPresent === true 的运行。false 说明交付已回收，不再列（已了结的也不进
@@ -71,8 +91,8 @@
 // 验证还在跑（有效状态 pending）不是事项，计入 counts.verifying。
 //
 // 车道键：laneId，没有时回退 agentId（会审席没有 laneId）。两者都没有的额度证据成不了组，
-// 事项不成立。额度事项按车道键跨项目分组（额度是车道的事，与项目无关）；projectSlug 取最后
-// 一次观测所在的项目。
+// 事项不成立。额度事项按车道键跨项目分组（额度是车道的事，与项目无关）；projectSlugs 含
+// 全部观测所在的项目（会审所在项目与被审运行项目同理，见上）。
 //
 // silent / process_only 只有现时状态：活性一旦不是 silent / process_only，事项就从列表消失，
 // 不进 resolved（快照里没有能重建"它曾经静默"的事实）。
@@ -85,13 +105,17 @@
 //   - selectOwnerWorkers：Workers 页的默认范围 = 非终态 ∪ 挂着 open / unknown 交付或会审
 //     事项的运行 ∪ 终态时刻在 24 小时内的；按 startedAt 倒序（读不到的排最后）。
 //     "挂着的事项"只算未了结的（额度、失败事项也算挂着）；"把运行带进范围"只算交付或会审
-//     事项。卡片标题：续修运行（lineageRootRunId 不是自己）用谱系根的标题作主标题、本轮
-//     标题作副标题；根不在快照里（或根没有标题）就只用本轮标题。
+//     事项。给了 project 时，attentionIds 只列 projectSlugs 含该项目的未了结事项——与
+//     /api/attention?project=X 同一筛选，不会"有 id 查不到"。卡片标题：续修运行
+//     （lineageRootRunId 不是自己）用谱系根的标题作主标题、本轮标题作副标题；根不在快照里
+//     （或根没有标题）就只用本轮标题。
 //   - ownerLanes：有运行在跑、或有未了结额度事项的车道各一行；额度摘要取 since 最晚的
-//     那一件（同一时刻 quota_exhausted 在前）。
+//     那一件（同一时刻 quota_exhausted 在前）。额度事项分属 decide（quota_exhausted）与
+//     anomalies（rate_limited）两栏，汇总两栏都读。
 //
 // 快照里还没有、所以这里给不出的事实（详情页那一批再补）：事件号；席位给出结论的时刻；
-// 原始验证状态。父子边（parentRunId）不用来认后续——failed 的后续只按谱系根与 retryOf 认。
+// 原始验证状态。父子边（parentRunId）不用来认后续——failed 的后续（后续成功与
+// followUp: running）只按谱系根与 retryOf 认，且要在失败之后才开始。
 //
 // 架构契约：不 import src/commands/*、src/mcp/*、MCP SDK 或 zod。
 
@@ -103,6 +127,8 @@ export const OWNER_ATTENTION_DECIDE_AFTER_MS = 2 * 60 * 60 * 1000;
 export const OWNER_ATTENTION_CAPACITY_FRESH_MS = 6 * 60 * 60 * 1000;
 /** 静默：非终态运行没有实质动作超过这么久才列（待校准）。 */
 export const OWNER_ATTENTION_QUIET_AFTER_MS = 30 * 60 * 1000;
+/** 额度事项的证据最多带最近这么多次观测（按观测时刻取最新的；解除证据另加一条）。 */
+export const OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX = 10;
 /** 窗口：失败、额度观测、已了结、Workers 默认范围里的终态，都只看这么多时间以内的（待校准）。 */
 export const OWNER_ATTENTION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -113,9 +139,8 @@ export const OWNER_ATTENTION_DECIDE_KINDS = Object.freeze([
   "delivery_ambiguous",
   "awaiting_decision",
   "quota_exhausted",
-  "rate_limited",
 ]);
-export const OWNER_ATTENTION_ANOMALY_KINDS = Object.freeze(["failed", "silent", "process_only"]);
+export const OWNER_ATTENTION_ANOMALY_KINDS = Object.freeze(["failed", "silent", "process_only", "rate_limited"]);
 /** 事项种类的闭集 = decide 栏的 + anomalies 栏的。 */
 export const OWNER_ATTENTION_KINDS = Object.freeze([...OWNER_ATTENTION_DECIDE_KINDS, ...OWNER_ATTENTION_ANOMALY_KINDS]);
 export const OWNER_ATTENTION_STATES = Object.freeze(["open", "unknown", "resolved"]);
@@ -152,6 +177,13 @@ function withinWindow(atMs, now, windowMs) {
 }
 
 const slugOf = (run) => text(run.project?.slug);
+
+/** 项目归属：去重、按码元序；不是字符串的丢弃（读不出项目的运行不凭空造一个项目）。 */
+function projectSlugsOf(...slugs) {
+  const out = new Set();
+  for (const slug of slugs) if (typeof slug === "string") out.add(slug);
+  return [...out].sort();
+}
 
 /** 车道键：laneId，没有时回退 agentId；两者都没有 → null。 */
 export function ownerLaneKey(run) {
@@ -225,6 +257,17 @@ function isFollowUp(other, run) {
 }
 
 /**
+ * failed 事项的后续成功候选：先得是后续运行，且它是在失败之后才开始
+ * （startedAt >= 失败的 terminalAt）——并发跑着的兄弟运行不算解除；开始时刻读不到、
+ * 或失败时刻读不到（确认不了"之后"），都不算。
+ */
+function isLaterFollowUp(other, failed, failedAtMs) {
+  if (failedAtMs === null || !isFollowUp(other, failed)) return false;
+  const startedMs = msOf(other.startedAt);
+  return startedMs !== null && startedMs >= failedAtMs;
+}
+
+/**
  * 组装一条事项。resolution 为 null 就是未了结（state 取传入的 open / unknown）；否则是
  * resolved，带上 resolvedAt / resolution，证据末尾追加解除证据。extra 是该种类自己的字段。
  */
@@ -235,7 +278,7 @@ function makeItem(fields, resolution, extra) {
     kind: fields.kind,
     state: resolved ? "resolved" : fields.state,
     runIds: fields.runIds,
-    projectSlug: fields.projectSlug,
+    projectSlugs: fields.projectSlugs,
     since: fields.since,
     evidence: resolved ? [...fields.evidence, resolution.evidence] : fields.evidence,
   };
@@ -305,6 +348,8 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
 
   /** 额度观测分组：kind + 车道键 → { kind, laneKey, observations: [{ run, atMs }] }。 */
   const capacityGroups = new Map();
+  // 额度事项落栏：quota_exhausted 值得拿主意（decide）；限流 / 上游过载是异常（anomalies）。
+  const capacityListFor = (kind) => (kind === "quota_exhausted" ? decide : anomalies);
 
   for (const run of runs) {
     const project = countsFor(slugOf(run));
@@ -334,7 +379,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           : supersessionOf(run, runsById);
       // 解除不了、也确认不了"仍未解除"：裁决状态读不到，或"是否已被取代"没能判定。
       const unresolvedUnknown = acceptanceStatus === null || run.supersessionUndeterminable === true;
-      const base = { runIds: [run.runId], projectSlug: slugOf(run) };
+      const base = { runIds: [run.runId], projectSlugs: projectSlugsOf(slugOf(run)) };
 
       if (effective === "failed" || effective === "unavailable" || reverifyPassed) {
         const kind = effective === "unavailable" ? "verification_unavailable" : "verification_failed";
@@ -350,7 +395,10 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
       }
 
       const settlement = delivery.settlement;
-      if (settlement?.status === "undeterminable" || settlement?.reason === "terminal_delivery_ambiguous") {
+      // 没有交付记录（commit 与 ambiguous 都读不出）的失败 / 中止运行不算交付事项：
+      // 真实存储里隔离时建的分支没回收，收口判定一直 ambiguous，但它们从未交出东西。
+      const hasDeliveryRecord = text(delivery.commit) !== null || delivery.ambiguous === true;
+      if (hasDeliveryRecord && (settlement?.status === "undeterminable" || settlement?.reason === "terminal_delivery_ambiguous")) {
         decide.push(makeItem({
           ...base,
           id: `delivery_ambiguous:${run.runId}`,
@@ -384,30 +432,40 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
     }
 
     // —— failed ——
+    // 列入窗口：未了结的按失败时刻在 24 小时内列；已了结的按 resolvedAt 在 24 小时内列，
+    // 与失败多老无关（25 小时前失败、1 小时前有后续成功 → 进"已了结"栏）。
     const failedAtMs = msOf(run.terminalAt);
-    if (run.state === "failed" && withinWindow(failedAtMs, now, OWNER_ATTENTION_WINDOW_MS)) {
-      const success = earliestSuccess(runs, (other) => isFollowUp(other, run), failedAtMs);
+    if (run.state === "failed") {
+      const success = failedAtMs === null
+        ? null
+        : earliestSuccess(runs, (other) => isLaterFollowUp(other, run, failedAtMs), failedAtMs);
       const acceptance = delivery?.acceptance ?? null;
       const resolution = success !== null
         ? success
         : isDecided(acceptance) ? decisionOf(run.runId, acceptance) : null;
-      // 失败原因只给闭集码；快照里没有这一项（读不出的运行）就是 null。
-      const extra = {
-        failure: run.failure === null || run.failure === undefined ? null : { category: text(run.failure.category), code: text(run.failure.code) },
-      };
-      if (resolution === null) {
-        // followUp 只对未了结的失败有意义：有后续还在跑是 running，看不到后续是 unknown（不写"没有后续"）。
-        extra.followUp = runs.some((other) => other.terminal === false && isFollowUp(other, run)) ? "running" : "unknown";
+      const listed = resolution === null
+        ? withinWindow(failedAtMs, now, OWNER_ATTENTION_WINDOW_MS)
+        : withinWindow(msOf(resolution.resolvedAt), now, OWNER_ATTENTION_WINDOW_MS);
+      if (listed) {
+        // 失败原因只给闭集码；快照里没有这一项（读不出的运行）就是 null。
+        const extra = {
+          failure: run.failure === null || run.failure === undefined ? null : { category: text(run.failure.category), code: text(run.failure.code) },
+        };
+        if (resolution === null) {
+          // followUp 只对未了结的失败有意义：有后续还在跑是 running（同样要求它在失败之后
+          // 才开始——并发兄弟不算后续），看不到后续是 unknown（不写"没有后续"）。
+          extra.followUp = runs.some((other) => other.terminal === false && isLaterFollowUp(other, run, failedAtMs)) ? "running" : "unknown";
+        }
+        anomalies.push(makeItem({
+          id: `failed:${run.runId}`,
+          kind: "failed",
+          state: "open",
+          runIds: [run.runId],
+          projectSlugs: projectSlugsOf(slugOf(run)),
+          since: text(run.terminalAt),
+          evidence: [evidenceOf(run.runId, run.terminalAt)],
+        }, resolution, extra));
       }
-      anomalies.push(makeItem({
-        id: `failed:${run.runId}`,
-        kind: "failed",
-        state: "open",
-        runIds: [run.runId],
-        projectSlug: slugOf(run),
-        since: text(run.terminalAt),
-        evidence: [evidenceOf(run.runId, run.terminalAt)],
-      }, resolution, extra));
     }
 
     // —— silent / process_only（只有现时状态）——
@@ -419,18 +477,19 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           kind: run.liveness,
           state: quietMs === null ? "unknown" : "open",
           runIds: [run.runId],
-          projectSlug: slugOf(run),
+          projectSlugs: projectSlugsOf(slugOf(run)),
           since: text(run.quietSince),
           evidence: [evidenceOf(run.runId, run.quietSince)],
         });
       }
     }
 
-    // —— 额度观测：先收集，循环后按车道键分组 ——
+    // —— 额度观测：先收集（不限 24 小时——已了结的事项按 resolvedAt 进窗口），循环后
+    //    按车道键分组。观测时刻读不到或没有车道键的成不了组。
     const kind = run.capacity === null || run.capacity === undefined ? undefined : CAPACITY_KINDS.get(run.capacity.code);
     const laneKey = ownerLaneKey(run);
     const observedAtMs = msOf(run.capacity?.observedAt);
-    if (kind !== undefined && laneKey !== null && withinWindow(observedAtMs, now, OWNER_ATTENTION_WINDOW_MS)) {
+    if (kind !== undefined && laneKey !== null && observedAtMs !== null) {
       const key = `${kind}\u0000${laneKey}`;
       if (!capacityGroups.has(key)) capacityGroups.set(key, { kind, laneKey, observations: [] });
       capacityGroups.get(key).observations.push({ run, atMs: observedAtMs });
@@ -454,7 +513,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
       kind: "consult_split",
       state: text(acceptance?.status) === null || reviewed.supersessionUndeterminable === true ? "unknown" : "open",
       runIds: [reviewed.runId],
-      projectSlug: text(consult.projectSlug),
+      projectSlugs: projectSlugsOf(text(consult.projectSlug), slugOf(reviewed)),
       since: text(consult.createdAt),
       evidence: verdicts
         .filter((seat) => typeof seat.runId === "string")
@@ -462,20 +521,30 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
     }, resolution));
   }
 
-  // —— 额度事项：每组取最后一次观测 ——
+  // —— 额度事项：每组取最后一次观测；窗口按解除与否分别看 ——
   for (const { kind, laneKey, observations } of capacityGroups.values()) {
     let latest = observations[0];
     for (const observation of observations) if (observation.atMs >= latest.atMs) latest = observation;
     const resolution = earliestSuccess(runs, (other) => ownerLaneKey(other) === laneKey, latest.atMs);
-    decide.push(makeItem({
+    // 未了结：按最后一次证据的 24 小时窗口；已了结：按 resolvedAt 的窗口，与证据多老无关。
+    const listed = resolution === null
+      ? withinWindow(latest.atMs, now, OWNER_ATTENTION_WINDOW_MS)
+      : withinWindow(msOf(resolution.resolvedAt), now, OWNER_ATTENTION_WINDOW_MS);
+    if (!listed) continue;
+    capacityListFor(kind).push(makeItem({
       id: `${kind === "quota_exhausted" ? "capacity" : "rate_limited"}:${laneKey}`,
       kind,
       state: resolution === null && now - latest.atMs > OWNER_ATTENTION_CAPACITY_FRESH_MS ? "unknown" : "open",
       runIds: observations.map((observation) => observation.run.runId),
-      projectSlug: slugOf(latest.run),
+      projectSlugs: projectSlugsOf(...observations.map((observation) => slugOf(observation.run))),
       since: text(latest.run.capacity.observedAt),
-      evidence: observations.slice().sort(byEvidenceAt).map((observation) => evidenceOf(observation.run.runId, observation.run.capacity.observedAt)),
-    }, resolution, { laneKey }));
+      // 证据只留最近的若干次观测（按观测时刻升序）；已了结时解除证据由 makeItem 追加在末尾。
+      evidence: observations
+        .slice()
+        .sort(byEvidenceAt)
+        .slice(-OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX)
+        .map((observation) => evidenceOf(observation.run.runId, observation.run.capacity.observedAt)),
+    }, resolution, { laneKey, capacityCode: text(latest.run.capacity.code) }));
   }
 
   decide.sort(bySince);
@@ -495,11 +564,15 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
   const pendingAnomalies = anomalies.filter((item) => item.state !== "resolved");
 
   // —— decide / anomalies 的 open 数与 unknown 数：直接数上面两张表 ——
+  // 每个项目一行：事项归属的每个项目都计（跨项目额度 / 会审事项在两边都算，与
+  // /api/attention?project=X 能查到它一致）。
   for (const [items, key] of [[pendingDecide, "decide"], [pendingAnomalies, "anomalies"]]) {
     for (const item of items) {
       counts[key][item.state] += 1;
-      const project = countsFor(item.projectSlug);
-      if (project !== null) project[key][item.state] += 1;
+      for (const slug of item.projectSlugs) {
+        const project = countsFor(slug);
+        if (project !== null) project[key][item.state] += 1;
+      }
     }
   }
 
@@ -519,7 +592,8 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
  *   project 给了就只留该项目的运行
  * @returns {Array<{run: object, laneKey: string|null, title: string|null, subtitle: string|null,
  *   attentionIds: string[]}>} attentionIds 是该运行挂着的未了结事项的 id（先 decide 后
- *   anomalies，各按列表顺序）
+ *   anomalies，各按列表顺序；给了 project 时只列 projectSlugs 含该项目的事项，与
+ *   /api/attention?project=X 一致）
  */
 export function selectOwnerWorkers(snapshot, attention, { now, project = null } = {}) {
   requireNow(now);
@@ -529,6 +603,8 @@ export function selectOwnerWorkers(snapshot, attention, { now, project = null } 
   const flagged = new Set(); // 挂着 open / unknown 交付或会审事项的运行
   for (const item of [...attention.decide, ...attention.anomalies]) {
     if (item.state === "resolved") continue;
+    // 给了项目就与 /api/attention?project=X 同一筛选：只列这个项目能查到的事项。
+    if (project !== null && !item.projectSlugs.includes(project)) continue;
     for (const runId of item.runIds) {
       const list = attached.get(runId);
       if (list === undefined) attached.set(runId, [item.id]);
@@ -583,7 +659,8 @@ function laterSummary(a, b) {
  */
 export function ownerLanes(snapshot, attention) {
   const capacityOf = new Map(); // laneKey → 该车道未了结额度事项里当摘要的那一件
-  for (const item of attention.decide) {
+  // 额度事项分属两栏（quota_exhausted → decide，rate_limited → anomalies）：两栏都读。
+  for (const item of [...attention.decide, ...attention.anomalies]) {
     if (item.state === "resolved" || !CAPACITY_ITEM_KINDS.has(item.kind)) continue;
     const current = capacityOf.get(item.laneKey);
     if (current === undefined || laterSummary(item, current)) capacityOf.set(item.laneKey, item);

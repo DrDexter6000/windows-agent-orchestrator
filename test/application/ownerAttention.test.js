@@ -12,15 +12,24 @@
 //     不成立；裁决 / 被取代解除；解除不了也确认不了时是 unknown
 //   - 交付验证类：failed / unavailable 成立且 unavailable 不当作通过；passed、pending 不
 //     成立（pending 计入 verifying）；复验通过、裁决、被取代三种解除；收口判定不清
+//   - delivery_ambiguous：有交付记录（commit 读得到或 ambiguous 为真）才成立；没有交付记录
+//     的失败 / 中止运行不算交付事项，也不进 Workers 默认范围
 //   - awaiting_decision：超过 2 小时才列；取代判定不了时照样列但标 unknown；收口时刻读不
 //     到时是 unknown
 //   - branchPresent 三值：true 才列；false 不列（已裁决的也不进 resolved）；null 不列、
 //     计入 deliveryUnobservable
-//   - 额度：按车道键分组取最后一次观测；后续成功解除；6 小时与 24 小时两侧；车道键回退
-//     agentId；没有车道键、观测时刻读不到不成立
-//   - failed：后续成功（同谱系 / retryOf）、裁决解除；后续在跑与看不到后续两种 followUp；
+//   - 额度：按车道键分组取最后一次观测；quota_exhausted 进 decide、rate_limited / overloaded
+//     进 anomalies，都带 capacityCode；同一运行的 failed 异常照留；后续成功解除；证据最多
+//     带最新 10 次观测（按观测时刻升序，解除证据附在末尾）；6 小时与 24 小时两侧；车道键
+//     回退 agentId；没有车道键、观测时刻读不到不成立
+//   - 24 小时窗口按种类：failed 与额度未了结项按证据时刻；交付类与会审事项不设年龄窗口；
+//     已了结一律按 resolvedAt（失败 / 额度证据多老都不影响已了结栏）
+//   - failed：后续成功（同谱系 / retryOf，且 startedAt >= 失败 terminalAt；并发兄弟不算）、
+//     裁决解除；后续在跑与看不到后续两种 followUp（running 同样只认失败之后才开始的运行）；
 //     只给 failure.{category, code}
 //   - silent / process_only：超过 30 分钟才列；只有现时状态，不进 resolved
+//   - 项目归属：projectSlugs（会审含会审所在项目与被审运行项目，其余含全部 runIds 的项目）；
+//     Workers 的 attentionIds 与 /api/attention 同一筛选
 //   - 读不到的运行不产生任何事项；稳定 id；kind / state / resolution / followUp 的闭集（每一种
 //     都真的会出现）；resolved 的 24 小时窗口与排序；counts 与列表一致；标题取谱系根；
 //     Workers 默认范围与排序；车道汇总
@@ -30,6 +39,7 @@ import assert from "node:assert/strict";
 
 import {
   OWNER_ATTENTION_ANOMALY_KINDS,
+  OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX,
   OWNER_ATTENTION_CAPACITY_FRESH_MS,
   OWNER_ATTENTION_DECIDE_AFTER_MS,
   OWNER_ATTENTION_DECIDE_KINDS,
@@ -185,11 +195,12 @@ const nowhere = (out, id) => assert.deepEqual(
 // =====================================================================
 // 阈值是导出的常量（待校准）
 // =====================================================================
-test("阈值常量：等裁决 2 小时、额度证据 6 小时、静默 30 分钟、窗口 24 小时", () => {
+test("阈值常量：等裁决 2 小时、额度证据 6 小时、静默 30 分钟、窗口 24 小时、额度证据最多 10 条", () => {
   assert.equal(OWNER_ATTENTION_DECIDE_AFTER_MS, 2 * HOUR);
   assert.equal(OWNER_ATTENTION_CAPACITY_FRESH_MS, 6 * HOUR);
   assert.equal(OWNER_ATTENTION_QUIET_AFTER_MS, 30 * MINUTE);
   assert.equal(OWNER_ATTENTION_WINDOW_MS, 24 * HOUR);
+  assert.equal(OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX, 10);
 });
 
 // =====================================================================
@@ -210,7 +221,7 @@ test("consult_split: 各席 Q1 不一致 → 挂在被审运行上的 open 事�
     kind: "consult_split",
     state: "open",
     runIds: ["run_rev"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(3 * HOUR),
     evidence: [
       { runId: "run_s1", at: ago(2 * HOUR), seq: null },
@@ -274,7 +285,7 @@ test("consult_split: 被审运行已裁决 → resolved / decided，resolvedAt �
     kind: "consult_split",
     state: "resolved",
     runIds: ["run_rev"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(3 * HOUR),
     resolvedAt: ago(HOUR),
     resolution: "decided",
@@ -316,6 +327,30 @@ test("consult_split: 解除不了、也确认不了「仍未解除」→ state: 
   assert.deepEqual(undeterminable.resolved, []);
 });
 
+test("项目归属: 会审事项含会审所在项目与被审运行的项目；Workers 的 attentionIds 与 /api/attention 同一筛选", () => {
+  const seats = [seat("run_s1", "PASS"), seat("run_s2", "FIX_FIRST")];
+  // 会审开在 beta，被审运行在 alpha。
+  const snap = snapshot(
+    [run({ runId: "run_rev", delivery: fresh() })],
+    [consult({ projectSlug: "beta", seats })],
+    [ALPHA, BETA],
+  );
+  const out = derive(snap);
+  assert.deepEqual(out.decide[0].projectSlugs, ["alpha", "beta"], "去重排序：会审所在项目与被审运行的项目");
+  // 被审运行在 alpha：alpha 的 Workers 行挂着它，attention 在 alpha 与 beta 下都查得到；
+  // beta 没有这个运行的行，但事项本身在 beta 下可见。两个筛选下都不会"有 id 查不到"。
+  assert.deepEqual(
+    selectOwnerWorkers(snap, out, { now: NOW, project: "alpha" }).map((row) => [row.run.runId, row.attentionIds]),
+    [["run_rev", ["consult_split:beta:consult_1"]]],
+  );
+  assert.deepEqual(selectOwnerWorkers(snap, out, { now: NOW, project: "beta" }), []);
+  for (const slug of ["alpha", "beta"]) {
+    assert.ok(out.decide.some((item) => item.projectSlugs.includes(slug)), slug);
+  }
+  // 不属于这个项目的运行进不了 Workers，事项也挂不上去。
+  assert.deepEqual(selectOwnerWorkers(snap, out, { now: NOW, project: "gamma" }), []);
+});
+
 // =====================================================================
 // 交付验证类 — verification_failed / verification_unavailable / delivery_ambiguous
 // =====================================================================
@@ -326,7 +361,7 @@ test("verification_failed / verification_unavailable: 有效状态决定种类�
     kind: "verification_failed",
     state: "open",
     runIds: ["run_a"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(HOUR),
     evidence: [{ runId: "run_a", at: ago(HOUR), seq: null }],
   }]);
@@ -362,7 +397,7 @@ test("交付验证类: 同一交付复验通过 → resolved / reverify_passed",
     kind: "verification_failed",
     state: "resolved",
     runIds: ["run_a"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(HOUR),
     resolvedAt: ago(HOUR),
     resolution: "reverify_passed",
@@ -396,7 +431,7 @@ test("交付验证类: 取代判定不了 → unknown；裁决状态读不到 �
   assert.deepEqual(noAcceptance.resolved, []);
 });
 
-test("delivery_ambiguous: 收口判定为 undeterminable 即成立，since 取终态时刻", () => {
+test("delivery_ambiguous: 有交付记录且收口判定为 undeterminable / terminal_delivery_ambiguous 才成立；没有交付记录的不算", () => {
   const undeterminable = derive(snapshot([run({ delivery: delivered({
     settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, settledAt: null,
   }) })]));
@@ -411,6 +446,32 @@ test("delivery_ambiguous: 收口判定为 undeterminable 即成立，since 取�
   // 理由是 terminal_delivery_ambiguous 时不论 status 写的是什么都成立。
   assert.deepEqual(outcome(derive(snapshot([run({ delivery: { ...noView, settlement: { status: null, reason: "terminal_delivery_ambiguous" } } })]))).decide,
     [["delivery_ambiguous:run_a", "unknown"]]);
+  // 有提交、收口不明（事实自相矛盾）→ 成立。
+  assert.deepEqual(outcome(derive(snapshot([run({ delivery: delivered({
+    settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, settledAt: null, ambiguous: false,
+  }) })]))).decide, [["delivery_ambiguous:run_a", "open"]]);
+  // 真实存储里那批 failed / aborted 运行：terminal_delivery_ambiguous，commit 与 ambiguous
+  // 都读不出（只是隔离时建的分支没回收）→ 不成立，也不进 Workers 默认范围。
+  const noRecord = run({
+    runId: "run_dead", state: "failed", terminalAt: ago(891 * HOUR), startedAt: ago(892 * HOUR),
+    deliveryRequested: true,
+    delivery: delivered({
+      settlement: { status: "undeterminable", reason: "terminal_delivery_ambiguous" }, settledAt: null,
+      verification: null, acceptance: { status: null, decidedAt: null }, commit: null, ambiguous: false,
+    }),
+  });
+  const dead = derive(snapshot([noRecord]));
+  nowhere(dead, "delivery_ambiguous:run_dead");
+  assert.deepEqual(dead.decide, []);
+  assert.deepEqual(selectOwnerWorkers(snapshot([noRecord]), dead, { now: NOW }), [], "没有交付记录就不把运行带进 Workers 默认范围");
+  // 同样形状但视图 ambiguous 为真（交付事实自相矛盾）：仍成立。
+  const contradicted = derive(snapshot([run({
+    runId: "run_dead", delivery: delivered({
+      settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, settledAt: null,
+      verification: null, acceptance: { status: null, decidedAt: null }, commit: null, ambiguous: true,
+    }),
+  })]));
+  assert.deepEqual(outcome(contradicted).decide, [["delivery_ambiguous:run_dead", "unknown"]]);
   // 已收口、没有歧义的交付不成立。
   assert.deepEqual(derive(snapshot([run({ delivery: fresh() })])).decide, []);
 });
@@ -425,7 +486,7 @@ test("awaiting_decision: 交付已收口、待裁决、超过 2 小时 → open�
     kind: "awaiting_decision",
     state: "open",
     runIds: ["run_a"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(3 * HOUR),
     evidence: [{ runId: "run_a", at: ago(3 * HOUR), seq: null }],
   }]);
@@ -522,9 +583,10 @@ test("quota_exhausted: open 事项，id 是 capacity:<车道键>，since 与证�
     kind: "quota_exhausted",
     state: "open",
     runIds: ["run_a"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(HOUR),
     laneKey: "glm-pro",
+    capacityCode: "quota_exhausted",
     evidence: [{ runId: "run_a", at: ago(HOUR), seq: null }],
   }]);
   assert.deepEqual(outcome(out).anomalies, [["failed:run_a", "open"]], "失败的运行本身另有一条异常");
@@ -540,9 +602,10 @@ test("quota_exhausted: 同车道多次观测合成一组，取最后一次观测
     kind: "quota_exhausted",
     state: "open",
     runIds: ["run_old", "run_new"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(HOUR),
     laneKey: "glm-pro",
+    capacityCode: "quota_exhausted",
     evidence: [
       { runId: "run_old", at: ago(4 * HOUR), seq: null }, // 证据按观测时刻从早到晚
       { runId: "run_new", at: ago(HOUR), seq: null },
@@ -588,19 +651,20 @@ test("quota_exhausted: 按车道键跨项目分组——别的项目里同车道
     run({ runId: "run_ok", ...kimis, ...inBeta, terminalAt: ago(HOUR), deliveryRequested: false }),
   ], [], [ALPHA, BETA]));
   assert.deepEqual(outcome(later).resolved, [["capacity:kimi", "later_success", ago(HOUR)]]);
-  assert.equal(later.resolved[0].projectSlug, "alpha", "只有一次观测：事项属于观测所在的项目");
-  // 同一车道的观测分布在两个项目：仍是一组，projectSlug 取最后一次观测所在的项目，计数归它。
+  assert.deepEqual(later.resolved[0].projectSlugs, ["alpha"], "只有一次观测：事项归属观测所在的项目");
+  // 同一车道的观测分布在两个项目：仍是一组；projectSlugs 含全部观测所在的项目，计数两边都算
+  // ——与 /api/attention?project=X 能查到它一致。
   const spread = derive(snapshot([
     exhausted(kimis, 4 * HOUR, { runId: "run_q_alpha" }),
     exhausted(kimis, HOUR, { runId: "run_q_beta", ...inBeta }),
   ], [], [ALPHA, BETA]));
   assert.deepEqual(outcome(spread).decide, [["capacity:kimi", "open"]]);
-  assert.equal(spread.decide[0].projectSlug, "beta");
+  assert.deepEqual(spread.decide[0].projectSlugs, ["alpha", "beta"]);
   assert.deepEqual(spread.decide[0].runIds, ["run_q_alpha", "run_q_beta"]);
   assert.deepEqual(spread.counts.projects.map((entry) => entry.slug), ["alpha", "beta"]);
   assert.deepEqual(
     spread.counts.projects.map((entry) => entry.decide),
-    [{ open: 0, unknown: 0 }, { open: 1, unknown: 0 }],
+    [{ open: 1, unknown: 0 }, { open: 1, unknown: 0 }],
   );
 });
 
@@ -616,33 +680,96 @@ test("quota_exhausted: 只列 24 小时内的观测；观测时刻读不到、�
   nowhere(derive(snapshot([exhausted({ laneId: null, agentId: null }, HOUR)])), "capacity:glm-pro");
 });
 
-test("rate_limited: rate_limited 与 overloaded 同归 rate_limited，分组、窗口与解除规则相同", () => {
+test("24 小时窗口: 未了结按证据时刻列，已了结按 resolvedAt 列——25 小时前的证据 + 1 小时前的后续成功仍进已了结", () => {
+  const done = (runId, terminalAgoMs, startedAgoMs) => run({
+    runId, laneId: LANE.laneId, agentId: LANE.agentId, startedAt: ago(startedAgoMs), terminalAt: ago(terminalAgoMs), deliveryRequested: false,
+  });
+  // 额度：观测在 25 小时前（窗口外），同车道 1 小时前跑成（resolvedAt 在窗口内）。
+  const quota = derive(snapshot([exhausted(LANE, OWNER_ATTENTION_WINDOW_MS + HOUR), done("run_ok", HOUR, 2 * HOUR)]));
+  assert.deepEqual(outcome(quota).decide, []);
+  assert.deepEqual(outcome(quota).resolved, [["capacity:glm-pro", "later_success", ago(HOUR)]]);
+  // 同一份证据窗口外、又没有后续成功：不成立（未了结按证据窗口）。
+  const staleQuota = derive(snapshot([exhausted(LANE, OWNER_ATTENTION_WINDOW_MS + HOUR)]));
+  nowhere(staleQuota, "capacity:glm-pro");
+  assert.deepEqual(staleQuota.resolved, []);
+  // 后续成功也在窗口外（30 小时前跑成）：不是"已了结"栏里的事项。
+  const oldSuccess = derive(snapshot([exhausted(LANE, OWNER_ATTENTION_WINDOW_MS + HOUR), done("run_ok", 30 * HOUR, 40 * HOUR)]));
+  assert.deepEqual(oldSuccess.resolved, []);
+  // failed：25 小时前失败、1 小时前有后续成功（在失败之后才开始）→ 只进已了结，不进异常。
+  const failed = failedRun({ runId: "run_root", terminalAt: ago(OWNER_ATTENTION_WINDOW_MS + HOUR) });
+  const recovered = derive(snapshot([
+    failed,
+    run({ runId: "run_child", lineageRootRunId: "run_root", startedAt: ago(OWNER_ATTENTION_WINDOW_MS + 30 * MINUTE), terminalAt: ago(HOUR), deliveryRequested: false }),
+  ]));
+  assert.deepEqual(outcome(recovered).anomalies, []);
+  assert.deepEqual(outcome(recovered).resolved, [["failed:run_root", "later_success", ago(HOUR)]]);
+});
+
+test("额度事项的证据只留最新 10 条观测（按观测时刻升序）；解除证据照旧附在末尾", () => {
+  // 同一车道 12 次观测，时刻从 12 小时前到 1 小时前（数组顺序故意打乱：按时刻取最新 10 条）。
+  const observations = [];
+  for (const observedAgoMs of [1, 5, 9, 2, 6, 10, 3, 7, 11, 4, 8, 12]) {
+    observations.push(exhausted(LANE, observedAgoMs * HOUR, { runId: `run_${observedAgoMs}` }));
+  }
+  const out = derive(snapshot(observations));
+  const item = byId(out.decide, "capacity:glm-pro");
+  assert.equal(item.evidence.length, OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX, "只留 10 条");
+  assert.deepEqual(item.evidence.map((entry) => entry.at), [10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map((h) => ago(h * HOUR)),
+    "取观测时刻最新的 10 条，再按时刻升序（11 小时前与 12 小时前的两条被截掉）");
+  assert.deepEqual(item.evidence.map((entry) => entry.runId), [10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map((h) => `run_${h}`));
+  assert.equal(item.runIds.length, 12, "runIds 仍列全部观测（只有证据有上限）");
+  assert.equal(item.since, ago(HOUR), "since 仍是最后一次观测");
+  // 加了后续成功：解除证据追加在（截断后的）观测证据末尾。
+  const resolved = derive(snapshot([
+    ...observations,
+    run({ runId: "run_ok", laneId: LANE.laneId, agentId: LANE.agentId, startedAt: ago(2 * HOUR), terminalAt: ago(30 * MINUTE), deliveryRequested: false }),
+  ]));
+  const resolvedItem = byId(resolved.resolved, "capacity:glm-pro");
+  assert.equal(resolvedItem.evidence.length, OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX + 1);
+  assert.deepEqual(resolvedItem.evidence.at(-1), { runId: "run_ok", at: ago(30 * MINUTE), seq: null });
+});
+
+test("rate_limited: 限流与上游过载进异常栏（不进口袋事项），分组与窗口/解除规则同额度；同一运行的 failed 异常照留", () => {
   const limited = (code, runId, observedAgoMs) => exhausted(LANE, observedAgoMs, {
     runId,
     failure: { category: "provider_capacity", code },
     capacity: { code, observedAt: ago(observedAgoMs) },
   });
   const out = derive(snapshot([limited("rate_limited", "run_a", HOUR), limited("overloaded", "run_b", 2 * HOUR)]));
-  assert.deepEqual(out.decide, [{
+  assert.deepEqual(out.decide, [], "限流不是拿主意事项");
+  // 同一运行另有 failed 异常照留；一组额度事项取最后一次观测（rate_limited），页面据此写"限流"。
+  assert.deepEqual(outcome(out).anomalies, [
+    ["failed:run_a", "open"],
+    ["failed:run_b", "open"],
+    ["rate_limited:glm-pro", "open"],
+  ]);
+  assert.deepEqual(byId(out.anomalies, "rate_limited:glm-pro"), {
     id: "rate_limited:glm-pro",
     kind: "rate_limited",
     state: "open",
     runIds: ["run_a", "run_b"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(HOUR),
     laneKey: "glm-pro",
+    capacityCode: "rate_limited",
     evidence: [
       { runId: "run_b", at: ago(2 * HOUR), seq: null },
       { runId: "run_a", at: ago(HOUR), seq: null },
     ],
-  }]);
-  // 与 quota_exhausted 分属两组，互不吞并。
-  assert.deepEqual(ids(derive(snapshot([limited("rate_limited", "run_a", HOUR), exhausted(LANE, HOUR, { runId: "run_q" })])).decide),
-    ["capacity:glm-pro", "rate_limited:glm-pro"]);
+  });
+  // capacityCode 是实际的额度码：只看一次 overloaded 观测时页面写"上游过载"。
+  const overloaded = derive(snapshot([limited("overloaded", "run_a", HOUR)]));
+  assert.equal(byId(overloaded.anomalies, "rate_limited:glm-pro").capacityCode, "overloaded");
+  // 与 quota_exhausted 分属两组、两栏，互不吞并。
+  const mixed = derive(snapshot([limited("rate_limited", "run_a", HOUR), exhausted(LANE, HOUR, { runId: "run_q" })]));
+  assert.deepEqual(ids(mixed.decide), ["capacity:glm-pro"]);
+  assert.deepEqual(ids(mixed.anomalies), ["failed:run_a", "failed:run_q", "rate_limited:glm-pro"]);
   // 6 小时两侧与"之后有运行完成"同一套规则。
-  assert.deepEqual(outcome(derive(snapshot([limited("overloaded", "run_a", OWNER_ATTENTION_CAPACITY_FRESH_MS + 1)]))).decide, [["rate_limited:glm-pro", "unknown"]]);
+  assert.deepEqual(outcome(derive(snapshot([limited("overloaded", "run_a", OWNER_ATTENTION_CAPACITY_FRESH_MS + 1)]))).anomalies
+    .filter(([id]) => id === "rate_limited:glm-pro"), [["rate_limited:glm-pro", "unknown"]]);
   const done = run({ runId: "run_ok", terminalAt: ago(30 * MINUTE), deliveryRequested: false });
-  assert.deepEqual(outcome(derive(snapshot([limited("rate_limited", "run_a", HOUR), done]))).resolved, [["rate_limited:glm-pro", "later_success", ago(30 * MINUTE)]]);
+  assert.deepEqual(outcome(derive(snapshot([limited("rate_limited", "run_a", HOUR), done]))).resolved,
+    [["rate_limited:glm-pro", "later_success", ago(30 * MINUTE)]]);
   // 额度码不在闭集里的容量事实不成立。
   nowhere(derive(snapshot([failedRun({ capacity: { code: "mystery", observedAt: ago(HOUR) } })])), "capacity:glm-pro");
 });
@@ -657,7 +784,7 @@ test("failed: 24 小时内失败的运行 → open 异常，followUp: unknown（
     kind: "failed",
     state: "open",
     runIds: ["run_a"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(HOUR),
     followUp: "unknown",
     failure: { category: "provider_error", code: "backend_error" },
@@ -676,7 +803,10 @@ test("failed: 超过 24 小时、终态时刻读不到、不是 failed 的不成
 
 test("failed: 同一谱系里有运行在它之后完成 → resolved / later_success（取最早的那个）", () => {
   const root = failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(3 * HOUR) });
-  const child = (runId, terminalAgoMs) => run({ runId, lineageRootRunId: "run_root", terminalAt: ago(terminalAgoMs), deliveryRequested: false });
+  // 后续运行在失败之后才开始（startedAt >= 失败的 terminalAt），完成时刻是 terminalAt。
+  const child = (runId, terminalAgoMs) => run({
+    runId, lineageRootRunId: "run_root", startedAt: ago(terminalAgoMs + 5 * MINUTE), terminalAt: ago(terminalAgoMs), deliveryRequested: false,
+  });
   const out = derive(snapshot([root, child("run_c1", 2 * HOUR)]));
   assert.deepEqual(outcome(out), { decide: [], anomalies: [], resolved: [["failed:run_root", "later_success", ago(2 * HOUR)]] });
   assert.deepEqual(out.resolved[0], {
@@ -684,7 +814,7 @@ test("failed: 同一谱系里有运行在它之后完成 → resolved / later_su
     kind: "failed",
     state: "resolved",
     runIds: ["run_root"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(3 * HOUR),
     resolvedAt: ago(2 * HOUR),
     resolution: "later_success",
@@ -700,23 +830,52 @@ test("failed: 同一谱系里有运行在它之后完成 → resolved / later_su
   assert.deepEqual(several.resolved[0].evidence.at(-1), { runId: "run_c1", at: ago(2 * HOUR), seq: null });
 });
 
-test("failed: retryOf 指向它的运行在它之后完成也算后续成功", () => {
+test("failed: retryOf 指向它的运行在它之后完成也算后续成功（且在失败之后才开始）", () => {
   const out = derive(snapshot([
     failedRun({ runId: "run_first", terminalAt: ago(3 * HOUR) }),
-    run({ runId: "run_retry", retryOf: "run_first", terminalAt: ago(HOUR), deliveryRequested: false }),
+    run({ runId: "run_retry", retryOf: "run_first", startedAt: ago(2 * HOUR), terminalAt: ago(HOUR), deliveryRequested: false }),
   ]));
   assert.deepEqual(outcome(out).resolved, [["failed:run_first", "later_success", ago(HOUR)]]);
   assert.deepEqual(out.anomalies, []);
 });
 
-test("failed: 有后续还在跑 → open + followUp: running（同谱系或 retryOf）", () => {
+test("failed: 并发跑着的兄弟运行不算解除——即使它完成得比失败晚，开始却在失败之前", () => {
+  const root = failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(2 * HOUR) });
+  // 兄弟运行 3 小时前就开始了（与失败并发），1 小时前完成：不是"后续成功"。
+  const sibling = run({
+    runId: "run_sibling", lineageRootRunId: "run_root", startedAt: ago(3 * HOUR), terminalAt: ago(HOUR), deliveryRequested: false,
+  });
+  const out = derive(snapshot([root, sibling]));
+  assert.deepEqual(outcome(out).anomalies, [["failed:run_root", "open"]]);
+  assert.deepEqual(out.resolved, []);
+  // startedAt 读不到时也确认不了"在失败之后开始"：不当作后续成功。
+  const unknownStart = run({
+    runId: "run_child", lineageRootRunId: "run_root", startedAt: null, terminalAt: ago(HOUR), deliveryRequested: false,
+  });
+  assert.deepEqual(derive(snapshot([root, unknownStart])).resolved, []);
+  // 等于失败时刻（同一毫秒）算"之后开始"。
+  const sameMs = run({
+    runId: "run_child", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR), terminalAt: ago(HOUR), deliveryRequested: false,
+  });
+  assert.deepEqual(outcome(derive(snapshot([root, sameMs]))).resolved, [["failed:run_root", "later_success", ago(HOUR)]]);
+  // followUp: running 也认同一个"后续"：并发在跑的兄弟（开始于失败之前）不算后续，
+  // 开始时刻读不到也不算；在失败之后才开始的才算。
+  const liveSibling = live({ runId: "run_live_sibling", lineageRootRunId: "run_root", startedAt: ago(3 * HOUR) });
+  assert.equal(derive(snapshot([root, liveSibling])).anomalies[0].followUp, "unknown");
+  const liveUnknownStart = live({ runId: "run_live_unknown", lineageRootRunId: "run_root", startedAt: null });
+  assert.equal(derive(snapshot([root, liveUnknownStart])).anomalies[0].followUp, "unknown");
+  const liveLater = live({ runId: "run_live_later", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR) });
+  assert.equal(derive(snapshot([root, liveLater])).anomalies[0].followUp, "running");
+});
+
+test("failed: 有后续还在跑 → open + followUp: running（同谱系或 retryOf，且在失败之后才开始）", () => {
   const root = failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(3 * HOUR) });
-  const byLineage = derive(snapshot([root, live({ runId: "run_child", lineageRootRunId: "run_root" })]));
+  const byLineage = derive(snapshot([root, live({ runId: "run_child", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR) })]));
   assert.deepEqual(outcome(byLineage).anomalies, [["failed:run_root", "open"]]);
   assert.equal(byLineage.anomalies[0].followUp, "running");
   const byRetry = derive(snapshot([
     failedRun({ runId: "run_first", terminalAt: ago(3 * HOUR) }),
-    live({ runId: "run_retry", retryOf: "run_first" }),
+    live({ runId: "run_retry", retryOf: "run_first", startedAt: ago(2 * HOUR) }),
   ]));
   assert.equal(byRetry.anomalies[0].followUp, "running");
 });
@@ -755,7 +914,7 @@ test("silent / process_only: 非终态且超过 30 分钟才列；恰好 30 分�
     kind: "silent",
     state: "open",
     runIds: ["run_a"],
-    projectSlug: "alpha",
+    projectSlugs: ["alpha"],
     since: ago(quietAgo),
     evidence: [{ runId: "run_a", at: ago(quietAgo), seq: null }],
   }]);
@@ -847,7 +1006,7 @@ test("闭集: 每种事项、每种状态、每种解除都出现，且字段取
     run({ runId: "run_child", lineageRootRunId: "run_sup", delivery: fresh({ acceptance: { status: "accepted", decidedAt: ago(HOUR) } }) }),
     live({ runId: "run_po", liveness: "process_only", quietSince: ago(HOUR) }),
     live({ runId: "run_unk", liveness: "silent", quietSince: null }),
-    live({ runId: "run_rl_child", lineageRootRunId: "run_rl" }), // run_rl 的后续还在跑 → followUp: running
+    live({ runId: "run_rl_child", lineageRootRunId: "run_rl", startedAt: ago(3 * HOUR) }), // run_rl 的后续还在跑（在失败之后开始）→ followUp: running
   ]));
   const all = [derive(mixedSnapshot()), rich].flatMap((out) => [...out.decide, ...out.anomalies, ...out.resolved]);
   for (const item of all) {
@@ -919,7 +1078,7 @@ test("counts: 全局与按项目，和 decide / anomalies 列表逐项一致", (
   });
   // 计数不是另算的：与列表逐项对得上。
   for (const [counts, slug] of [[out.counts, null], [out.counts.projects[0], "alpha"], [out.counts.projects[1], "beta"]]) {
-    const inProject = (item) => slug === null || item.projectSlug === slug;
+    const inProject = (item) => slug === null || item.projectSlugs.includes(slug);
     for (const [list, key] of [[out.decide, "decide"], [out.anomalies, "anomalies"]]) {
       assert.deepEqual(counts[key], {
         open: list.filter((item) => item.state === "open" && inProject(item)).length,
@@ -999,7 +1158,8 @@ test("selectOwnerWorkers: 按项目筛选；同一运行挂着多个事项时全
   ], [], [ALPHA, BETA, { slug: "gamma", name: "Gamma", repo: "unknown", branchesObservedAt: null, consultRecords: "unknown" }]);
   const out = derive(snap);
   const project = (slug) => selectOwnerWorkers(snap, out, { now: NOW, project: slug }).map((row) => [row.run.runId, row.attentionIds, row.laneKey]);
-  assert.deepEqual(project("beta"), [["run_live", [], "glm-pro"], ["run_fail", ["rate_limited:glm-pro", "failed:run_fail"], "glm-pro"]]);
+  // 限流事项在 anomalies 里；同一运行的 failed 异常照留。两条在 beta 下都查得到。
+  assert.deepEqual(project("beta"), [["run_live", [], "glm-pro"], ["run_fail", ["failed:run_fail", "rate_limited:glm-pro"], "glm-pro"]]);
   assert.deepEqual(project("gamma"), [["run_other", [], "auditor-seat"]]);
   assert.deepEqual(project("delta"), []);
   assert.equal(selectOwnerWorkers(snap, out, { now: NOW }).length, 3, "不筛项目就是全部");
@@ -1065,5 +1225,10 @@ test("ownerLanes: 有运行在跑或有额度事项的车道各一行；车道�
   const laterLimited = snapshot([exhausted(kimis, 2 * HOUR, { runId: "run_q" }), limitedAt("run_r", 30 * MINUTE)]);
   assert.deepEqual(ownerLanes(laterLimited, derive(laterLimited)), [
     { laneKey: "kimi", running: 0, capacity: { kind: "rate_limited", state: "open", observedAt: ago(30 * MINUTE) } },
+  ]);
+  // 只有限流事项（在 anomalies 栏）的车道：照样有额度摘要。
+  const limitedOnly = snapshot([limitedAt("run_r", HOUR)]);
+  assert.deepEqual(ownerLanes(limitedOnly, derive(limitedOnly)), [
+    { laneKey: "kimi", running: 0, capacity: { kind: "rate_limited", state: "open", observedAt: ago(HOUR) } },
   ]);
 });

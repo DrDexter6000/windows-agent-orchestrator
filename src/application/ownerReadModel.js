@@ -60,8 +60,9 @@
 //   - repo: "available" 表示"最近一次分支枚举成功"，与 branchesObservedAt 一起读；
 //     没观测过与观测失败都是 "unknown"，靠 branchesObservedAt 区分（null = 没观测过）。
 //   - 项目行的 consultRecords: "available" = 这一轮会审目录列出成功（或目录不存在）；
-//     "unknown" = 列不出、或单份记录 stat / 读取 I/O 出错（这一轮保留同一 key 上一轮
-//     的条目），并计入 unreadable。
+//     "unknown" = 列不出、单份记录 stat / 读取 I/O 出错（这一轮保留同一 key 上一轮
+//     的条目），或同一个 slug 对应多个 key（定位不了会审记录目录），并计入 unreadable
+//     （前两种）。
 //   - 席位 runState 的值域：RUN_STATES、dispatch_failed、missing，以及读模型自己的
 //     unknown（席位记录的形状可用、但没定位到运行且记录没给可采信状态时）。
 //   - 转录只解析到最后一个换行为止（140a 约定，防半行）；席位 Q1 也按这份事件算。
@@ -1392,8 +1393,9 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
         if (previous !== undefined && previous.key === key) index.set(consultKey(slug, consultId), previous);
       };
       if (key === null) {
-        // 两个 key 指向同一个 slug：说不清是哪个仓库，没有可列的会审目录。
-        projectStatus.set(slug, "available");
+        // 两个 key 指向同一个 slug：说不清是哪个仓库，没有可列的会审目录——定位不了
+        // 就不是"目录列出成功"，项目行的会审可用性如实为 unknown。
+        projectStatus.set(slug, "unknown");
         return;
       }
       let keyIsDirectory;
