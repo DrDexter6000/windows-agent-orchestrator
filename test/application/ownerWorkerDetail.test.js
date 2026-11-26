@@ -51,7 +51,7 @@ import {
   runGitReadOnly,
   sniffImageContentType,
 } from "../../src/application/ownerArtifact.js";
-import { projectIsolationViolationFields, projectWorkdirEscapeFields } from "../../src/diagnosis.js";
+import { projectIsolationViolation, isolationViolationDetail } from "../../src/diagnosis.js";
 import { headOfRedactedText } from "../../src/application/runActivityProjection.js";
 import { createSecretRedactor } from "../../src/secretRedaction.js";
 
@@ -925,18 +925,18 @@ test("隔离违规·畸形值不回显：非闭集 reason / destination → null
   assert.ok(isolation.resolvedPath.includes("[REDACTED"));
 });
 
-test("projectIsolationViolationFields / projectWorkdirEscapeFields：闭集成员、escapedAt 只在 *_physical_outside、别的运行的事件不算", () => {
-  assert.deepEqual(projectIsolationViolationFields(null), { reason: null, destination: null, reportedPath: null, resolvedPath: null, escapedAt: null });
-  assert.equal(projectIsolationViolationFields({ reason: "write_intent_physical_outside", escapedAt: "E:\\x" }).escapedAt, "E:\\x");
-  assert.equal(projectIsolationViolationFields({ reason: "write_intent_physical_unresolved", escapedAt: "E:\\x" }).escapedAt, null);
-  assert.equal(projectIsolationViolationFields({ escapedAt: "E:\\x" }).escapedAt, null, "没有 reason 就不给 escapedAt");
+test("projectIsolationViolation / isolationViolationDetail（看板与 MCP 共用）：闭集成员、escapedAt 只在 *_physical_outside、别的运行的事件不算", () => {
+  assert.equal(projectIsolationViolation(null), null);
+  assert.equal(projectIsolationViolation({ reason: "write_intent_physical_outside", escapedAt: "E:\\x" }).escapedAt, "E:\\x");
+  assert.equal(projectIsolationViolation({ reason: "write_intent_physical_unresolved", escapedAt: "E:\\x" }).escapedAt, undefined);
+  assert.equal(projectIsolationViolation({ escapedAt: "E:\\x" }), null, "没有 reason 就不给 escapedAt，也没有别的可信字段");
   const events = [
     { type: "run.isolation_violation", runId: "run_other", code: "workdir_escape", reason: "file_written_lexical_outside" },
     { type: "run.isolation_violation", runId: "run_mine", code: "something_else", reason: "file_written_lexical_outside" },
   ];
-  assert.equal(projectWorkdirEscapeFields(events, "run_mine"), null, "别的运行 / 非安全码的事件不算");
-  assert.equal(projectWorkdirEscapeFields([...events, { type: "run.isolation_violation", runId: "run_mine", code: "workdir_escape", reason: "file_written_lexical_outside", destination: "home" }], "run_mine").destination, "home");
-  assert.equal(projectWorkdirEscapeFields("nope", "run_mine"), null);
+  assert.equal(isolationViolationDetail(events, "run_mine"), null, "别的运行 / 非安全码的事件不算");
+  assert.equal(isolationViolationDetail([...events, { type: "run.isolation_violation", runId: "run_mine", code: "workdir_escape", reason: "file_written_lexical_outside", destination: "home" }], "run_mine").destination, "home");
+  assert.equal(isolationViolationDetail("nope", "run_mine"), null);
 });
 
 // ===== 9. 守卫：鉴权、参数闭集、404、方法、泄漏 =====

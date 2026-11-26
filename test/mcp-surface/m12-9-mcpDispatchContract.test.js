@@ -31,8 +31,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { CONTRACT_CHECK_ISSUE_CODES, CONTRACT_CHECK_SECTIONS, runDispatchContractCheck } from "../../src/application/runDispatchContract.js";
 import { EXECUTION_PROFILE_IDS } from "../../src/application/executionProfiles.js";
-// TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
-import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
+// TD-168: run_dispatch / 预检的输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_DISPATCH_INPUT_KEYS, RUN_DISPATCH_CONTRACT_CHECK_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
 // ===== Helpers (mirrors mcpRunDispatch.test.js) =====
 
@@ -109,16 +109,18 @@ test("B1: run_dispatch_contract_check is registered, read-only/idempotent, share
     const cc = tools.find((t) => t.name === "run_dispatch_contract_check");
     assert.ok(rd, "run_dispatch present");
     assert.ok(cc, "run_dispatch_contract_check present");
-    // SAME input schema shape (shared RUN_DISPATCH_INPUT).
+    // SAME input schema shape (shared RUN_DISPATCH_INPUT) — except the dispatch-only
+    // taskType (第 141b 批，决定 0131 §5): the precheck's input surface is NOT widened.
     const rdKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
     const ccKeys = Object.keys(cc.inputSchema.properties ?? {}).sort();
-    assert.deepEqual(rdKeys, ccKeys, "shared input schema keys");
+    assert.deepEqual(rdKeys.filter((k) => k !== "taskType"), ccKeys, "shared input schema keys (taskType is dispatch-only)");
     // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
     assert.deepEqual(
-      rdKeys,
-      RUN_DISPATCH_INPUT_KEYS,
-      "input schema is the full run_dispatch surface (incl. M12-16 correctable + Round 4 readOnly + R11-1 reasoning)",
+      ccKeys,
+      RUN_DISPATCH_CONTRACT_CHECK_INPUT_KEYS,
+      "contract_check input schema is the frozen precheck surface (incl. M12-16 correctable + Round 4 readOnly + R11-1 reasoning), no taskType",
     );
+    assert.deepEqual(rdKeys, RUN_DISPATCH_INPUT_KEYS, "run_dispatch input schema = precheck surface + taskType");
     assert.equal(rd.inputSchema.additionalProperties, false, "run_dispatch strict");
     assert.equal(cc.inputSchema.additionalProperties, false, "contract_check strict");
     // Read-only / advisory annotations.

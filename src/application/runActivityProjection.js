@@ -166,6 +166,10 @@ const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
   // 之后追加；kept 载荷 uniqueCommits/reason 闭集，分支名回链 wao/<runId> 约定）。
   "run.worktree_branch_recycled": "worktree_branch_recycled",
   "run.worktree_branch_kept": "worktree_branch_kept",
+  // 第 141b 批：隔离违规事实此前落 [unknown_event]。只补固定标签——路径、目的地、
+  // 逃出层级等细节绝不进活动页（信封条目只有 category/ts/seq/kind 四键），由
+  // run_diagnose 的 isolationViolation 给。
+  "run.isolation_violation": "isolation_violation",
 });
 export const ENVELOPE_ACTIVITY_LABELS = Object.freeze(Object.values(ENVELOPE_TYPE_TO_LABEL));
 

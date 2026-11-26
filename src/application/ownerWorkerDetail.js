@@ -39,7 +39,7 @@ import {
   DIAGNOSIS_CATEGORIES,
   diagnoseFailure,
   isValidDiagnosisCode,
-  projectWorkdirEscapeFields,
+  isolationViolationDetail,
 } from "../diagnosis.js";
 import { findLatestBound, validateDeliveryFacts } from "../transcript.js";
 import { isCanonicalCommitId, isValidRepoRelativePath } from "../delivery.js";
@@ -410,11 +410,13 @@ function briefBlock(events, runId, redactor) {
 // ===== 失败诊断 =====
 
 function isolationBlock(fields, redactor) {
-  if (fields === null) return null;
-  const bounded = (value) => (value === null ? null : safeText(value, redactor, OWNER_ISOLATION_FIELD_MAX_CHARS));
+  if (fields === null || fields === undefined) return null;
+  // isolationViolationDetail（src/diagnosis.js，看板与 MCP run_diagnose 共用的唯一读侧清理）
+  // 只带可信字段；这里把缺席的键补成 null，DTO 形状固定。
+  const bounded = (value) => (typeof value === "string" ? safeText(value, redactor, OWNER_ISOLATION_FIELD_MAX_CHARS) : null);
   return {
-    reason: fields.reason,
-    destination: fields.destination,
+    reason: fields.reason ?? null,
+    destination: fields.destination ?? null,
     reportedPath: bounded(fields.reportedPath),
     resolvedPath: bounded(fields.resolvedPath),
     escapedAt: bounded(fields.escapedAt),
@@ -441,7 +443,7 @@ function failureBlock(run, events, redactor) {
     category,
     code: category !== null && isValidDiagnosisCode(category, diagnosis.code) ? diagnosis.code : null,
     evidence,
-    isolation: category === "workdir_escape" ? isolationBlock(projectWorkdirEscapeFields(events, run.runId), redactor) : null,
+    isolation: category === "workdir_escape" ? isolationBlock(isolationViolationDetail(events, run.runId), redactor) : null,
   };
 }
 
