@@ -161,9 +161,13 @@ export function currentDelivery(events, runId) {
  * 自由文本的唯一出口链（决定 0131 §3）：精确值 + 形状脱敏 → 绝对路径折成 `…/末段`（读模型标题
  * 已在用的 foldAbsolutePaths）→ 清控制字符 → 限长（取头）。脱敏与折路径都在截断之前作用在
  * 完整文本上。隔离违规的路径字段是已批准的例外，走 diagnosis.js 的共用投影，不经这里。
+ *
+ * 第 141c 批起导出，给 Owner 活动投影（ownerWorkerActivity.js）复用同一条链；可选的 foldPaths
+ * 缺省就是 foldAbsolutePaths——活动投影在它之上再把 CRLF 归一成 LF（同样发生在脱敏之后、
+ * 清控制字符之前），其余环节一概不变。
  */
-function safeBody(raw, redactor, maxChars) {
-  return headOfRedactedText(raw, redactor, maxChars, foldAbsolutePaths);
+export function safeBody(raw, redactor, maxChars, foldPaths = foldAbsolutePaths) {
+  return headOfRedactedText(raw, redactor, maxChars, foldPaths);
 }
 
 const safeText = (raw, redactor, maxChars) => safeBody(raw, redactor, maxChars).text;
@@ -172,7 +176,7 @@ const safeText = (raw, redactor, maxChars) => safeBody(raw, redactor, maxChars).
 const safeRunId = (value) => (typeof value === "string" && value.length <= OWNER_RUN_ID_MAX_CHARS && isValidRunId(value) ? value : null);
 
 /** 文件清单里的路径：只给仓库相对路径（无控制字符），其余 [path_withheld]。 */
-function displayPath(raw, redactor) {
+export function displayPath(raw, redactor) {
   if (typeof raw !== "string" || !isValidRepoRelativePath(raw) || CONTROL_CHAR_RE.test(raw)) return OWNER_PATH_WITHHELD;
   return safeText(raw, redactor, OWNER_PATH_MAX_CHARS);
 }
@@ -494,7 +498,7 @@ function briefBlock(events, runId, redactor, seatConsult) {
  * 形状）、主目录换成 ~、用户名段守卫、清控制字符与双向格式控制符、最后才限长。这里只把缺席的键补成
  * null，DTO 形状固定；不再二次加工。
  */
-function isolationBlock(fields) {
+export function isolationBlock(fields) {
   if (fields === null || fields === undefined) return null;
   return {
     reason: fields.reason ?? null,

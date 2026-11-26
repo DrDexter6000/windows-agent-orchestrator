@@ -229,6 +229,7 @@
       "application/leadOpenItems.test.js",
       "application/ownerReadModelFacts.test.js",
       "application/ownerWorkerDetail.test.js",
+      "application/ownerWorkerActivity.test.js",
       "registry-roles/candidateInventory.test.js",
       "isolation-infra/hygieneGitState.test.js",
       "isolation-infra/desensitization.test.js",

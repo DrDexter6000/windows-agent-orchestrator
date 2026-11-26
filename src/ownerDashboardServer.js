@@ -82,11 +82,30 @@
 //     Only png / jpeg / webp by file structure (not just the prefix), bounded size;
 //     everything else (incl. SVG) is the fixed 404.
 //
+// Batch 141c (decision 0131 §3, plan A3): two more read-only routes for the Activity
+// tab of the Workers side panel. Same bearer / GET-only / no-CORS / no-store / fixed
+// error / closed-query rules, same authorization (loadWorkerSource: the read model's
+// resolveRun + the request-time re-read of the transcript), same fixed 404 for a run
+// that is not usable. Both are Owner-only projections (ownerWorkerActivity), separate
+// from the Lead-side run_activity cursor / path / output contract, which is untouched.
+//   - GET /api/worker/activity?runId=&beforeSeq=&limit=&filter=
+//     The latest `limit` (default and max 200) timeline events, or the page before
+//     `beforeSeq`; filter is the closed set all | messages | commands | errors.
+//     Before the first publication it answers the status (loading), like /api/worker.
+//   - GET /api/worker/event?runId=&seq=&part=&page=
+//     One page of the full text of `runId#seq` (part is the closed set command |
+//     output | message | error; page is 1-based, optional, default 1). seq absent,
+//     part not applicable to that event, page out of range, or nothing published
+//     yet: the fixed 404 (like /api/artifact).
+//   Every number is canonical decimal digits (no sign, no leading zeros, bounded
+//   length); a missing required key, an extra key or a repeated key is the fixed 400.
+//
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
 // node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
 // service, the run-summary cache, the Owner read model (createOwnerReadModel +
 // OWNER_LIVENESS_VALUES), the Owner attention derivation (ownerAttention), the
-// Owner worker detail (ownerWorkerDetail) and artifact reader (ownerArtifact) and
+// Owner worker detail (ownerWorkerDetail), activity projection
+// (ownerWorkerActivity) and artifact reader (ownerArtifact) and
 // the project slug shape (projectBuckets.SAFE_BUCKET_SLUG_RE). No second copy of
 // any closed set lives here.
 
@@ -115,6 +134,15 @@ import {
   readCommitImage,
 } from "./application/ownerArtifact.js";
 import { currentDelivery, projectWorkerDetail } from "./application/ownerWorkerDetail.js";
+import {
+  OWNER_ACTIVITY_FILTERS,
+  OWNER_ACTIVITY_LIMIT_MAX,
+  OWNER_EVENT_PARTS,
+  OWNER_SEQ_MAX,
+  createFullTextCache,
+  projectWorkerActivity,
+  projectWorkerEvent,
+} from "./application/ownerWorkerActivity.js";
 import { SAFE_BUCKET_SLUG_RE } from "./projectBuckets.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -621,13 +649,20 @@ function parseArtifactQuery(sp) {
  * model's resolveRun / read says no (unreadable, conflicting copies, not in this
  * run directory). Nothing about WHY crosses the boundary.
  */
-async function loadWorkerSource(ctx, pub, runId) {
+async function loadWorkerSource(ctx, pub, runId, { withIdentity = false } = {}) {
   const model = ctx.readModel;
-  if (typeof model?.readRunEvents !== "function") return null;
   const run = ctx.runsById(pub).get(runId);
+  // The full-text route also needs the transcript's identity (content hash) for its cache key; a read
+  // model without readRunTranscript simply gives no identity (the route then does not cache).
+  if (withIdentity && typeof model?.readRunTranscript === "function") {
+    if (run === undefined || run.availability !== "ok") return null;
+    const transcript = await model.readRunTranscript(runId);
+    return transcript === null ? null : { run, events: transcript.events, identity: transcript.identity };
+  }
+  if (typeof model?.readRunEvents !== "function") return null;
   if (run === undefined || run.availability !== "ok") return null;
   const events = await model.readRunEvents(runId);
-  return events === null ? null : { run, events };
+  return events === null ? null : { run, events, identity: null };
 }
 
 /** The project's repository root, held server-side only (never in a response). */
@@ -672,6 +707,104 @@ async function serveWorker(ctx, req, res, sp) {
       proveDelivery: ctx.proveDelivery,
     });
     return sendJson(res, 200, { ...ctx.status(), ...detail });
+  } catch {
+    return sendJson(res, 500, ERR.internal);
+  }
+}
+
+// ===== Batch 141c: /api/worker/activity and /api/worker/event =====
+
+// Canonical decimal digits only (no sign, no leading zeros, bounded length). The nine-digit bound is
+// OWNER_SEQ_MAX (999999999) — the same bound the projection applies to the event numbers in a
+// transcript, so a list never hands out a beforeSeq this route would reject.
+const SEQ_RE = /^[1-9][0-9]{0,8}$/; // an event number: 1 .. OWNER_SEQ_MAX
+const BEFORE_SEQ_RE = /^(0|[1-9][0-9]{0,8})$/; // 0 is allowed: "before everything" is an empty page
+const LIMIT_RE = /^[1-9][0-9]{0,2}$/; // then bounded by OWNER_ACTIVITY_LIMIT_MAX
+const PAGE_RE = /^[1-9][0-9]{0,5}$/; // 1-based page number
+
+function parseWorkerActivityQuery(sp) {
+  assertStrictKeys(sp, new Set(["runId", "beforeSeq", "limit", "filter"]));
+  const runId = sp.get("runId");
+  if (!isValidRunId(runId)) throw new BadRequest();
+  const query = { runId };
+  if (sp.has("beforeSeq")) {
+    const raw = sp.get("beforeSeq");
+    if (!BEFORE_SEQ_RE.test(raw) || Number(raw) > OWNER_SEQ_MAX) throw new BadRequest();
+    query.beforeSeq = Number(raw);
+  }
+  if (sp.has("limit")) {
+    const raw = sp.get("limit");
+    if (!LIMIT_RE.test(raw) || Number(raw) > OWNER_ACTIVITY_LIMIT_MAX) throw new BadRequest();
+    query.limit = Number(raw);
+  }
+  if (sp.has("filter")) {
+    const raw = sp.get("filter");
+    if (!OWNER_ACTIVITY_FILTERS.includes(raw)) throw new BadRequest();
+    query.filter = raw;
+  }
+  return query;
+}
+
+function parseWorkerEventQuery(sp) {
+  assertStrictKeys(sp, new Set(["runId", "seq", "part", "page"]));
+  const runId = sp.get("runId");
+  const seq = sp.get("seq");
+  const part = sp.get("part");
+  if (!isValidRunId(runId) || seq === null || !SEQ_RE.test(seq) || Number(seq) > OWNER_SEQ_MAX || !OWNER_EVENT_PARTS.includes(part)) {
+    throw new BadRequest();
+  }
+  const query = { runId, seq: Number(seq), part };
+  if (sp.has("page")) {
+    const raw = sp.get("page");
+    if (!PAGE_RE.test(raw)) throw new BadRequest();
+    query.page = Number(raw);
+  }
+  return query;
+}
+
+async function serveWorkerActivity(ctx, req, res, sp) {
+  const query = authorizeAndParse(ctx, req, res, sp, parseWorkerActivityQuery);
+  if (query === null) return;
+  const pub = ctx.published();
+  // Never published: same loading / unavailable answer as /api/worker.
+  if (pub === null) return sendJson(res, 200, ctx.status());
+  try {
+    const source = await loadWorkerSource(ctx, pub, query.runId);
+    if (source === null) return sendJson(res, 404, ERR.not_found);
+    const page = projectWorkerActivity({
+      runId: query.runId,
+      events: source.events,
+      ...(query.beforeSeq !== undefined ? { beforeSeq: query.beforeSeq } : {}),
+      ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      ...(query.filter !== undefined ? { filter: query.filter } : {}),
+      ...(ctx.env !== undefined ? { env: ctx.env } : {}),
+    });
+    return sendJson(res, 200, { ...ctx.status(), ...page });
+  } catch {
+    return sendJson(res, 500, ERR.internal);
+  }
+}
+
+async function serveWorkerEvent(ctx, req, res, sp) {
+  const query = authorizeAndParse(ctx, req, res, sp, parseWorkerEventQuery);
+  if (query === null) return;
+  const pub = ctx.published();
+  if (pub === null) return sendJson(res, 404, ERR.not_found);
+  try {
+    const source = await loadWorkerSource(ctx, pub, query.runId, { withIdentity: true });
+    if (source === null) return sendJson(res, 404, ERR.not_found);
+    const full = projectWorkerEvent({
+      runId: query.runId,
+      events: source.events,
+      seq: query.seq,
+      part: query.part,
+      cache: ctx.fullTextCache, // processed full texts, keyed by the transcript's content hash
+      identity: source.identity,
+      ...(query.page !== undefined ? { page: query.page } : {}),
+      ...(ctx.env !== undefined ? { env: ctx.env } : {}),
+    });
+    if (full === null) return sendJson(res, 404, ERR.not_found);
+    return sendJson(res, 200, { ...ctx.status(), ...full });
   } catch {
     return sendJson(res, 500, ERR.internal);
   }
@@ -838,6 +971,10 @@ function createHandler(ctx) {
       }
     }
 
+    // Batch 141c: the Activity tab's timeline page and one event's full text.
+    if (u.pathname === "/api/worker/activity") return serveWorkerActivity(ctx, req, res, sp);
+    if (u.pathname === "/api/worker/event") return serveWorkerEvent(ctx, req, res, sp);
+
     // Batch 141a: one worker's detail and one image of its current delivery.
     if (u.pathname === "/api/worker") return serveWorker(ctx, req, res, sp);
     if (u.pathname === "/api/artifact") return serveArtifact(ctx, req, res, sp);
@@ -968,6 +1105,9 @@ export function createOwnerDashboardServer(config) {
     // counts. The counts are cached per (repo, base, commit) — objects are immutable — but
     // the proof itself runs on every request, so a pruned object is never reported bound.
     proveDelivery: createDeliveryProver(),
+    // Batch 141c: the processed full texts of /api/worker/event (bounded by bytes, LRU, keyed by the
+    // transcript's content hash — a changed transcript never serves a stale text).
+    fullTextCache: createFullTextCache(),
   };
 
   // runId → snapshot row, built once per publication (the snapshot object is the key).

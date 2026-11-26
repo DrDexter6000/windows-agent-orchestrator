@@ -127,7 +127,7 @@ function lexNormalizePosix(p) {
  * is not a valid repo-relative path). PURE lexical reasoning — the worktree
  * root is a string, never a filesystem probe.
  */
-function deriveRelativePath(eventPath, worktreePath) {
+export function deriveRelativePath(eventPath, worktreePath) {
   if (typeof eventPath !== "string" || eventPath.length === 0) return null;
   if (eventPath.includes("\0")) return null;
   const norm = toPosix(eventPath);
@@ -156,12 +156,13 @@ function deriveRelativePath(eventPath, worktreePath) {
 }
 
 /**
- * Extract the authority from the frozen snapshot: exactly ONE run.started
- * event bound to this run, with an absolute worktreePath and a non-empty
- * delivery.allowedPaths of valid repo-relative paths. Anything else — missing,
- * ambiguous (duplicates), malformed, cross-run — collapses to null (unknown).
+ * The single run.started event bound to this run, when its worktreePath is an
+ * absolute path — otherwise null (none, more than one, relative or missing path).
+ * Shared by the scope authority below and by the Owner activity projection
+ * (ownerWorkerActivity.js, batch 141c), which derives display paths through the
+ * same worktree authority and the same deriveRelativePath rule.
  */
-function extractAuthority(events, runId) {
+function boundStartedWithWorktree(events, runId) {
   const started = [];
   for (const event of events) {
     if (event !== null && typeof event === "object" && !Array.isArray(event)
@@ -174,6 +175,23 @@ function extractAuthority(events, runId) {
   if (typeof bound.worktreePath !== "string" || !isAbsPathText(toPosix(bound.worktreePath))) {
     return null;
   }
+  return bound;
+}
+
+/** The unique bound worktree path (absolute), or null — see boundStartedWithWorktree. */
+export function boundWorktreePath(events, runId) {
+  return boundStartedWithWorktree(events, runId)?.worktreePath ?? null;
+}
+
+/**
+ * Extract the authority from the frozen snapshot: exactly ONE run.started
+ * event bound to this run, with an absolute worktreePath and a non-empty
+ * delivery.allowedPaths of valid repo-relative paths. Anything else — missing,
+ * ambiguous (duplicates), malformed, cross-run — collapses to null (unknown).
+ */
+function extractAuthority(events, runId) {
+  const bound = boundStartedWithWorktree(events, runId);
+  if (bound === null) return null;
   const delivery = bound.delivery;
   if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return null;
   if (!Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0) return null;

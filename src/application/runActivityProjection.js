@@ -216,7 +216,7 @@ export const ACTIVITY_COMMAND_CAP = 400;
 export const ACTIVITY_TOOL_DETAIL_CAP = 200;
 export const ACTIVITY_OUTPUT_TAIL_CAP = 400;
 // 按这个顺序取第一个非空字符串字段（真实转录里各后端工具输入的常见键）。
-const TOOL_DETAIL_KEYS = Object.freeze([
+export const TOOL_DETAIL_KEYS = Object.freeze([
   "command", "file_path", "pattern", "query", "url", "task_id", "skill", "path", "description",
 ]);
 
@@ -436,7 +436,8 @@ function sanitizeControls(text) {
   return String(text).replace(UNSAFE_CONTROL_RE, "�");
 }
 
-function safeSliceUtf16(str, start, end) {
+// 第 141c 批起导出：Owner 活动投影（ownerWorkerActivity.js）取行 / 摘要时复用，不另写一份。
+export function safeSliceUtf16(str, start, end) {
   let adjustedEnd = end;
   if (adjustedEnd < str.length) {
     const cc = str.charCodeAt(adjustedEnd - 1);
@@ -543,7 +544,7 @@ export function headOfRedactedText(text, redactor, maxChars, foldPaths = null) {
 // {type:"text", text} 与 ACP 的嵌套块 {type:"content", content:{type:"text", text}}
 // 都认；其它形状（图片、引用等）没有可展示的文本。此前只认字符串：deepseek-acp 的
 // 工具结果全是嵌套块（真实转录 314 条无一例外），它的输出尾部一直是空的。
-function outputText(output) {
+export function outputText(output) {
   if (typeof output === "string") return output;
   if (!Array.isArray(output)) return "";
   const parts = [];

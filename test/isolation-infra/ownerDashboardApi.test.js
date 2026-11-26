@@ -33,6 +33,10 @@
 //   - 缺省接线：不注入时用 createOwnerReadModel({ runDir, nowFn })；非法 refreshIntervalMs
 //     在构造时就拒绝
 //   - 旧的 /api/runs 与 /api/activity 不受刷新状态影响
+//   - 第 141c 批：/api/worker/activity 与 /api/worker/event 的路由守卫（AW 开头的用例）——无令牌 401、
+//     只许 GET、多余 / 重复 / 缺失 / 形状不对 400、不可用 404（含 seq 不存在、part 不适用、页号越界）、
+//     首次发布前 activity 200 loading / event 404、内部失败固定 500，以及响应里没有仓库 / 工作树路径
+//     与未脱敏的秘密（注入已知秘密值验证）；内容投影的用例在 test/application/ownerWorkerActivity.test.js
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -1295,6 +1299,253 @@ test("LEGACY: /api/runs 与 /api/activity 不受刷新状态影响——loading 
   assert.equal(bad.status, 400);
   const unknown = await drive(s.handler, { url: "/api/overview/runs", headers: auth(s) });
   assert.equal(unknown.status, 404);
+});
+
+// =====================================================================
+// 第 141c 批：/api/worker/activity 与 /api/worker/event 的路由守卫
+//   （内容投影的用例在 test/application/ownerWorkerActivity.test.js；这里只测路由与鉴权这一层，
+//    读模型用注入的假工厂，readRunEvents 给出真实形状的转录事件。）
+// =====================================================================
+const GUARD_RUN = "run_live";
+const GUARD_SECRET = "test-secret-exact-value-7788";
+const GUARD_ENV = { OWNER_TEST_API_KEY: GUARD_SECRET };
+const ACTIVITY = "/api/worker/activity";
+const EVENT = "/api/worker/event";
+const AW_ROUTES = [ACTIVITY, EVENT];
+/** 一条运行的转录：消息、命令 + 输出、写文件、错误各一条（seq 2–6），文本里夹着秘密与服务端自己的路径。 */
+function guardEvents() {
+  const wt = `${WORKSPACE_ROOT}\\.wao-worktrees\\${GUARD_RUN}`;
+  const ev = (seq, type, payload = {}) => ({ ...payload, seq, ts: iso(NOW - (100 - seq) * SECOND), type, runId: GUARD_RUN, agentId: "glm-pro" });
+  return [
+    ev(1, "run.started", { backend: "claude-code", worktreePath: wt }),
+    ev(2, "run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: `token ${GUARD_SECRET} in ${RUN_DIR}\\x.jsonl` }] }),
+    ev(3, "run.event", { kind: "command", command: `deploy ${GUARD_SECRET} --cwd ${WORKSPACE_ROOT}`, toolCallId: "c1" }),
+    ev(4, "run.event", { kind: "tool_result", tool: "c1", output: `out ${GUARD_SECRET}\n${WORKSPACE_ROOT}\\src\\a.js\n`, isError: false }),
+    ev(5, "run.event", { kind: "file_written", path: `${wt}\\src\\a.js` }),
+    ev(6, "run.error", { phase: "wait", error: `failed ${GUARD_SECRET} at ${WORKSPACE_ROOT}` }),
+  ];
+}
+/** 假读模型 + readRunEvents（只认 run_live；throws 让它抛错）。 */
+function guardModel({ events = guardEvents(), throws = null, withReader = true } = {}) {
+  const { model } = fakeReadModel();
+  if (!withReader) return model;
+  return {
+    ...model,
+    async readRunEvents(runId) {
+      if (throws !== null) throw throws;
+      return runId === GUARD_RUN ? events : null;
+    },
+  };
+}
+async function guardServer(options = {}) {
+  const s = createOwnerDashboardServer({
+    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: GUARD_ENV,
+    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn,
+    nowFn: () => NOW,
+    createReadModelFn: () => guardModel(options),
+  });
+  if (options.refresh !== false) assert.equal(await s.refreshNow(), "ready");
+  return s;
+}
+const GOOD_ACTIVITY = `${ACTIVITY}?runId=${GUARD_RUN}`;
+const GOOD_EVENT = `${EVENT}?runId=${GUARD_RUN}&seq=2&part=message`;
+
+test("AW AUTH: 两个新接口逐请求验 bearer——无令牌 / 错令牌 401，固定错误体，先于参数与 loading", async () => {
+  const s = await guardServer({ refresh: false }); // 还没发布：loading 也不能被无令牌的调用看到
+  for (const url of [GOOD_ACTIVITY, GOOD_EVENT, ACTIVITY, EVENT, `${ACTIVITY}?x=1`, `${EVENT}?x=1`]) {
+    const bare = await drive(s.handler, { url });
+    assert.equal(bare.status, 401, `${url} 无令牌 → 401`);
+    assert.deepEqual(jsonOf(bare), { error: "unauthorized" });
+    assertSafeHeaders(bare);
+    for (const headers of [
+      { authorization: "Bearer " + "0".repeat(64) }, { authorization: s.token }, { authorization: "bearer " + s.token }, { authorization: "Bearer" },
+    ]) {
+      const wrong = await drive(s.handler, { url, headers });
+      assert.equal(wrong.status, 401, `${url} 错令牌 → 401`);
+      assert.deepEqual(jsonOf(wrong), { error: "unauthorized" });
+      assert.ok(!wrong.body.includes(s.token));
+    }
+  }
+  await s.close();
+});
+
+test("AW METHOD: 两个新接口只许 GET——其余方法 405 + Allow: GET，OPTIONS 不开 CORS", async () => {
+  const s = await guardServer();
+  for (const url of [GOOD_ACTIVITY, GOOD_EVENT]) {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+      const r = await drive(s.handler, { method, url, headers: auth(s) });
+      assert.equal(r.status, 405, `${method} ${url} → 405`);
+      assert.equal(r.headers.allow, "GET");
+      assert.deepEqual(jsonOf(r), { error: "method_not_allowed" });
+      assertSafeHeaders(r);
+    }
+  }
+  await s.close();
+});
+
+test("AW QUERY: /api/worker/activity 只认 runId（必填）+ beforeSeq + limit + filter——多余键、重复键、缺失、形状不对都 400，固定错误体", async () => {
+  const s = await guardServer();
+  const bad = [
+    ACTIVITY, `${ACTIVITY}?runId=`, `${ACTIVITY}?runId=bad/path`, `${ACTIVITY}?runId=-dash`, `${ACTIVITY}?runId=../x`, `${ACTIVITY}?runId=a%00b`,
+    // 多余的键（含客户端想塞路径、项目、游标的）
+    `${GOOD_ACTIVITY}&x=1`, `${GOOD_ACTIVITY}&runDir=${encodeURIComponent(RUN_DIR)}`, `${GOOD_ACTIVITY}&path=x`, `${GOOD_ACTIVITY}&project=alpha`,
+    `${GOOD_ACTIVITY}&cursor=abc`, `${GOOD_ACTIVITY}&afterSeq=1`, `${GOOD_ACTIVITY}&seq=2`, `${GOOD_ACTIVITY}&page=1`, `${GOOD_ACTIVITY}&categories=message`,
+    // 重复的键
+    `${GOOD_ACTIVITY}&runId=${GUARD_RUN}`, `${GOOD_ACTIVITY}&limit=5&limit=5`, `${GOOD_ACTIVITY}&beforeSeq=5&beforeSeq=5`, `${GOOD_ACTIVITY}&filter=all&filter=all`,
+    // 形状不对
+    ...["-1", "01", "1.5", "abc", "", "1e2", "+1", "0x1", " 1", "1234567890"].map((v) => `${GOOD_ACTIVITY}&beforeSeq=${encodeURIComponent(v)}`),
+    ...["0", "201", "-1", "01", "1.5", "abc", "", "1e2", "+1", "1000"].map((v) => `${GOOD_ACTIVITY}&limit=${encodeURIComponent(v)}`),
+    ...["ALL", "All", "all,messages", "messages,errors", "tool", "", "command", " all", "messages ", "other"].map((v) => `${GOOD_ACTIVITY}&filter=${encodeURIComponent(v)}`),
+  ];
+  for (const url of bad) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 400, `${url} → 400`);
+    assert.deepEqual(jsonOf(r), { error: "bad_request" });
+    assertSafeHeaders(r);
+  }
+  for (const query of ["", "&limit=1", "&limit=200", "&beforeSeq=0", "&beforeSeq=999999999", "&filter=messages", "&filter=commands", "&filter=errors", "&filter=all", "&beforeSeq=6&limit=3&filter=all"]) {
+    const r = await drive(s.handler, { url: `${GOOD_ACTIVITY}${query}`, headers: auth(s) });
+    assert.equal(r.status, 200, `${query} → 200`);
+    assertSafeHeaders(r);
+  }
+  await s.close();
+});
+
+test("AW QUERY: /api/worker/event 只认 runId + seq + part（必填）+ page——缺任一、多余、重复、形状不对都 400", async () => {
+  const s = await guardServer();
+  const ok = `runId=${GUARD_RUN}&seq=2&part=message`;
+  const bad = [
+    EVENT, `${EVENT}?seq=2&part=message`, `${EVENT}?runId=${GUARD_RUN}&part=message`, `${EVENT}?runId=${GUARD_RUN}&seq=2`,
+    `${EVENT}?${ok}&x=1`, `${EVENT}?${ok}&path=x`, `${EVENT}?${ok}&runDir=/evil`, `${EVENT}?${ok}&limit=5`, `${EVENT}?${ok}&beforeSeq=3`, `${EVENT}?${ok}&filter=all`,
+    `${EVENT}?${ok}&runId=${GUARD_RUN}`, `${EVENT}?${ok}&seq=2`, `${EVENT}?${ok}&part=message`, `${EVENT}?${ok}&page=1&page=1`,
+    `${EVENT}?runId=bad/path&seq=2&part=message`, `${EVENT}?runId=&seq=2&part=message`,
+    ...["0", "-1", "01", "1.5", "abc", "", "1e2", "+1", "0x2", "1234567890"].map((v) => `${EVENT}?runId=${GUARD_RUN}&seq=${encodeURIComponent(v)}&part=message`),
+    ...["bogus", "Message", "MESSAGE", "command,output", "", "text", "all", " message"].map((v) => `${EVENT}?runId=${GUARD_RUN}&seq=2&part=${encodeURIComponent(v)}`),
+    ...["0", "-1", "01", "1.5", "abc", "", "1e2", "+1", "1000000"].map((v) => `${EVENT}?${ok}&page=${encodeURIComponent(v)}`),
+  ];
+  for (const url of bad) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 400, `${url} → 400`);
+    assert.deepEqual(jsonOf(r), { error: "bad_request" });
+    assertSafeHeaders(r);
+  }
+  for (const url of [GOOD_EVENT, `${GOOD_EVENT}&page=1`, `${EVENT}?runId=${GUARD_RUN}&seq=3&part=command`, `${EVENT}?runId=${GUARD_RUN}&seq=4&part=output`, `${EVENT}?runId=${GUARD_RUN}&seq=6&part=error`]) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 200, `${url} → 200`);
+    assertSafeHeaders(r);
+  }
+  await s.close();
+});
+
+test("AW QUERY 顺序：鉴权 → 参数 → 首次发布 → 运行可用——未发布时坏参数仍是 400", async () => {
+  const s = await guardServer({ refresh: false });
+  const bad = await drive(s.handler, { url: `${GOOD_ACTIVITY}&x=1`, headers: auth(s) });
+  assert.equal(bad.status, 400, "参数校验先于 loading");
+  await s.close();
+});
+
+test("AW 不可用 → 固定 404，不回显 runId：未知运行、不在快照里的运行、读不出转录的运行、读模型没有读入口", async () => {
+  const s = await guardServer();
+  const urls = [
+    `${ACTIVITY}?runId=run_nobody`, `${ACTIVITY}?runId=run_fail`, `${ACTIVITY}?runId=run_wait`,
+    `${EVENT}?runId=run_nobody&seq=2&part=message`, `${EVENT}?runId=run_fail&seq=2&part=message`,
+  ];
+  for (const url of urls) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 404, url);
+    assert.deepEqual(jsonOf(r), { error: "not_found" });
+    assertSafeHeaders(r);
+    assert.ok(!r.body.includes("run_"), "404 体里没有 runId");
+  }
+  await s.close();
+  // 读模型没有 readRunEvents：两个接口都是固定 404。
+  const bare = createOwnerDashboardServer({
+    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: GUARD_ENV,
+    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn, nowFn: () => NOW,
+    createReadModelFn: () => guardModel({ withReader: false }),
+  });
+  assert.equal(await bare.refreshNow(), "ready");
+  for (const url of [GOOD_ACTIVITY, GOOD_EVENT]) {
+    const r = await drive(bare.handler, { url, headers: auth(bare) });
+    assert.deepEqual([r.status, jsonOf(r)], [404, { error: "not_found" }], url);
+  }
+  await bare.close();
+});
+
+test("AW 事件接口的 404：seq 不存在、part 不适用于这类事件、页号越界——都是固定 404，体里没有任何回显", async () => {
+  const s = await guardServer();
+  for (const query of [
+    "seq=99&part=message", // 没有这条事件
+    "seq=1&part=message", // seq 1 是控制面记账，不在时间线上
+    "seq=2&part=command", "seq=2&part=output", "seq=2&part=error", // 消息只有 message
+    "seq=3&part=message", "seq=4&part=command", "seq=5&part=output", "seq=6&part=command", // 别类事件各有自己的 part
+    "seq=2&part=message&page=2", "seq=3&part=command&page=2", "seq=6&part=error&page=999", // 这些文本只有 1 页
+  ]) {
+    const r = await drive(s.handler, { url: `${EVENT}?runId=${GUARD_RUN}&${query}`, headers: auth(s) });
+    assert.equal(r.status, 404, query);
+    assert.deepEqual(jsonOf(r), { error: "not_found" });
+    assertSafeHeaders(r);
+  }
+  await s.close();
+});
+
+test("AW LOADING: 首次发布之前——activity 200 + status loading（不带数据）；event 固定 404", async () => {
+  const s = await guardServer({ refresh: false });
+  const a = await drive(s.handler, { url: GOOD_ACTIVITY, headers: auth(s) });
+  assert.deepEqual([a.status, jsonOf(a)], [200, { status: "loading" }]);
+  const e = await drive(s.handler, { url: GOOD_EVENT, headers: auth(s) });
+  assert.deepEqual([e.status, jsonOf(e)], [404, { error: "not_found" }]);
+  await s.close();
+});
+
+test("AW 内部失败 → 固定 500，错误原文（含路径与秘密）不出接口", async () => {
+  const boom = new Error(`EACCES: permission denied, open '${RUN_DIR}\\projects\\alpha\\run_live.jsonl' ${GUARD_SECRET}`);
+  const s = await guardServer({ throws: boom });
+  for (const url of [GOOD_ACTIVITY, GOOD_EVENT]) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 500, url);
+    assert.deepEqual(jsonOf(r), { error: "internal" });
+    assert.ok(!r.body.includes("EACCES") && !r.body.includes(RUN_DIR) && !r.body.includes(GUARD_SECRET));
+  }
+  await s.close();
+});
+
+test("AW LEAK: 响应里没有仓库 / 工作树 / 运行目录路径、令牌，也没有未脱敏的秘密——事件里注入了已知秘密值与服务端路径", async () => {
+  const s = await guardServer();
+  const needles = [RUN_DIR, WORKSPACE_ROOT, `${WORKSPACE_ROOT}\\.wao-worktrees`, GUARD_SECRET, s.token].flatMap((n) => [n, JSON.stringify(n).slice(1, -1)]);
+  const urls = [
+    ...["all", "messages", "commands", "errors"].map((f) => `${GOOD_ACTIVITY}&filter=${f}`),
+    ...[["2", "message"], ["3", "command"], ["4", "output"], ["6", "error"]].map(([seq, part]) => `${EVENT}?runId=${GUARD_RUN}&seq=${seq}&part=${part}`),
+  ];
+  let redacted = 0;
+  for (const url of urls) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 200, url);
+    for (const needle of needles) assert.ok(!r.body.includes(needle), `${url} 泄漏了 ${needle}`);
+    assert.ok(!/worktreePath|\.wao-worktrees/.test(r.body));
+    if (r.body.includes("[REDACTED")) redacted += 1;
+  }
+  assert.ok(redacted >= 5, "秘密确实是被替换掉的（不是没出现过）");
+  // 写文件：工作树内给相对路径。
+  const page = jsonOf(await drive(s.handler, { url: GOOD_ACTIVITY, headers: auth(s) }));
+  assert.equal(page.rows.find((r) => r.code === "WRITE").path, "src/a.js");
+  await s.close();
+});
+
+test("AW 与 /api/worker 同一套：401 / 405 / 400 / 404 的错误体逐字相同，旧接口与 /api/worker 的路由不受影响", async () => {
+  const s = await guardServer();
+  const worker = await drive(s.handler, { url: "/api/worker?runId=run_nobody", headers: auth(s) });
+  const aw = await drive(s.handler, { url: `${ACTIVITY}?runId=run_nobody`, headers: auth(s) });
+  assert.equal(aw.status, worker.status);
+  assert.equal(aw.body, worker.body);
+  // 紧邻的路径仍是固定 404，旧接口照常。
+  for (const url of [`${ACTIVITY}/`, `${ACTIVITY}/x`, `${EVENT}/`, `${EVENT}s`, "/api/worker/", "/api/worker/Activity"]) {
+    assert.equal((await drive(s.handler, { url, headers: auth(s) })).status, 404, url);
+  }
+  assert.equal((await drive(s.handler, { url: "/api/workers", headers: auth(s) })).status, 200);
+  assert.equal((await drive(s.handler, { url: "/api/runs?limit=1", headers: auth(s) })).status, 200);
+  assert.ok(AW_ROUTES.length === 2);
+  await s.close();
 });
 
 test("TOKEN: 令牌不出现在三个接口任何状态的响应体或响应头里", async () => {

@@ -257,18 +257,29 @@ const UNC_PATH_RE = new RegExp(`(\\\\\\\\${PATH_TAIL})`, "g");
 // 空白、开括号，或"前面是行首/空白/开括号"的引号才算数——词字符后面的撇号不是前导
 // （修订版写法 `R3'/R4' 已 PASS` 原样保留）。
 // 整段前导用非捕获组写，外层只留"前导 | 路径"两个捕获组。
-const POSIX_PREFIX = `(?:^|[\\s(\\[（【{]|(?:^|[\\s(\\[（【{])["'])`;
+const POSIX_PREFIX = `(?:^|[\\s(\\[（【{]|(?:^|[\\s(（【{])["'])`;
 const POSIX_PATH_RE = new RegExp(`(${POSIX_PREFIX})(\\/{1,}${PATH_TAIL})`, "g");
+// 第 141c 批修正一、二：JSON 值与数组元素里的路径（`"command":"/c/…"`、`["a","/home/x/y"]`、`=["/x"]`）的引号
+// 前面是 `:` `,` `=` `[`，不是空白——这几个字符后面**紧跟一个引号**也算前导。但这种前导下的斜杠开头文字常常
+// 是路由（`{"route":"/api/worker"}`），所以只认文件系统根的形状才折：MSYS 盘符 `/c/…`，或常见根目录
+// `/Users/ /home/ /tmp/ /mnt/ /var/ /opt/ /root/ /etc/ /usr/ /private/`。其余的原样保留；空白、开括号前导
+// 的旧规则（上面）不变。裸的 `:/x`、`,/x` 不算前导（`https://x/y` 的 `:` 后面是斜杠，不是引号）。
+const FS_ROOT = "(?:[A-Za-z]|Users|home|tmp|mnt|var|opt|root|etc|usr|private)";
+const POSIX_JSON_ROOTED_RE = new RegExp(`([:,=\\[]["'])(\\/{1,}${FS_ROOT}[\\\\/]+${PATH_TAIL})`, "g");
+// 完整 URL（`scheme://` 起，到空白或引号为止）里的任何部分都不折：`?next=/d/x`、`;next=/d/x` 是查询串，不是
+// 路径。`file://` 不在此列（它带的就是本地路径，盘符路径照旧折）；scheme 至少两个字符（`C://x` 是盘符路径）。
+const URL_SPAN_RE = /(?<![A-Za-z0-9+.-])(?!file:)[A-Za-z][A-Za-z0-9+.-]+:\/\/[^\s"']*/gi;
 
 // 加引号的完整路径（命令行、JSON 里最常见）：引号后紧跟盘符 / UNC / MSYS 盘符，到**配对的**
 // 收尾引号为止整段是路径——目录里有几个空格、点号、撇号都不用猜（收尾引号后面必须是边界：
 // 行尾、空白、半角或全角标点）。收尾引号找不到就不匹配，回到下面不加引号的规则。
 const QUOTED_PATH_RE = /(^|[^A-Za-z0-9_])(["'])((?:[A-Za-z]:[\\/]+|\\\\|\/[A-Za-z]\/)(?:(?!\2)[^\r\n]){0,1000}?)\2(?=$|[\s,;:)\]}>，。；：、！？）】》」”])/g;
-// 参数值里的 MSYS 盘符路径：`--cwd=/d/projects/x`、`CWD=/d/projects/x`。只认 `--flag=` 与全大写
-// 变量名，且第一段必须是单个字母（盘符）——`?next=/d/x`、`key=value/other` 不折。盘符与 UNC 路径
-// 跟在 `=` 后面本来就能被上面的规则认出（`=` 不是词字符）。
-const FLAG_PREFIX = "(?:--?[A-Za-z][A-Za-z0-9_.-]*|[A-Z][A-Z0-9_]*)=";
-const MSYS_PARAM_PATH_RE = new RegExp(`((?:^|[\\s(\\[（【{])${FLAG_PREFIX})(\\/[A-Za-z]\\/${PATH_TAIL})`, "g");
+// 参数值里的 MSYS 盘符路径：`--cwd=/d/projects/x`、`CWD=/d/projects/x`、`d=/c/Users/x/Temp/a`。认
+// `--flag=` 与变量名（大小写不限，第 141c 批修正一起：真实转录里有小写的 `d=/c/…` 赋值），名字前面
+// 只能是行首、空白、`;`、`&`、`(` 与几种开括号；第一段必须是单个字母（盘符）——`?next=/d/x`（前面是
+// `?`）、`key=value/other` 不折。盘符与 UNC 路径跟在 `=` 后面本来就能被上面的规则认出（`=` 不是词字符）。
+const FLAG_PREFIX = "(?:--?[A-Za-z][A-Za-z0-9_.-]*|[A-Za-z_][A-Za-z0-9_]*)=";
+const MSYS_PARAM_PATH_RE = new RegExp(`((?:^|[\\s;&(\\[（【{])${FLAG_PREFIX})(\\/[A-Za-z]\\/${PATH_TAIL})`, "g");
 
 /** 路径的最后一段（末尾分隔符不算）；拆不出段时为空串。 */
 function lastPathSegment(path) {
@@ -276,18 +287,30 @@ function lastPathSegment(path) {
   return segments.length === 0 ? "" : segments[segments.length - 1];
 }
 
-/**
- * 把绝对路径折成 `…/最后一段`：只保留人认得出是哪个文件的那一段，目录与根全部去掉。
- * 相对路径、普通斜杠词（wao/run_x、Q1/Q2）与 URL（https://…）不动；词字符后面的
- * 撇号不算路径前导。先折路径再做控制字符清理与限长。
- */
-export function foldAbsolutePaths(text) {
+function foldPlainText(text) {
   return text
     .replace(QUOTED_PATH_RE, (match, lead, quote, path) => `${lead}${quote}…/${lastPathSegment(path)}${quote}`)
     .replace(MSYS_PARAM_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`)
     .replace(DRIVE_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`)
     .replace(UNC_PATH_RE, (match, path) => `…/${lastPathSegment(path)}`)
-    .replace(POSIX_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`);
+    .replace(POSIX_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`)
+    .replace(POSIX_JSON_ROOTED_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`);
+}
+
+/**
+ * 把绝对路径折成 `…/最后一段`：只保留人认得出是哪个文件的那一段，目录与根全部去掉。
+ * 相对路径、普通斜杠词（wao/run_x、Q1/Q2）与完整 URL（https://…，到空白或引号为止，查询串里的
+ * `next=/d/x` 也不折）不动；词字符后面的撇号不算路径前导；JSON 值与数组元素里的路由字符串
+ * （`"/api/worker"`）不动，只有文件系统根形状的才折。先折路径再做控制字符清理与限长。
+ */
+export function foldAbsolutePaths(text) {
+  let out = "";
+  let last = 0;
+  for (const match of text.matchAll(URL_SPAN_RE)) {
+    out += foldPlainText(text.slice(last, match.index)) + match[0];
+    last = match.index + match[0].length;
+  }
+  return last === 0 ? foldPlainText(text) : out + foldPlainText(text.slice(last));
 }
 
 /**
@@ -948,9 +971,11 @@ const STAGE_DISPLAY = Object.freeze({
  * @param {object} [input.env] — 精确脱敏用的环境（缺省 process.env）：标题与项目名进快照前先
  *   把环境里的秘密值整段替换（形状脱敏之前、截断之前）
  * @returns {{refresh: Function, snapshot: Function, resolveRun: Function,
- *   readRunEvents: Function, projectRepoRoot: Function}} readRunEvents / projectRepoRoot
- *   是第 141 批给服务端的两个只读入口（单 worker 详情与产物接口）：前者按 resolveRun 的
- *   授权读一个运行当下的转录事件，后者给项目仓库根——都不进快照。
+ *   readRunEvents: Function, readRunTranscript: Function, projectRepoRoot: Function}}
+ *   readRunEvents / projectRepoRoot 是第 141 批给服务端的两个只读入口（单 worker 详情与产物接口）：
+ *   前者按 resolveRun 的授权读一个运行当下的转录事件，后者给项目仓库根——都不进快照。
+ *   readRunTranscript（第 141c 批）是 readRunEvents 的同一次读取外加转录身份（字节的 sha256），
+ *   给全文接口的缓存做键。
  */
 export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {}, env } = {}) {
   if (typeof runDir !== "string" || runDir.length === 0) {
@@ -1923,6 +1948,18 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
    * @returns {Promise<object[]|null>}
    */
   async function readRunEvents(runId) {
+    return (await readRunTranscript(runId))?.events ?? null;
+  }
+
+  /**
+   * readRunEvents 的同一次读取，外加这份转录的身份：identity = 字节的 sha256（十六进制；各副本
+   * 已证明逐字节相同）。第 141c 批：全文接口的有界缓存把它放进键里，转录变了（追加、改写、换副本）
+   * 身份就变，旧缓存自然失效。授权、读取与失败口径与 readRunEvents 完全相同（读不出一律 null）。
+   *
+   * @param {unknown} runId
+   * @returns {Promise<{events: object[], identity: string}|null>}
+   */
+  async function readRunTranscript(runId) {
     if (resolveRun(runId) === null) return null;
     try {
       // 与刷新同一个文件名口径（isRunTranscriptName + 去掉 .jsonl 得 runId），不另拼文件名。
@@ -1943,7 +1980,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
           return null;
         }
       }
-      return eventsOf(first);
+      return { events: eventsOf(first), identity: firstHash };
     } catch {
       return null;
     }
@@ -1972,5 +2009,5 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     return { runId, availability: run.availability, transcriptPath: run.primaryPath, bucket: run.primaryBucket };
   }
 
-  return { refresh, snapshot, resolveRun, readRunEvents, projectRepoRoot };
+  return { refresh, snapshot, resolveRun, readRunEvents, readRunTranscript, projectRepoRoot };
 }
