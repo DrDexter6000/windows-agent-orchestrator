@@ -6,18 +6,19 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, rmSync, rmdirSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { symlinkSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
 const require = createRequire(import.meta.url);
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 import {
   planWorktreeReclaim, computeTreeFingerprint, untrackedIgnoredManifest, RECENT_BOUND_EVENT_MS,
 } from "../../src/application/worktreeReclaim.js";
 import { worktreeCommand } from "../../src/commands/worktree.js";
+import { closeRunLineage } from "../../src/application/lineageClose.js";
 
 import {
   git, makeRepo, mkdtemp, makeWorktree, makeLinkedWorktree, makeRunTreeIn, commitIn, seedTranscript,
@@ -887,6 +888,107 @@ test("分类：detached HEAD + 新提交（计划前切）→ tree_protection/he
   assert.equal(item.reason, "head_drift");
 });
 
+// TD-375：头指针漂移两处同一判定。同一棵真实的树，reclaim 计划的第 7 门与
+// `runs lineage-close` 的释放门必须给出同一结论——旧口径里 lineage-close 比树 HEAD 与
+// 交付提交（这里的转录给的是假交付提交，HEAD 永远对不上），reclaim 比树 HEAD 与分支
+// tip，同一棵树 lineage-close 判漂移留下、reclaim 却认为可回收。
+// 每个形状写死 lineage-close 的结果：detached HEAD、在别的分支上，lineage-close 连"这是哪个
+// 成员的分支"都认不出，在更前面的一道门就是 skipped_not_tip；只有"树在自己分支上、但读到的
+// tip 与 HEAD 不一致"才走到漂移判定本身，是 skipped_head_drift。后者在真实仓里造不出静止
+// 的形状（附着在分支上时 HEAD 就是分支引用），用 gitRev 缝在读完 HEAD 之后把分支推走，复现
+// 两次读取之间 ref 被改动；reclaim 计划面没有对应的缝，这一形状只钉 lineage-close。
+const DRIFT_SHAPES = [
+  {
+    name: "附着自己的分支、HEAD=tip、tip≠交付提交（分支在交付之后又被推进过）",
+    drifted: false,
+    lineageOutcome: "released",
+    setup: (wt) => { commitIn(wt, "after-delivery.txt", "x\n"); },
+  },
+  {
+    name: "附着自己的分支、HEAD=tip=基点（没有新提交）",
+    drifted: false,
+    lineageOutcome: "released",
+    setup: () => {},
+  },
+  {
+    name: "detached HEAD（在 tip 上）",
+    drifted: true,
+    lineageOutcome: "skipped_not_tip",
+    setup: (wt) => { git(["checkout", "--detach", "HEAD"], wt); },
+  },
+  {
+    name: "detached HEAD + 只在这里的新提交",
+    drifted: true,
+    lineageOutcome: "skipped_not_tip",
+    setup: (wt) => {
+      git(["checkout", "--detach", "HEAD"], wt);
+      commitIn(wt, "only-here.txt", "x\n");
+    },
+  },
+  {
+    name: "在别的分支上",
+    drifted: true,
+    lineageOutcome: "skipped_not_tip",
+    setup: (wt) => { git(["checkout", "-b", "scratch-branch"], wt); },
+  },
+  {
+    name: "读完 HEAD 之后分支被推走（HEAD≠tip）",
+    drifted: true,
+    lineageOutcome: "skipped_head_drift",
+    skipReclaimPlan: true, // 计划面没有缝，造不出这个形状
+    setup: (wt) => { commitIn(wt, "moves-later.txt", "x\n"); },
+    raceGitRev: (repo, branchRef, otherCommit) => {
+      let headRead = false;
+      return (path, args) => {
+        const out = execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+        if (args[0] === "rev-parse" && args[1] === "HEAD") headRead = true;
+        // 读完 HEAD 之后，分支 tip 那一次读取回的是被别的进程推走后的值。
+        if (headRead && args[0] === "rev-parse" && args[1] === branchRef) return otherCommit;
+        return out;
+      };
+    },
+  },
+];
+
+for (const shape of DRIFT_SHAPES) {
+  test(`TD-375 两处同判：${shape.name} → ${shape.drifted ? "两处都留树" : "两处都放"}`, async () => {
+    const s = await scenario();
+    const wt = s.wt("run_dsame");
+    shape.setup(wt);
+    s.seed("run_dsame", decidedRunEvents({
+      repo: s.repo, wt, branch: "wao/run_dsame", baseCommit: s.mainCommit, decision: "accepted",
+    }));
+    const branchTip = git(["rev-parse", "refs/heads/wao/run_dsame"], s.repo);
+
+    // reclaim 计划：第 7 门。
+    if (!shape.skipReclaimPlan) {
+      const { plan } = await s.plan();
+      const tree = itemsOf(plan, "run_dsame").find((i) => i.action === "remove_tree");
+      const kept = oneItem(plan, "run_dsame");
+      if (shape.drifted) {
+        assert.equal(tree, undefined, "漂移的树不进回收计划");
+        assert.equal(kept.category, "tree_protection");
+        assert.equal(kept.reason, "head_drift");
+      } else {
+        assert.ok(tree, `没漂移的树应进回收计划：${JSON.stringify(kept)}`);
+        assert.equal(tree.category, "reclaim");
+      }
+    }
+
+    // lineage-close：同一棵树，结果按形状写死。
+    const closed = await closeRunLineage({
+      runId: "run_dsame", runDir: s.runDir, reasonText: "TD-375 两处同判", apply: true,
+      ...(shape.raceGitRev
+        ? { gitRev: shape.raceGitRev(s.repo, "refs/heads/wao/run_dsame", s.mainCommit) }
+        : {}),
+    });
+    assert.equal(closed.worktrees[0].outcome, shape.lineageOutcome, JSON.stringify(closed.worktrees));
+    if (shape.drifted) assert.ok(existsSync(wt), "lineage-close 留树");
+    else assert.ok(!existsSync(wt), "lineage-close 释放树");
+    assert.equal(git(["rev-parse", "refs/heads/wao/run_dsame"], s.repo), branchTip, "两条路径都不动分支");
+  });
+}
+
 test("分类：嵌套保护 → tree_protection/has_kept_descendant", async () => {
   const s = await scenario();
   const outer = s.wt("run_outer");
@@ -1293,6 +1395,88 @@ test("CLI：worktree remove 不删上锁的树；经 junction 给出时删的是
   assert.ok(removed.toLowerCase().endsWith("\\.wao-worktrees\\run_remove_via_link"), `报的是登记的树：${removed}`);
 });
 
+// ── 第 150 批修正二：CLI worktree remove 的登记残留与悬空根链接 ──
+// 用 --relative-paths 建的树，管理条目里的 gitdir 是相对路径：旧清理对不上，树删了、登记留着，
+// CLI 还打印 removed。登记清不掉时必须如实报错，不报成功。
+function adminIdsOf(repo) {
+  const dir = join(repo, ".git", "worktrees");
+  return existsSync(dir) ? readdirSync(dir).filter((n) => !n.startsWith(".")) : [];
+}
+
+async function captureLogs(fn) {
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await fn();
+  } finally {
+    console.log = origLog;
+  }
+  return logs;
+}
+
+test("CLI：worktree remove 删 --relative-paths 建的树——树与登记都清净，才打印 removed", async (t) => {
+  const s = await scenario();
+  const wt = join(s.repo, ".wao-worktrees", "run_cli_rel");
+  try {
+    git(["worktree", "add", "--relative-paths", wt, "-b", "wao/run_cli_rel"], s.repo);
+  } catch {
+    t.skip("此 git 不支持 worktree add --relative-paths");
+    return;
+  }
+  assert.ok(adminIdsOf(s.repo).includes("run_cli_rel"), "前置：登记在");
+  const logs = await captureLogs(() => worktreeCommand(["remove", wt], {}));
+  assert.ok(!existsSync(wt), "树删净");
+  assert.ok(!adminIdsOf(s.repo).includes("run_cli_rel"), "相对路径登记也清掉");
+  assert.ok(logs.some((l) => l.includes('"removed"')), "清净了才打印 removed");
+});
+
+test("CLI：树删了但登记清不掉（Windows：进程以管理条目目录为 cwd）→ worktree remove 报错说明登记残留，不打印 removed", async (t) => {
+  if (process.platform !== "win32") { t.skip("目录被进程 cwd 锁死是 Windows 行为"); return; }
+  const s = await scenario();
+  const wt = s.wt("run_cli_resid");
+  const adminDir = join(s.repo, ".git", "worktrees", "run_cli_resid");
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: adminDir, stdio: "ignore", windowsHide: true });
+  try {
+    await new Promise((r) => holder.once("spawn", r));
+    let logs;
+    await assert.rejects(
+      async () => { logs = await captureLogs(() => worktreeCommand(["remove", wt], {})); },
+      /登记/,
+    );
+    assert.equal(logs, undefined, "报错路径不会走到打印 removed");
+    assert.ok(!existsSync(wt), "树本身已删净");
+    assert.ok(adminIdsOf(s.repo).includes("run_cli_resid"), "登记确实还在（报错没有说谎）");
+  } finally {
+    const exited = new Promise((r) => holder.once("exit", r));
+    holder.kill();
+    await exited;
+  }
+});
+
+test("CLI：树根是悬空链接 → worktree remove 拒绝，链接原样（existsSync 看不见悬空链接，不能当成已经不在）", async (t) => {
+  const s = await scenario();
+  s.wt("run_cli_anchor"); // 让 .wao-worktrees 在
+  const link = join(s.repo, ".wao-worktrees", "run_cli_dang");
+  const target = join(s.base, "dang-target");
+  mkdirSync(target, { recursive: true });
+  try {
+    symlinkSync(target, link, "junction");
+  } catch {
+    t.skip("此环境不允许创建 junction，无法构造");
+    return;
+  }
+  rmdirSync(target);
+  assert.equal(existsSync(link), false, "前置：existsSync 把悬空链接看成不存在");
+  let logs;
+  await assert.rejects(
+    async () => { logs = await captureLogs(() => worktreeCommand(["remove", link], {})); },
+    /只删 git 登记在册的链接工作树/,
+  );
+  assert.equal(logs, undefined, "不打印 removed");
+  assert.ok(lstatSync(link).isSymbolicLink(), "链接原样");
+});
+
 test("CLI：未知子命令报错列出新子命令", async () => {
   await assert.rejects(
     () => worktreeCommand(["frobnicate"], {}),
@@ -1464,6 +1648,27 @@ test("清单指纹：lstat/readdir 读不出 → 抛错（读不出就保留，�
     }),
     /readdir failed/,
   );
+});
+
+test("清单指纹（第 150 批修正二）：每行记路径所属类别（status 的 ?? / !!），目录展开出来的文件继承所在记录的类", async () => {
+  const dir = await mkdtemp("wao-manifest-");
+  bases.push(dir);
+  mkdirSync(join(dir, "inner"), { recursive: true });
+  writeFileSync(join(dir, "inner", "deep.txt"), "x\n");
+  writeFileSync(join(dir, "a.txt"), "a\n");
+  writeFileSync(join(dir, "b.txt"), "b\n");
+  const U = (path) => ({ x: "?", y: "?", path });
+  const I = (path) => ({ x: "!", y: "!", path });
+  const lines = (buf) => buf.toString("utf8").split("\n").filter(Boolean);
+  assert.match(lines(untrackedIgnoredManifest(dir, [U("a.txt")]))[0], /^a\.txt\t\?\?\t\d+\t/, "未跟踪记 ??");
+  assert.match(lines(untrackedIgnoredManifest(dir, [I("a.txt")]))[0], /^a\.txt\t!!\t\d+\t/, "被忽略记 !!");
+  assert.match(lines(untrackedIgnoredManifest(dir, [I("inner")]))[0], /^inner\/deep\.txt\t!!\t/, "目录展开出来的文件继承所在记录的类");
+  assert.match(lines(untrackedIgnoredManifest(dir, [U("inner")]))[0], /^inner\/deep\.txt\t\?\?\t/);
+  // 两个文件互换忽略身份：路径、字节数、mtime 都一样，只有类别不同——清单必须不同。
+  const before = untrackedIgnoredManifest(dir, [U("a.txt"), I("b.txt")]);
+  const after = untrackedIgnoredManifest(dir, [I("a.txt"), U("b.txt")]);
+  assert.notDeepEqual(before, after, "互换忽略身份后清单要变");
+  assert.deepEqual(untrackedIgnoredManifest(dir, [I("b.txt"), U("a.txt")]), before, "记录顺序不影响清单");
 });
 
 test("清单指纹：在册嵌套 worktree 子树不计入外树清单（嵌套一轮清完的前提）", async () => {

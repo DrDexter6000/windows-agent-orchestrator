@@ -4785,7 +4785,9 @@ export class Run {
         return;
       }
       const removed = await this.removeWorktreeForTerminalRelease(wtPath);
-      if (!removed || existsSync(wtPath)) {
+      // removeWorktreeNoForce 返回 true | false | "tree_contains_junction"（树里有链接危险、
+      // 没调 git）：只有恰好 true 才算删成功——字符串原因是真值，不能判真假。
+      if (removed !== true || existsSync(wtPath)) {
         await this.transcript.append("run.worktree_release_failed", { reason: "still_present" });
       } else {
         await this.transcript.append("run.worktree_released", {});

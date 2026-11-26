@@ -21,13 +21,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, rmdirSync, existsSync, readFileSync, writeFileSync, appendFileSync, statSync, lstatSync, readdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { RunManager, Run, worktreeOccupiedByOtherRuns } from "../../src/runManager.js";
 import { JsonlTranscript } from "../../src/transcript.js";
-import { removeWorktreeNoForce, terminalWorktreeVerdict } from "../../src/isolation.js";
+import {
+  findTreeLinkHazard, indexInventoryUnreliable, removeWorktreeNoForce, terminalWorktreeVerdict,
+} from "../../src/isolation.js";
+import { isTreeHeadDrifted } from "../../src/application/lineageClose.js";
 import { listTranscriptsDeep } from "../../src/projectBuckets.js";
 
 function cleanupDir(dir) { rmSync(dir, { recursive: true, force: true }); }
@@ -677,6 +680,195 @@ test("removeWorktreeNoForce: 干净树删除；脏树拒绝且不强删", async 
     // 不在盘上 → true（无事可做）
     assert.equal(removeWorktreeNoForce(join(dir, ".wao-worktrees", "run_absent")), true);
   } finally { cleanupDir(dir); }
+});
+
+// ── 第 150 批修正一：保守原语不碰带 junction 的树 ──
+// 无 --force 的 `git worktree remove` 对"被忽略的 junction"照样跟进、删掉目标目录里的
+// 文件（实测），"不干净就拒绝"保护不到这个形状。原语先做一遍不写入的检查（lstat 不跟进
+// 链接遍历整棵树），发现 junction 就保留整棵树、返回闭集原因 tree_contains_junction，
+// 不调用 git。Node 分不出 junction 与目录符号链接（lstat/stat/readlink 完全一样），
+// 目录型链接一并保守处置；指向文件的符号链接 git 不跟进，不在此列。
+for (const kind of ["junction", "dir"]) {
+  for (const ignored of [true, false]) {
+    test(`removeWorktreeNoForce: 树里有${ignored ? "被忽略的" : "未忽略的"} ${kind} 链接 → 保留整棵树、返回 tree_contains_junction、不调 git、树外文件不动`, async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "wao-twr-nfj-"));
+      const outside = mkdtempSync(join(tmpdir(), "wao-twr-out-"));
+      try {
+        makeGitRepo(dir);
+        if (ignored) appendFileSync(join(dir, ".git", "info", "exclude"), "linkdir\n", "utf8");
+        const wt = addWorktree(dir, "run_twr_nfj");
+        const secret = join(outside, "secret.txt");
+        writeFileSync(secret, "OUTSIDE-SECRET\n", "utf8");
+        try {
+          symlinkSync(outside, join(wt, "linkdir"), kind);
+        } catch {
+          t.skip(`此环境不允许创建 ${kind} 链接，无法构造`);
+          return;
+        }
+        const gitCalls = [];
+        const result = removeWorktreeNoForce(wt, {
+          execFn: (file, args, opts) => { gitCalls.push(args); return execFileSync(file, args, opts); },
+        });
+        assert.equal(result, "tree_contains_junction");
+        assert.ok(!gitCalls.some((a) => a[0] === "worktree" && a[1] === "remove"), "没有调用 git worktree remove");
+        assert.ok(existsSync(wt) && lstatSync(join(wt, "linkdir")).isSymbolicLink(), "整棵树与链接原样");
+        assert.equal(readFileSync(secret, "utf8"), "OUTSIDE-SECRET\n", "树外文件原样");
+        assert.ok(branchExists(dir, "run_twr_nfj"), "分支不动");
+      } finally { cleanupDir(dir); cleanupDir(outside); }
+    });
+  }
+}
+
+test("removeWorktreeNoForce（第 150 批修正二）: 树根是链接（有效或悬空）→ 一律不动、返回 false；悬空链接 existsSync 看不见，不能判成'本来就不在'", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-twr-rootlink-"));
+  try {
+    makeGitRepo(dir);
+    mkdirSync(join(dir, ".wao-worktrees"), { recursive: true });
+    const real = addWorktree(dir, "run_twr_rl_real");
+    const validLink = join(dir, ".wao-worktrees", "run_twr_rl_valid");
+    const danglingLink = join(dir, ".wao-worktrees", "run_twr_rl_dang");
+    const target = join(dir, "dangling-target");
+    mkdirSync(target, { recursive: true });
+    try {
+      symlinkSync(real, validLink, "junction");
+      symlinkSync(target, danglingLink, "junction");
+    } catch {
+      t.skip("此环境不允许创建 junction，无法构造");
+      return;
+    }
+    rmdirSync(target);
+    assert.equal(existsSync(danglingLink), false, "前置：existsSync 把悬空链接看成不存在");
+    assert.equal(removeWorktreeNoForce(danglingLink), false, "悬空根链接：返回失败，不是 true");
+    assert.ok(lstatSync(danglingLink).isSymbolicLink(), "悬空链接原样");
+    assert.equal(removeWorktreeNoForce(validLink), false, "指向真树的根链接：不动");
+    assert.ok(lstatSync(validLink).isSymbolicLink() && existsSync(join(real, "a.txt")), "链接与真树原样");
+  } finally { cleanupDir(dir); }
+});
+
+test("removeWorktreeNoForce: 被跟踪的文件符号链接不挡干净树的回收（只有目录型链接才保守处置）", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-twr-nfs-"));
+  try {
+    makeGitRepo(dir);
+    // 本机 git 缺省 core.symlinks=false（符号链接被检出成普通文本文件，守卫就形同虚设）：
+    // 显式打开，让 worktree 检出里真有被跟踪的符号链接。
+    execSync("git config core.symlinks true", { cwd: dir, stdio: "ignore" });
+    try {
+      symlinkSync("a.txt", join(dir, "ln.txt"), "file");
+    } catch {
+      t.skip("此环境不允许创建符号链接，无法构造");
+      return;
+    }
+    execSync("git add ln.txt && git commit -qm symlink", { cwd: dir, stdio: "ignore" });
+    const mode = execSync("git ls-files -s ln.txt", { cwd: dir, encoding: "utf8" });
+    if (!mode.startsWith("120000")) {
+      t.skip("此环境 git 没把它记成符号链接（core.symlinks 关闭）");
+      return;
+    }
+    const wt = addWorktree(dir, "run_twr_nfs");
+    if (!lstatSync(join(wt, "ln.txt")).isSymbolicLink()) {
+      t.skip("此环境检出时没生成符号链接");
+      return;
+    }
+    assert.equal(removeWorktreeNoForce(wt), true, "树干净（符号链接是被跟踪的内容）→ 照常删除");
+    assert.ok(!existsSync(wt));
+  } finally { cleanupDir(dir); }
+});
+
+test("findTreeLinkHazard: 目录型链接、悬空链接、读不出的目录都报；指向文件的链接与普通树不报", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-twr-haz-"));
+  const outside = mkdtempSync(join(tmpdir(), "wao-twr-hazout-"));
+  try {
+    mkdirSync(join(dir, "deep", "er"), { recursive: true });
+    writeFileSync(join(dir, "deep", "er", "f.txt"), "f\n", "utf8");
+    assert.equal(findTreeLinkHazard(dir), null, "普通树不报");
+    writeFileSync(join(outside, "t.txt"), "t\n", "utf8");
+    try {
+      symlinkSync(join(outside, "t.txt"), join(dir, "deep", "filelink"), "file");
+    } catch {
+      t.skip("此环境不允许创建符号链接，其余形状都需要链接");
+      return;
+    }
+    assert.equal(findTreeLinkHazard(dir), null, "指向文件的符号链接 git 不跟进，不报");
+    symlinkSync(outside, join(dir, "deep", "er", "dirlink"), "junction");
+    const hit = findTreeLinkHazard(dir);
+    assert.equal(hit.path, "deep/er/dirlink", "相对路径，/ 分隔");
+    assert.equal(hit.why, "directory_link");
+    assert.equal(findTreeLinkHazard(dir, { skip: ["deep/er/dirlink"] }), null, "skip 名单（嵌套在册树）不走进去");
+    assert.equal(findTreeLinkHazard(dir, { skip: ["DEEP/ER/DIRLINK"] }), null, "skip 按大小写折叠比较");
+    rmSync(join(dir, "deep", "er", "dirlink"), { recursive: true, force: true });
+    symlinkSync(join(outside, "gone-target"), join(dir, "deep", "dangling"), "file");
+    const dangling = findTreeLinkHazard(dir);
+    assert.equal(dangling.path, "deep/dangling");
+    assert.match(dangling.why, /^dangling:/, "目标读不出的链接：判断不了就当危险");
+    rmSync(join(dir, "deep", "dangling"), { force: true }); // 只留下"读不出的目录"这一种危险
+    const unreadable = findTreeLinkHazard(dir, {
+      io: {
+        readdirSync: (p, o) => {
+          if (String(p).endsWith(join("deep", "er"))) throw Object.assign(new Error("x"), { code: "EACCES" });
+          return readdirSync(p, o);
+        },
+        statSync,
+      },
+    });
+    assert.equal(unreadable.path, "deep/er");
+    assert.equal(unreadable.why, "unreadable:EACCES", "目录读不出：不能证明安全，按危险报");
+  } finally { cleanupDir(dir); cleanupDir(outside); }
+});
+
+// ── TD-375：漂移判定两处同规则的同表测试 ──
+// isolation.terminalWorktreeVerdict（core 层）与 lineageClose.isTreeHeadDrifted（application
+// 层）规则等价：core 层不能反向引用 application 层，所以各写一份；这张表用同一组
+// (树的分支, HEAD, 分支 tip) 喂两个函数，要求结论一致——以后任何一边单独改规则，这里红。
+test("TD-375: isTreeHeadDrifted 与 terminalWorktreeVerdict 同表——同一组输入两处结论一致", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-twr-same-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_twr_same";
+    const wt = addWorktree(dir, runId);
+    const H1 = "a".repeat(40);
+    const H2 = "b".repeat(40);
+    const own = `wao/${runId}`;
+    const rows = [
+      { name: "自己的分支、HEAD=tip", branch: own, head: H1, tip: H1, drifted: false },
+      { name: "完整引用名写法", branch: `refs/heads/${own}`, head: H1, tip: H1, drifted: false },
+      { name: "HEAD 不在 tip 上", branch: own, head: H1, tip: H2, drifted: true },
+      { name: "detached HEAD", branch: "HEAD", head: H1, tip: H1, drifted: true },
+      { name: "在别的分支上", branch: "main", head: H1, tip: H1, drifted: true },
+      { name: "在另一个运行的分支上", branch: "wao/run_twr_other", head: H1, tip: H1, drifted: true },
+      { name: "tip 读不出", branch: own, head: H1, tip: null, drifted: true },
+    ];
+    const realGit = (cwd, args) => execFileSync("git", ["--no-optional-locks", ...args], {
+      cwd, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    }).toString();
+    for (const row of rows) {
+      const verdict = terminalWorktreeVerdict({
+        worktreePath: wt, runId, repoCwd: dir,
+        git: (cwd, args) => {
+          const a = args.filter((x) => x !== "--no-optional-locks");
+          if (a[0] === "rev-parse" && a[1] === "--abbrev-ref") return `${row.branch}\n`;
+          if (a[0] === "rev-parse" && a[1] === "HEAD") return `${row.head}\n`;
+          if (a[0] === "rev-parse" && a[1] === `refs/heads/${own}`) {
+            if (row.tip === null) throw new Error("tip unreadable");
+            return `${row.tip}\n`;
+          }
+          return realGit(cwd, args);
+        },
+      });
+      const drifted = isTreeHeadDrifted({ runId, treeBranch: row.branch, treeHead: row.head, branchTip: row.tip });
+      assert.equal(drifted, row.drifted, `${row.name}: isTreeHeadDrifted`);
+      assert.equal(verdict === "not_tip", drifted, `${row.name}: terminalWorktreeVerdict=${verdict}`);
+      assert.equal(verdict, drifted ? "not_tip" : "ready", row.name);
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("terminalWorktreeVerdict 与 reclaim 共用索引清点：skip-worktree / assume-unchanged / gitlink / 非正常缓存位都不可信", () => {
+  assert.equal(indexInventoryUnreliable("H a.txt\nH b.txt\n", "100644 abc 0\ta.txt\n"), false);
+  assert.equal(indexInventoryUnreliable("", ""), false, "空树不算不可信");
+  assert.equal(indexInventoryUnreliable("S a.txt\n", ""), true, "skip-worktree");
+  assert.equal(indexInventoryUnreliable("h a.txt\n", ""), true, "assume-unchanged（小写）");
+  assert.equal(indexInventoryUnreliable("M a.txt\n", ""), true, "unmerged 等其余状态字母");
+  assert.equal(indexInventoryUnreliable("H sub\n", "160000 abc 0\tsub\n"), true, "gitlink（子模块）");
 });
 
 test("终态自动回收: 派发事实缺工作目录 → occupancy_unprovable，不当作无关记录跳过", async () => {

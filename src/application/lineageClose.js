@@ -13,10 +13,11 @@
 //     窗口；陈旧条目不堵）。continueRun 侧在变异相前读根转录闭态 → 拒绝
 //     lineage_closed（闭集新拒因）。残余（check→claim 微窗）显式记录。
 //   - tip 门（sol 漂移反例+opus 快照纪律）：成员集在 live git 读**之前**快照、
-//     绝不按分支名反查扩充；live 分支 wao/<m> 必须 m∈快照；HEAD 必须等于该成员
-//     的持久事实（已打包=deliveryCommit；未打包=run.started.delivery.baseCommit）
-//     ——漂移提交（人在分支上推进过）→ head_drift 留树。dirty 工作树不阻塞但
-//     记审计（放弃=丢弃未提交字节，强放弃合同显式化——sol）。
+//     绝不按分支名反查扩充；live 分支 wao/<m> 必须 m∈快照；漂移判定与 worktree
+//     reclaim 第 7 门同一份（isTreeHeadDrifted，TD-375）：树在 wao/<m> 上且 HEAD
+//     等于这条分支此刻的 tip 才放，detached / 别的分支 / HEAD 不在 tip → head_drift
+//     留树（原先要求 HEAD 等于交付提交或基点提交，分支被推进过的树会被误留）。
+//     dirty 工作树不阻塞但记审计（放弃=丢弃未提交字节，强放弃合同显式化——sol）。
 //   - closed≠released（两席）：已闭合重入 = 跳过写事实、**补偿重试释放**并返回
 //     资源结果（W1b already_decided 的崩溃补偿缺口不复制）。
 //   - 事实写根转录（Invariant 1 单一权威；0034 只禁重写冻结档不禁热转录追加）：
@@ -148,6 +149,42 @@ export async function withLineageRootLock(runDir, rootRunId, fn) {
 /** 线系闭态检查（continueRun 复用）：根转录 bound run.lineage_closed 在场即 true。 */
 export function lineageClosedIn(events, fileRunId) {
   return events.some((e) => e && e.type === "run.lineage_closed" && e.runId === fileRunId);
+}
+
+/**
+ * 头指针漂移判定（TD-375）：lineage-close 的释放门与 worktree reclaim 的第 7 门共用
+ * 的唯一实现，两处不得各写一套。没漂移 = 树附着在这个运行自己的分支 wao/<runId>
+ * 上，并且树 HEAD 等于这条分支此刻的 tip。
+ *
+ * 为什么这样就不丢提交：树 HEAD 可达的每个提交都被分支 wao/<runId> 引用着；
+ * reclaim 删分支之前先把分支打进 bundle，lineage-close 从不删分支，所以删树不会让
+ * 任何提交失去引用。detached HEAD、换到别的分支、或 HEAD 不在分支 tip 上（树上有
+ * 分支没有的提交）时，这些提交可能没有任何分支引用，删树即丢——一律判漂移、留树。
+ * tip 读不出（branchTip 为空）同样判漂移：证明不了就不放。
+ *
+ * 只管提交，不管未提交的字节：lineage-close 是 Lead 显式放弃一条线系，按决定 0058
+ * 丢弃未提交字节并留审计；reclaim 删脏树之前另有内容备份（TD-374）。
+ *
+ * 同一条规则在 src/isolation.js 的 terminalWorktreeVerdict（终态自动回收，"提交都在分支
+ * 上"一段）里还有一份：core 层不能反向引用 application 层，所以各写一份。
+ * test/run-lifecycle/terminalWorktreeRelease.test.js 的同表测试用同一组
+ * (树的分支, HEAD, tip) 喂两个函数、要求结论一致——任何一边单独改规则，那里红。
+ * 验收后释放（upstreamSessionRelease）的门槛不在此列：它要求 HEAD 等于本次验收的交付
+ * 提交，是"归属证明"，比这里更严，刻意不改。
+ *
+ * @param {object} p
+ * @param {string} p.runId 这棵树对应的运行（分支应是 wao/<runId>）
+ * @param {string} p.treeBranch 树的 `rev-parse --abbrev-ref HEAD`（detached 时是 "HEAD"）
+ * @param {string} p.treeHead 树的 `rev-parse HEAD`
+ * @param {string|null} p.branchTip 分支 wao/<runId> 当前的 tip（读不出传 null）
+ * @returns {boolean} true = 漂移，留树
+ */
+export function isTreeHeadDrifted({ runId, treeBranch, treeHead, branchTip }) {
+  const own = `wao/${runId}`;
+  if (treeBranch !== own && treeBranch !== `refs/heads/${own}`) return true;
+  if (typeof branchTip !== "string" || branchTip.length === 0) return true;
+  if (typeof treeHead !== "string" || treeHead.length === 0) return true;
+  return treeHead.toLowerCase() !== branchTip.toLowerCase();
 }
 
 /**
@@ -302,10 +339,14 @@ export async function closeRunLineage({
         try { dirtyFiles = gitRev(p, ["--no-optional-locks", "status", "--porcelain"]).split(/\r?\n/).filter(Boolean).length; } catch { dirtyFiles = -1; }
         const m = branch.startsWith("wao/") ? branch.slice(4) : null;
         if (!m || !snapshot.has(m)) { results.push({ path: p, outcome: "skipped_not_tip", branch }); continue; }
-        const member = members.find((x) => x.runId === m);
-        const expected = member?.deliveryCommit ?? member?.baseCommit ?? null;
-        if (!expected || head.toLowerCase() !== expected.toLowerCase()) {
-          results.push({ path: p, outcome: "skipped_head_drift", branch, head, expected });
+        // TD-375：漂移与 worktree reclaim 第 7 门同一判定（isTreeHeadDrifted）——HEAD 等
+        // 于分支 wao/<m> 此刻的 tip 就放，不再要求等于交付提交或基点提交（分支在
+        // 交付之后被推进过，提交仍在分支上，删树不丢）。tip 用只读 git 现读；读不
+        // 出按漂移处置。
+        let tip = null;
+        try { tip = gitRev(p, ["rev-parse", `refs/heads/wao/${m}`]); } catch { /* 读不出：下面判漂移 */ }
+        if (isTreeHeadDrifted({ runId: m, treeBranch: branch, treeHead: head, branchTip: tip })) {
+          results.push({ path: p, outcome: "skipped_head_drift", branch, head, expected: tip });
           branchesKept.push(branch);
           continue;
         }

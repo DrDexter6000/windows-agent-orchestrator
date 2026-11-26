@@ -7,13 +7,14 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
 const require = createRequire(import.meta.url);
-import { planWorktreeReclaim, applyWorktreeReclaim } from "../../src/application/worktreeReclaim.js";
+import { planWorktreeReclaim, applyWorktreeReclaim, isAbnormalBackupSegment } from "../../src/application/worktreeReclaim.js";
 import { lineageMemberFiles } from "../../src/application/lineageClose.js";
 import { worktreeCommand } from "../../src/commands/worktree.js";
 
@@ -857,6 +858,534 @@ test("apply：脏树快照写失败 → 这棵树不删、分支不删、记为�
   assert.equal(outcomeOf(result, "remove_tree", "run_snapf").reason, "dirty_snapshot_failed");
   assert.ok(existsSync(wt), "快照失败时树不动");
   assert.equal(outcomeOf(result, "delete_branch", "run_snapf").reason, "tree_not_removed");
+});
+
+// ── TD-374：删脏树前备份内容（受控改动 diff + 未被忽略的新文件副本）──
+// 备份落在本次回收记录目录的 dirty/ 下：<runId>.diff、<runId>.untracked/<相对路径>、
+// <runId>.untracked-links.txt；被忽略的文件（node_modules、dist 之类）不备份。
+
+/** 递归列出目录下全部非目录条目（绝对路径；不跟随链接）。 */
+function filesUnder(dir) {
+  const out = [];
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, ent.name);
+    if (ent.isDirectory()) out.push(...filesUnder(p));
+    else out.push(p);
+  }
+  return out;
+}
+
+/** 在干净检出上依次回放两层补丁：先 --index 应用暂存层（索引与工作区一起变），再把工作区层打到工作区上。
+ * 空补丁（0 字节）不是合法的 git apply 输入，跳过。 */
+function replayBackup(clean, stagedPath, unstagedPath) {
+  for (const [path, args] of [[stagedPath, ["--index"]], [unstagedPath, []]]) {
+    if (statSync(path).size === 0) continue;
+    execFileSync("git", ["apply", "--check", ...args, path], { cwd: clean, stdio: "pipe" });
+    execFileSync("git", ["apply", ...args, path], { cwd: clean, stdio: "pipe" });
+  }
+}
+
+test("执行（TD-374）：staged、unstaged、未忽略新文件的树 → 删前备份；两层补丁依次回放到干净检出，新文件副本逐字节一致，被忽略文件不进备份", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bk1");
+  // staged：新增文本与二进制文件；unstaged：改已跟踪的 a.txt；untracked：未忽略的新文件
+  //（含子目录）；ignored：node_modules 里的文件。
+  const bin = Buffer.from([0, 1, 2, 255, 254, 0, 7, 8, 9, 0]);
+  writeFileSync(join(wt, "staged.txt"), "staged new file\n");
+  writeFileSync(join(wt, "staged.bin"), bin);
+  git(["add", "staged.txt", "staged.bin"], wt);
+  writeFileSync(join(wt, "a.txt"), "const a = 2; // unstaged edit\n");
+  mkdirSync(join(wt, "notes", "deep"), { recursive: true });
+  writeFileSync(join(wt, "notes", "deep", "untracked.txt"), "untracked content\n");
+  mkdirSync(join(wt, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(wt, "node_modules", "pkg", "ignored.js"), "IGNORED-MARKER\n");
+  s.accepted("run_bk1", wt);
+  const { result } = await s.planAndApply();
+  assert.ok(!result.refused, `不应拒绝：${result.refused}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_bk1").outcome, "removed");
+  assert.ok(!existsSync(wt), "树照常删除");
+
+  const dirtyDir = join(result.preserveDir, "dirty");
+  assert.ok(existsSync(join(dirtyDir, "run_bk1.status.txt")), "状态快照照旧保存");
+  // 第 150 批修正一：暂存层（HEAD→索引）与工作区层（索引→工作区）分开存——
+  // 合成一份 `git diff HEAD` 会丢掉被工作区改动抵消的暂存内容。
+  const stagedPath = join(dirtyDir, "run_bk1.staged.diff");
+  const unstagedPath = join(dirtyDir, "run_bk1.unstaged.diff");
+  assert.ok(existsSync(stagedPath), "暂存层补丁在备份目录里");
+  assert.ok(existsSync(unstagedPath), "工作区层补丁在备份目录里");
+  assert.ok(!existsSync(join(dirtyDir, "run_bk1.diff")), "不再有合成的 .diff");
+  assert.equal(
+    readFileSync(join(dirtyDir, "run_bk1.untracked", "notes", "deep", "untracked.txt"), "utf8"),
+    "untracked content\n",
+    "未忽略的新文件副本保留相对路径、内容一致",
+  );
+  const copied = filesUnder(dirtyDir);
+  assert.ok(!copied.some((p) => readFileSync(p).includes("IGNORED-MARKER")), "被忽略的文件不备份");
+  assert.ok(!existsSync(join(dirtyDir, "run_bk1.untracked-links.txt")), "没有链接或目录时不出 links 清单");
+
+  // 回放：在干净检出（基点提交）上先 --index 应用暂存层，再应用工作区层，内容与删前一致。
+  const clean = join(s.base, "clean-checkout");
+  git(["worktree", "add", "--detach", clean, s.mainCommit], s.repo);
+  replayBackup(clean, stagedPath, unstagedPath);
+  assert.equal(readFileSync(join(clean, "a.txt"), "utf8"), "const a = 2; // unstaged edit\n", "unstaged 改动回放");
+  assert.equal(readFileSync(join(clean, "staged.txt"), "utf8"), "staged new file\n", "staged 新文件回放");
+  assert.deepEqual(readFileSync(join(clean, "staged.bin")), bin, "二进制文件逐字节回放");
+  assert.equal(git(["show", ":staged.txt"], clean), "staged new file", "暂存区里也有 staged 新文件");
+
+  // 输出与记录：备份了哪棵树、存在哪里。
+  assert.equal(result.dirtyBackups.length, 1);
+  assert.equal(result.dirtyBackups[0].runId, "run_bk1");
+  assert.equal(result.dirtyBackups[0].stagedPath, stagedPath);
+  assert.equal(result.dirtyBackups[0].unstagedPath, unstagedPath);
+  const rec = JSON.parse(readFileSync(join(result.preserveDir, "results.json"), "utf8"));
+  assert.deepEqual(rec.dirtyBackups.map((b) => b.runId), ["run_bk1"]);
+});
+
+test("执行（TD-374）：只有被忽略文件的树 → 只存状态快照，不生成 .diff 与 .untracked，照旧删除", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bki");
+  mkdirSync(join(wt, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(wt, "node_modules", "pkg", "ignored.js"), "IGNORED-MARKER\n");
+  s.accepted("run_bki", wt);
+  const { result } = await s.planAndApply();
+  assert.equal(outcomeOf(result, "remove_tree", "run_bki").outcome, "removed");
+  assert.ok(!existsSync(wt));
+  const dirtyDir = join(result.preserveDir, "dirty");
+  assert.deepEqual(readdirSync(dirtyDir).sort(), ["run_bki.status.txt"], "只有状态快照");
+  assert.deepEqual(result.dirtyBackups, [], "没有树被备份");
+});
+
+// ── 树里有链接（第 150 批修正一，真删，不注入失败）──
+// junction（和 Node 分不开的目录符号链接）：apply 在算指纹、备份之前不跟进链接地走一遍整棵
+// 树，发现就保留整棵树（tree_contains_junction）——git diff/status 会读进目标的内容，而
+// 原生 git 删树还会删掉目标里的文件。指向文件的符号链接 git 不跟进：照常备份（记进 links
+// 清单）、照常删除，树外文件原样。
+const OUTSIDE_MARKER = "OUTSIDE-SECRET-MARKER";
+
+/** 树外目录 + 里面的 secret.txt。 */
+function plantOutside(s) {
+  const outside = join(s.base, "outside-dir");
+  mkdirSync(outside, { recursive: true });
+  const secret = join(outside, "secret.txt");
+  writeFileSync(secret, `${OUTSIDE_MARKER}\n`);
+  return { outside, secret };
+}
+
+for (const kind of ["junction", "dir"]) {
+  test(`执行（TD-374）：树里有指向树外的 ${kind} 链接 → 整棵树保留、记 tree_contains_junction，不备份、不删树、不删分支，树外文件不动`, async (t) => {
+    const s = await scenario();
+    const wt = s.wt("run_bkj");
+    const { outside, secret } = plantOutside(s);
+    try {
+      symlinkSync(outside, join(wt, "linkdir"), kind);
+    } catch {
+      t.skip(`此环境不允许创建 ${kind} 链接，无法构造树内链接`);
+      return;
+    }
+    writeFileSync(join(wt, "plain.txt"), "plain untracked\n");
+    s.accepted("run_bkj", wt);
+    const { result } = await s.planAndApply();
+    const r = outcomeOf(result, "remove_tree", "run_bkj");
+    assert.equal(r.outcome, "skipped");
+    assert.equal(r.reason, "tree_contains_junction");
+    assert.match(String(r.detail), /^linkdir/, `detail 点名链接的相对路径：${r.detail}`);
+    assert.equal(outcomeOf(result, "delete_branch", "run_bkj").reason, "tree_not_removed", "分支不删");
+    assert.ok(git(["branch", "--list", "wao/run_bkj"], s.repo).length > 0);
+    assert.ok(existsSync(wt) && lstatSync(join(wt, "linkdir")).isSymbolicLink(), "整棵树与链接原样");
+    assert.equal(readFileSync(join(wt, "plain.txt"), "utf8"), "plain untracked\n");
+    assert.equal(readFileSync(secret, "utf8"), `${OUTSIDE_MARKER}\n`, "树外文件原样不动");
+    assert.deepEqual(result.dirtyBackups, [], "没有备份");
+    assert.ok(
+      !filesUnder(result.preserveDir).some((p) => readFileSync(p).includes(OUTSIDE_MARKER)),
+      "树外文件的内容不在记录目录的任何文件里",
+    );
+    assert.ok(!existsSync(join(result.preserveDir, "dirty")), "没碰内容：连状态快照目录都没建");
+  });
+}
+
+test("执行（TD-374）：受控目录被换成指向树外的 junction → 整棵树保留，git diff 读到的树外内容不进任何备份文件", async (t) => {
+  const s = await scenario();
+  const wt = s.wt("run_bkt");
+  mkdirSync(join(wt, "tracked"), { recursive: true });
+  commitIn(wt, "tracked/f.txt", "original\n");
+  s.accepted("run_bkt", wt);
+  const { outside } = plantOutside(s);
+  writeFileSync(join(outside, "f.txt"), `${OUTSIDE_MARKER}-TRACKED\n`);
+  rmSync(join(wt, "tracked"), { recursive: true, force: true });
+  try {
+    symlinkSync(outside, join(wt, "tracked"), "junction");
+  } catch {
+    t.skip("此环境不允许创建 junction，无法构造");
+    return;
+  }
+  assert.ok(git(["status", "--porcelain"], wt).includes("tracked/f.txt"), "前置：git 把 junction 里的内容当成受控文件的改动");
+  const { result } = await s.planAndApply();
+  const r = outcomeOf(result, "remove_tree", "run_bkt");
+  assert.equal(r.outcome, "skipped");
+  assert.equal(r.reason, "tree_contains_junction");
+  assert.ok(existsSync(wt), "树还在");
+  assert.ok(
+    !filesUnder(result.preserveDir).some((p) => readFileSync(p).includes(OUTSIDE_MARKER)),
+    "树外文件的内容不在记录目录的任何文件里",
+  );
+  assert.equal(readFileSync(join(outside, "f.txt"), "utf8"), `${OUTSIDE_MARKER}-TRACKED\n`, "树外文件原样不动");
+});
+
+test("执行（TD-374）：删前整树检查之后才冒出的 junction（竞态）→ 备份不跟进、摘树不跟进，树真删、树外文件原样", async (t) => {
+  // "已知不防"的竞态之外还剩两道：备份逐级 lstat 父目录（记链接本身、不复制），摘树走
+  // isolation.removeWorktree（rmSync，不跟进）。测试缝在删前复核之后、备份之前，在这里建
+  // junction。旧实现（git worktree remove --force）下，这条会把树外的 secret.txt 删掉。
+  const s = await scenario();
+  const wt = s.wt("run_bkrace");
+  const { outside, secret } = plantOutside(s);
+  writeFileSync(join(wt, "plain.txt"), "plain untracked\n");
+  s.accepted("run_bkrace", wt);
+  let linked = true;
+  const { result } = await s.planAndApply({
+    beforeTreeSnapshot: async (item) => {
+      if (item.runId !== "run_bkrace") return;
+      try {
+        symlinkSync(outside, join(wt, "linkdir"), "junction");
+      } catch {
+        linked = false;
+      }
+    },
+  });
+  if (!linked) {
+    t.skip("此环境不允许创建 junction，无法构造");
+    return;
+  }
+  assert.equal(outcomeOf(result, "remove_tree", "run_bkrace").outcome, "removed");
+  assert.ok(!existsSync(wt), "树删净（含 junction 本身）");
+  assert.equal(readFileSync(secret, "utf8"), `${OUTSIDE_MARKER}\n`, "树外文件原样不动");
+  const dirtyDir = join(result.preserveDir, "dirty");
+  assert.equal(readFileSync(join(dirtyDir, "run_bkrace.untracked", "plain.txt"), "utf8"), "plain untracked\n");
+  const links = readFileSync(join(dirtyDir, "run_bkrace.untracked-links.txt"), "utf8").split(/\r?\n/).filter(Boolean);
+  assert.deepEqual(links, ["linkdir"], "穿过 junction 才走得到的条目记链接本身");
+  assert.ok(
+    !filesUnder(result.preserveDir).some((p) => readFileSync(p).includes(OUTSIDE_MARKER)),
+    "树外文件的内容不在记录目录的任何文件里",
+  );
+});
+
+test("执行（TD-374）：指向树外文件的符号链接 → 照常备份（路径记进 links 清单、不复制目标）、真删树，树外文件原样", async (t) => {
+  const s = await scenario();
+  const wt = s.wt("run_bkl");
+  const { secret } = plantOutside(s);
+  try {
+    symlinkSync(secret, join(wt, "leak.txt"), "file");
+  } catch {
+    t.skip("此环境不允许创建文件符号链接，无法构造");
+    return;
+  }
+  writeFileSync(join(wt, "plain.txt"), "plain untracked\n");
+  s.accepted("run_bkl", wt);
+  const { result } = await s.planAndApply();
+  assert.equal(outcomeOf(result, "remove_tree", "run_bkl").outcome, "removed", "真删，没有注入");
+  assert.ok(!existsSync(wt));
+  const dirtyDir = join(result.preserveDir, "dirty");
+  assert.equal(readFileSync(join(dirtyDir, "run_bkl.untracked", "plain.txt"), "utf8"), "plain untracked\n", "普通新文件照常复制");
+  const links = readFileSync(join(dirtyDir, "run_bkl.untracked-links.txt"), "utf8").split(/\r?\n/).filter(Boolean);
+  assert.deepEqual(links, ["leak.txt"], "只有链接进 links 清单");
+  assert.ok(!existsSync(join(dirtyDir, "run_bkl.untracked", "leak.txt")), "不复制链接目标文件");
+  assert.ok(
+    !filesUnder(result.preserveDir).some((p) => readFileSync(p).includes(OUTSIDE_MARKER)),
+    "树外文件的内容不在记录目录的任何文件里",
+  );
+  assert.equal(readFileSync(secret, "utf8"), `${OUTSIDE_MARKER}\n`, "树外文件原样不动");
+});
+
+test("执行（TD-374）：单树备份字节数超上限 → 这棵树不删、分支不删、记 dirty_backup_too_large；上限按单棵树算", async () => {
+  const s = await scenario();
+  const big = "x".repeat(4096);
+  const treeUntracked = s.wt("run_tl1");
+  writeFileSync(join(treeUntracked, "big.txt"), big); // 未忽略新文件超限
+  const treeStaged = s.wt("run_tl2");
+  writeFileSync(join(treeStaged, "big-staged.txt"), big); // diff 本身超限
+  git(["add", "big-staged.txt"], treeStaged);
+  const treeSmall = s.wt("run_tl3");
+  writeFileSync(join(treeSmall, "small.txt"), "tiny\n"); // 在限内
+  for (const [id, wt] of [["run_tl1", treeUntracked], ["run_tl2", treeStaged], ["run_tl3", treeSmall]]) s.accepted(id, wt);
+  const { result } = await s.planAndApply({ dirtyBackupMaxBytes: 2048 });
+  for (const id of ["run_tl1", "run_tl2"]) {
+    const r = outcomeOf(result, "remove_tree", id);
+    assert.equal(r.outcome, "skipped", id);
+    assert.equal(r.reason, "dirty_backup_too_large", id);
+    assert.equal(outcomeOf(result, "delete_branch", id).reason, "tree_not_removed", `${id} 的分支不删`);
+    assert.ok(git(["branch", "--list", `wao/${id}`], s.repo).length > 0, `${id} 分支还在`);
+  }
+  assert.ok(existsSync(treeUntracked) && existsSync(treeStaged), "超限的树都还在");
+  assert.equal(readFileSync(join(treeUntracked, "big.txt"), "utf8"), big, "树里的内容原样");
+  const dirtyFiles = readdirSync(join(result.preserveDir, "dirty")).sort();
+  assert.ok(
+    !dirtyFiles.some((n) => n.startsWith("run_tl1.") && n.endsWith(".diff")) && !dirtyFiles.some((n) => n.startsWith("run_tl2.") && n.endsWith(".diff")),
+    `超限时不写半截备份：${dirtyFiles}`,
+  );
+  assert.ok(!dirtyFiles.some((n) => n === "run_tl1.untracked"), `超限时不写半截备份：${dirtyFiles}`);
+  assert.equal(outcomeOf(result, "remove_tree", "run_tl3").outcome, "removed", "限内的树照常备份、删除");
+  assert.ok(existsSync(join(result.preserveDir, "dirty", "run_tl3.untracked", "small.txt")));
+});
+
+test("执行（TD-374）：备份写失败 → 这棵树不删、分支不删、记 dirty_backup_failed（状态快照已写成）；已存在的同名文件不被覆盖（独占创建）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bkf");
+  writeFileSync(join(wt, "dirty.txt"), "about to be dropped\n", "utf8");
+  s.accepted("run_bkf", wt);
+  let squatted = null;
+  const { result } = await s.planAndApply({
+    // 测试缝在状态快照之前：把 <runId>.staged.diff 抢先建成普通文件——状态快照照常写成，备份
+    // 独占创建（wx）这个文件时必然 EEXIST：失败留树，且不把别人的文件覆盖掉。
+    beforeTreeSnapshot: async (item, claimed) => {
+      if (item.runId !== "run_bkf") return;
+      mkdirSync(join(claimed, "dirty"), { recursive: true });
+      squatted = join(claimed, "dirty", "run_bkf.staged.diff");
+      writeFileSync(squatted, "SQUATTER\n", "utf8");
+    },
+  });
+  const r = outcomeOf(result, "remove_tree", "run_bkf");
+  assert.equal(r.outcome, "skipped");
+  assert.equal(r.reason, "dirty_backup_failed");
+  assert.equal(r.detail, "EEXIST");
+  assert.equal(readFileSync(squatted, "utf8"), "SQUATTER\n", "独占创建：已存在的文件不被覆盖");
+  assert.ok(existsSync(wt), "备份失败时树不动");
+  assert.equal(readFileSync(join(wt, "dirty.txt"), "utf8"), "about to be dropped\n");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bkf").reason, "tree_not_removed", "分支不删");
+  assert.ok(git(["branch", "--list", "wao/run_bkf"], s.repo).length > 0);
+  assert.ok(existsSync(join(result.preserveDir, "dirty", "run_bkf.status.txt")), "状态快照先于备份、已写成（失败点确在备份这一步）");
+  assert.deepEqual(result.dirtyBackups, [], "失败的备份不算数");
+});
+
+test("执行（TD-374）：同一文件 MM（暂存 B、工作区改回 A）→ 两层补丁都在，依次回放后暂存区里是 B、工作区是 A", async () => {
+  // 旧写法只存 `git diff HEAD`：工作区改回 HEAD 的内容时它输出空补丁，暂存区里的 B 随树一起丢。
+  const s = await scenario();
+  const wt = s.wt("run_bkmm");
+  const original = readFileSync(join(wt, "a.txt"), "utf8");
+  writeFileSync(join(wt, "a.txt"), "const a = 'B-staged';\n");
+  git(["add", "a.txt"], wt);
+  writeFileSync(join(wt, "a.txt"), original);
+  assert.equal(git(["status", "--porcelain"], wt), "MM a.txt", "前置：同一文件暂存 B、工作区改回 A");
+  assert.equal(git(["diff", "HEAD"], wt), "", "前置：git diff HEAD 是空的（旧写法会丢 B）");
+  s.accepted("run_bkmm", wt);
+  const { result } = await s.planAndApply();
+  assert.equal(outcomeOf(result, "remove_tree", "run_bkmm").outcome, "removed");
+  const dirtyDir = join(result.preserveDir, "dirty");
+  const stagedPath = join(dirtyDir, "run_bkmm.staged.diff");
+  const unstagedPath = join(dirtyDir, "run_bkmm.unstaged.diff");
+  assert.ok(statSync(stagedPath).size > 0, "暂存层补丁非空");
+  assert.ok(statSync(unstagedPath).size > 0, "工作区层补丁非空");
+  const clean = join(s.base, "clean-mm");
+  git(["worktree", "add", "--detach", clean, s.mainCommit], s.repo);
+  replayBackup(clean, stagedPath, unstagedPath);
+  assert.equal(git(["show", ":a.txt"], clean), "const a = 'B-staged';", "暂存区里的 B 回来了");
+  assert.equal(readFileSync(join(clean, "a.txt"), "utf8"), original, "工作区是 A");
+});
+
+test("执行（TD-374）：补丁不受 diff 配置影响——diff.noprefix / mnemonicPrefix / 外部 diff 与 textconv 都不改变补丁的可回放性", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bkcfg");
+  git(["config", "diff.noprefix", "true"], s.repo);
+  git(["config", "diff.mnemonicPrefix", "true"], s.repo);
+  // 外部 diff 与 textconv 配成必然失败的命令（false）：任何没带 --no-ext-diff / --no-textconv 的
+  // git diff 都会在这里炸掉或输出非补丁内容。
+  git(["config", "diff.external", "false"], s.repo);
+  git(["config", "diff.badconv.textconv", "false"], s.repo);
+  appendFileSync(join(s.repo, ".git", "info", "attributes"), "*.txt diff=badconv\n", "utf8");
+  writeFileSync(join(wt, "a.txt"), "const a = 3; // edited\n");
+  writeFileSync(join(wt, "staged.txt"), "staged\n");
+  git(["add", "staged.txt"], wt);
+  s.accepted("run_bkcfg", wt);
+  const { result } = await s.planAndApply();
+  assert.equal(outcomeOf(result, "remove_tree", "run_bkcfg").outcome, "removed");
+  const dirtyDir = join(result.preserveDir, "dirty");
+  const stagedPath = join(dirtyDir, "run_bkcfg.staged.diff");
+  const unstagedPath = join(dirtyDir, "run_bkcfg.unstaged.diff");
+  assert.match(readFileSync(unstagedPath, "utf8"), /^diff --git a\/a\.txt b\/a\.txt$/m, "固定 a/ b/ 前缀");
+  const clean = join(s.base, "clean-cfg");
+  git(["worktree", "add", "--detach", clean, s.mainCommit], s.repo);
+  replayBackup(clean, stagedPath, unstagedPath); // 默认 -p1 的 git apply 能回放
+  assert.equal(readFileSync(join(clean, "a.txt"), "utf8"), "const a = 3; // edited\n");
+});
+
+test("执行（TD-374）：状态显示有暂存改动、暂存层补丁却为空 → 无法可靠表示，留树（dirty_backup_failed/staged_patch_empty）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bkse");
+  writeFileSync(join(wt, "staged.txt"), "staged\n");
+  git(["add", "staged.txt"], wt);
+  s.accepted("run_bkse", wt);
+  // 真实 git 造不出"status 报暂存、git diff --cached 却为空"：用备份的 git 执行缝，让 --cached 那条返回空。
+  const { result } = await s.planAndApply({
+    backupGitExec: (args, opts) => (args.includes("--cached") ? Buffer.alloc(0) : execFileSync("git", args, opts)),
+  });
+  const r = outcomeOf(result, "remove_tree", "run_bkse");
+  assert.equal(r.outcome, "skipped");
+  assert.equal(r.reason, "dirty_backup_failed");
+  assert.equal(r.detail, "staged_patch_empty");
+  assert.ok(existsSync(join(wt, "staged.txt")), "树原样");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bkse").reason, "tree_not_removed");
+});
+
+test("执行（TD-374）：skip-worktree 的树 → 留树（清点不了：改动被索引标志藏起来，status 看着是干净的）", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bksw");
+  git(["update-index", "--skip-worktree", "a.txt"], wt);
+  writeFileSync(join(wt, "a.txt"), "const a = 'hidden change';\n");
+  assert.equal(git(["status", "--porcelain"], wt), "", "前置：status 干净，改动被藏起来了");
+  s.accepted("run_bksw", wt);
+  const { result } = await s.planAndApply();
+  const r = outcomeOf(result, "remove_tree", "run_bksw");
+  assert.equal(r.outcome, "skipped");
+  assert.equal(r.reason, "inventory_unreadable");
+  assert.equal(readFileSync(join(wt, "a.txt"), "utf8"), "const a = 'hidden change';\n", "被藏起来的改动还在");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bksw").reason, "tree_not_removed");
+});
+
+test("执行（TD-374）：assume-unchanged 的树同样留树", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bkau");
+  git(["update-index", "--assume-unchanged", "a.txt"], wt);
+  s.accepted("run_bkau", wt);
+  const { result } = await s.planAndApply();
+  assert.equal(outcomeOf(result, "remove_tree", "run_bkau").reason, "inventory_unreadable");
+  assert.ok(existsSync(wt));
+});
+
+test("执行（TD-374）：计划后 .git/info/exclude 改了，原本被忽略的文件变成未忽略 → 跳过（content_changed），不凭旧状态只留清单就删", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bkex");
+  const excludePath = join(s.repo, ".git", "info", "exclude");
+  appendFileSync(excludePath, "gen/\n", "utf8");
+  mkdirSync(join(wt, "gen"), { recursive: true });
+  writeFileSync(join(wt, "gen", "out.txt"), "generated, later un-ignored\n");
+  s.accepted("run_bkex", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      // 只改忽略规则：文件路径、大小、时间戳都不变，指纹四件套不动，但它现在是未忽略的新文件。
+      writeFileSync(excludePath, "/.wao-worktrees/\n", "utf8");
+    },
+  });
+  const r = outcomeOf(result, "remove_tree", "run_bkex");
+  assert.equal(r.outcome, "skipped");
+  assert.equal(r.reason, "content_changed");
+  assert.ok(existsSync(join(wt, "gen", "out.txt")), "树里的文件原样");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bkex").reason, "tree_not_removed");
+});
+
+test("执行（TD-374）：两个文件在计划后互换忽略身份（四个脏标志都不变）→ 跳过 content_changed，树和分支保留，不凭旧身份删", async () => {
+  // 计划时：a 未忽略（会被备份）、b 被忽略（只留清单）；批准后只改 .git/info/exclude 把两者
+  // 对调。路径、字节数、mtime 都没变，staged/unstaged/untracked/ignored 四个标志也都还是
+  // 旧值——只有"哪个文件属于哪一类"变了。旧清单看不出，apply 会备份新变成未忽略的 b、把原本
+  // 该备份的 a 随树删掉。
+  const s = await scenario();
+  const wt = s.wt("run_bkswap");
+  const excludePath = join(s.repo, ".git", "info", "exclude");
+  appendFileSync(excludePath, "\nb_swap.txt\n", "utf8");
+  writeFileSync(join(wt, "a_swap.txt"), "A-content\n");
+  writeFileSync(join(wt, "b_swap.txt"), "B-content\n");
+  const statusNow = () => git(["status", "--porcelain", "--ignored"], wt).split(/\r?\n/).sort();
+  assert.deepEqual(statusNow().filter((l) => l.includes("_swap")), ["!! b_swap.txt", "?? a_swap.txt"], "前置：a 未忽略、b 被忽略");
+  s.accepted("run_bkswap", wt);
+  const { result } = await s.planAndApply({
+    mutate: async () => {
+      writeFileSync(excludePath, readFileSync(excludePath, "utf8").replace("b_swap.txt", "a_swap.txt"), "utf8");
+      assert.deepEqual(statusNow().filter((l) => l.includes("_swap")), ["!! a_swap.txt", "?? b_swap.txt"], "前置：对调完成");
+    },
+  });
+  const r = outcomeOf(result, "remove_tree", "run_bkswap");
+  assert.equal(r.outcome, "skipped");
+  assert.equal(r.reason, "content_changed");
+  assert.ok(existsSync(join(wt, "a_swap.txt")) && existsSync(join(wt, "b_swap.txt")), "树里的文件原样");
+  assert.equal(outcomeOf(result, "delete_branch", "run_bkswap").reason, "tree_not_removed", "分支保留");
+  assert.ok(git(["branch", "--list", "wao/run_bkswap"], s.repo).length > 0);
+  assert.deepEqual(result.dirtyBackups, [], "没有凭旧状态做备份");
+});
+
+test("执行（TD-374）：用户配了 diff.context=0 → 补丁固定 3 行上下文，普通 git apply 能依次回放两层", async () => {
+  // diff.context=0 时 git diff 不输出上下文行，默认的 git apply 不收这样的补丁（需要
+  // --unidiff-zero）。备份显式带 --unified=3，不受用户配置影响。
+  const s = await scenario();
+  const wt = s.wt("run_bkctx");
+  const original = Array.from({ length: 9 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+  commitIn(wt, "multi.txt", original);
+  const head = git(["rev-parse", "HEAD"], wt);
+  git(["config", "diff.context", "0"], s.repo);
+  // 暂存层改第 3 行，工作区层改第 7 行（同一个文件）。
+  writeFileSync(join(wt, "multi.txt"), original.replace("line 3", "line 3 STAGED"));
+  git(["add", "multi.txt"], wt);
+  const finalText = original.replace("line 3", "line 3 STAGED").replace("line 7", "line 7 WORKTREE");
+  writeFileSync(join(wt, "multi.txt"), finalText);
+  s.accepted("run_bkctx", wt);
+  const { result } = await s.planAndApply();
+  assert.equal(outcomeOf(result, "remove_tree", "run_bkctx").outcome, "removed");
+  const dirtyDir = join(result.preserveDir, "dirty");
+  const stagedPath = join(dirtyDir, "run_bkctx.staged.diff");
+  const unstagedPath = join(dirtyDir, "run_bkctx.unstaged.diff");
+  assert.match(readFileSync(stagedPath, "utf8"), /^ line 2$/m, "补丁带上下文行");
+  const clean = join(s.base, "clean-ctx");
+  git(["worktree", "add", "--detach", clean, head], s.repo);
+  replayBackup(clean, stagedPath, unstagedPath); // 普通 git apply --index / git apply，不加 --unidiff-zero
+  assert.equal(readFileSync(join(clean, "multi.txt"), "utf8"), finalText, "工作区是最终内容");
+  assert.equal(git(["show", ":multi.txt"], clean), original.replace("line 3", "line 3 STAGED").trimEnd(), "暂存区里只有暂存层的改动");
+});
+
+test("执行（TD-374）：归档根预先被设成 junction → 整体拒绝（preserve_dir_unsafe），不写任何备份，树与分支不动", async (t) => {
+  const s = await scenario();
+  const wt = s.wt("run_bkarch");
+  writeFileSync(join(wt, "dirty.txt"), "about to be dropped\n", "utf8");
+  s.accepted("run_bkarch", wt);
+  const elsewhere = join(s.base, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  let linked = true;
+  const { result } = await s.planAndApply({
+    // 计划面读归档根须是干净形态（链接会让计划整体毒化），apply 前才把它换成 junction。
+    mutate: async () => {
+      try {
+        symlinkSync(elsewhere, join(s.base, "runs-archive"), "junction");
+      } catch {
+        linked = false;
+      }
+    },
+  });
+  if (!linked) {
+    t.skip("此环境不允许创建 junction，无法构造");
+    return;
+  }
+  assert.equal(result.refused, "preserve_dir_unsafe");
+  assert.deepEqual(readdirSync(elsewhere), [], "物理上的另一目录里什么都没写");
+  assert.ok(existsSync(join(wt, "dirty.txt")), "树原样");
+  assert.ok(git(["branch", "--list", "wao/run_bkarch"], s.repo).length > 0, "分支原样");
+});
+
+test("备份路径段：Windows 保留名、点段、带冒号的段、空段一律拒绝；普通名字放行", () => {
+  for (const bad of ["..", ".", "", "a:b", "C:", "CON", "con", "NUL.txt", "aux.tar.gz", "COM1", "lpt9.log", "Prn"]) {
+    assert.equal(isAbnormalBackupSegment(bad), true, `应拒绝：${JSON.stringify(bad)}`);
+  }
+  for (const ok of ["a.txt", "console.log", "com10", "lpt0x", "notes", "..hidden", "a..b", "nul-file", "auxiliary.txt", ".gitignore"]) {
+    assert.equal(isAbnormalBackupSegment(ok), false, `应放行：${JSON.stringify(ok)}`);
+  }
+});
+
+test("apply CLI（TD-374）：输出说明备份了几棵树、存在哪里", async () => {
+  const s = await scenario();
+  const wt = s.wt("run_bkc");
+  writeFileSync(join(wt, "dirty.txt"), "about to be dropped\n", "utf8");
+  s.accepted("run_bkc", wt);
+  const outPath = join(s.base, "plan.json");
+  const { planSha256 } = await planWorktreeReclaim({ repoCwd: s.repo, runDir: s.runDir, outPath, now: fixedNow });
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    await worktreeCommand(["reclaim", "--apply", outPath, "--expect-sha256", planSha256, "--run-dir", s.runDir], {});
+  } finally {
+    console.log = origLog;
+  }
+  const done = logs.find((l) => l.trim().startsWith("[worktree reclaim] 完成"));
+  assert.ok(done, `应打印完成：${logs.join(" | ")}`);
+  const preserveDir = done.slice(done.indexOf("记录：") + "记录：".length).trim();
+  const line = logs.find((l) => l.includes("脏树备份"));
+  assert.ok(line, `应有脏树备份行：${logs.join(" | ")}`);
+  assert.ok(line.includes("1 棵"), `备份了几棵：${line}`);
+  assert.ok(line.includes(join(preserveDir, "dirty")), `存在哪里：${line}`);
 });
 
 test("apply（L1）：对某根是候选的已有文件改成另一根的 X↔Y → 后一条跳过", async () => {

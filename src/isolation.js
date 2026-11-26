@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { dirname, join, resolve, sep } from "node:path";
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isValidRunId, gitChildEnv, gitProbeEnv, isCanonicalCommitId } from "./delivery.js";
 import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
@@ -91,25 +91,27 @@ export async function createWorktree(sourceCwd, name, opts = {}) {
 export const WORKTREE_PRUNE_EXPIRE = "10.minutes";
 
 /**
- * 只删一棵树自己的 worktree 管理条目：在 <gitCommonDir>/worktrees/ 下找
- * `gitdir` 文件内容指向 <wtPath>/.git 的那一项，核对 <wtPath> 目录确实已不
- * 在盘上，才删那个管理目录。不碰其他条目、不做仓库级 prune（竞争说明见
- * WORKTREE_PRUNE_EXPIRE）。
+ * 在 <gitCommonDir>/worktrees/ 下找 `gitdir` 文件内容指向 <wtPath>/.git 的那个管理目录
+ *（只读，不看 <wtPath> 在不在）。
+ *
+ * gitdir 的写法有两种：默认是绝对路径；`git worktree add --relative-paths`（或
+ * worktree.useRelativePaths=true，git 2.48+）写的是**相对路径，基准是它所在的管理条目目录**
+ *（不是 common dir，也不是当前目录）。相对写法要先以条目目录为基准解析成绝对路径再比——
+ * 直接拿绝对路径跟相对文本比永远对不上，树删了、登记留着（第 150 批修正二）。
  *
  * @param {string} gitCommonDir 仓库 git common dir（绝对真实路径）
- * @param {string} wtPath 刚删掉的树的真实路径
- * @returns {boolean} 是否删掉了一个管理条目
+ * @param {string} wtPath 树的路径
+ * @returns {string | null} 管理目录的路径；找不到（或读不出）为 null
  */
-export function removeWorktreeAdminEntry(gitCommonDir, wtPath) {
+export function findWorktreeAdminEntry(gitCommonDir, wtPath) {
   try {
     const path = resolve(wtPath);
-    if (existsSync(path)) return false; // 树还在：条目是活的，不删
     const adminRoot = join(gitCommonDir, "worktrees");
     let names;
     try {
       names = readdirSync(adminRoot);
     } catch {
-      return false;
+      return null;
     }
     const norm = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
     const want = norm(`${path}${sep}.git`);
@@ -129,47 +131,156 @@ export function removeWorktreeAdminEntry(gitCommonDir, wtPath) {
       } catch {
         continue;
       }
-      if (norm(content) !== want) continue;
-      rmSync(entryDir, { recursive: true, force: true });
-      return true;
+      const absolute = isAbsolute(content) ? content : resolve(entryDir, content);
+      if (norm(absolute) === want) return entryDir;
     }
+  } catch {
+    /* 读不出：当作没找到 */
+  }
+  return null;
+}
+
+/**
+ * 只删一棵树自己的 worktree 管理条目：用 findWorktreeAdminEntry 找到 `gitdir` 指向
+ * <wtPath>/.git 的那一项，核对 <wtPath> 目录确实已不在盘上，才删那个管理目录。不碰其他
+ * 条目、不做仓库级 prune（竞争说明见 WORKTREE_PRUNE_EXPIRE）。
+ *
+ * @param {string} gitCommonDir 仓库 git common dir（绝对真实路径）
+ * @param {string} wtPath 刚删掉的树的真实路径
+ * @returns {boolean} 管理条目是否确实已不在盘上（删掉了，或本来就没有则为 false）
+ */
+export function removeWorktreeAdminEntry(gitCommonDir, wtPath) {
+  try {
+    if (pathPresent(resolve(wtPath))) return false; // 树还在：条目是活的，不删
+    const entryDir = findWorktreeAdminEntry(gitCommonDir, wtPath);
+    if (entryDir === null) return false;
+    rmSync(entryDir, { recursive: true, force: true });
+    // rmSync 可能只删了一半（Windows 上目录被进程以 cwd 占着：里面的文件删了、目录删不掉）。
+    return !existsSync(entryDir);
   } catch {
     /* best-effort：清不掉留给通用清扫 */
   }
   return false;
 }
 
+/** 路径本身（不跟进）是不是符号链接 / junction（Node 的 lstat 把两者都报成符号链接）。 */
+function isLinkAt(p) {
+  try {
+    return lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 路径本身（不跟进链接）是否在盘上。悬空的链接也算在——existsSync 会跟进链接、把悬空链接
+ * 看成"不存在"，拿它判"树已经不在了"会把一个还留在盘上的链接报成已删（第 150 批修正二）。
+ */
+export function pathPresent(p) {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 树里有目录型链接（junction 或目录符号链接）——保守删除原语的闭集拒绝原因。 */
+export const TREE_CONTAINS_JUNCTION = "tree_contains_junction";
+
+/**
+ * 不跟进链接地遍历一棵树（只 readdir / stat，不写盘），找出会让 `git worktree remove`
+ * 与 `git diff` 读出或删到树外的东西（第 150 批修正一）：Windows 上 git 删树会跟进
+ * **junction**，把目标目录里的文件一并删掉（git 2.50.1.windows.1 实测；被忽略的
+ * junction 无 --force 也照删），`git diff` 对被换成 junction 的受控目录也会读进目标内容。
+ *
+ * Node 的 lstat / stat / Dirent / readlink 分不出 junction 与目录符号链接（实测完全一
+ * 样），所以凡是"自己是链接、目标不是普通文件"的一律按危险报（保守：多留树，不多删）：
+ *   - 链接且 stat 为目录                → why = "directory_link"
+ *   - 链接且 stat 失败（悬空、读不出）  → why = "dangling:<code>"
+ *   - 目录读不出                        → why = "unreadable:<code>"（证明不了安全）
+ * 指向文件的符号链接 git 不跟进，不报。libuv 把 symlink / junction 以外的重解析点
+ * （云盘占位等）当普通文件或目录，Node 看不见，本函数覆盖不到——这是已知限制。
+ *
+ * 已知不防：遍历之后、删除之前有人新建 junction（竞态）。
+ *
+ * @param {string} treePath 树根（调用方保证它自己不是链接，见 isLinkAt）
+ * @param {{skip?: string[], io?: {readdirSync: Function, statSync: Function}}} [opts]
+ *   skip：不走进去的相对路径（"/" 分隔、大小写折叠比较；在册嵌套树有自己的条目）；
+ *   io：测试缝。
+ * @returns {{path: string, why: string} | null} 第一处危险（相对路径，"/" 分隔）；没有则 null
+ */
+export function findTreeLinkHazard(treePath, { skip = [], io = { readdirSync, statSync } } = {}) {
+  const skipSet = new Set(skip.map((s) => String(s).replace(/\\/g, "/").toLowerCase()));
+  const stack = [""];
+  while (stack.length > 0) {
+    const rel = stack.pop();
+    let entries;
+    try {
+      entries = io.readdirSync(rel === "" ? treePath : join(treePath, rel), { withFileTypes: true });
+    } catch (error) {
+      return { path: rel === "" ? "." : rel, why: `unreadable:${error?.code ?? "error"}` };
+    }
+    for (const ent of entries) {
+      const childRel = rel === "" ? ent.name : `${rel}/${ent.name}`;
+      if (skipSet.has(childRel.toLowerCase())) continue;
+      if (ent.isSymbolicLink()) {
+        let target;
+        try {
+          target = io.statSync(join(treePath, childRel));
+        } catch (error) {
+          return { path: childRel, why: `dangling:${error?.code ?? "error"}` };
+        }
+        if (target.isFile()) continue;
+        return { path: childRel, why: "directory_link" };
+      }
+      if (ent.isDirectory()) stack.push(childRel);
+    }
+  }
+  return null;
+}
+
 /**
  * 删除 worktree（含目录）。
  * @param {string} wtPath worktree 路径
- * @param {{execFn?: Function}} [opts] 测试缝（缺省 execFileSync；execFn 只用于
- *   worktree remove 调用，源仓库自推与定向登记清理仍走真实 fs/git）
  *
- * git worktree remove 在**源仓库**执行（cwd=源仓库），不是待删目录：Windows 上
- * 子进程以待删目录为 cwd 时，该目录因是进程自身 cwd 而锁死，git 自己的目录删除
- * 必然失败、退回 rmSync 兜底。源仓库从目标树自己的 `git rev-parse
- * --git-common-dir` 推出（common dir 的父目录即主工作树根），不依赖调用方传
- * 入——转录里的 cwd 可能是相对路径或已删掉的外层树。
+ * 第 150 批修正一：**不再调用 `git worktree remove --force`**。Windows 上 git 删树会跟进
+ * 树里的 junction，把目标目录（树外！）里的文件一并删掉（git 2.50.1.windows.1 实测）。
+ * 删树主路径改为 fs.rmSync(recursive)——Node 22 对 junction、目录符号链接、文件符号链接
+ * 都不跟进（只删链接本身，实测）——再定向清理本树自己的管理条目。删除前的归属、上锁、
+ * 主检出检查照旧；树根自己是链接时不动（只 unlink 链接会让调用方误以为树已释放，真树
+ * 还在目标位置，也绕过管理条目的归属核对）。
+ *
+ * 源仓库从目标树自己的 `git rev-parse --git-common-dir` 推出（common dir 的父目录即
+ * 主工作树根），不依赖调用方传入——转录里的 cwd 可能是相对路径或已删掉的外层树。
  *
  * 不做仓库级 prune（与并发 `git worktree add` 存在关不掉的竞争，见
  * WORKTREE_PRUNE_EXPIRE）：树目录删掉后，只定向删这棵树自己的管理条目
  * （removeWorktreeAdminEntry，按 gitdir 内容核对归属）；其他目录已缺失的
  * stale 登记留给 serve 维护 / runs verify-commit 的通用清扫。
  *
- * Windows 上 git worktree remove 偶因文件锁 Permission denied（进程持有句柄）。
- * 解法：先试 git worktree remove，失败则 fallback 到 rmSync 强制删目录 +
- * 定向清理本树管理条目。
+ * Windows 上删目录偶因文件锁 Permission denied（进程持有句柄）：rmSync 带有界重试
+ *（线性退避），事后目录仍在如实留着，调用方以"目录仍在"判定没删掉。
  *
  * 只删 git 认得出、没上锁的链接工作树（linkedWorktreeEntry）：上了锁的（`git worktree
- * lock`）git 本就拒删，rmSync 兜底却会照删；git 认不出的（树里的 .git 丢了或指错、主检出、
- * 独立仓库、普通目录）看不出锁没锁，兜底同样不碰。调用方照旧以事后目录仍在判定没删掉。
+ * lock`）git 本就拒删，rmSync 却会照删；git 认不出的（树里的 .git 丢了或指错、主检出、
+ * 独立仓库、普通目录）看不出锁没锁，同样不碰。
+ *
+ * 返回值（第 150 批修正二）：`{ removed, registrationLeft }`。removed = 事后路径本身（lstat，
+ * 不跟进链接）已不在盘上——悬空的根链接 existsSync 看不见，不能判成"本来就不在"，树根是
+ * 链接（有效或悬空）一律不动、removed:false。registrationLeft = 树已删净但本树的管理条目
+ * 没清掉时的管理目录路径（相对路径登记认不出、目录被进程占着删不掉等），否则 null——调用方
+ * 必须如实报告，不当成功。树没删净时条目是活的，不算残留。
+ * @returns {Promise<{removed: boolean, registrationLeft: string | null}>}
  */
-export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
+export function removeWorktree(wtPath) {
   const path = resolve(wtPath);
-  if (!existsSync(path)) return Promise.resolve();
+  if (isLinkAt(path)) return Promise.resolve({ removed: false, registrationLeft: null });
+  if (!existsSync(path)) return Promise.resolve({ removed: true, registrationLeft: null });
   const entry = linkedWorktreeEntry(path);
-  if (!entry || entry.locked) return Promise.resolve();
-  // 源仓库自推：git 刚认出这棵树，推不出几乎不会发生；推不出时以待删目录为 cwd。
+  if (!entry || entry.locked) return Promise.resolve({ removed: false, registrationLeft: null });
+  // 源仓库自推（只为清理管理条目）：git 刚认出这棵树，推不出几乎不会发生；推不出时
+  // 管理条目留给通用清扫。
   let realCommon = null;
   try {
     const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
@@ -182,9 +293,7 @@ export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
     }).toString().trim();
     realCommon = realpathSync(resolve(path, commonDir));
     if (!existsSync(dirname(realCommon))) realCommon = null;
-  } catch { /* 自推失败走旧 cwd */ }
-  const execCwd = realCommon ? dirname(realCommon) : path;
-  // 重试内层：git worktree remove 失败 → rmSync 强删（均落源仓库）。
+  } catch { /* 自推失败：不清管理条目 */ }
   const MAX_RETRIES = 3;
   const RETRY_DELAY_MS = 100;
   let attempt = 0;
@@ -192,32 +301,27 @@ export function removeWorktree(wtPath, { execFn = execFileSync } = {}) {
   while (attempt < MAX_RETRIES && !removed) {
     attempt += 1;
     try {
-      execFn("git", ["worktree", "remove", "--force", path], {
-        cwd: execCwd,
-        // TD-236：worktree 清理同样禁用 replace objects（gitChildEnv SSOT）。
-        env: gitChildEnv(),
-        stdio: "pipe",
-        windowsHide: true,
-      });
-      removed = true;
-    } catch {
-      // fallback：强制删目录，登记走后面的定向清理
-      try {
-        rmSync(path, { recursive: true, force: true });
-        removed = !existsSync(path);
-      } catch { /* 尽力，下次重试 */ }
-    }
+      rmSync(path, { recursive: true, force: true });
+      removed = !existsSync(path);
+    } catch { /* 尽力，下次重试 */ }
     // 仍未删除且还有重试机会 → 退避等待（同步 sleep，worktree 删除非热路径，可接受）
     if (!removed && attempt < MAX_RETRIES) {
       const end = Date.now() + RETRY_DELAY_MS * attempt; // 线性退避 100/200ms
       while (Date.now() < end) { /* busy wait */ }
     }
   }
-  // 只删本树自己的管理条目：git worktree remove 成功时 git 已自清（这里是无害
-  // 的幂等核对）；rmSync 兜底后清残留。树目录仍在（删除失败）时条目是活的，
-  // 不清。
-  if (realCommon && !existsSync(path)) removeWorktreeAdminEntry(realCommon, path);
-  return Promise.resolve();
+  // 只删本树自己的管理条目。树目录仍在（删除失败）时条目是活的，不清。清完再核对一次：
+  // 条目目录还在盘上就如实报残留（findWorktreeAdminEntry 认得相对路径登记）。
+  const gone = !pathPresent(path);
+  let registrationLeft = null;
+  if (realCommon && gone) {
+    const adminDir = findWorktreeAdminEntry(realCommon, path);
+    if (adminDir !== null) {
+      removeWorktreeAdminEntry(realCommon, path);
+      if (existsSync(adminDir)) registrationLeft = adminDir;
+    }
+  }
+  return Promise.resolve({ removed: gone, registrationLeft });
 }
 
 /**
@@ -254,8 +358,8 @@ export function linkedWorktreeEntry(wtPath) {
 // ===== 终态零丢失自动回收（只删树，分支一律保留）============================
 //
 // 供 Run 终态收尾路径（_runCleanup，停止验证之后）回收普通 persistent 隔离树。
-// 与 removeWorktree 的差别是安全模型：不加 --force、单发、不重试、绝无
-// rmSync(force) 兜底——删除失败或删后目录仍在时如实返回 false（调用方记
+// 与 removeWorktree（rmSync 强删）的差别是安全模型：交给 git 的"不干净就拒绝"、单发、
+// 不重试、绝无 rmSync 兜底——删除失败或删后目录仍在时如实返回 false（调用方记
 // still_present 保留），宁可留着也不强删。判定门在 terminalWorktreeVerdict，
 // 通过全部删除条件（内容全净、HEAD 附着在自己的分支 tip、无嵌套、无共享）
 // 的树 git 无需 force 即可删除；force 在本路径是多余权力，去掉。
@@ -270,13 +374,27 @@ export function linkedWorktreeEntry(wtPath) {
  * 成功判定 = 事后目录不在盘上。git worktree remove 成功时自清管理条目；
  * 本函数不做任何 rmSync/管理条目清理（没有 force 兜底就没有残留条目要补）。
  *
+ * 第 150 批修正一：调用 git 之前先做一遍**不写入**的检查（findTreeLinkHazard，不跟进链接
+ * 遍历整棵树）。无 --force 的 git 对"被忽略的 junction"照样跟进、删掉目标目录里的文件，
+ * "不干净就拒绝"保护不到这个形状；发现目录型链接（junction / 目录符号链接）、悬空链接或
+ * 读不出的目录，就保留整棵树、返回 TREE_CONTAINS_JUNCTION、不调用 git。不先去删链接：
+ * 删掉被跟踪的符号链接会让干净的树变脏，删掉被忽略的链接又会改动 git 本来用来拒删的
+ * 内容。git 的"不干净就拒绝"仍是这条路径的安全依据，不改成 rmSync。树根自己是链接时
+ * 不动。已知不防：检查之后、git 删除之前有人新建 junction（竞态）。
+ *
  * @param {string} wtPath worktree 路径
  * @param {{execFn?: Function}} [opts] 测试缝（缺省 execFileSync）
- * @returns {boolean} 目录已不在（含本来就不在）；false = 删除失败或仍在盘上
+ * @returns {boolean | typeof TREE_CONTAINS_JUNCTION} true = 目录已不在（含本来就不在）；
+ *   false = 删除失败或仍在盘上；TREE_CONTAINS_JUNCTION = 树里有链接危险，没调用 git、树原样
+ *   （调用方一律按"没删掉"处理：判 `=== true`，不要判真值）
  */
 export function removeWorktreeNoForce(wtPath, { execFn = execFileSync } = {}) {
   const path = resolve(wtPath);
+  // 先 lstat 判链接、再 existsSync：existsSync 跟进链接，会把悬空的根链接看成"不存在"、返回
+  // true（成功），而链接其实还在盘上。根是链接（有效或悬空）一律不动、返回失败。
+  if (isLinkAt(path)) return false;
   if (!existsSync(path)) return true;
+  if (findTreeLinkHazard(path) !== null) return TREE_CONTAINS_JUNCTION;
   let execCwd = path;
   try {
     const commonDir = execFn("git", ["rev-parse", "--git-common-dir"], {
@@ -459,13 +577,12 @@ export function terminalWorktreeVerdict({
   } catch {
     return "inventory_unreadable";
   }
-  // 正常缓存位是大写 H；S=skip-worktree、小写=assume-unchanged、其余字母=
-  // removed/changed/unmerged 等状态——凡清点不了的一律保留。
-  if (lsVerbose.split(/\r?\n/).some((line) => line.length > 0 && !line.startsWith("H "))) {
-    return "inventory_unreadable";
-  }
-  if (lsStage.split(/\r?\n/).some((line) => line.startsWith("160000 "))) return "inventory_unreadable";
+  if (indexInventoryUnreliable(lsVerbose, lsStage)) return "inventory_unreadable";
   // ── 提交都在分支上 ──
+  // 这一段与 lineageClose.isTreeHeadDrifted 是同一条规则（树在 wao/<runId> 上且 HEAD 等于
+  // 这条分支此刻的 tip）。core 层不能反向引用 application 层，所以各写一份；
+  // test/run-lifecycle/terminalWorktreeRelease.test.js 的同表测试用同一组输入喂两边，
+  // 任何一边单独改规则都会红。
   const branch = `wao/${runId}`;
   let head;
   let tip;
@@ -521,6 +638,20 @@ export function terminalWorktreeVerdict({
     }
   }
   return "ready";
+}
+
+/**
+ * 索引清点是否不可信（终态自动回收与 worktree reclaim 共用，第 150 批 TD-374）：这些
+ * 形态会把工作区的改动藏起来，`git status` 看着干净其实不是，凡清点不了的一律保留。
+ * 正常缓存位是大写 H；S = skip-worktree、小写 = assume-unchanged、其余字母 = unmerged /
+ * removed / changed 等状态；gitlink（模式 160000，子模块）里的未提交内容 diff 看不到。
+ * @param {string} lsVerbose `git ls-files -v` 的输出
+ * @param {string} lsStage `git ls-files -s` 的输出
+ * @returns {boolean} true = 清点不可信
+ */
+export function indexInventoryUnreliable(lsVerbose, lsStage) {
+  if (lsVerbose.split(/\r?\n/).some((line) => line.length > 0 && !line.startsWith("H "))) return true;
+  return lsStage.split(/\r?\n/).some((line) => line.startsWith("160000 "));
 }
 
 /** 词法 basename（不触盘；Windows 两分隔符都认）。 */
