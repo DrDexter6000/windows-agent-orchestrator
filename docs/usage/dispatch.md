@@ -141,7 +141,7 @@ retry 的 per-dispatch 覆盖继承（任务文本 runId 绑定取法、继承�
 
 ## MCP `run_dispatch`（受监督的后台派发）
 
-`run_dispatch` 让 MCP host 正式派发一个受监督的后台任务。它直接复用与 CLI `run --background` 相同的 application service（`dispatchRun()`），不 shell-out CLI。WAO 拥有 dispatch、detached runner 和 transcript；模型只提供 worker 和 bounded prompt。
+`run_dispatch` 让 MCP host 正式派发一个受监督的后台任务。它直接复用与 CLI `run --background` 相同的 application service（`dispatchRun()`），不 shell-out CLI。WAO 拥有 dispatch、detached runner 和 transcript；模型只提供 worker 和 bounded prompt。可选 `taskType:"image"` 标生图任务。
 
 参数与形状见 `docs/surface/mcp-tools.md`（生成层，随代码再生成）。输入是 strict schema（拒绝额外字段）；schema 未列的一切（`registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout、`isolate` 等）都是 server-owned 配置，模型不能传。
 
