@@ -3485,8 +3485,8 @@ export class Run {
         // canonical Win32 segment shape (no trailing dot/space, ADS colon, or
         // reserved device name such as NUL), and no redaction marker (DeepSeek
         // redacts the event before enqueueing it). Everything else keeps the
-        // pre-batch fail-closed behavior: no toolCallId (kimi-web/zcode/codex
-        // file_written events carry none), no matching inside intent, a
+        // pre-batch fail-closed behavior: no toolCallId (a write first seen at
+        // completion carries none, TD-361), no matching inside intent, a
         // non-ENOENT error, physical_outside, or a failed root realpath.
         // Known boundary (not defended): swapping the junction between the
         // intent check and the write is TOCTOU; the backend-reported intent is a
