@@ -303,7 +303,7 @@ function factForIsolationViolation(reason, errorCode, event = {}) {
     fact = `${fact} (filesystem error code: ${errorCode})`;
   }
   if (knownReason && (reason.endsWith("_lexical_outside") || reason.endsWith("_physical_outside"))) {
-    const detail = isolationOutsideDetail(event, { physical: reason.endsWith("_physical_outside") });
+    const detail = isolationOutsideDetail(event);
     if (detail.length > 0) fact = `${fact} (${detail.join("; ")})`;
   }
   return fact;
@@ -318,19 +318,82 @@ function isolationDisplayText(value) {
   return safeSliceUtf16(escapeControlChars(value), 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
 }
 
-function isolationOutsideDetail(event, { physical = false } = {}) {
-  if (!event || typeof event !== "object" || Array.isArray(event)) return [];
-  const out = [];
-  if (typeof event.destination === "string" && ISOLATION_DESTINATIONS.includes(event.destination)) {
-    out.push(`destination: ${event.destination}`);
+/**
+ * 第 141b 批：隔离违规的机读面（MCP run_diagnose 的 `isolationViolation`）。
+ * 输入是一条 run.isolation_violation 事件，或服务层给出的同名五字段对象——读侧
+ * 一律当不可信文本，逐字段过同一道清理：
+ *   - reason、destination 只认闭集成员（ISOLATION_VIOLATION_REASONS /
+ *     ISOLATION_DESTINATIONS），闭集外与非字符串不回显；
+ *   - reportedPath、resolvedPath、escapedAt 先转义控制字符、再按
+ *     ISOLATION_DISPLAY_PATH_MAX_CHARS 限长，非字符串与空串不回显；
+ *   - escapedAt 只在（闭集内的）reason 以 `_physical_outside` 结尾时给——词法越界
+ *     与相关性/物理不可确认的原因没有"逃出的那一级"。
+ * 一个可信字段都没有 → null（调用方不带这个键）；其余键一律丢弃。清理幂等：
+ * 已转义、已限长的值再过一遍不变，所以服务层与 MCP 边界各过一次无副作用。
+ * 文字证据（factForIsolationViolation）读同一份结果，两个面不会各清各的。
+ *
+ * @param {unknown} raw
+ * @returns {{reason?: string, destination?: string, reportedPath?: string, resolvedPath?: string, escapedAt?: string}|null}
+ */
+export function projectIsolationViolation(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out = {};
+  const reason = typeof raw.reason === "string" && ISOLATION_VIOLATION_REASONS.includes(raw.reason)
+    ? raw.reason
+    : null;
+  if (reason !== null) out.reason = reason;
+  if (typeof raw.destination === "string" && ISOLATION_DESTINATIONS.includes(raw.destination)) {
+    out.destination = raw.destination;
   }
-  const reportedPath = isolationDisplayText(event.reportedPath);
-  if (reportedPath !== null) out.push(`worker-reported path: ${reportedPath}`);
-  const resolvedPath = isolationDisplayText(event.resolvedPath);
-  if (resolvedPath !== null) out.push(`resolved path: ${resolvedPath}`);
-  const escapedAt = physical ? isolationDisplayText(event.escapedAt) : null;
-  if (escapedAt !== null) out.push(`escaped at: ${escapedAt}`);
+  const reportedPath = isolationDisplayText(raw.reportedPath);
+  if (reportedPath !== null) out.reportedPath = reportedPath;
+  const resolvedPath = isolationDisplayText(raw.resolvedPath);
+  if (resolvedPath !== null) out.resolvedPath = resolvedPath;
+  const escapedAt = reason !== null && reason.endsWith("_physical_outside")
+    ? isolationDisplayText(raw.escapedAt)
+    : null;
+  if (escapedAt !== null) out.escapedAt = escapedAt;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+// 文字证据：同一份清理结果按固定顺序拼成 "key: value" 片段。
+function isolationOutsideDetail(event) {
+  const p = projectIsolationViolation(event) ?? {};
+  const out = [];
+  if (p.destination !== undefined) out.push(`destination: ${p.destination}`);
+  if (p.reportedPath !== undefined) out.push(`worker-reported path: ${p.reportedPath}`);
+  if (p.resolvedPath !== undefined) out.push(`resolved path: ${p.resolvedPath}`);
+  if (p.escapedAt !== undefined) out.push(`escaped at: ${p.escapedAt}`);
   return out;
+}
+
+// 内核判定"这条运行越界"的唯一谓词：事件类型、绑定本 runId、安全码 workdir_escape。
+// diagnoseFailureInner 与 isolationViolationDetail 共用，两处永不各自判定。
+function findBoundIsolationViolation(evs, expectedRunId) {
+  return evs.find(
+    (e) => e.type === "run.isolation_violation"
+      && e.runId === expectedRunId
+      && e.code === "workdir_escape",
+  );
+}
+
+/**
+ * 第 141b 批：与 diagnoseFailure 判为 workdir_escape 同一条绑定事件的机读事实
+ * （同一 runId 绑定与 boundReportScope 读法，见 diagnoseFailureInner）。没有合法
+ * expectedRunId、没有绑定本 runId 的 workdir_escape 事件、或事件上没有可信字段 → null。
+ * 只供 MCP run_diagnose 的 `isolationViolation`；diagnoseFailure 的返回形状不变
+ * （`wao run` 失败输出里嵌的 diagnosis 对象逐字节不变）。
+ *
+ * @param {Array} events
+ * @param {string} [expectedRunId]
+ * @returns {ReturnType<typeof projectIsolationViolation>}
+ */
+export function isolationViolationDetail(events, expectedRunId) {
+  if (typeof expectedRunId !== "string" || expectedRunId.length === 0) return null;
+  const raw = Array.isArray(events) ? events : [];
+  const evs = boundReportScope(raw, expectedRunId) ?? raw;
+  const event = findBoundIsolationViolation(evs, expectedRunId);
+  return event ? projectIsolationViolation(event) : null;
 }
 
 // Provider access denial facts that classify as provider_auth even when they
@@ -761,11 +824,7 @@ function diagnoseFailureInner(events, expectedRunId) {
   // unknown value is NOT this diagnosis — the safe-code check keeps the signal
   // type-bound, matching the readiness projection's safe closed set.
   const isolationViolation = hasValidExpectedRunId
-    ? evs.find(
-      (e) => e.type === "run.isolation_violation"
-        && e.runId === expectedRunId
-        && e.code === "workdir_escape",
-    )
+    ? findBoundIsolationViolation(evs, expectedRunId)
     : undefined;
   if (isolationViolation) {
     // M12-14: the fact wording is reason-aware. Only an exact closed-set

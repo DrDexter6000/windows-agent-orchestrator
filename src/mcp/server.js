@@ -397,7 +397,15 @@ import {
   ALLOWED_PATHS_RULE_TEXT,
 } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
-import { DIAGNOSIS_CATEGORIES, DIAGNOSIS_CODES, isValidDiagnosisCode, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
+import {
+  DIAGNOSIS_CATEGORIES,
+  DIAGNOSIS_CODES,
+  isValidDiagnosisCode,
+  ISOLATION_DESTINATIONS,
+  ISOLATION_DISPLAY_PATH_MAX_CHARS,
+  ISOLATION_VIOLATION_REASONS,
+  projectIsolationViolation,
+} from "../diagnosis.js";
 import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES, TERMINAL_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
@@ -1020,8 +1028,13 @@ const RUN_DISPATCH_INPUT = z.object({
 // 从与 run_dispatch_contract_check 共享的 RUN_DISPATCH_INPUT 派生，只把这一个
 // 字段改成必填；后者可用缺省绑定，保持 optional 不动。处理器里原有的缺参
 // 固定文案拒绝保留（schema 校验在前，处理器兜底不删）。
+// 第 141b 批（决定 0131 §5）：taskType 只加在这份派发 schema 上——预检工具的输入
+// 面不扩大。闭集只开放 "image"（OWNER_TASK_TYPES 的成员；其余类型由会审与续修
+// 路径在服务层固化，不经这个入口）；经 dispatchRun 变成 runner 的 --task-type，
+// 由 RunManager.start 固化进 run.started.taskType。
 const RUN_DISPATCH_INPUT_STRICT = RUN_DISPATCH_INPUT.extend({
   expectedWorkspaceRoot: z.string().min(1).max(1024),
+  taskType: z.enum(["image"]).optional(),
 });
 
 // M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
@@ -1129,8 +1142,9 @@ const RUN_DISPATCH_DESCRIPTION =
   "not consulted; expectedGitHead/expectedDirty are optional assertions. " +
   "continuable roots a lineage run_continue can " +
   "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
-  "keeps one live process so run_correct can queue an in-flight turn. WAO never infers " +
-  "continuation, correction delivery, scope, retry, or acceptance.";
+  "keeps one live process so run_correct can queue an in-flight turn. taskType:\"image\" " +
+  "marks an image-generation task for the Owner dashboard's grouping; it does not affect " +
+  "dispatch. WAO never infers continuation, correction delivery, scope, retry, or acceptance.";
 
 // ===== run_dispatch_contract_check (M12-9 advisory precheck) constants =====
 //
@@ -2023,6 +2037,20 @@ const RUN_DIAGNOSE_INPUT = z.object({
 // Category enum from the diagnosis SSOT — no second hand-maintained list.
 const DIAGNOSIS_CATEGORY_ENUM = z.enum(DIAGNOSIS_CATEGORIES);
 
+// 第 141b 批：隔离违规的机读事实（TD-373 的 MCP 面）。每个字段都是读侧不可信文本
+// 的清理结果（projectIsolationViolation 是唯一的清理处，边界与服务各过一次）：
+// reason / destination 是 diagnosis.js 闭集的 enum，三个路径字段以共用的
+// ISOLATION_DISPLAY_PATH_MAX_CHARS 为上界。对象与每个字段都可选——历史转录没有这些
+// 字段，写入侧也只在对应原因下记录。三个路径字段各自内联：复用同一个 zod 实例会让
+// SDK 把后两个写成 $ref，既更长、也不是每个宿主都解析。
+const RUN_DIAGNOSE_ISOLATION_VIOLATION = z.object({
+  reason: z.enum([...ISOLATION_VIOLATION_REASONS]).optional(),
+  destination: z.enum([...ISOLATION_DESTINATIONS]).optional(),
+  reportedPath: z.string().max(ISOLATION_DISPLAY_PATH_MAX_CHARS).optional(),
+  resolvedPath: z.string().max(ISOLATION_DISPLAY_PATH_MAX_CHARS).optional(),
+  escapedAt: z.string().max(ISOLATION_DISPLAY_PATH_MAX_CHARS).optional(),
+}).strict();
+
 const RUN_DIAGNOSE_OUTPUT = z.object({
   runId: z.string(),
   state: z.string(),
@@ -2038,6 +2066,8 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   signalEventTypes: z.array(z.string().min(1).max(DIAGNOSE_MAX_TYPE_CHARS)).max(DIAGNOSE_MAX_SIGNALS),
   signalCount: z.number().int().nonnegative(),
   signalsTruncated: z.boolean(),
+  // 第 141b 批：仅 category === "workdir_escape" 且有可信字段时带。
+  isolationViolation: RUN_DIAGNOSE_ISOLATION_VIOLATION.optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the standalone observation outputs expose it;
   // the delivery BASE shape deliberately does not carry the field.
@@ -4465,7 +4495,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, lane, role, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, fresh, model, reasoning }) => {
+    async ({ agentId, prompt, lane, role, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, fresh, model, reasoning, taskType }) => {
       // 0047 L1：防向下派发门（worker 会话拉起的 MCP 服务实例在 side effect 前被拒；
       // 判定 SSOT=nestedDispatchGuard，与 RunManager.start 同一函数零分叉）。
       try {
@@ -4865,6 +4895,9 @@ export function createWaoMcpServer({
           // RunManager.start synthesizes reasoning.effort over the registry
           // policy.
           ...(reasoning !== undefined ? { reasoningOverride: reasoning } : {}),
+          // 第 141b 批（决定 0131 §5）：任务类型原样交给 dispatchRun（缺省 = 不放这个
+          // 键，入参与 argv 逐字节不变）；wire 已卡死闭集 "image"，服务层同一闭集再核一次。
+          ...(taskType !== undefined ? { taskType } : {}),
           // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
           // model-supplied). RunManager.start revalidates/pins it.
           frozenGitHead: workspaceFrozenHead,
@@ -6034,6 +6067,13 @@ export function createWaoMcpServer({
           signalCount: allTypes.length,
           signalsTruncated: allTypes.length > DIAGNOSE_MAX_SIGNALS,
         };
+        // 第 141b 批：越界类别的机读事实。服务给出的 isolationViolation 在这里当
+        // 不可信输入再过一遍同一个清理（闭集成员、控制字符转义、统一限长、escapedAt
+        // 只给 *_physical_outside、多余键丢弃）；不是 workdir_escape 一律不带。
+        if (payload.category === "workdir_escape") {
+          const isolationViolation = projectIsolationViolation(diag.isolationViolation);
+          if (isolationViolation !== null) payload.isolationViolation = isolationViolation;
+        }
         // M12-8B: bounded progressive-disclosure metadata — a pure function of
         // the already-projected safe fields.
         payload.availableDrilldowns = selectDrilldowns("run_diagnose", {

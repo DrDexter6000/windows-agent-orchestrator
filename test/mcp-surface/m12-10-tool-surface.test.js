@@ -485,7 +485,14 @@ const RED_23_WIRE = 75492;
 // "cursor = prior nextCursor"、run_stop 恢复 "(any worker event)"（schema 表达
 // 不了的指路语义），同批压 reverify/repackage/stop/continue 的 schema 重复措辞
 // 抵消：76532→76535（实测；不高于 main 的 76543，Owner 硬顶 94532 内）。
-const FROZEN_17_WIRE_CEILING = 76535;
+// 第 141b 批（决定 0021 / 0078 手续，Owner 批准本批合理抬高上限）：run_dispatch 入参增
+// 可选 taskType（enum ["image"]，决定 0131 §5；只加在派发 schema 上，预检工具的输入面
+// 不动）、run_diagnose 出参增可选 isolationViolation（reason/destination 闭集 enum、
+// 三个路径字段 maxLength 300；只在 workdir_escape 且有可信字段时带，TD-373 的 MCP 面）、
+// run_activity 出参 envelope enum 增固定标签 isolation_violation（服务端
+// ENVELOPE_TYPE_TO_LABEL 增 run.isolation_violation 映射的镜像）：76535→77446（实测；
+// 改动前同口径实测 76529；Owner 硬顶 94532 内）。
+const FROZEN_17_WIRE_CEILING = 77446;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -757,8 +764,14 @@ test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", asyn
 // 第 135 批续修：run_continue 出参增可选 guidance——SHA 如实翻新。
 // （历史值：82b48f5bd1f7fa26c1d0685d61313c14e9f08d877fe3239104a83a7ca03a46fc
 // 为第 135 批首交付（cfbf522f）的冻结值。）
+// 第 141b 批（决定 0021 / 0078 手续，Owner 批准本批合理抬高上限）：run_dispatch 入参增
+// 可选 taskType（enum ["image"]）、run_diagnose 出参增可选 isolationViolation、
+// run_activity 出参 envelope enum 增 isolation_violation——三处 schema 都在 stripped
+// 载荷内，SHA 如实翻新；描述只有 run_dispatch 增一句 taskType 说明（不进 stripped 载荷）。
+// （历史值：e3de9cbb1ba6720b0d6e750b267d841727fcbbafa31749c4aecc1f75ea8e7295
+// 为第 135 批续修后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "e3de9cbb1ba6720b0d6e750b267d841727fcbbafa31749c4aecc1f75ea8e7295";
+  "e2db4509d342a49eb33866c19b134ba0af5c411cc48b268e7c927bb7f222927a";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。
@@ -887,7 +900,10 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 第 135 批续修：恢复 cursor=nextCursor 与 "(any worker event)" 两句（schema
 // 表达不了），同批压 reverify/repackage/stop/continue 的重复措辞净减：
 // 10231→10189（实测；不高于 main 的 10402，Owner 硬顶 12347 内）。
-const FROZEN_17_DESC_CEILING = 10189;
+// 第 141b 批（决定 0021 / 0078 手续，Owner 批准本批合理抬高上限）：run_dispatch 描述加
+// 一句 taskType:"image" 的说明（生图任务、给 Owner 看板分类用，不影响派发）：
+// 10189→10296（实测；改动前同口径实测 10183；Owner 硬顶 12347 内）。
+const FROZEN_17_DESC_CEILING = 10296;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：12063→12219（实测；Owner 硬顶 12347 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 描述加一句"回执在有未终态
@@ -916,7 +932,10 @@ const FROZEN_17_DESC_CEILING = 10189;
 // 20870→20859（hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 第 135 批续修：guidance 字段进 outputSchema（+45B）、两句描述恢复与同批
 // 精简相抵后按实测：20859→20817（不高于 main 的 20870，wire 硬顶 94532 内）。
-const FROZEN_17_HOSTVISIBLE_CEILING = 20817;
+// 第 141b 批（决定 0021 / 0078 手续，Owner 批准本批合理抬高上限）：run_dispatch 的
+// taskType 入参字段与描述一句进 hostVisible：20817→20970（实测；改动前同口径实测
+// 20811；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
+const FROZEN_17_HOSTVISIBLE_CEILING = 20970;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：23270→23426（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句

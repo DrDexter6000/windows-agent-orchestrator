@@ -1868,3 +1868,146 @@ test("147-MCP-6: 合同提醒 + 超帽提示 → CLI 等待半句不被挤掉（
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// 第 141b 批（决定 0131 §5）：run_dispatch 可选输入 taskType——只有 "image"，
+// 只加在派发 schema 上（预检工具的输入面不扩大）；经 dispatchRun 变成 runner 的
+// --task-type，由 RunManager.start 固化进 run.started.taskType（第 140a 批已接）。
+// 这些用例让真实 dispatchRun 跑在 MCP 处理器后面，只把 spawn 换成记录 argv 的假实现。
+// =====================================================================
+
+function makeRunnerSpawnRecorder() {
+  const calls = [];
+  const spawnFn = (cmd, args, opts) => {
+    const call = { cmd, args, opts };
+    calls.push(call);
+    return { unref() {}, stdin: { once() {}, end(_text, cb) { cb?.(); } } };
+  };
+  return { calls, spawnFn };
+}
+
+async function withTaskTypeServer(body) {
+  const dir = mkdtempSync(join(tmpdir(), "wao-141b-tt-"));
+  const runDir = join(dir, "runs");
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const recorder = makeRunnerSpawnRecorder();
+    const dispatched = [];
+    const server = createWaoMcpServer({
+      registryPath, runDir, workspaceRoot: dir,
+      dispatchRunFn: (input) => {
+        dispatched.push(input);
+        return realDispatchRun({ ...input, spawnFn: recorder.spawnFn });
+      },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      await body({ dir, client, recorder, dispatched });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+}
+
+function flagValues(args, flag) {
+  const out = [];
+  args.forEach((a, i) => { if (a === flag) out.push(args[i + 1]); });
+  return out;
+}
+
+test("141b-TT-1: taskType:\"image\" 受理，runner 参数里恰有一对 --task-type image", async () => {
+  await withTaskTypeServer(async ({ dir, client, recorder, dispatched }) => {
+    const res = await client.callTool({
+      name: "run_dispatch",
+      arguments: { agentId: "coder_low", prompt: "画一张图", expectedWorkspaceRoot: dir, taskType: "image" },
+    });
+    assert.equal(res.isError, undefined, `受理（实测：${res.content?.[0]?.text ?? ""}）`);
+    assert.equal(res.structuredContent.accepted, true);
+    assert.equal(dispatched.length, 1, "派发服务恰好一次");
+    assert.equal(dispatched[0].taskType, "image", "taskType 原样交给 dispatchRun");
+    assert.equal(recorder.calls.length, 1, "runner 恰好启动一次");
+    assert.deepEqual(flagValues(recorder.calls[0].args, "--task-type"), ["image"], "runner argv 恰有一对 --task-type image");
+  });
+});
+
+test("141b-TT-2: 不带 taskType → dispatchRun 入参没有这个键、runner argv 没有 --task-type（行为不变）", async () => {
+  await withTaskTypeServer(async ({ dir, client, recorder, dispatched }) => {
+    const res = await client.callTool({
+      name: "run_dispatch",
+      arguments: { agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: dir },
+    });
+    assert.equal(res.isError, undefined, `受理（实测：${res.content?.[0]?.text ?? ""}）`);
+    assert.equal(dispatched.length, 1);
+    assert.equal(Object.hasOwn(dispatched[0], "taskType"), false, "没给就不往派发入参里放键");
+    assert.equal(recorder.calls.length, 1);
+    assert.equal(recorder.calls[0].args.includes("--task-type"), false, "argv 没有 --task-type");
+  });
+});
+
+test("141b-TT-3: taskType 别的值或错误类型在 schema 层被拒（派发服务与 runner 零调用）", async () => {
+  await withTaskTypeServer(async ({ dir, client, recorder, dispatched }) => {
+    // 其余入参全部合法——被拒的唯一原因只能是 taskType。
+    const base = { agentId: "coder_low", prompt: "do it", expectedWorkspaceRoot: dir };
+    const ok = await client.callTool({ name: "run_dispatch", arguments: { ...base, taskType: "image" } });
+    assert.equal(ok.isError, undefined, "对照：同一组入参带合法 taskType 能受理");
+    const dispatchedBefore = dispatched.length;
+    const spawnedBefore = recorder.calls.length;
+    const badValues = [
+      "code", "research", "test", "plan_review", "delivery_review", "untyped", // 别的闭集成员也不开放
+      "IMAGE", "Image", " image", "image ", "banana", "", // 大小写、空白、集外、空串
+      42, true, null, {}, ["image"], // 错误类型
+    ];
+    for (const taskType of badValues) {
+      let result = null;
+      let threw = false;
+      try {
+        result = await client.callTool({ name: "run_dispatch", arguments: { ...base, taskType } });
+      } catch {
+        threw = true; // 协议层拒绝也算拒绝
+      }
+      if (!threw) {
+        assert.equal(result.isError, true, `taskType=${JSON.stringify(taskType)} 必须被拒，不能受理`);
+        assert.equal(result.structuredContent, undefined, "被拒没有结构化回执");
+      }
+    }
+    assert.equal(dispatched.length, dispatchedBefore, "被拒的调用没有触达派发服务");
+    assert.equal(recorder.calls.length, spawnedBefore, "被拒的调用没有启动 runner");
+  });
+});
+
+test("141b-TT-4: tools/list——run_dispatch 的 taskType 是可选闭集 [\"image\"]，预检工具的输入 schema 不含 taskType", async () => {
+  await withTaskTypeServer(async ({ client }) => {
+    const { tools } = await client.listTools();
+    const rd = tools.find((t) => t.name === "run_dispatch");
+    const cc = tools.find((t) => t.name === "run_dispatch_contract_check");
+    assert.deepEqual(rd.inputSchema.properties.taskType.enum, ["image"], "闭集只有 image");
+    assert.equal((rd.inputSchema.required ?? []).includes("taskType"), false, "可选，不是必填");
+    assert.equal(rd.inputSchema.additionalProperties, false, "run_dispatch 仍是 strict");
+    assert.equal(Object.hasOwn(cc.inputSchema.properties, "taskType"), false, "预检的输入面不扩大");
+    assert.equal(cc.inputSchema.additionalProperties, false, "预检仍是 strict");
+    assert.match(rd.description, /taskType/, "描述里有 taskType 一句");
+    assert.match(rd.description, /image/, "说明 image 用于生图任务");
+    assert.doesNotMatch(cc.description, /taskType/, "预检描述不提 taskType");
+  });
+});
+
+test("141b-TT-5: 预检工具收到 taskType 被 strict schema 拒（输入面没有扩大）", async () => {
+  await withTaskTypeServer(async ({ dir, client, dispatched }) => {
+    let result = null;
+    let threw = false;
+    try {
+      result = await client.callTool({
+        name: "run_dispatch_contract_check",
+        arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir, taskType: "image" },
+      });
+    } catch {
+      threw = true;
+    }
+    if (!threw) assert.equal(result.isError, true, "预检不认 taskType，必须被拒");
+    assert.equal(dispatched.length, 0, "预检从不派发");
+  });
+});

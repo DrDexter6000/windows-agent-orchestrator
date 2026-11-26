@@ -21,19 +21,27 @@ export const RUN_STATUS_OUTPUT_KEYS = Object.freeze([
   "runId", "state", "terminal",
 ]);
 
-// run_dispatch input schema properties: 12 keys (M9-2B-01 / R10-A-MCP-1 /
-// R11-1-MCP-1 / B1). agentId + prompt required; the rest optional additive
-// members (delivery, M12-6 expectations, M12-9 executionProfileId, M12-7
-// continuable, M12-16 correctable, Round-4 readOnly, R10-A model, R11-1
-// reasoning). 决定 0129（会审修正）：run_dispatch_contract_check 保留并**继续
-// 共享该 schema**（只预检不派发是它独有的入口）。
+// run_dispatch_contract_check input schema properties: 15 keys (M9-2B-01 /
+// R10-A-MCP-1 / R11-1-MCP-1 / B1). agentId + prompt required; the rest optional
+// additive members (delivery, M12-6 expectations, M12-9 executionProfileId,
+// M12-7 continuable, M12-16 correctable, Round-4 readOnly, R10-A model, R11-1
+// reasoning). 决定 0129（会审修正）：run_dispatch_contract_check 保留（只预检
+// 不派发是它独有的入口），与 run_dispatch 共享基础 schema。
 // 0045 §1.4 第 5 步（2026-10-05）：+lane/+role（agentId 转可选——{agentId} 或
 // {lane, role} 二选一闭集，选择器校验在 handler 经 dispatchResolution）。
 // 0052（2026-10-10）：+fresh（复用会话逃生口——强制 first+epoch+1，Lead 裁量）。
-export const RUN_DISPATCH_INPUT_KEYS = Object.freeze([
+// 第 141b 批（决定 0131 §5）：taskType 只加在 run_dispatch 的派发 schema 上，
+// 预检工具的输入面不扩大——这份键集就是它的冻结值。
+export const RUN_DISPATCH_CONTRACT_CHECK_INPUT_KEYS = Object.freeze([
   "agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty",
   "expectedGitHead", "expectedWorkspaceRoot", "fresh", "lane", "model", "prompt", "readOnly",
   "reasoning", "role",
+]);
+
+// run_dispatch input schema properties：预检的 15 键 + 第 141b 批（决定 0131 §5）
+// 的可选 taskType（闭集只有 "image"）。
+export const RUN_DISPATCH_INPUT_KEYS = Object.freeze([
+  ...RUN_DISPATCH_CONTRACT_CHECK_INPUT_KEYS, "taskType",
 ]);
 
 // run_delivery (point-in-time) output: 24 top-level keys (M11-1A-01 /
