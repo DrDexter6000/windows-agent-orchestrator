@@ -356,8 +356,14 @@ test("BOARD R1 WIRING: switching views is presentation-only — no refetch, no w
     "the single commit path renders list AND board");
 });
 
-test("BOARD R2 DATA: app.js still speaks ONLY /api/runs + /api/activity; exactly one direct fetch", () => {
+// Decision 0131 A3 (batch 142): this guard now binds ONLY the legacy UI's app.js
+// (src/owner-dashboard/app.js, served at "/"). The new front end at /v2 is not
+// held to "two endpoints, one fetch": it has its own closed endpoint set (three
+// routes), its own single-fetch rule and its own text-safety guards in
+// ownerDashboardV2.test.js. The legacy rule itself is unchanged.
+test("BOARD R2 DATA (legacy UI): app.js still speaks ONLY /api/runs + /api/activity; exactly one direct fetch", () => {
   const js = readAsset("app.js");
+  assert.notEqual(js, readAsset("v2/app.js"), "the file under guard is the legacy app.js, not the /v2 one");
   const endpoints = [...new Set([...js.matchAll(/\/api\/([a-z]+)/g)].map((m) => m[1]))];
   assert.deepEqual([...endpoints].sort(), ["activity", "runs"], "no new endpoint anywhere in the client");
   const direct = js.match(/await fetch\(/g) || [];

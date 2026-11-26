@@ -194,27 +194,52 @@ const SAFE_HEADERS = Object.freeze({
 
 // ===== Package D: the Owner read-only dashboard UI =====
 //
-// The server serves EXACTLY three fixed static assets (the dashboard UI). There
-// is no second HTTP framework and no client-supplied path is ever read from
-// disk: the request pathname is matched against a FIXED route→asset table whose
-// bodies are preloaded ONCE at server creation. A request for any other path
-// (including every traversal form — the pathname is never used as a filesystem
-// path) simply matches no key and falls through to the fixed 404.
+// The server serves a CLOSED list of fixed static assets (the dashboard UIs).
+// There is no second HTTP framework and no client-supplied path is ever read
+// from disk: the request pathname is matched against a FIXED route→asset table
+// whose bodies are preloaded ONCE at server creation. A request for any other
+// path (including every traversal form, a case variant, an extra path level or
+// an unlisted file name — the pathname is never used as a filesystem path)
+// simply matches no key and falls through to the fixed 404.
 //
-// The three assets are loaded relative to this module (src/owner-dashboard/).
-// Loading is EAGER and FAIL-CLOSED at createOwnerDashboardServer time: if any of
-// the three fixed assets is missing/unreadable the factory throws BEFORE any
-// token is issued or socket opened — a dashboard that cannot serve its own UI
-// never starts. Tests may inject `loadAssetFn(name)` to avoid the disk.
+// Batch 142 (decision 0131 A3): two UIs live side by side. The legacy UI is
+// served from "/" (src/owner-dashboard/index.html, src/owner-dashboard/app.js,
+// src/owner-dashboard/styles.css). The new Owner dashboard is served from "/v2"
+// and "/v2/" (src/owner-dashboard/v2/index.html) plus one fixed route per module:
+// src/owner-dashboard/v2/app.js, src/owner-dashboard/v2/api.js,
+// src/owner-dashboard/v2/i18n.js, src/owner-dashboard/v2/model.js,
+// src/owner-dashboard/v2/store.js, src/owner-dashboard/v2/views.js and
+// src/owner-dashboard/v2/styles.css. "/v2/index.html" is NOT a route.
+// A /v2 file is served only when the RAW request path is clean (equal to the parsed
+// pathname: no "." / ".." segments, no repeated slashes, no backslashes); see the handler.
+//
+// The assets are loaded relative to this module (src/owner-dashboard/), by the
+// name written in `file` ("v2/app.js" is joined under that directory).
+// Loading is EAGER and FAIL-CLOSED at createOwnerDashboardServer time: if any
+// fixed asset is missing/unreadable the factory throws BEFORE any token is
+// issued or socket opened — a dashboard that cannot serve its own UI never
+// starts. Tests may inject `loadAssetFn(name)` to avoid the disk.
 const STATIC_DIR = fileURLToPath(new URL("./owner-dashboard/", import.meta.url));
+const HTML = "text/html; charset=utf-8";
+const CSS = "text/css; charset=utf-8";
+const JS = "text/javascript; charset=utf-8";
 const STATIC_ASSETS = Object.freeze([
-  { route: "/", file: "index.html", type: "text/html; charset=utf-8" },
-  { route: "/index.html", file: "index.html", type: "text/html; charset=utf-8" },
-  { route: "/styles.css", file: "styles.css", type: "text/css; charset=utf-8" },
-  { route: "/app.js", file: "app.js", type: "text/javascript; charset=utf-8" },
+  { route: "/", file: "index.html", type: HTML },
+  { route: "/index.html", file: "index.html", type: HTML },
+  { route: "/styles.css", file: "styles.css", type: CSS },
+  { route: "/app.js", file: "app.js", type: JS },
+  { route: "/v2", file: "v2/index.html", type: HTML },
+  { route: "/v2/", file: "v2/index.html", type: HTML },
+  { route: "/v2/styles.css", file: "v2/styles.css", type: CSS },
+  { route: "/v2/app.js", file: "v2/app.js", type: JS },
+  { route: "/v2/api.js", file: "v2/api.js", type: JS },
+  { route: "/v2/i18n.js", file: "v2/i18n.js", type: JS },
+  { route: "/v2/model.js", file: "v2/model.js", type: JS },
+  { route: "/v2/store.js", file: "v2/store.js", type: JS },
+  { route: "/v2/views.js", file: "v2/views.js", type: JS },
 ]);
 
-// Preload the three fixed assets into an immutable route→{body,type} map. The
+// Preload the fixed assets into an immutable route→{body,type} map. The
 // bodies are Buffers (exact bytes served verbatim; content-length is the byte
 // length). A fixed map keyed by the EXACT pathname makes traversal impossible:
 // "/../x", "/%2e", "/foo" match no key → 404, and no client input reaches fs.
@@ -398,7 +423,13 @@ const COUNT_KEYS = Object.freeze(["running", "starting", "verifying", "deliveryU
 const ITEM_KEYS = Object.freeze([
   "id", "kind", "state", "runIds", "projectSlugs", "since", "resolvedAt", "resolution", "evidence",
   "laneKey", "capacityCode", "followUp", "failure",
+  // 142 修正一：交付类事项的当前交付提交；会审事项的全部席位运行（牵涉的 worker）。
+  "commit", "seatRunIds",
+  // 142 修正二：failed 事项的后续运行（只给 runId 与当前 state）。
+  "followUpRuns",
 ]);
+const FOLLOW_UP_RUN_KEYS = Object.freeze(["runId", "state"]);
+const CONSULT_KEYS = Object.freeze(["groupId", "seatsIn", "seatsTotal"]);
 const EVIDENCE_KEYS = Object.freeze(["runId", "at", "seq"]);
 const FAILURE_KEYS = Object.freeze(["category", "code"]);
 const CAPACITY_KEYS = Object.freeze(["kind", "state", "observedAt"]);
@@ -434,6 +465,8 @@ function itemDto(item) {
   const out = pick(item, ITEM_KEYS);
   if (out.failure !== undefined) out.failure = failureDto(item.failure);
   if (out.evidence !== undefined) out.evidence = item.evidence.map((entry) => pick(entry, EVIDENCE_KEYS));
+  if (out.seatRunIds !== undefined) out.seatRunIds = [...item.seatRunIds];
+  if (out.followUpRuns !== undefined) out.followUpRuns = item.followUpRuns.map((entry) => pick(entry, FOLLOW_UP_RUN_KEYS));
   return out;
 }
 
@@ -464,6 +497,8 @@ function workerRowDto(row) {
     },
     failure: failureDto(run.failure),
     attentionIds: [...row.attentionIds],
+    // 会审席位所在组的摘要（几席已到 / 总席数）；不是会审席位就是 null。
+    consult: row.consult === null || row.consult === undefined ? null : pick(row.consult, CONSULT_KEYS),
   };
 }
 
@@ -685,6 +720,19 @@ async function serveArtifact(ctx, req, res, sp) {
   }
 }
 
+/** The request path exactly as sent (no query, no fragment, nothing normalized). */
+const rawPathOf = (req) => String(req.url || "/").split(/[?#]/, 1)[0];
+
+/** "/v2" itself or anything below it (a parsed pathname). */
+const isV2Path = (path) => path === "/v2" || path.startsWith("/v2/");
+
+/**
+ * A RAW request path that starts at /v2: "/v2" itself, "/v2/…", and also "/v2\…" or "/v2%5C…" — the URL
+ * parser turns a backslash into a slash, so "/v2\..\app.js" parses to the legacy "/app.js" and would
+ * otherwise slip past a prefix check on "/v2/". An encoded backslash is the same boundary.
+ */
+const isV2RawPath = (path) => /^\/v2(?:$|[\/\\]|%5c)/i.test(path);
+
 function createHandler(ctx) {
   return async function handler(req, res) {
     // Method-first: GET only. Every other method (incl. OPTIONS) → 405, with NO
@@ -705,11 +753,20 @@ function createHandler(ctx) {
       return sendJson(res, 200, { status: "ok" });
     }
 
-    // Package D: the three fixed dashboard assets. NO auth — the bearer lives
+    // Package D: the fixed dashboard assets. NO auth — the bearer lives
     // only in the URL fragment (client-side, never sent to the server), so a
     // browser navigation cannot carry it. The pathname is matched against a
     // fixed preloaded map; any other path (incl. traversal forms) → 404 below.
     const asset = ctx.assets.get(u.pathname);
+    // Batch 142 fix 1: the /v2 files are only served for a RAW request path that is already
+    // clean. The URL parser collapses "." / ".." segments, turns backslashes into slashes and
+    // drops tabs / newlines, so a collapsed path can land exactly on a fixed asset
+    // ("/v2/../app.js", "/v2/app.js/..", "/v2//app.js"). Whenever the raw path is under /v2, or
+    // the collapsed path is a /v2 asset, the raw path must equal the collapsed one — otherwise
+    // the fixed 404. The legacy routes keep their historic behaviour.
+    if (isV2RawPath(rawPathOf(req)) || (asset && isV2Path(u.pathname))) {
+      if (rawPathOf(req) !== u.pathname) return sendJson(res, 404, ERR.not_found);
+    }
     if (asset) {
       return sendAsset(res, asset);
     }
@@ -819,7 +876,8 @@ function createHandler(ctx) {
  * @param {Function} [config.nowFn] — clock (ms) for liveness (testing)
  * @param {Function} [config.loadAssetFn] — injectable fixed-asset loader
  *   `(name:string) => Buffer|Uint8Array|string` for tests; default reads the
- *   three fixed assets from src/owner-dashboard/ relative to this module.
+ *   fixed assets (the legacy UI and the "v2/…" files) from src/owner-dashboard/
+ *   relative to this module.
  *   Loading is eager + fail-closed: a missing asset throws BEFORE listen.
  * @param {Function} [config.createReadModelFn] — injectable (testing) Owner
  *   read-model factory `() => {refresh, snapshot}`; default
@@ -876,7 +934,7 @@ export function createOwnerDashboardServer(config) {
     throw new Error(`invalid refreshIntervalMs: must be a positive integer (default ${DEFAULT_REFRESH_INTERVAL_MS})`);
   }
 
-  // Package D: preload the three fixed dashboard assets EAGER and FAIL-CLOSED
+  // Package D: preload the fixed dashboard assets EAGER and FAIL-CLOSED
   // BEFORE the token is issued or any socket opened. A dashboard that cannot
   // serve its own UI never starts. The map is immutable for the server lifetime.
   const assets = loadStaticAssets(loadAssetFn);

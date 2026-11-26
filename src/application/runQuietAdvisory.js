@@ -72,11 +72,11 @@ export function vitalSignAgeMs(scopeEvents, nowMs) {
   return base === null ? null : Math.max(0, nowMs - base);
 }
 
-/** 作用域内最后一条"实质动作"（runEventIsUsableEffect）的 ts 原值；从未有过则 undefined。 */
-function lastUsableEffectTs(scopeEvents) {
+/** 作用域内最后一条"实质动作"（runEventIsUsableEffect）事件本身；从未有过则 undefined。 */
+function lastUsableEffectEvent(scopeEvents) {
   for (let i = scopeEvents.length - 1; i >= 0; i -= 1) {
     const e = scopeEvents[i];
-    if (e?.type === "run.event" && runEventIsUsableEffect(e)) return e.ts;
+    if (e?.type === "run.event" && runEventIsUsableEffect(e)) return e;
   }
   return undefined;
 }
@@ -90,7 +90,24 @@ function lastUsableEffectTs(scopeEvents) {
  * @returns {number|null}
  */
 export function lastActualEffectAtMs(scopeEvents) {
-  return tsMs(lastUsableEffectTs(scopeEvents));
+  return tsMs(lastUsableEffectEvent(scopeEvents)?.ts);
+}
+
+/**
+ * "距最近一次动作或正文"的回退基准事件，lastEffectAtMs 的时刻就取自它：最后一次实质
+ * 动作（它的 ts 读不到时不算，顺延）；从未有过动作时是 run.submitted；连 run.submitted
+ * 都没有（卡在 pending、从未派出去的运行）就是转录里第一条带字符串 ts 的事件；都没有
+ * 则 null。Owner 读模型用它给 quietSince 找依据事件（事件号 seq）。
+ *
+ * @param {Array<object>} scopeEvents — 已绑定到请求 runId 的事件作用域
+ * @returns {object|null}
+ */
+export function lastEffectBaseEvent(scopeEvents) {
+  const usable = lastUsableEffectEvent(scopeEvents);
+  if (usable?.ts !== undefined && usable?.ts !== null) return usable;
+  const submitted = scopeEvents.find((e) => e?.type === "run.submitted");
+  if (submitted?.ts !== undefined && submitted?.ts !== null) return submitted;
+  return scopeEvents.find((e) => typeof e?.ts === "string") ?? null;
 }
 
 /**
@@ -103,11 +120,7 @@ export function lastActualEffectAtMs(scopeEvents) {
  * @returns {number|null} 无可用时间基准时为 null
  */
 export function lastEffectAtMs(scopeEvents) {
-  const baseTs = lastUsableEffectTs(scopeEvents)
-    ?? scopeEvents.find((e) => e?.type === "run.submitted")?.ts
-    ?? scopeEvents.find((e) => typeof e?.ts === "string")?.ts
-    ?? null;
-  return tsMs(baseTs);
+  return tsMs(lastEffectBaseEvent(scopeEvents)?.ts);
 }
 
 /**

@@ -2443,8 +2443,8 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
     }
     const RUN_KEYS = [
       "agentId", "availability", "deliveryRequested", "lastEffectAt", "lastHeartbeatAt", "lastProcessActiveAt", "lastVitalAt", "laneId",
-      "liveness", "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince",
-      "startedAt", "state", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
+      "liveness", "parentRunId", "project", "quietSince", "quietSinceSeq", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince",
+      "startedAt", "state", "taskType", "terminal", "terminalAt", "terminalSeq", "title", "titleBasis", "typeBasis",
       // 第 140b 批：交付、失败、额度、谱系。
       "capacity", "delivery", "failure", "legalDecision", "lineageRootConflict", "lineageRootRunId",
       "supersessionUndeterminable", "supersededByRunId",
@@ -2457,10 +2457,10 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
       if (run.delivery !== null) {
         assert.deepEqual(Object.keys(run.delivery).sort(), [
           "acceptance", "ambiguous", "branchPresent", "commit", "isolationFailure", "packagingFailure", "settledAt",
-          "settlement", "verification",
+          "settledSeq", "settlement", "verification",
         ], `${run.runId} 的 delivery 键集`);
         assert.deepEqual(Object.keys(run.delivery.settlement).sort(), ["reason", "status"]);
-        assert.deepEqual(Object.keys(run.delivery.acceptance).sort(), ["decidedAt", "status"]);
+        assert.deepEqual(Object.keys(run.delivery.acceptance).sort(), ["decidedAt", "decidedSeq", "status"]);
       }
     }
     // 这个夹具里的运行请求了交付、终态却既没打包也没隔离证据：如实是判不出的收口，不是"没有"。
@@ -2468,8 +2468,9 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
       settlement: { status: "undeterminable", reason: "terminal_delivery_ambiguous" },
       commit: null,
       verification: null,
-      acceptance: { status: null, decidedAt: null },
+      acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: null,
+      settledSeq: null,
       ambiguous: false,
       packagingFailure: null,
       isolationFailure: null,

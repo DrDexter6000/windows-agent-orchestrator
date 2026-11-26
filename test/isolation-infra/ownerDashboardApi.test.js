@@ -232,7 +232,9 @@ function fixtureSnapshot() {
 const ALPHA_COUNTS = {
   running: 1, starting: 0,
   liveness: { terminal: 2, progress: 1, process_only: 0, silent: 0, unknown: 0 },
-  verifying: 0, deliveryUnobservable: 0, decide: { open: 2, unknown: 0 }, anomalies: { open: 1, unknown: 0 },
+  verifying: 0, deliveryUnobservable: 0,
+  decide: { open: 2, unknown: 0 }, // 等裁决 + kimi 额度用尽
+  anomalies: { open: 2, unknown: 0 }, // 失败的运行 + kimi 额度用尽的镜像（额度用尽也计入 Alerts）
 };
 const EXPECTED_OVERVIEW = {
   status: "ready",
@@ -253,17 +255,24 @@ const EXPECTED_ATTENTION = {
     {
       id: "awaiting_decision:run_wait", kind: "awaiting_decision", state: "open", runIds: ["run_wait"],
       projectSlugs: ["alpha"], since: ago(3 * HOUR), evidence: [{ runId: "run_wait", at: ago(3 * HOUR), seq: null }],
+      commit: "c".repeat(40),
     },
     {
       id: "capacity:kimi", kind: "quota_exhausted", state: "open", runIds: ["run_fail"], projectSlugs: ["alpha"],
       since: ago(HOUR), laneKey: "kimi", capacityCode: "quota_exhausted", evidence: [{ runId: "run_fail", at: ago(HOUR), seq: null }],
     },
   ],
-  anomalies: [{
-    id: "failed:run_fail", kind: "failed", state: "open", runIds: ["run_fail"], projectSlugs: ["alpha"], since: ago(HOUR),
-    followUp: "unknown", failure: { category: "provider_capacity", code: "quota_exhausted" },
-    evidence: [{ runId: "run_fail", at: ago(HOUR), seq: null }],
-  }],
+  anomalies: [
+    {
+      id: "capacity_alert:kimi", kind: "quota_exhausted", state: "open", runIds: ["run_fail"], projectSlugs: ["alpha"],
+      since: ago(HOUR), laneKey: "kimi", capacityCode: "quota_exhausted", evidence: [{ runId: "run_fail", at: ago(HOUR), seq: null }],
+    },
+    {
+      id: "failed:run_fail", kind: "failed", state: "open", runIds: ["run_fail"], projectSlugs: ["alpha"], since: ago(HOUR),
+      followUp: "none", followUpRuns: [], failure: { category: "provider_capacity", code: "quota_exhausted" },
+      evidence: [{ runId: "run_fail", at: ago(HOUR), seq: null }],
+    },
+  ],
   resolved: [],
 };
 const ALPHA = { slug: "alpha", name: "Alpha" };
@@ -275,13 +284,14 @@ const EXPECTED_WORKERS = {
     {
       runId: "run_live", project: ALPHA, title: "任务 run_live", subtitle: null, taskType: "code", laneKey: "glm-pro",
       roleId: "coder", state: "running", liveness: "progress", stage: "active", startedAt: ago(HOUR), terminalAt: null,
-      lastEffectAt: ago(3 * HOUR), quietSince: ago(4 * HOUR), delivery: null, failure: null, attentionIds: [],
+      lastEffectAt: ago(3 * HOUR), quietSince: ago(4 * HOUR), delivery: null, failure: null, attentionIds: [], consult: null,
     },
     {
       runId: "run_fail", project: ALPHA, title: "任务 run_fail", subtitle: null, taskType: "code", laneKey: "kimi",
       roleId: "coder", state: "failed", liveness: "terminal", stage: "terminal", startedAt: ago(2 * HOUR),
       terminalAt: ago(HOUR), lastEffectAt: ago(3 * HOUR), quietSince: ago(4 * HOUR), delivery: null,
-      failure: { category: "provider_capacity", code: "quota_exhausted" }, attentionIds: ["capacity:kimi", "failed:run_fail"],
+      failure: { category: "provider_capacity", code: "quota_exhausted" },
+      attentionIds: ["capacity:kimi", "capacity_alert:kimi", "failed:run_fail"], consult: null,
     },
     {
       runId: "run_wait", project: ALPHA, title: "任务 run_wait", subtitle: null, taskType: "code", laneKey: "glm-pro",
@@ -293,7 +303,7 @@ const EXPECTED_WORKERS = {
         acceptance: { status: "pending" },
         branchPresent: true,
       },
-      failure: null, attentionIds: ["awaiting_decision:run_wait"],
+      failure: null, attentionIds: ["awaiting_decision:run_wait"], consult: null,
     },
   ],
 };
@@ -661,7 +671,7 @@ test("SAME NOW: snapshot({ now }) 与事项推导用同一轮的同一个时刻�
   assert.equal(r.generatedAt, NOW_ISO, "generatedAt 是同一个 now");
   assert.deepEqual(r.decide.map((item) => [item.id, item.state]), [["capacity:kimi", "open"]]);
   // 异常按 since 从早到晚：失败得更早的 run_edge（23 小时前）在 run_quota（5 小时前）之前。
-  assert.deepEqual(r.anomalies.map((item) => item.id), ["failed:run_edge", "failed:run_quota"]);
+  assert.deepEqual(r.anomalies.map((item) => item.id), ["failed:run_edge", "capacity_alert:kimi", "failed:run_quota"]);
 });
 
 test("STALE: 某轮失败保留上一份发布、标 stale 并带首次失败时刻；下一轮成功恢复 ready", async () => {
@@ -733,7 +743,7 @@ test("WHITELIST: 行与事项只有页面要的字段；快照里的敌意附加
   assert.deepEqual(sortedKeys(overview.lanes[1].capacity), ["kind", "observedAt", "state"]);
   assert.deepEqual(sortedKeys(workers), ["generatedAt", "status", "truncated", "workers"]);
   assert.deepEqual(sortedKeys(workers.workers[0]), [
-    "attentionIds", "delivery", "failure", "laneKey", "lastEffectAt", "liveness", "project", "quietSince", "roleId",
+    "attentionIds", "consult", "delivery", "failure", "laneKey", "lastEffectAt", "liveness", "project", "quietSince", "roleId",
     "runId", "stage", "startedAt", "state", "subtitle", "taskType", "terminalAt", "title",
   ]);
   assert.deepEqual(sortedKeys(workers.workers[0].project), ["name", "slug"]);
@@ -743,10 +753,11 @@ test("WHITELIST: 行与事项只有页面要的字段；快照里的敌意附加
   assert.deepEqual(sortedKeys(workers.workers[2].delivery.acceptance), ["status"]);
   assert.deepEqual(sortedKeys(workers.workers[1].failure), ["category", "code"]);
   assert.deepEqual(sortedKeys(attention), ["anomalies", "decide", "generatedAt", "resolved", "status"]);
-  assert.deepEqual(sortedKeys(attention.decide[0]), ["evidence", "id", "kind", "projectSlugs", "runIds", "since", "state"]);
+  assert.deepEqual(sortedKeys(attention.decide[0]), ["commit", "evidence", "id", "kind", "projectSlugs", "runIds", "since", "state"]);
   assert.deepEqual(sortedKeys(attention.decide[1]), ["capacityCode", "evidence", "id", "kind", "laneKey", "projectSlugs", "runIds", "since", "state"]);
-  assert.deepEqual(sortedKeys(attention.anomalies[0]), ["evidence", "failure", "followUp", "id", "kind", "projectSlugs", "runIds", "since", "state"]);
-  assert.deepEqual(sortedKeys(attention.anomalies[0].evidence[0]), ["at", "runId", "seq"]);
+  assert.deepEqual(sortedKeys(attention.anomalies[0]), ["capacityCode", "evidence", "id", "kind", "laneKey", "projectSlugs", "runIds", "since", "state"]);
+  assert.deepEqual(sortedKeys(attention.anomalies[1]), ["evidence", "failure", "followUp", "followUpRuns", "id", "kind", "projectSlugs", "runIds", "since", "state"]);
+  assert.deepEqual(sortedKeys(attention.anomalies[1].evidence[0]), ["at", "runId", "seq"]);
   for (const marker of ["PROMPT_MARKER", "SESSION_MARKER", "424242", "SECRET_MARKER", "transcriptPath", "worktreePath", "cwd", "prompt", "pid", "availability"]) {
     for (const body of [JSON.stringify(workers), JSON.stringify(attention), JSON.stringify(overview)]) {
       assert.ok(!body.includes(`"${marker}`), `${marker} 不透传`);
@@ -1308,4 +1319,172 @@ test("TOKEN: 令牌不出现在三个接口任何状态的响应体或响应头�
     assert.ok(!r.body.includes(s.token));
     assertSafeHeaders(r);
   }
+});
+
+// =====================================================================
+// 第 142 批修正一：线上（真实推导 + 真实 DTO）的事件号、交付提交、会审席、额度进 Alerts
+// =====================================================================
+const getJson = async (s, url) => jsonOf(await drive(s.handler, { url, headers: auth(s) }));
+
+/** 在 fixtureSnapshot 的基础上改运行行 / 加会审组（快照形状，和读模型给的一致）。 */
+function snapshotWith(mutate) {
+  return () => {
+    const snap = fixtureSnapshot();
+    mutate(snap);
+    return snap;
+  };
+}
+
+test("WIRE SEQ: 快照里记下的事件号经事项推导与 DTO 原样到线上；读不到的仍是 null，不合法的不透传", async () => {
+  const { s } = await readyServer({
+    snapshotFactory: snapshotWith((snap) => {
+      const byId = (id) => snap.runs.find((run) => run.runId === id);
+      byId("run_fail").terminalSeq = 41;
+      byId("run_fail").capacity.observedSeq = 33;
+      byId("run_wait").delivery.settledSeq = 52;
+      // 一个静默的运行：quietSince 所取事件的事件号。
+      snap.runs.push(runRow({
+        runId: "run_quiet", state: "running", terminal: false, liveness: "silent", stage: "active", deliveryRequested: false,
+        startedAt: ago(3 * HOUR), terminalAt: null, quietSince: ago(HOUR), quietSinceSeq: 17,
+      }));
+      // 一个已裁决的交付：裁决事件号进解除证据。
+      snap.runs.push(runRow({
+        runId: "run_done", delivery: {
+          settlement: { status: "settled", reason: "delivery_settled" }, commit: "d".repeat(40),
+          verification: { status: "passed", reverify: { status: "none", reason: null } },
+          acceptance: { status: "accepted", decidedAt: ago(HOUR), decidedSeq: 63 }, settledAt: ago(4 * HOUR), settledSeq: 62,
+          ambiguous: false, packagingFailure: null, isolationFailure: null, branchPresent: true,
+        },
+      }));
+      // 事件号不合法的运行：线上是 null（不透传 "7"、0、小数）。
+      snap.runs.push(runRow({
+        runId: "run_badseq", state: "failed", deliveryRequested: false, terminalAt: ago(2 * HOUR), terminalSeq: "7",
+        failure: { category: "provider_error", code: "backend_error" },
+      }));
+    }),
+  });
+  const attention = await getJson(s, "/api/attention");
+  const item = (list, id) => list.find((entry) => entry.id === id);
+  assert.deepEqual(item(attention.decide, "awaiting_decision:run_wait").evidence, [{ runId: "run_wait", at: ago(3 * HOUR), seq: 52 }]);
+  assert.deepEqual(item(attention.decide, "capacity:kimi").evidence, [{ runId: "run_fail", at: ago(HOUR), seq: 33 }]);
+  assert.deepEqual(item(attention.anomalies, "capacity_alert:kimi").evidence, [{ runId: "run_fail", at: ago(HOUR), seq: 33 }]);
+  assert.deepEqual(item(attention.anomalies, "failed:run_fail").evidence, [{ runId: "run_fail", at: ago(HOUR), seq: 41 }]);
+  assert.deepEqual(item(attention.anomalies, "silent:run_quiet").evidence, [{ runId: "run_quiet", at: ago(HOUR), seq: 17 }]);
+  assert.deepEqual(item(attention.resolved, "awaiting_decision:run_done").evidence.map((entry) => entry.seq), [62, 63]);
+  assert.deepEqual(item(attention.anomalies, "failed:run_badseq").evidence.map((entry) => entry.seq), [null]);
+  // 没记事件号的旧行：全是 null（没有编造）。
+  assert.deepEqual(attention.anomalies.flatMap((entry) => entry.evidence).filter((entry) => entry.runId === "run_wait"), []);
+});
+
+test("WIRE COMMIT + SEATS: 交付类事项带当前提交（读不出是 null）；会审事项带被审运行的提交与全部席位运行；别的种类没有这两项", async () => {
+  const seat = (runId, q1, extra = {}) => ({ agentId: `seat_${runId}`, runId, runState: "completed", q1, replied: true, ...extra });
+  const { s } = await readyServer({
+    snapshotFactory: snapshotWith((snap) => {
+      snap.runs.push(
+        runRow({ runId: "run_seat1", deliveryRequested: false }),
+        runRow({ runId: "run_seat2", deliveryRequested: false }),
+        runRow({ runId: "run_seat3", deliveryRequested: false, state: "running", terminal: false, liveness: "progress", stage: "active", terminalAt: null }),
+        // 提交读不出（创建与验证引用了不同提交）的交付：事项在，commit 为 null。
+        runRow({
+          runId: "run_nocommit", delivery: {
+            settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, commit: null, verification: null,
+            acceptance: { status: null, decidedAt: null }, settledAt: null, ambiguous: true,
+            packagingFailure: null, isolationFailure: null, branchPresent: true,
+          },
+        }),
+      );
+      snap.consults = [{
+        consultId: "consult_1", projectSlug: "alpha", createdAt: ago(3 * HOUR), reviewedRunId: "run_wait", q1Declared: true, declaredFields: null,
+        seats: [seat("run_seat1", "PASS"), seat("run_seat2", "FIX_FIRST"), seat("run_seat3", null, { runState: "running", replied: false })],
+      }];
+    }),
+  });
+  const attention = await getJson(s, "/api/attention");
+  const item = (list, id) => list.find((entry) => entry.id === id);
+  const split = item(attention.decide, "consult_split:alpha:consult_1");
+  assert.equal(split.commit, "c".repeat(40), "被审运行 run_wait 的提交");
+  assert.deepEqual(split.runIds, ["run_wait"]);
+  assert.deepEqual(split.seatRunIds, ["run_seat1", "run_seat2", "run_seat3"], "全部席位运行，含还没给结论的");
+  assert.deepEqual(split.evidence.map((entry) => entry.runId), ["run_seat1", "run_seat2"], "证据只列给了结论的席位");
+  assert.equal(item(attention.decide, "awaiting_decision:run_wait").commit, "c".repeat(40));
+  assert.equal(item(attention.decide, "delivery_ambiguous:run_nocommit").commit, null, "读不出：null，页面标未知");
+  assert.equal("seatRunIds" in item(attention.decide, "awaiting_decision:run_wait"), false);
+  for (const id of ["failed:run_fail", "capacity_alert:kimi"]) {
+    const entry = item(attention.anomalies, id);
+    assert.equal("commit" in entry, false, `${id} 不是交付类事项`);
+    assert.equal("seatRunIds" in entry, false);
+  }
+  assert.equal("commit" in item(attention.decide, "capacity:kimi"), false);
+  // 提交只在事项里，不进 /api/workers 的交付摘要。
+  assert.ok(!JSON.stringify(await getJson(s, "/api/workers")).includes("c".repeat(40)));
+});
+
+test("WIRE SEATS: /api/workers 的行给会审席位所在组的摘要 { groupId, seatsIn, seatsTotal }；不是席位 / 没有组记录是 null", async () => {
+  const seats = [
+    { agentId: "a", runId: "run_seat1", runState: "completed", q1: "PASS", replied: true },
+    { agentId: "b", runId: "run_seat2", runState: "completed", q1: null, replied: false },
+    { agentId: "c", runId: "run_seat3", runState: "running", q1: null, replied: false },
+  ];
+  const live = (runId) => runRow({ runId, state: "running", terminal: false, liveness: "progress", stage: "active", deliveryRequested: false, terminalAt: null });
+  const { s } = await readyServer({
+    snapshotFactory: snapshotWith((snap) => {
+      snap.runs.push(live("run_seat1"), live("run_seat2"), live("run_seat3"));
+      snap.consults = [{ consultId: "consult_9", projectSlug: "alpha", createdAt: ago(HOUR), reviewedRunId: "run_wait", q1Declared: false, declaredFields: null, seats }];
+    }),
+  });
+  const workers = (await getJson(s, "/api/workers")).workers;
+  const row = (id) => workers.find((entry) => entry.runId === id);
+  for (const id of ["run_seat1", "run_seat2", "run_seat3"]) {
+    assert.deepEqual(row(id).consult, { groupId: "alpha:consult_9", seatsIn: 1, seatsTotal: 3 }, `${id}: 完成且答复的一席已到；完成没答复的、在跑的不算`);
+    assert.deepEqual(sortedKeys(row(id).consult), ["groupId", "seatsIn", "seatsTotal"]);
+  }
+  assert.equal(row("run_live").consult, null, "不是会审席位");
+  assert.equal(row("run_wait").consult, null, "被审运行不是席位");
+  assert.ok(!JSON.stringify(workers).includes("seatRunIds"));
+});
+
+test("WIRE ALERTS: 额度用尽与限流同时出现——顶部计数、项目计数、两栏列表同口径；Needs you 只数额度用尽，Alerts 数镜像 + 限流 + 失败", async () => {
+  const limited = (runId, laneId) => runRow({
+    runId, laneId, agentId: laneId, state: "failed", deliveryRequested: false, terminalAt: ago(HOUR),
+    failure: { category: "provider_capacity", code: "rate_limited" }, capacity: { code: "rate_limited", observedAt: ago(HOUR) },
+  });
+  const { s } = await readyServer({ snapshotFactory: snapshotWith((snap) => { snap.runs.push(limited("run_rl", "opus")); }) });
+  const overview = await getJson(s, "/api/overview");
+  const attention = await getJson(s, "/api/attention");
+  // fixture：等裁决 + kimi 额度用尽 → Needs you 2；失败的 run_fail、run_rl + kimi 额度镜像 + opus 限流 → Alerts 4。
+  assert.deepEqual(attention.decide.map((item) => item.id), ["awaiting_decision:run_wait", "capacity:kimi"]);
+  assert.deepEqual(attention.anomalies.map((item) => item.id).sort(), ["capacity_alert:kimi", "failed:run_fail", "failed:run_rl", "rate_limited:opus"]);
+  assert.deepEqual(overview.counts.decide, { open: attention.decide.length, unknown: 0 });
+  assert.deepEqual(overview.counts.anomalies, { open: attention.anomalies.length, unknown: 0 });
+  assert.deepEqual(overview.projects[0].counts.decide, overview.counts.decide, "项目计数与全局同口径");
+  assert.deepEqual(overview.projects[0].counts.anomalies, overview.counts.anomalies);
+  // 车道行点名两条车道，各一行。
+  assert.deepEqual(overview.lanes.filter((lane) => lane.capacity !== null).map((lane) => [lane.laneKey, lane.capacity.kind]), [["kimi", "quota_exhausted"], ["opus", "rate_limited"]]);
+  // 按项目筛选同口径。
+  const filtered = await getJson(s, "/api/attention?project=alpha");
+  assert.deepEqual(filtered.anomalies.map((item) => item.id).sort(), attention.anomalies.map((item) => item.id).sort());
+});
+
+test("WIRE FOLLOW-UP: a failure whose retry already started and failed again says 'exists' with the retry's state; no retry (complete census) is 'none'; an unreadable run makes it 'unknown'", async () => {
+  const failedRow = (runId, over = {}) => runRow({
+    runId, state: "failed", deliveryRequested: false, terminalAt: ago(3 * HOUR), failure: { category: "provider_error", code: "backend_error" }, ...over,
+  });
+  const retryRow = (runId, state, over = {}) => runRow({
+    runId, retryOf: "run_first", state, terminal: state !== "running", deliveryRequested: false, startedAt: ago(2 * HOUR),
+    terminalAt: state === "running" ? null : ago(HOUR), ...over,
+  });
+  const followUpOf = async (rows) => {
+    const { s } = await readyServer({ snapshotFactory: snapshotWith((snap) => { snap.runs = rows; }) });
+    const item = (await getJson(s, "/api/attention")).anomalies.find((entry) => entry.id === "failed:run_first");
+    return { followUp: item.followUp, followUpRuns: item.followUpRuns };
+  };
+  assert.deepEqual(await followUpOf([failedRow("run_first"), retryRow("run_retry", "failed")]), { followUp: "exists", followUpRuns: [{ runId: "run_retry", state: "failed" }] });
+  assert.deepEqual(await followUpOf([failedRow("run_first"), retryRow("run_retry", "running")]), { followUp: "exists", followUpRuns: [{ runId: "run_retry", state: "running" }] });
+  assert.deepEqual(await followUpOf([failedRow("run_first")]), { followUp: "none", followUpRuns: [] });
+  assert.deepEqual(await followUpOf([failedRow("run_first"), runRow({ runId: "run_blind", availability: "unreadable", project: null })]), { followUp: "unknown", followUpRuns: [] });
+  // Only the two whitelisted keys of a follow-up run reach the wire (a hostile extra field on the row does not).
+  const { s } = await readyServer({ snapshotFactory: snapshotWith((snap) => { snap.runs = [failedRow("run_first"), retryRow("run_retry", "failed", { secret: "SECRET_MARKER" })]; }) });
+  const body = await getJson(s, "/api/attention");
+  assert.deepEqual(sortedKeys(body.anomalies.find((entry) => entry.id === "failed:run_first").followUpRuns[0]), ["runId", "state"]);
+  assert.ok(!JSON.stringify(body).includes("SECRET_MARKER"));
 });

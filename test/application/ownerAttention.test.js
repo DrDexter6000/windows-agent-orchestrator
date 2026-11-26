@@ -49,6 +49,7 @@ import {
   OWNER_ATTENTION_RESOLUTIONS,
   OWNER_ATTENTION_STATES,
   OWNER_ATTENTION_WINDOW_MS,
+  consultSeatsArrived,
   deriveOwnerAttention,
   ownerLanes,
   selectOwnerWorkers,
@@ -227,6 +228,8 @@ test("consult_split: 各席 Q1 不一致 → 挂在被审运行上的 open 事�
       { runId: "run_s1", at: ago(2 * HOUR), seq: null },
       { runId: "run_s2", at: ago(HOUR), seq: null },
     ],
+    commit: "c".repeat(40),
+    seatRunIds: ["run_s1", "run_s2"],
   }]);
   assert.deepEqual(out.anomalies, []);
   assert.deepEqual(out.resolved, []);
@@ -294,6 +297,8 @@ test("consult_split: 被审运行已裁决 → resolved / decided，resolvedAt �
       { runId: "run_s2", at: null, seq: null },
       { runId: "run_rev", at: ago(HOUR), seq: null },
     ],
+    commit: "c".repeat(40),
+    seatRunIds: ["run_s1", "run_s2"],
   }]);
 });
 
@@ -364,6 +369,7 @@ test("verification_failed / verification_unavailable: 有效状态决定种类�
     projectSlugs: ["alpha"],
     since: ago(HOUR),
     evidence: [{ runId: "run_a", at: ago(HOUR), seq: null }],
+    commit: "c".repeat(40),
   }]);
   const unavailable = derive(snapshot([run({ delivery: fresh({ verification: { status: "unavailable", reverify: NONE } }) })]));
   assert.deepEqual(outcome(unavailable), { decide: [["verification_unavailable:run_a", "open"]], anomalies: [], resolved: [] });
@@ -402,6 +408,7 @@ test("交付验证类: 同一交付复验通过 → resolved / reverify_passed",
     resolvedAt: ago(HOUR),
     resolution: "reverify_passed",
     evidence: [{ runId: "run_a", at: ago(HOUR), seq: null }],
+    commit: "c".repeat(40),
   }]);
   // 复验还在跑：有效状态仍是失败，事项照旧 open。
   const reverifying = derive(snapshot([run({ delivery: fresh({ verification: { status: "failed", reverify: { status: "pending", reason: null } } }) })]));
@@ -489,6 +496,7 @@ test("awaiting_decision: 交付已收口、待裁决、超过 2 小时 → open�
     projectSlugs: ["alpha"],
     since: ago(3 * HOUR),
     evidence: [{ runId: "run_a", at: ago(3 * HOUR), seq: null }],
+    commit: "c".repeat(40),
   }]);
   nowhere(derive(snapshot([run({ delivery: delivered({ settledAt: ago(HOUR) }) })])), "awaiting_decision:run_a");
   // 阈值两侧：恰好 2 小时不算"超过"，多一毫秒就算。
@@ -589,7 +597,9 @@ test("quota_exhausted: open 事项，id 是 capacity:<车道键>，since 与证�
     capacityCode: "quota_exhausted",
     evidence: [{ runId: "run_a", at: ago(HOUR), seq: null }],
   }]);
-  assert.deepEqual(outcome(out).anomalies, [["failed:run_a", "open"]], "失败的运行本身另有一条异常");
+  // 失败的运行本身另有一条异常；额度用尽也计入 Alerts：异常栏里有一件镜像（自己的 id，其余相同）。
+  assert.deepEqual(outcome(out).anomalies, [["failed:run_a", "open"], ["capacity_alert:glm-pro", "open"]]);
+  assert.deepEqual(byId(out.anomalies, "capacity_alert:glm-pro"), { ...out.decide[0], id: "capacity_alert:glm-pro" });
 });
 
 test("quota_exhausted: 同车道多次观测合成一组，取最后一次观测；不同车道各成一组", () => {
@@ -763,7 +773,8 @@ test("rate_limited: 限流与上游过载进异常栏（不进口袋事项），
   // 与 quota_exhausted 分属两组、两栏，互不吞并。
   const mixed = derive(snapshot([limited("rate_limited", "run_a", HOUR), exhausted(LANE, HOUR, { runId: "run_q" })]));
   assert.deepEqual(ids(mixed.decide), ["capacity:glm-pro"]);
-  assert.deepEqual(ids(mixed.anomalies), ["failed:run_a", "failed:run_q", "rate_limited:glm-pro"]);
+  assert.deepEqual(ids(mixed.anomalies), ["failed:run_a", "failed:run_q", "capacity_alert:glm-pro", "rate_limited:glm-pro"],
+    "额度用尽的镜像与限流各一件，互不吞并");
   // 6 小时两侧与"之后有运行完成"同一套规则。
   assert.deepEqual(outcome(derive(snapshot([limited("overloaded", "run_a", OWNER_ATTENTION_CAPACITY_FRESH_MS + 1)]))).anomalies
     .filter(([id]) => id === "rate_limited:glm-pro"), [["rate_limited:glm-pro", "unknown"]]);
@@ -777,7 +788,7 @@ test("rate_limited: 限流与上游过载进异常栏（不进口袋事项），
 // =====================================================================
 // failed — 失败的运行
 // =====================================================================
-test("failed: 24 小时内失败的运行 → open 异常，followUp: unknown（看不到后续），原因只给 category 与 code", () => {
+test("failed: 24 小时内失败的运行 → open 异常；快照读得全、谱系根已知、没有链到它的后续 → followUp: none；原因只给 category 与 code", () => {
   const out = derive(snapshot([failedRun({ terminalAt: ago(HOUR), failure: { category: "provider_error", code: "backend_error", evidence: "SECRET /d/private/x" } })]));
   assert.deepEqual(out.anomalies, [{
     id: "failed:run_a",
@@ -786,7 +797,8 @@ test("failed: 24 小时内失败的运行 → open 异常，followUp: unknown（
     runIds: ["run_a"],
     projectSlugs: ["alpha"],
     since: ago(HOUR),
-    followUp: "unknown",
+    followUp: "none",
+    followUpRuns: [],
     failure: { category: "provider_error", code: "backend_error" },
     evidence: [{ runId: "run_a", at: ago(HOUR), seq: null }],
   }]);
@@ -858,26 +870,74 @@ test("failed: 并发跑着的兄弟运行不算解除——即使它完成得比
     runId: "run_child", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR), terminalAt: ago(HOUR), deliveryRequested: false,
   });
   assert.deepEqual(outcome(derive(snapshot([root, sameMs]))).resolved, [["failed:run_root", "later_success", ago(HOUR)]]);
-  // followUp: running 也认同一个"后续"：并发在跑的兄弟（开始于失败之前）不算后续，
-  // 开始时刻读不到也不算；在失败之后才开始的才算。
+  // followUp 也认同一个"后续"：并发在跑的兄弟（开始于失败之前）不算后续（读得全时是 none），
+  // 开始时刻读不到的链到它的运行确认不了先后（unknown）；在失败之后才开始的才算（exists）。
   const liveSibling = live({ runId: "run_live_sibling", lineageRootRunId: "run_root", startedAt: ago(3 * HOUR) });
-  assert.equal(derive(snapshot([root, liveSibling])).anomalies[0].followUp, "unknown");
+  assert.equal(derive(snapshot([root, liveSibling])).anomalies[0].followUp, "none");
   const liveUnknownStart = live({ runId: "run_live_unknown", lineageRootRunId: "run_root", startedAt: null });
   assert.equal(derive(snapshot([root, liveUnknownStart])).anomalies[0].followUp, "unknown");
   const liveLater = live({ runId: "run_live_later", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR) });
-  assert.equal(derive(snapshot([root, liveLater])).anomalies[0].followUp, "running");
+  const later = derive(snapshot([root, liveLater])).anomalies[0];
+  assert.equal(later.followUp, "exists");
+  assert.deepEqual(later.followUpRuns, [{ runId: "run_live_later", state: "running" }]);
 });
 
-test("failed: 有后续还在跑 → open + followUp: running（同谱系或 retryOf，且在失败之后才开始）", () => {
+test("failed: 有后续 → open + followUp: exists，带后续 run 的当前状态（同谱系或 retryOf，且在失败之后才开始；运行中只是其中一种状态）", () => {
   const root = failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(3 * HOUR) });
   const byLineage = derive(snapshot([root, live({ runId: "run_child", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR) })]));
   assert.deepEqual(outcome(byLineage).anomalies, [["failed:run_root", "open"]]);
-  assert.equal(byLineage.anomalies[0].followUp, "running");
+  assert.equal(byLineage.anomalies[0].followUp, "exists");
+  assert.deepEqual(byLineage.anomalies[0].followUpRuns, [{ runId: "run_child", state: "running" }]);
   const byRetry = derive(snapshot([
     failedRun({ runId: "run_first", terminalAt: ago(3 * HOUR) }),
     live({ runId: "run_retry", retryOf: "run_first", startedAt: ago(2 * HOUR) }),
   ]));
-  assert.equal(byRetry.anomalies[0].followUp, "running");
+  assert.equal(byRetry.anomalies[0].followUp, "exists");
+  assert.deepEqual(byRetry.anomalies[0].followUpRuns, [{ runId: "run_retry", state: "running" }]);
+});
+
+test("failed: 重试已经启动、又失败了 → 仍是 followUp: exists，状态是 failed（不再写后续未知）；各种未成功的状态都带出来", () => {
+  const first = failedRun({ runId: "run_first", terminalAt: ago(3 * HOUR) });
+  const retry = (runId, state, startedAgo, over = {}) => run({
+    runId, retryOf: "run_first", state, terminal: !["running", "pending", "submitted"].includes(state), startedAt: ago(startedAgo),
+    terminalAt: ["running", "pending", "submitted"].includes(state) ? null : ago(startedAgo - 10 * MINUTE), deliveryRequested: false, ...over,
+  });
+  const failedRetry = derive(snapshot([first, retry("run_retry", "failed", 2 * HOUR)]));
+  assert.deepEqual(outcome(failedRetry).anomalies.filter(([id]) => id === "failed:run_first"), [["failed:run_first", "open"]], "原失败仍未了结（后续没成功）");
+  assert.equal(byId(failedRetry.anomalies, "failed:run_first").followUp, "exists");
+  assert.deepEqual(byId(failedRetry.anomalies, "failed:run_first").followUpRuns, [{ runId: "run_retry", state: "failed" }]);
+  for (const state of ["aborted", "timed_out", "pending", "submitted"]) {
+    const out = derive(snapshot([first, retry("run_retry", state, 2 * HOUR)]));
+    assert.deepEqual(byId(out.anomalies, "failed:run_first").followUpRuns, [{ runId: "run_retry", state }], state);
+  }
+  // 几次重试：按开始先后列出（最新的在最后），至多 5 个。
+  const chain = [retry("run_t1", "failed", 150 * MINUTE), retry("run_t2", "failed", 120 * MINUTE), retry("run_t3", "running", 60 * MINUTE)];
+  const several = derive(snapshot([first, ...chain]));
+  assert.deepEqual(byId(several.anomalies, "failed:run_first").followUpRuns.map((entry) => [entry.runId, entry.state]), [["run_t1", "failed"], ["run_t2", "failed"], ["run_t3", "running"]]);
+  const many = derive(snapshot([first, ...Array.from({ length: 8 }, (_, i) => retry(`run_m${i}`, "failed", (170 - i * 10) * MINUTE))]));
+  assert.deepEqual(byId(many.anomalies, "failed:run_first").followUpRuns.map((entry) => entry.runId), ["run_m3", "run_m4", "run_m5", "run_m6", "run_m7"], "最近的 5 个");
+  // 后续成功了：事项了结（resolved），不再带 followUp。
+  const solved = derive(snapshot([first, retry("run_ok", "completed", 2 * HOUR)]));
+  assert.equal(byId(solved.anomalies, "failed:run_first"), null);
+  assert.equal("followUp" in solved.resolved[0], false);
+});
+
+test("failed: 没有后续的证据——只有快照全部读得出、没有谱系冲突、失败运行自己的谱系根已知时才写 none；缺一条就是 unknown", () => {
+  const failedAlone = (over = {}) => failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(3 * HOUR), ...over });
+  const followUpOf = (runs) => byId(derive(snapshot(runs)).anomalies, "failed:run_root").followUp;
+  assert.equal(followUpOf([failedAlone()]), "none");
+  assert.equal(followUpOf([failedAlone(), run({ runId: "run_other", deliveryRequested: false })]), "none", "别的无关运行不影响");
+  // 任何一个读不出的运行都可能是后续：证据不足。
+  assert.equal(followUpOf([failedAlone(), unreadable({ runId: "run_blind" })]), "unknown");
+  // 任何一个谱系声明冲突的运行也认不出归属。
+  assert.equal(followUpOf([failedAlone(), run({ runId: "run_conflict", lineageRootRunId: null, lineageRootConflict: true, deliveryRequested: false })]), "unknown");
+  // 失败运行自己的谱系根读不到：认不出谁链到它。
+  assert.equal(followUpOf([failedAlone({ lineageRootRunId: null })]), "unknown");
+  assert.equal(followUpOf([failedAlone({ lineageRootRunId: null, lineageRootConflict: true })]), "unknown");
+  // 链到它、但开始时刻读不到的运行：确认不了先后。
+  assert.equal(followUpOf([failedAlone(), live({ runId: "run_nostart", lineageRootRunId: "run_root", startedAt: null })]), "unknown");
+  // 但已确认有后续时，别的读不出的运行不改变"有"。
+  assert.equal(followUpOf([failedAlone(), live({ runId: "run_later", lineageRootRunId: "run_root", startedAt: ago(2 * HOUR) }), unreadable({ runId: "run_blind" })]), "exists");
 });
 
 test("failed: 它的交付已裁决 → resolved / decided", () => {
@@ -893,6 +953,7 @@ test("failed: 后续认不出时不说「没有后续」——谱系根读不到
     lineageRootRunId: null, lineageRootConflict: true, terminalAt: ago(HOUR), failure: { category: "unknown", code: null },
   })]));
   assert.equal(conflict.anomalies[0].followUp, "unknown");
+  assert.deepEqual(conflict.anomalies[0].followUpRuns, []);
   assert.deepEqual(conflict.anomalies[0].failure, { category: "unknown", code: null });
   const blind = derive(snapshot([
     failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(3 * HOUR) }),
@@ -986,7 +1047,7 @@ test("稳定 id: 同一份快照算两次结果相同；换 now 只改时效，i
   assert.deepEqual(outcome(later), outcome(first));
   // 未了结的按 since 从早到晚（等得最久的在前），同一时刻按 id。
   assert.deepEqual(ids(first.decide), ["awaiting_decision:run_wait", "consult_split:alpha:consult_1", "capacity:kimi"]);
-  assert.deepEqual(ids(first.anomalies), ["failed:run_fail", "silent:run_live"]);
+  assert.deepEqual(ids(first.anomalies), ["failed:run_fail", "capacity_alert:kimi", "silent:run_live"]);
   assert.deepEqual(ids(first.resolved), ["awaiting_decision:run_decided", "verification_failed:run_decided"]);
 });
 
@@ -1008,7 +1069,9 @@ test("闭集: 每种事项、每种状态、每种解除都出现，且字段取
     live({ runId: "run_unk", liveness: "silent", quietSince: null }),
     live({ runId: "run_rl_child", lineageRootRunId: "run_rl", startedAt: ago(3 * HOUR) }), // run_rl 的后续还在跑（在失败之后开始）→ followUp: running
   ]));
-  const all = [derive(mixedSnapshot()), rich].flatMap((out) => [...out.decide, ...out.anomalies, ...out.resolved]);
+  // followUp 的三个值都要真的出现：rich 里有后续（exists）、mixedSnapshot 读得全且没有后续（none）、blind 里有读不出的运行（unknown）。
+  const blind = derive(snapshot([failedRun({ runId: "run_root", lineageRootRunId: "run_root", terminalAt: ago(3 * HOUR) }), unreadable({ runId: "run_child" })]));
+  const all = [derive(mixedSnapshot()), rich, blind].flatMap((out) => [...out.decide, ...out.anomalies, ...out.resolved]);
   for (const item of all) {
     assert.ok(OWNER_ATTENTION_STATES.includes(item.state), item.id);
     assert.ok(OWNER_ATTENTION_KINDS.includes(item.kind), item.id);
@@ -1062,7 +1125,7 @@ test("counts: 全局与按项目，和 decide / anomalies 列表逐项一致", (
     verifying: 0,
     deliveryUnobservable: 1, // run_unseen：仓库不可观测，不当作 0
     decide: { open: 3, unknown: 0 }, // run_wait、run_decided 的会审、kimi 车道的额度
-    anomalies: { open: 2, unknown: 0 }, // run_fail、run_live
+    anomalies: { open: 3, unknown: 0 }, // run_fail、run_live、kimi 车道额度用尽的镜像
     projects: [
       {
         slug: "alpha", running: 1, starting: 1,
@@ -1072,7 +1135,7 @@ test("counts: 全局与按项目，和 decide / anomalies 列表逐项一致", (
       {
         slug: "beta", running: 0, starting: 0,
         liveness: { terminal: 1, progress: 0, process_only: 0, silent: 0, unknown: 0 },
-        verifying: 0, deliveryUnobservable: 0, decide: { open: 1, unknown: 0 }, anomalies: { open: 1, unknown: 0 },
+        verifying: 0, deliveryUnobservable: 0, decide: { open: 1, unknown: 0 }, anomalies: { open: 2, unknown: 0 },
       },
     ],
   });
@@ -1231,4 +1294,196 @@ test("ownerLanes: 有运行在跑或有额度事项的车道各一行；车道�
   assert.deepEqual(ownerLanes(limitedOnly, derive(limitedOnly)), [
     { laneKey: "kimi", running: 0, capacity: { kind: "rate_limited", state: "open", observedAt: ago(HOUR) } },
   ]);
+});
+
+// =====================================================================
+// 第 142 批修正一：证据事件号、交付提交、会审全部席位、额度进 Alerts、会审席到齐摘要
+// =====================================================================
+const seqsOf = (item) => item.evidence.map((entry) => entry.seq);
+
+test("证据事件号: 每个当证据用的时间点带它所取事件的 seq（终态、静默起点、收口、裁决、取代者的裁决、后续成功、额度观测、席位终态）", () => {
+  // failed：失败的终态事件。
+  const failed = derive(snapshot([failedRun({ terminalAt: ago(HOUR), terminalSeq: 41 })]));
+  assert.deepEqual(seqsOf(byId(failed.anomalies, "failed:run_a")), [41]);
+  // silent：quietSince 所取事件。
+  const silent = derive(snapshot([live({ runId: "run_s", liveness: "silent", quietSince: ago(40 * MINUTE), quietSinceSeq: 17 })]));
+  assert.deepEqual(seqsOf(byId(silent.anomalies, "silent:run_s")), [17]);
+  // 验证失败 / 等裁决：收口事件。
+  const settled = derive(snapshot([
+    run({ runId: "run_v", delivery: fresh({ verification: FAILED_VERIFICATION, settledSeq: 52 }) }),
+    run({ runId: "run_w", delivery: delivered({ settledAt: ago(3 * HOUR), settledSeq: 53 }) }),
+  ]));
+  assert.deepEqual(seqsOf(byId(settled.decide, "verification_failed:run_v")), [52]);
+  assert.deepEqual(seqsOf(byId(settled.decide, "awaiting_decision:run_w")), [53]);
+  // 收口判定不清：终态事件。
+  const ambiguous = derive(snapshot([run({
+    runId: "run_amb", terminalSeq: 61,
+    delivery: fresh({ settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, settledAt: null }),
+  })]));
+  assert.deepEqual(seqsOf(byId(ambiguous.decide, "delivery_ambiguous:run_amb")), [61]);
+  // 已裁决：解除证据（末尾一条）是裁决事件；已被取代：取代者的裁决事件。
+  const decided = derive(snapshot([run({
+    runId: "run_d",
+    delivery: delivered({ settledAt: ago(4 * HOUR), acceptance: { status: "accepted", decidedAt: ago(HOUR), decidedSeq: 63 }, settledSeq: 62 }),
+  })]));
+  assert.deepEqual(seqsOf(byId(decided.resolved, "awaiting_decision:run_d")), [62, 63]);
+  const superseded = derive(snapshot([
+    run({ runId: "run_old", delivery: delivered({ settledAt: ago(5 * HOUR), settledSeq: 70 }), supersededByRunId: "run_new" }),
+    run({ runId: "run_new", lineageRootRunId: "run_old", delivery: fresh({ acceptance: { status: "accepted", decidedAt: ago(HOUR), decidedSeq: 71 } }) }),
+  ]));
+  assert.deepEqual(seqsOf(byId(superseded.resolved, "awaiting_decision:run_old")), [70, 71]);
+  // 复验通过：收口事件（复验结果事件）。
+  const reverified = derive(snapshot([run({
+    runId: "run_rv",
+    delivery: delivered({ verification: { status: "passed", reverify: { status: "complete", reason: "tooling_invalid" } }, settledAt: ago(HOUR), settledSeq: 80 }),
+  })]));
+  assert.deepEqual(seqsOf(byId(reverified.resolved, "verification_failed:run_rv")), [80]);
+  // 失败后的后续成功：后续运行的终态事件；额度观测：判定所依据的那条 run.error。
+  const later = derive(snapshot([
+    failedRun({ runId: "run_f", terminalAt: ago(3 * HOUR), terminalSeq: 90, lineageRootRunId: "run_f" }),
+    run({ runId: "run_f2", lineageRootRunId: "run_f", startedAt: ago(2 * HOUR), terminalAt: ago(HOUR), terminalSeq: 91, deliveryRequested: false }),
+  ]));
+  assert.deepEqual(seqsOf(byId(later.resolved, "failed:run_f")), [90, 91]);
+  const quota = derive(snapshot([exhausted(LANE, HOUR, { runId: "run_q", capacity: { code: "quota_exhausted", observedAt: ago(HOUR), observedSeq: 33 } })]));
+  assert.deepEqual(seqsOf(byId(quota.decide, "capacity:glm-pro")), [33]);
+  assert.deepEqual(seqsOf(byId(quota.anomalies, "capacity_alert:glm-pro")), [33], "镜像件的证据相同");
+  // 会审：给了结论的席位运行的终态事件。
+  const split = derive(snapshot(
+    [
+      run({ runId: "run_rev", delivery: fresh() }),
+      run({ runId: "run_s1", deliveryRequested: false, terminalAt: ago(2 * HOUR), terminalSeq: 12 }),
+      run({ runId: "run_s2", deliveryRequested: false, terminalAt: ago(HOUR), terminalSeq: 14 }),
+    ],
+    [consult({ seats: [seat("run_s1", "PASS"), seat("run_s2", "FIX_FIRST")] })],
+  ));
+  assert.deepEqual(seqsOf(split.decide[0]), [12, 14]);
+  // 读不到就是 null（旧转录没有 seq、或不是正整数）：绝不编造。
+  for (const bad of [undefined, null, 0, -1, 1.5, "7", NaN]) {
+    const out = derive(snapshot([failedRun({ terminalAt: ago(HOUR), terminalSeq: bad })]));
+    assert.deepEqual(seqsOf(byId(out.anomalies, "failed:run_a")), [null], `terminalSeq ${String(bad)} -> null`);
+  }
+});
+
+test("交付提交: 交付类事项带当前绑定的 commit（会审事项取被审运行的）；确定不了是 null；别的种类没有这个字段", () => {
+  const commit = "a".repeat(40);
+  const out = derive(snapshot(
+    [
+      run({ runId: "run_v", delivery: fresh({ verification: FAILED_VERIFICATION, commit }) }),
+      run({ runId: "run_u", delivery: fresh({ verification: { status: "unavailable", reverify: NONE }, commit }) }),
+      run({ runId: "run_w", delivery: delivered({ settledAt: ago(3 * HOUR), commit }) }),
+      run({ runId: "run_amb", delivery: fresh({ settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, settledAt: null, commit }) }),
+      // 创建与验证引用了不同提交：读模型故意不给 commit（ambiguous 为真）→ 事项在，提交未知。
+      run({ runId: "run_unk", delivery: fresh({ settlement: { status: "undeterminable", reason: "delivery_facts_malformed" }, settledAt: null, commit: null, ambiguous: true }) }),
+      run({ runId: "run_rev", delivery: fresh({ commit: "b".repeat(40) }) }),
+      failedRun({ runId: "run_f" }),
+      live({ runId: "run_quiet", liveness: "silent", quietSince: ago(40 * MINUTE) }),
+    ],
+    [consult({ seats: [seat("run_s1", "PASS"), seat("run_s2", "FIX_FIRST")] })],
+  ));
+  const commitOf = (items, id) => byId(items, id).commit;
+  assert.equal(commitOf(out.decide, "verification_failed:run_v"), commit);
+  assert.equal(commitOf(out.decide, "verification_unavailable:run_u"), commit);
+  assert.equal(commitOf(out.decide, "awaiting_decision:run_w"), commit);
+  assert.equal(commitOf(out.decide, "delivery_ambiguous:run_amb"), commit);
+  assert.equal(commitOf(out.decide, "delivery_ambiguous:run_unk"), null, "唯一确定不了 → null（页面标未知）");
+  assert.equal(commitOf(out.decide, "consult_split:alpha:consult_1"), "b".repeat(40), "会审事项取被审运行的提交");
+  for (const item of [byId(out.anomalies, "failed:run_f"), byId(out.anomalies, "silent:run_quiet")]) {
+    assert.equal("commit" in item, false, `${item.id}: 不是交付类事项，没有 commit 字段`);
+  }
+  // 已了结的也带（提交是事项挂着的那一版）。
+  const decided = derive(snapshot([run({ delivery: delivered({ settledAt: ago(4 * HOUR), commit, acceptance: { status: "accepted", decidedAt: ago(HOUR) } }) })]));
+  assert.equal(decided.resolved[0].commit, commit);
+});
+
+test("会审牵涉的 worker: seatRunIds 是全部席位运行（含没给结论的），去重、保持席位顺序；evidence 仍只列给了结论的席位", () => {
+  const out = derive(snapshot(
+    [run({ runId: "run_rev", delivery: fresh() })],
+    [consult({ seats: [seat("run_s1", "PASS"), seat("run_s2", "FIX_FIRST"), seat("run_s3", null), seat("run_s1", "PASS"), { agentId: "x", q1: "PASS" }] })],
+  ));
+  assert.deepEqual(out.decide[0].runIds, ["run_rev"], "runIds 仍只是被审运行（事项挂着的运行不变）");
+  assert.deepEqual(out.decide[0].seatRunIds, ["run_s1", "run_s2", "run_s3"]);
+  assert.deepEqual(out.decide[0].evidence.map((entry) => entry.runId), ["run_s1", "run_s2", "run_s1"], "证据只列给了结论的席位");
+  // 别的种类没有 seatRunIds。
+  const other = derive(snapshot([run({ runId: "run_w", delivery: delivered({ settledAt: ago(3 * HOUR) }) })]));
+  assert.equal("seatRunIds" in other.decide[0], false);
+});
+
+test("额度用尽也计入 Alerts: 只有额度用尽 → decide 一件、anomalies 一件镜像；顶部计数、项目计数、两栏列表同口径", () => {
+  const out = derive(snapshot([exhausted(LANE, HOUR, { runId: "run_q" })]));
+  assert.deepEqual(ids(out.decide), ["capacity:glm-pro"]);
+  assert.deepEqual(ids(out.anomalies), ["failed:run_q", "capacity_alert:glm-pro"]);
+  const mirror = byId(out.anomalies, "capacity_alert:glm-pro");
+  assert.equal(mirror.kind, "quota_exhausted");
+  assert.deepEqual({ ...mirror, id: "capacity:glm-pro" }, out.decide[0], "除 id 外与 decide 那件相同");
+  assert.notEqual(mirror.runIds, out.decide[0].runIds, "不共享可变数组");
+  assert.notEqual(mirror.evidence[0], out.decide[0].evidence[0]);
+  // 计数：Needs you 1；Alerts = 失败的运行 + 额度镜像。全局与项目一致。
+  assert.deepEqual(out.counts.decide, { open: 1, unknown: 0 });
+  assert.deepEqual(out.counts.anomalies, { open: 2, unknown: 0 });
+  assert.deepEqual(out.counts.projects[0].decide, { open: 1, unknown: 0 });
+  assert.deepEqual(out.counts.projects[0].anomalies, { open: 2, unknown: 0 });
+  // 车道行照旧点名（一行，不因镜像而重复）。
+  assert.deepEqual(ownerLanes(snapshot([exhausted(LANE, HOUR, { runId: "run_q" })]), out).map((lane) => [lane.laneKey, lane.capacity?.kind]), [["glm-pro", "quota_exhausted"]]);
+  // Workers 行挂着两件（各自的 id 都查得到）。
+  const rows = selectOwnerWorkers(snapshot([exhausted(LANE, HOUR, { runId: "run_q" })]), out, { now: NOW });
+  assert.deepEqual(rows[0].attentionIds, ["capacity:glm-pro", "failed:run_q", "capacity_alert:glm-pro"]);
+});
+
+test("额度用尽与限流同时出现: Needs you 只数额度用尽；Alerts 数额度镜像 + 限流；了结时 resolved 里额度只出现一次", () => {
+  const limited = exhausted(LANE, HOUR, {
+    runId: "run_rl", failure: { category: "provider_capacity", code: "rate_limited" }, capacity: { code: "rate_limited", observedAt: ago(HOUR) },
+  });
+  const both = derive(snapshot([limited, exhausted(LANE, 2 * HOUR, { runId: "run_q" })]));
+  assert.deepEqual(ids(both.decide), ["capacity:glm-pro"]);
+  assert.deepEqual(ids(both.anomalies).filter((id) => !id.startsWith("failed:")).sort(), ["capacity_alert:glm-pro", "rate_limited:glm-pro"]);
+  assert.deepEqual(both.counts.decide, { open: 1, unknown: 0 });
+  assert.deepEqual(both.counts.anomalies, { open: 4, unknown: 0 }, "两条失败 + 额度镜像 + 限流");
+  // 之后同车道有运行完成：两栏的额度事项都了结，但 resolved 里额度只有一件（镜像不重复列）。
+  const done = run({ runId: "run_ok", terminalAt: ago(30 * MINUTE), deliveryRequested: false });
+  const resolved = derive(snapshot([exhausted(LANE, HOUR, { runId: "run_q" }), done]));
+  assert.deepEqual(resolved.decide, []);
+  assert.deepEqual(ids(resolved.anomalies), ["failed:run_q"], "了结的额度镜像不留在未了结的异常栏，失败的运行本身照旧");
+  assert.deepEqual(resolved.resolved.filter((item) => item.kind === "quota_exhausted").map((item) => item.id), ["capacity:glm-pro"]);
+  assert.deepEqual(resolved.counts.anomalies, { open: 1, unknown: 0 }, "只剩失败的运行本身");
+  // 额度证据超过 6 小时：unknown 也两栏都有（都是未了结）。
+  const stale = derive(snapshot([exhausted(LANE, OWNER_ATTENTION_CAPACITY_FRESH_MS + 1, { runId: "run_q" })]));
+  assert.deepEqual([byId(stale.decide, "capacity:glm-pro").state, byId(stale.anomalies, "capacity_alert:glm-pro").state], ["unknown", "unknown"]);
+  assert.deepEqual(stale.counts.anomalies, { open: 1, unknown: 1 });
+  // 导出的闭集：quota_exhausted 在两栏的种类里，种类总集没有重复。
+  assert.ok(OWNER_ATTENTION_DECIDE_KINDS.includes("quota_exhausted") && OWNER_ATTENTION_ANOMALY_KINDS.includes("quota_exhausted"));
+  assert.equal(new Set(OWNER_ATTENTION_KINDS).size, OWNER_ATTENTION_KINDS.length);
+});
+
+test("会审几席已到: 已到终态且收到答复才算；完成但没答复不算、失败但有答复算；Workers 行上给 { groupId, seatsIn, seatsTotal }", () => {
+  const seats = [
+    { agentId: "a", runId: "run_s1", runState: "completed", q1: "PASS", replied: true },
+    { agentId: "b", runId: "run_s2", runState: "completed", q1: null, replied: false },
+    { agentId: "c", runId: "run_s3", runState: "failed", q1: null, replied: true },
+    { agentId: "d", runId: "run_s4", runState: "running", q1: null, replied: false },
+    { agentId: "e", runId: "run_s5", runState: "running", q1: null, replied: true },
+  ];
+  assert.equal(consultSeatsArrived(seats), 2, "s1（完成且答复）与 s3（失败但有答复）");
+  assert.equal(consultSeatsArrived([]), 0);
+  assert.equal(consultSeatsArrived(undefined), 0);
+  assert.equal(consultSeatsArrived([{ runState: "completed" }]), 0, "replied 读不到不算已到");
+  const snap = snapshot(
+    [live({ runId: "run_s4" }), live({ runId: "run_other" }), run({ runId: "run_s1", deliveryRequested: false })],
+    [consult({ seats })],
+  );
+  const rows = selectOwnerWorkers(snap, derive(snap), { now: NOW });
+  const consultOfRow = (runId) => rows.find((row) => row.run.runId === runId).consult;
+  assert.deepEqual(consultOfRow("run_s4"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5 });
+  assert.deepEqual(consultOfRow("run_s1"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5 }, "同组各席共用一个组摘要");
+  assert.equal(consultOfRow("run_other"), null, "不是会审席位");
+  // 没有会审组记录（或记录里没有席位 / 没有 consultId）：没有这一项。
+  const bare = snapshot([live({ runId: "run_s4" })], []);
+  assert.equal(selectOwnerWorkers(bare, derive(bare), { now: NOW })[0].consult, null);
+  const empty = snapshot([live({ runId: "run_s4" })], [consult({ seats: [] }), consult({ consultId: null, seats })]);
+  assert.equal(selectOwnerWorkers(empty, derive(empty), { now: NOW })[0].consult, null);
+  // 一个席位同时出现在两个组里：取 createdAt 更早（快照里排在前面）的那个组。
+  const twice = snapshot([live({ runId: "run_s4" })], [
+    consult({ consultId: "consult_1", seats: [seats[3]] }),
+    consult({ consultId: "consult_2", seats }),
+  ]);
+  assert.equal(selectOwnerWorkers(twice, derive(twice), { now: NOW })[0].consult.groupId, "alpha:consult_1");
 });

@@ -41,6 +41,7 @@ import { diagnoseFailure, diagnoseFailureWithBasis } from "../../src/diagnosis.j
 import { validateDeliveryFacts } from "../../src/transcript.js";
 import { execGitReadOnly, listRunBranchRunIds, RUN_BRANCH_GIT_TIMEOUT_MS } from "../../src/application/runBranches.js";
 import { listTranscriptsDeep } from "../../src/projectBuckets.js";
+import { lastEffectAtMs, lastEffectBaseEvent } from "../../src/application/runQuietAdvisory.js";
 
 // ===== 夹具 =====
 
@@ -171,6 +172,11 @@ function completedEvents(runId, o = {}) {
   terminal(b, { at: at + 5000 });
   return b.events;
 }
+
+/** 构造器里事件的 seq：最后一条满足条件的事件（用来写期望，不写魔数）。 */
+const seqWhere = (b, predicate) => b.events.filter(predicate).at(-1).seq;
+const seqOfTransition = (b, to) => seqWhere(b, (e) => e.type === "run.state_change" && e.to === to);
+const seqOfType = (b, type) => seqWhere(b, (e) => e.type === type);
 
 const runOf = (snapshot, runId) => {
   const run = snapshot.runs.find((r) => r.runId === runId);
@@ -386,8 +392,9 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
       settlement: { status: "settled", reason: "packaging_failed" },
       commit: null,
       verification: null,
-      acceptance: { status: null, decidedAt: null },
+      acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: iso(T0 + 5000),
+      settledSeq: seqOfTransition(pack, "failed"),
       ambiguous: false,
       packagingFailure: "empty_diff",
       isolationFailure: null,
@@ -397,8 +404,9 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
       settlement: { status: "settled", reason: "isolation_failed" },
       commit: null,
       verification: null,
-      acceptance: { status: null, decidedAt: null },
+      acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: iso(T0 + 5000),
+      settledSeq: seqOfTransition(escaped, "failed"),
       ambiguous: false,
       packagingFailure: null,
       isolationFailure: { code: "workdir_escape", reason: "write_intent_lexical_outside" },
@@ -408,8 +416,9 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
       settlement: { status: "undeterminable", reason: "delivery_facts_malformed" },
       commit: null,
       verification: null,
-      acceptance: { status: null, decidedAt: null },
+      acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: null,
+      settledSeq: null,
       ambiguous: true,
       packagingFailure: null,
       isolationFailure: null,
@@ -499,7 +508,7 @@ test("交付事实：验证 passed / failed / pending / unavailable；复验通�
       settlement: { status: "unsettled", reason: "reverify_pending" },
       commit: DELIVERED,
     }, "复验还没结果：有效状态仍是原始的 failed");
-    assert.deepEqual(runOf(snap, "run_pass").delivery.acceptance, { status: "pending", decidedAt: null });
+    assert.deepEqual(runOf(snap, "run_pass").delivery.acceptance, { status: "pending", decidedAt: null, decidedSeq: null });
   } finally {
     s.cleanup();
   }
@@ -514,18 +523,24 @@ test("交付事实：已采纳 / 已拒收带裁决事件自己的时间；验�
       build(b);
       s.write(s.bucket(ALPHA.slug), runId, b.events);
     };
+    let accB;
+    let rejB;
+    let prejB;
     put("run_acc", (b) => {
+      accB = b;
       created(b, T0 + 6000, "run_acc");
       outcome(b, T0 + 7000, "run_acc", "passed");
       decide(b, T0 + 8000, "run_acc", "accepted", "passed");
     });
     put("run_rej", (b) => {
+      rejB = b;
       created(b, T0 + 6000, "run_rej");
       outcome(b, T0 + 7000, "run_rej", "passed");
       decide(b, T0 + 8000, "run_rej", "rejected", "passed");
     });
     // 验证未出就拒收（第 87 批的 pending 拒收），随后验证结果后到。
     put("run_prej", (b) => {
+      prejB = b;
       created(b, T0 + 6000, "run_prej");
       b.clock(T0 + 7000).add("run.delivery_rejected", {
         delivery: ref("run_prej", { acceptance: { status: "rejected", reviewerType: "lead_agent" } }),
@@ -550,7 +565,7 @@ test("交付事实：已采纳 / 已拒收带裁决事件自己的时间；验�
       };
     };
     assert.deepEqual(pick("run_acc"), {
-      acceptance: { status: "accepted", decidedAt: iso(T0 + 8000) },
+      acceptance: { status: "accepted", decidedAt: iso(T0 + 8000), decidedSeq: seqOfType(accB, "run.delivery_accepted") },
       verification: "passed",
       settledAt: iso(T0 + 7000),
       settlement: { status: "settled", reason: "delivery_settled" },
@@ -558,7 +573,7 @@ test("交付事实：已采纳 / 已拒收带裁决事件自己的时间；验�
       supersededByRunId: null,
     }, "裁决时间取裁决事件自己的 ts；settledAt 不因裁决推后");
     assert.deepEqual(pick("run_rej"), {
-      acceptance: { status: "rejected", decidedAt: iso(T0 + 8000) },
+      acceptance: { status: "rejected", decidedAt: iso(T0 + 8000), decidedSeq: seqOfType(rejB, "run.delivery_rejected") },
       verification: "passed",
       settledAt: iso(T0 + 7000),
       settlement: { status: "settled", reason: "delivery_settled" },
@@ -566,7 +581,7 @@ test("交付事实：已采纳 / 已拒收带裁决事件自己的时间；验�
       supersededByRunId: null,
     });
     assert.deepEqual(pick("run_prej"), {
-      acceptance: { status: "rejected", decidedAt: iso(T0 + 7000) },
+      acceptance: { status: "rejected", decidedAt: iso(T0 + 7000), decidedSeq: seqOfType(prejB, "run.delivery_rejected") },
       verification: "failed",
       settledAt: iso(T0 + 8000),
       settlement: { status: "settled", reason: "delivery_settled" },
@@ -638,6 +653,118 @@ test("交付事实：settledAt 取终态事件与该轮有效验证（或复验�
   }
 });
 
+test("证据事件号: 终态、静默起点、收口、裁决各自带它所取事件的 seq；旧转录没有 / 不合法的 seq 读成 null，不编造", async () => {
+  const s = makeStore();
+  try {
+    s.writeProject(ALPHA);
+    const put = (runId, b, events = b.events) => s.write(s.bucket(ALPHA.slug), runId, events);
+
+    // 终态 + 静默起点：有过实质动作 → quietSince 取最后一次动作的事件。
+    const done = builder("run_q1");
+    head(done);
+    working(done, { at: T0 + 3000 });
+    effect(done, { at: T0 + 4000 });
+    terminal(done, { at: T0 + 5000 });
+    put("run_q1", done);
+    // 从未有过动作：quietSince 从 run.submitted 起算 → 它的事件号。
+    const idle = builder("run_q2");
+    head(idle);
+    working(idle, { at: T0 + 3000 });
+    put("run_q2", idle);
+    // 连 run.submitted 都没有（卡在 pending）：第一条带 ts 的事件。
+    const stuck = builder("run_q3");
+    stuck.clock(T0).add("run.background_submitted", { background: true, cwd: PRIVATE_ROOT, deliveryRequested: false, project: projectFact(ALPHA) });
+    stuck.add("run.state_change", { from: null, to: "pending", reason: "background_spawned" });
+    put("run_q3", stuck);
+
+    // 收口：结果事件晚于终态 → 取结果事件；终态晚 → 取终态；复验结果；打包失败取终态；裁决事件。
+    const mk = (runId, build) => {
+      const b = builder(runId);
+      head(b, { deliveryRequested: true });
+      working(b, { at: T0 + 3000 });
+      build(b);
+      put(runId, b);
+      return b;
+    };
+    const d1 = mk("run_d1", (b) => {
+      terminal(b, { at: T0 + 5000 });
+      created(b, T0 + 6000, "run_d1");
+      outcome(b, T0 + 9000, "run_d1", "passed");
+      decide(b, T0 + 9500, "run_d1", "accepted", "passed");
+    });
+    const d2 = mk("run_d2", (b) => {
+      created(b, T0 + 3000, "run_d2");
+      outcome(b, T0 + 3500, "run_d2", "passed");
+      terminal(b, { at: T0 + 9000 });
+    });
+    const d3 = mk("run_d3", (b) => {
+      terminal(b, { at: T0 + 5000 });
+      created(b, T0 + 6000, "run_d3");
+      outcome(b, T0 + 7000, "run_d3", "failed");
+      reverify(b, T0 + 8000, T0 + 9500, "run_d3");
+    });
+    const pack = mk("run_d4", (b) => {
+      terminal(b, { at: T0 + 5000, state: "failed" });
+      b.clock(T0 + 6000).add("run.delivery_failed", { deliveryCode: "empty_diff" });
+    });
+    const pend = mk("run_d5", (b) => created(b, T0 + 6000, "run_d5"));
+
+    // 旧转录：同样的事件，但没有 seq / seq 不是正整数。
+    const legacyEvents = (runId) => completedEvents(runId).map(({ seq, ...rest }) => rest);
+    put("run_old1", null, legacyEvents("run_old1"));
+    put("run_old2", null, completedEvents("run_old2").map((e, i) => ({ ...e, seq: [0, -3, 1.5, "7", null][i % 5] })));
+
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+
+    assert.equal(runOf(snap, "run_q1").terminalSeq, seqOfTransition(done, "completed"), "终态 = 状态依据的那条终态转移");
+    assert.equal(runOf(snap, "run_q1").quietSince, iso(T0 + 4000));
+    assert.equal(runOf(snap, "run_q1").quietSinceSeq, seqWhere(done, (e) => e.type === "run.event"), "静默起点 = 最后一次实质动作");
+    assert.equal(runOf(snap, "run_q2").terminalSeq, null, "没到终态就没有终态事件号");
+    assert.equal(runOf(snap, "run_q2").quietSinceSeq, seqOfType(idle, "run.submitted"), "从未有过动作 → run.submitted");
+    assert.equal(runOf(snap, "run_q3").quietSinceSeq, stuck.events[0].seq, "连 run.submitted 都没有 → 第一条带 ts 的事件");
+
+    assert.equal(runOf(snap, "run_d1").delivery.settledSeq, seqOfType(d1, "run.delivery_verification_passed"), "结果事件晚 → 取结果事件");
+    assert.equal(runOf(snap, "run_d1").delivery.acceptance.decidedSeq, seqOfType(d1, "run.delivery_accepted"));
+    assert.equal(runOf(snap, "run_d2").delivery.settledSeq, seqOfTransition(d2, "completed"), "终态晚 → 取终态事件");
+    assert.equal(runOf(snap, "run_d2").delivery.acceptance.decidedSeq, null, "没裁决就没有裁决事件号");
+    assert.equal(runOf(snap, "run_d3").delivery.settledSeq, seqOfType(d3, "run.delivery_reverification_passed"), "复验通过 → 复验结果事件");
+    assert.equal(runOf(snap, "run_d4").delivery.settledSeq, seqOfTransition(pack, "failed"), "打包失败 → 终态事件");
+    assert.equal(runOf(snap, "run_d5").delivery.settledSeq, null, "没收口就没有收口事件号");
+    assert.equal(runOf(snap, "run_d5").delivery.settledAt, null);
+    assert.ok(pend.events.length > 0);
+
+    // 旧转录没有 seq → null；seq 不是正整数（0、负数、小数、字符串、null）→ null。从不编造。
+    assert.equal(runOf(snap, "run_old1").terminalSeq, null);
+    assert.equal(runOf(snap, "run_old1").quietSinceSeq, null);
+    assert.equal(runOf(snap, "run_old2").terminalSeq, null);
+    assert.equal(runOf(snap, "run_old2").quietSinceSeq, null);
+    // 时间照给：seq 缺席不影响时间。
+    assert.ok(runOf(snap, "run_old1").terminalAt !== null);
+  } finally {
+    s.cleanup();
+  }
+});
+test("静默起点的依据事件：lastEffectBaseEvent 与 lastEffectAtMs 同口径——最后一次实质动作（ts 读不到时顺延）→ run.submitted → 第一条带字符串 ts 的事件", () => {
+  const msg = (seq, ts) => ({ seq, ts, type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "x" }] });
+  const submitted = (seq, ts) => ({ seq, ts, type: "run.submitted" });
+  const other = (seq, ts) => ({ seq, ts, type: "session.created" });
+  const cases = [
+    [[other(1, iso(T0)), submitted(2, iso(T0 + 1000)), msg(3, iso(T0 + 2000)), msg(4, iso(T0 + 3000))], 4, "最后一次实质动作"],
+    [[other(1, iso(T0)), submitted(2, iso(T0 + 1000)), msg(3, iso(T0 + 2000)), msg(4, null)], 2, "实质动作的 ts 读不到：顺延到 run.submitted（与原口径一致）"],
+    [[other(1, iso(T0)), submitted(2, iso(T0 + 1000))], 2, "从未有过动作 → run.submitted"],
+    [[other(1, iso(T0)), other(2, iso(T0 + 1000))], 1, "连 run.submitted 都没有 → 第一条带字符串 ts 的事件"],
+    [[other(1, 12345), other(2, iso(T0 + 1000))], 2, "第一条的 ts 不是字符串 → 跳过"],
+    [[], null, "空作用域"],
+  ];
+  for (const [scope, expectSeq, why] of cases) {
+    const event = lastEffectBaseEvent(scope);
+    assert.equal(event?.seq ?? null, expectSeq, why);
+    const ms = lastEffectAtMs(scope);
+    assert.equal(ms, event === null ? null : Date.parse(event.ts), `${why}：毫秒值就取自这条事件`);
+  }
+});
 test("交付事实校验：绑定的原始验证结果事件经 verificationOutcomeEvent 给出（与 reverifyOutcomeEvent 对称）；不再导出可变集合", async () => {
   const b = deliveryRun("run_vo");
   created(b, T0 + 6000, "run_vo");
@@ -753,9 +880,14 @@ test("额度证据：code 是闭集额度码；observedAt 是判定所依据的�
     const model = createOwnerReadModel({ runDir: s.runDir });
     await model.refresh();
     const snap = model.snapshot({ now: NOW });
-    assert.deepEqual(runOf(snap, "run_c_tr").capacity, { code: "rate_limited", observedAt: iso(T0 + 5000) });
-    assert.deepEqual(runOf(snap, "run_c_q").capacity, { code: "quota_exhausted", observedAt: iso(T0 + 7000) });
-    assert.deepEqual(runOf(snap, "run_c_o").capacity, { code: "overloaded", observedAt: iso(T0 + 8000) });
+    // observedSeq 是判定所依据的那条 run.error 的事件号（终态之前最近的那条，不是更早的瞬时错误）。
+    assert.deepEqual(runOf(snap, "run_c_tr").capacity, {
+      code: "rate_limited", observedAt: iso(T0 + 5000),
+      observedSeq: seqWhere(transient, (e) => e.type === "run.error" && e.ts === iso(T0 + 5000)),
+    });
+    assert.notEqual(runOf(snap, "run_c_tr").capacity.observedSeq, seqWhere(transient, (e) => e.type === "run.error" && e.ts === iso(T0 + 4000)));
+    assert.deepEqual(runOf(snap, "run_c_q").capacity, { code: "quota_exhausted", observedAt: iso(T0 + 7000), observedSeq: seqOfType(quota, "run.error") });
+    assert.deepEqual(runOf(snap, "run_c_o").capacity, { code: "overloaded", observedAt: iso(T0 + 8000), observedSeq: seqOfType(full, "run.error") });
     assert.deepEqual(runOf(snap, "run_c_tr").failure, { category: "provider_capacity", code: "rate_limited" });
   } finally {
     s.cleanup();
@@ -773,7 +905,7 @@ test("额度证据：zcode 上游摘要升级那一路，observedAt 是带摘要
     await model.refresh();
     const snap = model.snapshot({ now: NOW });
     assert.deepEqual(runOf(snap, "run_c_z").failure, { category: "provider_capacity", code: "rate_limited" });
-    assert.deepEqual(runOf(snap, "run_c_z").capacity, { code: "rate_limited", observedAt: iso(T0 + 6000) });
+    assert.deepEqual(runOf(snap, "run_c_z").capacity, { code: "rate_limited", observedAt: iso(T0 + 6000), observedSeq: b.events.at(-2).seq });
   } finally {
     s.cleanup();
   }
@@ -2526,7 +2658,7 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
     assert.equal(runOf(snap, LEAK_ROOT).supersededByRunId, LEAK_CHILD);
     assert.equal(runOf(snap, LEAK_ROOT).supersessionUndeterminable, false);
     assert.deepEqual(runOf(snap, "run_leak_cap").failure, { category: "provider_capacity", code: "rate_limited" });
-    assert.deepEqual(runOf(snap, "run_leak_cap").capacity, { code: "rate_limited", observedAt: iso(T0 + 5000) });
+    assert.deepEqual(runOf(snap, "run_leak_cap").capacity, { code: "rate_limited", observedAt: iso(T0 + 5000), observedSeq: seqOfType(cap, "run.error") });
     assert.equal(runOf(snap, "run_leak_pack").failure.category, "delivery_packaging_failed");
     assert.equal(runOf(snap, "run_leak_pack").delivery.packagingFailure, "disallowed_path");
     assert.equal(runOf(snap, "run_leak_iso").delivery.isolationFailure.code, "workdir_escape");
@@ -2550,18 +2682,18 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
     const RUN_KEYS = [
       "agentId", "availability", "capacity", "delivery", "deliveryRequested", "failure", "lastEffectAt", "lastProcessActiveAt",
       "lastHeartbeatAt", "lastVitalAt", "laneId", "legalDecision", "lineageRootConflict", "lineageRootRunId", "supersessionUndeterminable", "liveness",
-      "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince", "startedAt",
-      "state", "supersededByRunId", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
+      "parentRunId", "project", "quietSince", "quietSinceSeq", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince", "startedAt",
+      "state", "supersededByRunId", "taskType", "terminal", "terminalAt", "terminalSeq", "title", "titleBasis", "typeBasis",
     ].sort();
     for (const run of snap.runs) {
       assert.deepEqual(Object.keys(run).sort(), RUN_KEYS, `${run.runId} 的运行行键集`);
       if (run.delivery !== null) {
         assert.deepEqual(Object.keys(run.delivery).sort(), [
           "acceptance", "ambiguous", "branchPresent", "commit", "isolationFailure", "packagingFailure", "settledAt",
-          "settlement", "verification",
+          "settledSeq", "settlement", "verification",
         ], `${run.runId} 的 delivery 键集`);
         assert.deepEqual(Object.keys(run.delivery.settlement).sort(), ["reason", "status"]);
-        assert.deepEqual(Object.keys(run.delivery.acceptance).sort(), ["decidedAt", "status"]);
+        assert.deepEqual(Object.keys(run.delivery.acceptance).sort(), ["decidedAt", "decidedSeq", "status"]);
         if (run.delivery.verification !== null) {
           assert.deepEqual(Object.keys(run.delivery.verification).sort(), ["reverify", "status"]);
           assert.deepEqual(Object.keys(run.delivery.verification.reverify).sort(), ["reason", "status"]);
@@ -2571,7 +2703,7 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
         }
       }
       if (run.failure !== null) assert.deepEqual(Object.keys(run.failure).sort(), ["category", "code"]);
-      if (run.capacity !== null) assert.deepEqual(Object.keys(run.capacity).sort(), ["code", "observedAt"]);
+      if (run.capacity !== null) assert.deepEqual(Object.keys(run.capacity).sort(), ["code", "observedAt", "observedSeq"]);
     }
     for (const consult of snap.consults) {
       assert.deepEqual(Object.keys(consult).sort(), ["consultId", "createdAt", "declaredFields", "projectSlug", "q1Declared", "reviewedRunId", "seats"]);

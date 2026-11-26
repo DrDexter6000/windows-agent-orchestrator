@@ -50,7 +50,7 @@ import {
   isValidDiagnosisCode,
   isolationViolationDetail,
 } from "../diagnosis.js";
-import { TERMINAL_STATES, findLatestBound, validateDeliveryFacts } from "../transcript.js";
+import { findLatestBound, validateDeliveryFacts } from "../transcript.js";
 import { isCanonicalCommitId, isValidRepoRelativePath, isValidRunId } from "../delivery.js";
 import { extractFinalAssistantText, stripConsultSeatContract } from "./consultService.js";
 import {
@@ -61,7 +61,7 @@ import {
   liveDeliveryFacts,
   projectDelivery,
 } from "./ownerReadModel.js";
-import { ownerLaneKey, ownerRunTitles } from "./ownerAttention.js";
+import { consultSeatsArrived, ownerLaneKey, ownerRunTitles } from "./ownerAttention.js";
 import { DELIVERY_VERIFICATION_FAILURE_CODES, DELIVERY_VERIFICATION_STATUSES } from "./runDelivery.js";
 import { headOfRedactedText } from "./runActivityProjection.js";
 
@@ -311,7 +311,7 @@ function consultRows(consult, runsById) {
 function consultAxis(consult, runId) {
   const seats = Array.isArray(consult.seats) ? consult.seats : [];
   const thisSeat = seats.find((seat) => seat?.runId === runId);
-  const arrived = seats.filter((seat) => TERMINAL_STATES.includes(seat?.runState) && seat?.replied === true).length;
+  const arrived = consultSeatsArrived(seats);
   return {
     consultId: text(consult.consultId),
     createdAt: text(consult.createdAt),

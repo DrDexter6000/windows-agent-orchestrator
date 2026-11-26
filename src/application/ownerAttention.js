@@ -5,7 +5,8 @@
 //   - decide：    值得你拿主意——交付会审结论不一致、交付验证没过 / 没验成 / 收口判定不清、
 //                 等裁决超过 2 小时、车道额度耗尽；
 //   - anomalies： 异常——24 小时内失败且没有后续成功的运行、静默超过 30 分钟的运行、
-//                 只剩进程体征超过 30 分钟的运行、车道被限流 / 上游过载；
+//                 只剩进程体征超过 30 分钟的运行、车道被限流 / 上游过载、车道额度用尽
+//                 （quota_exhausted 是 decide 那一件的镜像，两栏各一件，见下"额度"）；
 //   - resolved：  上面各类里已了结、且了结时刻在 24 小时内的，按了结时刻倒序。
 //
 // 边界：
@@ -24,12 +25,19 @@
 //   projectSlugs（事项归属的项目，去重排序：会审事项含会审所在项目与被审运行的项目，
 //   其余事项含它全部 runIds 的项目）、
 //   since（证据事件自己的时间，不是"被观测到"的时间，所以服务重启后能从转录事实重建）、
-//   evidence（[{ runId, at, seq }]；快照还没有事件号，seq 一律 null）。
+//   evidence（[{ runId, at, seq }]；seq 是该时间点所取事件的事件号，快照里读不到——旧转录
+//   没有 seq——就是 null，不编造）。
+//   交付类事项（consult_split、verification_failed / unavailable、delivery_ambiguous、
+//   awaiting_decision）另带 commit：当前绑定的交付提交（会审事项取被审运行的）；交付事实
+//   自相矛盾、读不出时是 null（"未知"）。consult_split 另带 seatRunIds：会审的全部席位运行
+//   （evidence 只列给了结论的席位；牵涉的 worker = runIds 的被审运行 + seatRunIds）。
 //   resolvedAt 与 resolution 只在 resolved 时有；此时 evidence 末尾多一条解除证据。
 //   个别种类带自己的字段：额度事项带 laneKey 与 capacityCode（quota_exhausted |
 //   rate_limited | overloaded，最后一次观测的码）；failed 事项带 failure（快照里的
-//   failure.{category, code}），未了结时再带 followUp（running | unknown：后续是否还在跑，
-//   "后续"同样要求在失败之后才开始）。
+//   failure.{category, code}），未了结时再带 followUp 与 followUpRuns（exists | none | unknown，见
+//   followUpsOf：有链到它的后续运行就是 exists，followUpRuns 列出它们与各自当前状态——运行中、失败等
+//   都只是状态；快照读得全、谱系根已知、没有链到它的后续时才是 none；缺一条证据是 unknown。
+//   "后续"要求在失败之后才开始）。
 //
 // 各类事项的 since 与证据取自哪里：
 //   - consult_split：since 是会审的 createdAt；证据是每个给了结论的席位（runId 是席位
@@ -47,9 +55,11 @@
 //     "等了多久"算到解除那一刻：仍待裁决算到现在，已裁决 / 已被取代的算到 resolvedAt。所以
 //     收口后不到 2 小时就被裁决的交付哪一栏都不在；等过 3 小时才被裁决的，裁决当下就进
 //     "已了结"栏（resolvedAt 在 24 小时内）。
-//   - quota_exhausted：额度耗尽，进 decide；rate_limited / overloaded 归 rate_limited，进
-//     anomalies（同一运行另有 failed 异常照留）。都按车道键分组，since 是最后一次观测的
-//     observedAt，证据是最新的 10 次观测（按观测时刻升序；解除证据附在末尾）。
+//   - quota_exhausted：额度耗尽，进 decide；Owner 已定额度用尽也计入 Alerts，所以异常栏再列
+//     一件镜像（id 为 capacity_alert:<车道键>，其余字段相同；已了结的镜像不进 resolved，
+//     避免同一件事列两遍）。rate_limited / overloaded 归 rate_limited，只进 anomalies（同一
+//     运行另有 failed 异常照留）。都按车道键分组，since 是最后一次观测的 observedAt，证据是
+//     最新的 10 次观测（按观测时刻升序；解除证据附在末尾）。
 //   - failed：since 与证据是失败的终态时刻。
 //   - silent / process_only：since 与证据是 quietSince。
 //
@@ -62,7 +72,7 @@
 //     可能是 failed（runDeliveryReverify 的前置条件），快照本身不留原始状态。
 //   - later_success：同车道（额度事项）或同谱系 / retryOf（failed 事项）里，有运行在证据
 //     时刻之后完成；多个取最早的那个，resolvedAt = 它的 terminalAt。failed 的"后续"
-//     （解除用的后续成功，与未了结时的 followUp: running）还要求后续运行在失败运行的
+//     （解除用的后续成功，与未了结时的 followUp: exists）还要求后续运行在失败运行的
 //     terminalAt 之后才开始（startedAt >= terminalAt）：并发跑着的兄弟运行不算后续。
 //   同一事项多种解除并存时按上面的先后取第一种。awaiting_decision 只认 decided 与
 //   superseded；consult_split 不认 reverify_passed。
@@ -113,13 +123,14 @@
 //     那一件（同一时刻 quota_exhausted 在前）。额度事项分属 decide（quota_exhausted）与
 //     anomalies（rate_limited）两栏，汇总两栏都读。
 //
-// 快照里还没有、所以这里给不出的事实（详情页那一批再补）：事件号；席位给出结论的时刻；
+// 快照里还没有、所以这里给不出的事实（详情页那一批再补）：席位给出结论的时刻；
 // 原始验证状态。父子边（parentRunId）不用来认后续——failed 的后续（后续成功与
-// followUp: running）只按谱系根与 retryOf 认，且要在失败之后才开始。
+// followUp）只按谱系根与 retryOf 认，且要在失败之后才开始。
 //
 // 架构契约：不 import src/commands/*、src/mcp/*、MCP SDK 或 zod。
 
 import { OWNER_CONSULT_Q1_VALUES, OWNER_LIVENESS_VALUES } from "./ownerReadModel.js";
+import { TERMINAL_STATES } from "../transcript.js";
 
 /** 等裁决：交付收口后待裁决超过这么久才列（待校准）。 */
 export const OWNER_ATTENTION_DECIDE_AFTER_MS = 2 * 60 * 60 * 1000;
@@ -140,12 +151,17 @@ export const OWNER_ATTENTION_DECIDE_KINDS = Object.freeze([
   "awaiting_decision",
   "quota_exhausted",
 ]);
-export const OWNER_ATTENTION_ANOMALY_KINDS = Object.freeze(["failed", "silent", "process_only", "rate_limited"]);
-/** 事项种类的闭集 = decide 栏的 + anomalies 栏的。 */
-export const OWNER_ATTENTION_KINDS = Object.freeze([...OWNER_ATTENTION_DECIDE_KINDS, ...OWNER_ATTENTION_ANOMALY_KINDS]);
+// quota_exhausted 两栏都出现：值得拿主意（decide），同时计入异常（Owner 已定：车道限流或额度
+// 用尽都计入 Alerts）。异常栏里的那一件是 decide 那件的镜像（id 为 capacity_alert:<车道键>）。
+export const OWNER_ATTENTION_ANOMALY_KINDS = Object.freeze(["failed", "silent", "process_only", "rate_limited", "quota_exhausted"]);
+/** 事项种类的闭集 = decide 栏的 + anomalies 栏的（quota_exhausted 两栏都有，只算一种）。 */
+export const OWNER_ATTENTION_KINDS = Object.freeze([...new Set([...OWNER_ATTENTION_DECIDE_KINDS, ...OWNER_ATTENTION_ANOMALY_KINDS])]);
 export const OWNER_ATTENTION_STATES = Object.freeze(["open", "unknown", "resolved"]);
 export const OWNER_ATTENTION_RESOLUTIONS = Object.freeze(["decided", "superseded", "reverify_passed", "later_success"]);
-export const OWNER_ATTENTION_FOLLOW_UPS = Object.freeze(["running", "unknown"]);
+/** failed 事项的后续：exists 有链到它的后续运行（followUpRuns 带各自当前状态）；none 有证据表明没有；unknown 证据不足。 */
+export const OWNER_ATTENTION_FOLLOW_UPS = Object.freeze(["exists", "none", "unknown"]);
+/** followUpRuns 至多带这么多个（最近开始的，按开始先后，最新的在最后）。 */
+export const OWNER_ATTENTION_FOLLOW_UP_RUNS_MAX = 5;
 
 /** 交付或会审事项：Workers 默认范围里，只有它们能把一个终态超过 24 小时的运行带进来。 */
 const DELIVERY_CONSULT_KINDS = new Set([
@@ -208,8 +224,20 @@ export function ownerRunTitles(run, runsById) {
   return { title: rootTitle ?? own, subtitle: rootTitle === null ? null : own };
 }
 
-/** 一条证据：快照还没有事件号，seq 一律 null。 */
-const evidenceOf = (runId, at) => ({ runId, at: text(at), seq: null });
+/** 事件号：快照里记下的 seq（正整数）；读不到（旧转录、没有这项事实）就是 null，不编造。 */
+const seqValue = (seq) => (Number.isInteger(seq) && seq > 0 ? seq : null);
+
+/** 一条证据：时间点 at 与它所取事件的事件号 seq（读不到为 null）。 */
+const evidenceOf = (runId, at, seq = null) => ({ runId, at: text(at), seq: seqValue(seq) });
+
+/**
+ * 会审几席"已到"：已到终态**且**收到了答复——席位的运行状态与答复各自独立，不用一项代替
+ * 另一项（完成但没有答复不算，失败但有答复算）。单个 worker 详情的会审轴
+ * （ownerWorkerDetail.consultAxis）与 Workers 行上的会审摘要共用这一个口径。
+ */
+export function consultSeatsArrived(seats) {
+  return (Array.isArray(seats) ? seats : []).filter((seat) => TERMINAL_STATES.includes(seat?.runState) && seat?.replied === true).length;
+}
 
 function requireNow(now) {
   if (!Number.isFinite(now)) {
@@ -235,15 +263,19 @@ function byEvidenceAt(a, b) {
 
 /** 已裁决：acceptance.status 是 accepted / rejected。 */
 function decisionOf(runId, acceptance) {
-  return { resolution: "decided", resolvedAt: text(acceptance.decidedAt), evidence: evidenceOf(runId, acceptance.decidedAt) };
+  return {
+    resolution: "decided",
+    resolvedAt: text(acceptance.decidedAt),
+    evidence: evidenceOf(runId, acceptance.decidedAt, acceptance.decidedSeq),
+  };
 }
 
 /** 已被取代：resolvedAt 取取代者的裁决时间，取代者不在快照里就是 null。 */
 function supersessionOf(run, runsById) {
   const by = text(run.supersededByRunId);
   if (by === null) return null;
-  const decidedAt = runsById.get(by)?.delivery?.acceptance?.decidedAt;
-  return { resolution: "superseded", resolvedAt: text(decidedAt), evidence: evidenceOf(by, decidedAt) };
+  const acceptance = runsById.get(by)?.delivery?.acceptance;
+  return { resolution: "superseded", resolvedAt: text(acceptance?.decidedAt), evidence: evidenceOf(by, acceptance?.decidedAt, acceptance?.decidedSeq) };
 }
 
 const isDecided = (acceptance) => acceptance?.status === "accepted" || acceptance?.status === "rejected";
@@ -262,7 +294,7 @@ function earliestSuccess(runs, isCandidate, afterMs) {
   }
   return best === null
     ? null
-    : { resolution: "later_success", resolvedAt: text(best.run.terminalAt), evidence: evidenceOf(best.run.runId, best.run.terminalAt) };
+    : { resolution: "later_success", resolvedAt: text(best.run.terminalAt), evidence: evidenceOf(best.run.runId, best.run.terminalAt, best.run.terminalSeq) };
 }
 
 /** failed 事项的后续：同一谱系（lineageRootRunId 相同）或 retryOf 指向它。 */
@@ -283,6 +315,31 @@ function isLaterFollowUp(other, failed, failedAtMs) {
 }
 
 /**
+ * failed 事项的后续：只认链到它的运行（同谱系 lineageRootRunId 或 retryOf），且要在失败之后才开始。
+ *   - exists：有这样的运行。followUpRuns 列出它们（按开始先后，至多 OWNER_ATTENTION_FOLLOW_UP_RUNS_MAX 个，
+ *     最新的在最后），每个带当前 state——运行中、失败、停止等都只是状态，不是"有没有"的区别。
+ *   - none：证据表明没有——快照里每个运行都读得出、没有谱系声明冲突的运行（否则读不出的那个可能就是
+ *     后续）、失败运行自己的谱系根已知（否则认不出谁链到它）、链到它的运行开始时刻都读得出（否则
+ *     确认不了先后）。这是"没有链到它的后续"的证据，不是"没人再派过同一件事"。
+ *   - unknown：以上缺一条。
+ * 后续成功的情形走 earliestSuccess（事项已了结），不在这里。
+ */
+function followUpsOf(runs, run, failedAtMs, censusComplete) {
+  const linked = runs.filter((other) => isFollowUp(other, run));
+  const later = linked
+    .filter((other) => isLaterFollowUp(other, run, failedAtMs))
+    .sort((a, b) => msOf(a.startedAt) - msOf(b.startedAt) || (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  if (later.length > 0) {
+    return {
+      followUp: "exists",
+      followUpRuns: later.slice(-OWNER_ATTENTION_FOLLOW_UP_RUNS_MAX).map((other) => ({ runId: other.runId, state: text(other.state) })),
+    };
+  }
+  const provable = censusComplete && text(run.lineageRootRunId) !== null && linked.every((other) => msOf(other.startedAt) !== null);
+  return { followUp: provable ? "none" : "unknown", followUpRuns: [] };
+}
+
+/**
  * 组装一条事项。resolution 为 null 就是未了结（state 取传入的 open / unknown）；否则是
  * resolved，带上 resolvedAt / resolution，证据末尾追加解除证据。extra 是该种类自己的字段。
  */
@@ -297,6 +354,8 @@ function makeItem(fields, resolution, extra) {
     since: fields.since,
     evidence: resolved ? [...fields.evidence, resolution.evidence] : fields.evidence,
   };
+  // 交付类事项带当前交付提交（取自快照里绑定的交付事实；确定不了就是 null）。
+  if (fields.commit !== undefined) item.commit = fields.commit;
   if (resolved) {
     item.resolvedAt = resolution.resolvedAt;
     item.resolution = resolution.resolution;
@@ -333,6 +392,8 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
   const runs = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
   const consults = Array.isArray(snapshot?.consults) ? snapshot.consults : [];
   const runsById = new Map(runs.map((run) => [run.runId, run]));
+  // 快照是否"读得全"：没有读不出的运行、没有谱系声明冲突的运行——"没有后续"的证据要以此为前提。
+  const censusComplete = runs.every((run) => run.availability === "ok" && run.lineageRootConflict !== true);
   const decide = [];
   const anomalies = [];
   const counts = emptyCounts();
@@ -365,6 +426,8 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
   const capacityGroups = new Map();
   // 额度事项落栏：quota_exhausted 值得拿主意（decide）；限流 / 上游过载是异常（anomalies）。
   const capacityListFor = (kind) => (kind === "quota_exhausted" ? decide : anomalies);
+  /** quota_exhausted 在异常栏里的镜像件（不进 resolved，不重复列已了结）。 */
+  const mirrors = new Set();
 
   for (const run of runs) {
     const project = countsFor(slugOf(run));
@@ -388,13 +451,13 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
 
       const reverifyPassed = effective === "passed" && verification.reverify?.status === "complete";
       const verificationResolution = reverifyPassed
-        ? { resolution: "reverify_passed", resolvedAt: settledAt, evidence: evidenceOf(run.runId, settledAt) }
+        ? { resolution: "reverify_passed", resolvedAt: settledAt, evidence: evidenceOf(run.runId, settledAt, delivery.settledSeq) }
         : decided
           ? decisionOf(run.runId, acceptance)
           : supersessionOf(run, runsById);
       // 解除不了、也确认不了"仍未解除"：裁决状态读不到，或"是否已被取代"没能判定。
       const unresolvedUnknown = acceptanceStatus === null || run.supersessionUndeterminable === true;
-      const base = { runIds: [run.runId], projectSlugs: projectSlugsOf(slugOf(run)) };
+      const base = { runIds: [run.runId], projectSlugs: projectSlugsOf(slugOf(run)), commit: text(delivery.commit) };
 
       if (effective === "failed" || effective === "unavailable" || reverifyPassed) {
         const kind = effective === "unavailable" ? "verification_unavailable" : "verification_failed";
@@ -405,7 +468,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           state: unresolvedUnknown ? "unknown" : "open",
           since: settledAt,
           // 复验通过的：原始失败那条事件的时刻快照里没有，证据只留复验结果这一条。
-          evidence: reverifyPassed ? [] : [evidenceOf(run.runId, settledAt)],
+          evidence: reverifyPassed ? [] : [evidenceOf(run.runId, settledAt, delivery.settledSeq)],
         }, verificationResolution));
       }
 
@@ -420,7 +483,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           kind: "delivery_ambiguous",
           state: unresolvedUnknown ? "unknown" : "open",
           since: text(run.terminalAt),
-          evidence: [evidenceOf(run.runId, run.terminalAt)],
+          evidence: [evidenceOf(run.runId, run.terminalAt, run.terminalSeq)],
         }, verificationResolution));
       }
 
@@ -440,7 +503,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
             kind: "awaiting_decision",
             state: run.supersessionUndeterminable === true || settledMs === null ? "unknown" : "open",
             since: settledAt,
-            evidence: [evidenceOf(run.runId, settledAt)],
+            evidence: [evidenceOf(run.runId, settledAt, delivery.settledSeq)],
           }, resolution));
         }
       }
@@ -467,9 +530,8 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           failure: run.failure === null || run.failure === undefined ? null : { category: text(run.failure.category), code: text(run.failure.code) },
         };
         if (resolution === null) {
-          // followUp 只对未了结的失败有意义：有后续还在跑是 running（同样要求它在失败之后
-          // 才开始——并发兄弟不算后续），看不到后续是 unknown（不写"没有后续"）。
-          extra.followUp = runs.some((other) => other.terminal === false && isLaterFollowUp(other, run, failedAtMs)) ? "running" : "unknown";
+          // followUp 只对未了结的失败有意义：见 followUpsOf（有后续 / 有证据没有后续 / 证据不足）。
+          Object.assign(extra, followUpsOf(runs, run, failedAtMs, censusComplete));
         }
         anomalies.push(makeItem({
           id: `failed:${run.runId}`,
@@ -478,7 +540,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           runIds: [run.runId],
           projectSlugs: projectSlugsOf(slugOf(run)),
           since: text(run.terminalAt),
-          evidence: [evidenceOf(run.runId, run.terminalAt)],
+          evidence: [evidenceOf(run.runId, run.terminalAt, run.terminalSeq)],
         }, resolution, extra));
       }
     }
@@ -494,7 +556,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
           runIds: [run.runId],
           projectSlugs: projectSlugsOf(slugOf(run)),
           since: text(run.quietSince),
-          evidence: [evidenceOf(run.runId, run.quietSince)],
+          evidence: [evidenceOf(run.runId, run.quietSince, run.quietSinceSeq)],
         });
       }
     }
@@ -532,8 +594,12 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
       since: text(consult.createdAt),
       evidence: verdicts
         .filter((seat) => typeof seat.runId === "string")
-        .map((seat) => evidenceOf(seat.runId, runsById.get(seat.runId)?.terminalAt)),
-    }, resolution));
+        .map((seat) => evidenceOf(seat.runId, runsById.get(seat.runId)?.terminalAt, runsById.get(seat.runId)?.terminalSeq)),
+      commit: text(reviewed.delivery.commit),
+    }, resolution, {
+      // 牵涉的 worker = 被审运行（runIds）+ 会审的全部席位运行（不论给没给结论；证据只列给了结论的）。
+      seatRunIds: [...new Set((Array.isArray(consult.seats) ? consult.seats : []).map((seat) => seat?.runId).filter((id) => typeof id === "string"))],
+    }));
   }
 
   // —— 额度事项：每组取最后一次观测；窗口按解除与否分别看 ——
@@ -546,7 +612,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
       ? withinWindow(latest.atMs, now, OWNER_ATTENTION_WINDOW_MS)
       : withinWindow(msOf(resolution.resolvedAt), now, OWNER_ATTENTION_WINDOW_MS);
     if (!listed) continue;
-    capacityListFor(kind).push(makeItem({
+    const item = makeItem({
       id: `${kind === "quota_exhausted" ? "capacity" : "rate_limited"}:${laneKey}`,
       kind,
       state: resolution === null && now - latest.atMs > OWNER_ATTENTION_CAPACITY_FRESH_MS ? "unknown" : "open",
@@ -558,8 +624,22 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
         .slice()
         .sort(byEvidenceAt)
         .slice(-OWNER_ATTENTION_CAPACITY_EVIDENCE_MAX)
-        .map((observation) => evidenceOf(observation.run.runId, observation.run.capacity.observedAt)),
-    }, resolution, { laneKey, capacityCode: text(latest.run.capacity.code) }));
+        .map((observation) => evidenceOf(observation.run.runId, observation.run.capacity.observedAt, observation.run.capacity.observedSeq)),
+    }, resolution, { laneKey, capacityCode: text(latest.run.capacity.code) });
+    capacityListFor(kind).push(item);
+    if (kind === "quota_exhausted") {
+      // Owner 已定：额度用尽也计入 Alerts。同一件事在异常栏再列一件镜像（自己的 id，内容相同），
+      // 这样顶部计数、两栏列表与项目标记的数口径一致；已了结的只在 resolved 里出现一次（见下）。
+      const mirror = {
+        ...item,
+        id: `capacity_alert:${laneKey}`,
+        runIds: [...item.runIds],
+        projectSlugs: [...item.projectSlugs],
+        evidence: item.evidence.map((entry) => ({ ...entry })),
+      };
+      mirrors.add(mirror);
+      anomalies.push(mirror);
+    }
   }
 
   decide.sort(bySince);
@@ -567,7 +647,7 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
 
   // —— 已了结：resolvedAt 在 24 小时内的，按 resolvedAt 倒序；resolvedAt 为 null 的不进 ——
   const resolved = [...decide, ...anomalies]
-    .filter((item) => item.state === "resolved" && withinWindow(msOf(item.resolvedAt), now, OWNER_ATTENTION_WINDOW_MS))
+    .filter((item) => item.state === "resolved" && !mirrors.has(item) && withinWindow(msOf(item.resolvedAt), now, OWNER_ATTENTION_WINDOW_MS))
     .sort((a, b) => {
       const left = msOf(a.resolvedAt);
       const right = msOf(b.resolvedAt);
@@ -598,6 +678,28 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
 // ===== Workers 默认范围与车道汇总 =====
 
 /**
+ * 席位运行 → 它所在会审组的摘要。一个运行同时出现在多个组里时取 createdAt 最早的那个组
+ * （快照里的 consults 已按 createdAt 升序）。没有座位或没有 consultId 的组记录不成摘要。
+ */
+function consultBySeatRun(snapshot) {
+  const out = new Map();
+  for (const consult of Array.isArray(snapshot?.consults) ? snapshot.consults : []) {
+    const seats = Array.isArray(consult?.seats) ? consult.seats : [];
+    const consultId = text(consult?.consultId);
+    if (seats.length === 0 || consultId === null) continue;
+    const summary = {
+      groupId: `${text(consult.projectSlug) ?? ""}:${consultId}`,
+      seatsIn: consultSeatsArrived(seats),
+      seatsTotal: seats.length,
+    };
+    for (const seat of seats) {
+      if (typeof seat?.runId === "string" && !out.has(seat.runId)) out.set(seat.runId, summary);
+    }
+  }
+  return out;
+}
+
+/**
  * Workers 页默认范围内的运行，按 startedAt 倒序（读不到的排最后，同一时刻按 runId）。
  * 纯函数；行里带快照行本身（run）与三个派生值，字段白名单由接口的 DTO 负责。
  *
@@ -606,9 +708,12 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
  * @param {{now: number, project?: string|null}} options — now 与那份 attention 同一个；
  *   project 给了就只留该项目的运行
  * @returns {Array<{run: object, laneKey: string|null, title: string|null, subtitle: string|null,
- *   attentionIds: string[]}>} attentionIds 是该运行挂着的未了结事项的 id（先 decide 后
- *   anomalies，各按列表顺序；给了 project 时只列 projectSlugs 含该项目的事项，与
- *   /api/attention?project=X 一致）
+ *   attentionIds: string[], consult: {groupId: string, seatsIn: number, seatsTotal: number}|null}>}
+ *   attentionIds 是该运行挂着的未了结事项的 id（先 decide 后 anomalies，各按列表顺序；给了
+ *   project 时只列 projectSlugs 含该项目的事项，与 /api/attention?project=X 一致）；
+ *   consult 是这个运行（当会审席位时）所在会审组的摘要：groupId 是 <项目 slug>:<consultId>，
+ *   seatsIn 是几席已到（consultSeatsArrived 口径：已到终态且收到答复），seatsTotal 是总席数；
+ *   不是会审席位、或没有会审组记录就是 null
  */
 export function selectOwnerWorkers(snapshot, attention, { now, project = null } = {}) {
   requireNow(now);
@@ -627,6 +732,7 @@ export function selectOwnerWorkers(snapshot, attention, { now, project = null } 
       if (DELIVERY_CONSULT_KINDS.has(item.kind)) flagged.add(runId);
     }
   }
+  const consultOf = consultBySeatRun(snapshot);
   const rows = [];
   for (const run of runs) {
     if (project !== null && slugOf(run) !== project) continue;
@@ -636,6 +742,7 @@ export function selectOwnerWorkers(snapshot, attention, { now, project = null } 
       laneKey: ownerLaneKey(run),
       ...ownerRunTitles(run, runsById),
       attentionIds: [...(attached.get(run.runId) ?? [])],
+      consult: consultOf.get(run.runId) ?? null,
     });
   }
   rows.sort((a, b) => {

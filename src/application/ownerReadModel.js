@@ -54,6 +54,12 @@
 //     只存算出的 Q1 值（键 = 席位转录身份 + 记录声明的 Q1 候选），不存回答原文，
 //     组记录只留快照需要的字段。
 //
+// 第 142 批修正一补的事实——证据事件号（Attention 的证据引用 runId#seq 用）：每个当证据用
+// 的时间点，连同它所取事件的 seq 一起记：终态（terminalSeq）、quietSince 所取的事件
+// （quietSinceSeq）、交付收口（delivery.settledSeq，取较晚的那条事件）、裁决
+// （delivery.acceptance.decidedSeq）、额度观测（capacity.observedSeq）。seq 是事件信封里的
+// 正整数、与 /api/activity 同一个数；旧转录没有或不合法就是 null，不编造。
+//
 // 写清楚、不改的口径（140c 要知道）：
 //   - delivery.verification.status 是**有效**验证状态（复验链完成时用复验结果），
 //     等于 `wao runs delivery` 的 effectiveVerification.status，不是原始状态。
@@ -145,7 +151,7 @@ import {
   gatherDeliveryView,
 } from "./runDelivery.js";
 import { projectExecutionStage } from "./runStageProjection.js";
-import { lastActualEffectAtMs, lastEffectAtMs, lastVitalSignAtMs } from "./runQuietAdvisory.js";
+import { lastActualEffectAtMs, lastEffectAtMs, lastEffectBaseEvent, lastVitalSignAtMs } from "./runQuietAdvisory.js";
 import { readOwnerLease } from "./ownerLiveness.js";
 import { execGitReadOnly, listRunBranchRunIds, runCreatedAtMs } from "./runBranches.js";
 import { listArchiveTranscriptFiles } from "./serveMaintenance.js";
@@ -455,6 +461,12 @@ function memberOf(set, value) {
 const canonicalCommit = (value) => (typeof value === "string" && isCanonicalCommitId(value) ? value : null);
 
 /**
+ * 事件号：事件信封里的 seq（正整数，与 /api/activity 的 seq 同一个数）。旧转录没有、或不是
+ * 正整数 → null：读不到就是读不到，不编造。事项的证据引用 runId#seq 用它。
+ */
+const seqOf = (event) => (Number.isInteger(event?.seq) && event.seq > 0 ? event.seq : null);
+
+/**
  * 事实派生的兜底：某个判定函数对一份转录抛错时如实给 fallback。读得到与否只取决于
  * 读与解析，不能因为下游判定抛错就把整份转录判成读不到。
  */
@@ -471,7 +483,9 @@ const NO_DELIVERY_OUTCOME = Object.freeze({
   verification: null,
   acceptance: null,
   decidedAtMs: null,
+  decidedSeq: null,
   settledAtMs: null,
+  settledSeq: null,
   ambiguous: false,
   packagingFailure: null,
   isolationFailure: null,
@@ -529,10 +543,15 @@ function deliveryFacts(events, runId, state, terminalEvent) {
         ? facts.reverifyOutcomeEvent
         : facts.verificationOutcomeEvent;
       const times = [tsMs(terminalEvent?.ts), tsMs(outcome?.ts)];
-      if (times.every((t) => t !== null)) out.settledAtMs = Math.max(...times);
+      if (times.every((t) => t !== null)) {
+        out.settledAtMs = Math.max(...times);
+        // 收口时刻出自较晚的那条事件（同一时刻取终态事件）；它的事件号是证据引用。
+        out.settledSeq = seqOf(times[1] > times[0] ? outcome : terminalEvent);
+      }
     } else if (settlement.status === "settled") {
       // 打包失败 / 隔离失败：绑定终态事件的时间就是收口时刻。
       out.settledAtMs = tsMs(terminalEvent?.ts);
+      out.settledSeq = seqOf(terminalEvent);
     }
     if (view.deliveryAvailable !== true) return out;
     out.verification = {
@@ -545,6 +564,7 @@ function deliveryFacts(events, runId, state, terminalEvent) {
     };
     out.acceptance = { status: memberOf(DELIVERY_ACCEPTANCE_STATUSES, view.acceptance?.status) };
     out.decidedAtMs = facts.decisionEvent ? tsMs(facts.decisionEvent.ts) : null;
+    out.decidedSeq = facts.decisionEvent ? seqOf(facts.decisionEvent) : null;
     return out;
   }, { settlement: { status: null, reason: null }, ...NO_DELIVERY_OUTCOME });
 }
@@ -567,7 +587,7 @@ function failureFacts(events, runId, state) {
       failure: { category, code },
       capacity: capacityCode === null
         ? null
-        : { code: capacityCode, observedAtMs: tsMs(diagnosis.basisEvent?.ts) },
+        : { code: capacityCode, observedAtMs: tsMs(diagnosis.basisEvent?.ts), observedSeq: seqOf(diagnosis.basisEvent) },
     };
   }, { failure: { category: null, code: null }, capacity: null });
 }
@@ -696,12 +716,14 @@ function extractFacts(events, runId, redactString) {
     terminal,
     startedAtMs: tsMs(started?.ts),
     terminalAtMs: terminalEvent === null ? null : tsMs(terminalEvent.ts),
+    terminalSeq: seqOf(terminalEvent),
     stagePhase: stage.phase,
     stageSinceMs: tsMs(stage.sinceTs),
     // lastEffectAt 只认实质动作；quietSince 是静默门限的回退起点（run.submitted 或
     // 首事件）。两者与 runQuietAdvisory 的两个基准同口径。
     lastEffectAtMs: lastActualEffectAtMs(scope),
     quietSinceMs: lastEffectAtMs(scope),
+    quietSinceSeq: seqOf(lastEffectBaseEvent(scope)),
     lastVitalEventAtMs: lastVitalSignAtMs(scope),
     lastProcessActiveAtMs,
     retryOf: isValidRunId(started?.retryOf) && started.retryOf !== runId ? started.retryOf : null,
@@ -861,8 +883,13 @@ export function projectDelivery(runId, delivery, branches) {
       status: delivery.verification.status,
       reverify: { status: delivery.verification.reverify.status, reason: delivery.verification.reverify.reason },
     },
-    acceptance: { status: delivery.acceptance === null ? null : delivery.acceptance.status, decidedAt: iso(delivery.decidedAtMs) },
+    acceptance: {
+      status: delivery.acceptance === null ? null : delivery.acceptance.status,
+      decidedAt: iso(delivery.decidedAtMs),
+      decidedSeq: delivery.decidedSeq ?? null,
+    },
     settledAt: iso(delivery.settledAtMs),
+    settledSeq: delivery.settledSeq ?? null,
     ambiguous: delivery.ambiguous,
     packagingFailure: delivery.packagingFailure,
     isolationFailure: delivery.isolationFailure === null
@@ -1837,10 +1864,13 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       typeBasis: f?.typeBasis ?? null,
       startedAt: iso(f?.startedAtMs ?? null),
       terminalAt: iso(f?.terminalAtMs ?? null),
+      terminalSeq: f?.terminalSeq ?? null,
       stageSince: iso(f?.stageSinceMs ?? null),
       // lastEffectAt 只给实质动作（没有就是 null）；quietSince 是静默门限的起点。
+      // quietSinceSeq 是 quietSince 所取事件的事件号（证据引用 runId#seq；读不到为 null）。
       lastEffectAt: iso(f?.lastEffectAtMs ?? null),
       quietSince: iso(f?.quietSinceMs ?? null),
+      quietSinceSeq: f?.quietSinceSeq ?? null,
       lastVitalAt: iso(vital.length === 0 ? null : Math.max(...vital)),
       // 租约心跳单独投影（只取租约；没有心跳证据就是 null）。lastVitalAt 保持"最后体征"的原义。
       lastHeartbeatAt: iso(heartbeatAtMs),
@@ -1852,7 +1882,9 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       delivery: f === null || f.delivery === null ? null : projectDelivery(run.runId, f.delivery, branches),
       // 失败与额度：只在状态为 failed 时有。每次快照新建对象，不交出缓存里的那个。
       failure: f === null || f.failure === null ? null : { category: f.failure.category, code: f.failure.code },
-      capacity: f === null || f.capacity === null ? null : { code: f.capacity.code, observedAt: iso(f.capacity.observedAtMs) },
+      capacity: f === null || f.capacity === null
+        ? null
+        : { code: f.capacity.code, observedAt: iso(f.capacity.observedAtMs), observedSeq: f.capacity.observedSeq ?? null },
       lineageRootRunId: f?.lineageRoot ?? null,
       lineageRootConflict: f?.lineageConflict ?? null,
       supersessionUndeterminable: ok ? supersessionUndeterminable : null,
