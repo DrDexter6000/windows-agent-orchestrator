@@ -4,8 +4,8 @@
 // boundary that lets a local trusted Owner client observe worker runs in real
 // time WITHOUT increasing Lead context cost. It is facts-only: it NEVER stops /
 // retries / continues / repackages / decides, and performs NO semantic judgment.
-// Every endpoint projects a bounded, read-only view via the ownerDashboard
-// composition service (which reuses the SINGLE application SSOTs).
+// Every endpoint projects a bounded, read-only view of the Owner read model
+// (which reuses the SINGLE application SSOTs).
 //
 // Trust boundary (enforced fail-closed, in order):
 //   - Bind EXACTLY to 127.0.0.1 — any other host is rejected BEFORE listen.
@@ -15,15 +15,20 @@
 //     Compared in constant time; never echoed in any body or header.
 //   - GET only — every other method → 405 (Allow: GET). No CORS opt-in: OPTIONS
 //     is NOT preflight-handled and never sets Access-Control-Allow-*.
-//   - No client-supplied runDir / workspaceRoot / host. Server-owned paths are
-//     bound at construction from the trusted process config, never from a query.
-//   - Strict query bounds + closed-set categories/order/cursor — any unknown or
-//     out-of-range parameter → fixed 400, never a reflection of client input.
+//   - No client-supplied runDir / host. Server-owned paths are bound at
+//     construction from the trusted process config, never from a query.
+//   - Strict query bounds + closed-set parameters (project / runId / filter /
+//     afterSeq / beforeSeq / limit / page / part) — any unknown key, repeated
+//     key or out-of-range value → fixed 400, never a reflection of client input.
+//   - The factory accepts ONLY the known config keys (CONFIG_KEYS); an unknown
+//     key throws BEFORE any side effect, so a removed legacy key (workspaceRoot,
+//     knownAgentIds, getOwnerRunsFn, getOwnerActivityFn, summaryCache, token)
+//     cannot silently return.
 //   - Any injected service error → fixed 500 {error:"internal"} — NEVER raw
 //     exception text, path, token, prompt, command, PID, provider session, or
 //     credential.
-//   - readRunActivity / projectRunActivity are single-snapshot reads — this
-//     server appends NO transcript and mutates NO worktree.
+//   - Every route is a single-snapshot read — this server appends NO transcript
+//     and mutates NO worktree.
 //
 // Batch 140c (decision 0131 §7): /api/overview, /api/workers and /api/attention
 // read ONE in-memory publication built from the Owner read model.
@@ -56,7 +61,6 @@
 //     projectSlugs (an item may belong to more than one project); ?project=X
 //     returns the items whose projectSlugs contain X, and Workers attentionIds
 //     use the same filter.
-//   - The legacy /api/runs and /api/activity do NOT read this publication.
 //
 // Batch 141a (decision 0131 §3): two more read-only routes for the Workers side
 // panel of the new front end. Same bearer / GET-only / no-CORS / no-store / fixed
@@ -111,8 +115,8 @@
 //     consult summary carries the seat's own verdict q1 (closed set, only once it has answered).
 //     Still no path, settle time, reverify chain or parent / root run id.
 //   - The /v2 static files (and only they) answer with the base CSP plus ONE source: img-src also allows
-//     blob:, because the panel shows a delivered image from a blob URL it made with the bearer. The legacy
-//     UI and every data response keep the base policy.
+//     blob:, because the panel shows a delivered image from a blob URL it made with the bearer. Every
+//     other response (the redirect, JSON, images) keeps the base policy.
 //
 // Batch 143b (decision 0131 A3): two small, closed additions on the same read-only boundary.
 //   - A /api/workers consult summary also carries `finished`: whether the WHOLE review group has ended
@@ -142,15 +146,27 @@
 //     then shuts the socket: the streams are long-lived responses that would otherwise hold
 //     server.close() open.
 //
+// Batch 145a (decision 0131 §3): the legacy Owner UI is retired and /v2 is the one page.
+//   - STATIC_ASSETS holds ONLY the /v2 files; src/owner-dashboard/{index.html,app.js,styles.css}
+//     and the routes "/styles.css" / "/app.js" are gone.
+//   - "/" and "/index.html" answer 302 with Location: /v2/, the same safe headers, an empty
+//     body and no token. The browser keeps the URL fragment across a redirect, so an old
+//     bookmarked /#token=… still lands on /v2/#token=… (the token never enters a query string
+//     or the server log).
+//   - The legacy-only data routes GET /api/runs and GET /api/activity (and their query
+//     parsers, injectable services and run-summary cache) are deleted; the old paths are the
+//     fixed 404 like any unknown route.
+//   - V2_CSP is still the ONE relaxation (img-src blob:) for /v2 files only; every other
+//     response keeps the base policy.
+//
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
-// node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
-// service, the run-summary cache, the Owner read model (createOwnerReadModel +
-// OWNER_LIVENESS_VALUES), the Owner attention derivation (ownerAttention), the
-// Owner worker detail (ownerWorkerDetail), activity projection
+// node:http / node:crypto / node:url / node:fs / node:path, the Owner read model
+// (createOwnerReadModel + OWNER_LIVENESS_VALUES), the Owner attention derivation
+// (ownerAttention), the Owner worker detail (ownerWorkerDetail), activity projection
 // (ownerWorkerActivity), the Activity event stream (ownerWorkerStream), artifact
-// reader (ownerArtifact) and the project slug shape
-// (projectBuckets.SAFE_BUCKET_SLUG_RE). No second copy of any closed set lives
-// here.
+// reader (ownerArtifact), the project slug shape (projectBuckets.SAFE_BUCKET_SLUG_RE)
+// and the runId validator (delivery.isValidRunId). No second copy of any closed set
+// lives here.
 
 import http from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -158,16 +174,7 @@ import { URL, fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import {
-  getOwnerRuns,
-  getOwnerActivity,
-  OWNER_RUNS_LIMIT_MAX,
-  ACTIVITY_CATEGORIES,
-  ACTIVITY_CURSOR_MAX_CHARS,
-  LEAD_PAGE_HARD_CAP,
-  isValidRunId,
-} from "./application/ownerDashboard.js";
-import { createRunSummaryCache } from "./application/runSummaryCache.js";
+import { isValidRunId } from "./delivery.js";
 import { createOwnerReadModel, OWNER_LIVENESS_VALUES } from "./application/ownerReadModel.js";
 import { deriveOwnerAttention, ownerLanes, selectOwnerWorkers } from "./application/ownerAttention.js";
 import {
@@ -200,14 +207,13 @@ const TOKEN_HEX_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 const WORKERS_ROWS_MAX = 500;
 
-// M12-20: bounded history-on-demand range contract. Presets are a fixed closed
-// set; the maximum window (7d) bounds every history query — preset and custom.
-// Custom from/to are non-negative integer epoch-ms; the server rejects unknown,
-// inverted, future, and over-cap windows with a fixed 400 (never a reflection
-// of client input). 7d is exactly the cap, so the 7d preset is accepted.
-const HISTORY_PRESETS = Object.freeze({ "1h": 3_600_000, "24h": 86_400_000, "7d": 604_800_000 });
-const HISTORY_MAX_RANGE_MS = 604_800_000; // 7d
-const EPOCH_MS_MAX = 9_999_999_999_999; // ~year 2286 in ms; a generous integer bound
+// The complete configuration surface (145a): the legacy-only knobs are gone. An unknown key must fail
+// closed — a test or caller that still passes workspaceRoot / knownAgentIds / getOwnerRunsFn /
+// getOwnerActivityFn / summaryCache / token would otherwise be silently ignored.
+const CONFIG_KEYS = Object.freeze(new Set([
+  "runDir", "env", "host", "port", "randomBytesFn", "nowFn", "loadAssetFn",
+  "createReadModelFn", "createWorkerStreamsFn", "refreshIntervalMs",
+]));
 
 /**
  * Issue the per-process bearer token. In production this is ALWAYS 32 bytes
@@ -275,12 +281,13 @@ const STREAM_HEADERS = Object.freeze({ ...SAFE_HEADERS, "content-type": "text/ev
 // img-src also allows blob:, because the side panel reads a delivered image with the bearer
 // (fetch), turns it into a blob URL for an <img> and revokes the URL when it is done. Nothing else
 // is relaxed: same default-src, same base-uri / object-src / frame-ancestors, no script or style
-// relaxation. The legacy UI and every JSON / image data response keep the policy above.
+// relaxation. Every JSON / image / redirect response keeps the policy above.
 const V2_CSP = SAFE_HEADERS["content-security-policy"].replace("img-src 'self' data:", "img-src 'self' data: blob:");
 
 // ===== Package D: the Owner read-only dashboard UI =====
 //
-// The server serves a CLOSED list of fixed static assets (the dashboard UIs).
+// The server serves a CLOSED list of fixed static assets (the /v2 UI — 145a
+// retired the legacy files).
 // There is no second HTTP framework and no client-supplied path is ever read
 // from disk: the request pathname is matched against a FIXED route→asset table
 // whose bodies are preloaded ONCE at server creation. A request for any other
@@ -288,16 +295,13 @@ const V2_CSP = SAFE_HEADERS["content-security-policy"].replace("img-src 'self' d
 // an unlisted file name — the pathname is never used as a filesystem path)
 // simply matches no key and falls through to the fixed 404.
 //
-// Batch 142 (decision 0131 A3): two UIs live side by side. The legacy UI is
-// served from "/" (src/owner-dashboard/index.html, src/owner-dashboard/app.js,
-// src/owner-dashboard/styles.css). The new Owner dashboard is served from "/v2"
-// and "/v2/" (src/owner-dashboard/v2/index.html) plus one fixed route per module:
-// src/owner-dashboard/v2/app.js, src/owner-dashboard/v2/api.js,
-// src/owner-dashboard/v2/i18n.js, src/owner-dashboard/v2/model.js,
-// src/owner-dashboard/v2/store.js, src/owner-dashboard/v2/views.js and
-// src/owner-dashboard/v2/styles.css; batch 143a adds the Workers page and the side panel:
-// src/owner-dashboard/v2/workers.js, detail.js, artifacts.js (DOM-free) and workersview.js,
-// sidebarview.js (DOM). "/v2/index.html" is NOT a route.
+// Batch 142 (decision 0131 A3): the Owner dashboard is served from "/v2" and
+// "/v2/" (src/owner-dashboard/v2/index.html) plus one fixed route per module:
+// src/owner-dashboard/v2/app.js, api.js, i18n.js, model.js, store.js, views.js,
+// styles.css, activity.js, activityview.js, workers.js, detail.js, artifacts.js,
+// workersview.js and sidebarview.js. "/v2/index.html" is NOT a route.
+// 145a: "/" and "/index.html" are redirects to "/v2/" (LEGACY_REDIRECTS) and
+// the legacy index.html / app.js / styles.css are no longer loaded or served.
 // A /v2 file is served only when the RAW request path is clean (equal to the parsed
 // pathname: no "." / ".." segments, no repeated slashes, no backslashes); see the handler.
 //
@@ -312,10 +316,6 @@ const HTML = "text/html; charset=utf-8";
 const CSS = "text/css; charset=utf-8";
 const JS = "text/javascript; charset=utf-8";
 const STATIC_ASSETS = Object.freeze([
-  { route: "/", file: "index.html", type: HTML },
-  { route: "/index.html", file: "index.html", type: HTML },
-  { route: "/styles.css", file: "styles.css", type: CSS },
-  { route: "/app.js", file: "app.js", type: JS },
   { route: "/v2", file: "v2/index.html", type: HTML },
   { route: "/v2/", file: "v2/index.html", type: HTML },
   { route: "/v2/styles.css", file: "v2/styles.css", type: CSS },
@@ -334,6 +334,12 @@ const STATIC_ASSETS = Object.freeze([
   { route: "/v2/workersview.js", file: "v2/workersview.js", type: JS },
 ]);
 
+// Batch 145a: the retired legacy entry. Both paths answer 302 to the one page.
+// The body is empty and no token is ever written: the browser keeps the URL
+// fragment across a redirect, so a bookmarked /#token=… still reaches
+// /v2/#token=… and the token stays out of every query string and log line.
+const LEGACY_REDIRECTS = Object.freeze(new Map([["/", "/v2/"], ["/index.html", "/v2/"]]));
+
 // Preload the fixed assets into an immutable route→{body,type} map. The
 // bodies are Buffers (exact bytes served verbatim; content-length is the byte
 // length). A fixed map keyed by the EXACT pathname makes traversal impossible:
@@ -344,8 +350,8 @@ function loadStaticAssets(loadAssetFn) {
     : (name) => readFileSync(join(STATIC_DIR, name));
   const map = new Map();
   for (const a of STATIC_ASSETS) {
-    // Skip re-reading a file already loaded under another route (e.g. "/" and
-    // "/index.html" share index.html) — same bytes, one read.
+    // Skip re-reading a file already loaded under another route (e.g. "/v2" and
+    // "/v2/" share v2/index.html) — same bytes, one read.
     let body = null;
     for (const existing of map.values()) {
       if (existing.file === a.file) { body = existing.body; break; }
@@ -382,6 +388,16 @@ function sendAsset(res, asset) {
   res.end(asset.body);
 }
 
+// Batch 145a: the retired legacy entry → the one page. Same safe headers, an
+// empty body, and never a token: the browser carries the URL fragment across.
+function sendRedirect(res, location) {
+  for (const [k, v] of Object.entries(SAFE_HEADERS)) res.setHeader(k, v);
+  res.setHeader("location", location);
+  res.setHeader("content-length", 0);
+  res.writeHead(302);
+  res.end();
+}
+
 // Constant-time bearer comparison. Accepts ONLY the exact "Bearer <token>"
 // form (single space, case-sensitive scheme). Length mismatch is rejected
 // before timingSafeEqual (which requires equal-length buffers). The token is
@@ -415,98 +431,6 @@ function parseBoundedInt(raw, min, max) {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min || n > max) throw new BadRequest();
   return n;
-}
-
-function parseCategories(raw) {
-  if (raw.length === 0) throw new BadRequest();
-  const out = [];
-  const seen = new Set();
-  for (const part of raw.split(",")) {
-    if (!ACTIVITY_CATEGORIES.includes(part)) throw new BadRequest();
-    if (seen.has(part)) throw new BadRequest();
-    seen.add(part);
-    out.push(part);
-  }
-  return out;
-}
-
-function parseCursor(raw) {
-  if (!/^[A-Za-z0-9_-]+$/.test(raw)) throw new BadRequest();
-  if (raw.length > ACTIVITY_CURSOR_MAX_CHARS) throw new BadRequest();
-  return raw;
-}
-
-function parseOrder(raw) {
-  if (raw !== "asc" && raw !== "desc") throw new BadRequest();
-  return raw;
-}
-
-// M12-20: parse /api/runs into a closed-set query. scope defaults to "active"
-// (dashboard active-first). history REQUIRES a bounded range — a preset range
-// (1h/24h/7d) OR an explicit from+to epoch-ms pair — and rejects unknown,
-// ambiguous, inverted, future, and over-cap (>7d) windows. active rejects any
-// range as inconsistent. Every failure throws BadRequest → fixed 400.
-function parseRunsQuery(sp, nowMs) {
-  assertStrictKeys(sp, new Set(["limit", "scope", "range", "from", "to"]));
-  const q = {};
-  if (sp.has("limit")) q.latest = parseBoundedInt(sp.get("limit"), 1, OWNER_RUNS_LIMIT_MAX);
-
-  // scope: closed-set {active, history}; default active (dashboard active-first).
-  let scope = "active";
-  if (sp.has("scope")) {
-    const raw = sp.get("scope");
-    if (raw !== "active" && raw !== "history") throw new BadRequest();
-    scope = raw;
-  }
-
-  const hasRange = sp.has("range");
-  const hasFrom = sp.has("from");
-  const hasTo = sp.has("to");
-
-  if (scope === "active") {
-    // active carries NO range — range/from/to are inconsistent with the
-    // active fast-path (which enumerates current leases, not a time window).
-    if (hasRange || hasFrom || hasTo) throw new BadRequest();
-    q.scanScope = "active";
-    return q;
-  }
-
-  // scope === "history": a bounded range is REQUIRED. Exactly one source: a
-  // preset range OR an explicit from+to pair (both required together).
-  if (hasRange && (hasFrom || hasTo)) throw new BadRequest(); // preset + custom is ambiguous
-  if (!hasRange && !(hasFrom && hasTo)) throw new BadRequest(); // history needs a bounded range
-  let fromMs;
-  let toMs;
-  if (hasRange) {
-    const dur = HISTORY_PRESETS[sp.get("range")];
-    if (dur === undefined) throw new BadRequest();
-    toMs = nowMs;
-    fromMs = nowMs - dur;
-  } else {
-    fromMs = parseBoundedInt(sp.get("from"), 0, EPOCH_MS_MAX);
-    toMs = parseBoundedInt(sp.get("to"), 0, EPOCH_MS_MAX);
-  }
-  // Semantic range checks: inverted, future upper bound, over-cap window.
-  if (fromMs > toMs) throw new BadRequest();
-  if (toMs > nowMs) throw new BadRequest();
-  if (toMs - fromMs > HISTORY_MAX_RANGE_MS) throw new BadRequest();
-
-  q.scanScope = "history";
-  q.historyRange = { fromMs, toMs };
-  return q;
-}
-
-function parseActivityQuery(sp) {
-  assertStrictKeys(sp, new Set(["runId", "cursor", "categories", "afterSeq", "pageSize", "order"]));
-  const runId = sp.get("runId");
-  if (!isValidRunId(runId)) throw new BadRequest();
-  const q = { runId };
-  if (sp.has("cursor")) q.cursor = parseCursor(sp.get("cursor"));
-  if (sp.has("categories")) q.categories = parseCategories(sp.get("categories"));
-  if (sp.has("afterSeq")) q.afterSeq = parseBoundedInt(sp.get("afterSeq"), 0, 1_000_000);
-  if (sp.has("pageSize")) q.pageSize = parseBoundedInt(sp.get("pageSize"), 1, LEAD_PAGE_HARD_CAP);
-  if (sp.has("order")) q.order = parseOrder(sp.get("order"));
-  return q;
 }
 
 // ===== Batch 140c: Overview / Workers / Attention — DTO whitelists =====
@@ -669,8 +593,8 @@ const READ_MODEL_ROUTES = new Map([
 ]);
 
 // Serve one read-model route: bearer → strict query keys (+ slug shape) →
-// loading → the current publication. Order matches the legacy /api/* routes, so
-// an unauthenticated caller learns nothing (not even the loading state).
+// loading → the current publication. The bearer is checked FIRST, so an
+// unauthenticated caller learns nothing (not even the loading state).
 function serveReadModelRoute(ctx, req, res, sp, route) {
   if (!bearerOk(req.headers.authorization, ctx.token)) {
     return sendJson(res, 401, ERR.unauthorized);
@@ -1012,11 +936,12 @@ const rawPathOf = (req) => String(req.url || "/").split(/[?#]/, 1)[0];
 const isV2Path = (path) => path === "/v2" || path.startsWith("/v2/");
 
 /**
- * A RAW request path that starts at /v2: "/v2" itself, "/v2/…", and also "/v2\…" or "/v2%5C…" — the URL
- * parser turns a backslash into a slash, so "/v2\..\app.js" parses to the legacy "/app.js" and would
- * otherwise slip past a prefix check on "/v2/". An encoded backslash is the same boundary.
+ * A RAW request path that starts at /v2 with one OR MORE leading slashes: "/v2", "/v2/…", "/v2\…",
+ * "/v2%5C…" and the double-slash forms ("//v2/…") — the URL parser treats "//v2" as an authority, so
+ * the collapsed pathname can otherwise land on another route (a redirect, /health or a fixed asset)
+ * while the raw path never matched a "/v2" prefix. An encoded backslash is the same boundary.
  */
-const isV2RawPath = (path) => /^\/v2(?:$|[\/\\]|%5c)/i.test(path);
+const isV2RawPath = (path) => /^\/+v2(?:$|[\/\\]|%5c)/i.test(path);
 
 function createHandler(ctx) {
   return async function handler(req, res) {
@@ -1034,93 +959,35 @@ function createHandler(ctx) {
     }
     const sp = u.searchParams;
 
-    if (u.pathname === "/health") {
-      return sendJson(res, 200, { status: "ok" });
-    }
-
     // Package D: the fixed dashboard assets. NO auth — the bearer lives
     // only in the URL fragment (client-side, never sent to the server), so a
     // browser navigation cannot carry it. The pathname is matched against a
     // fixed preloaded map; any other path (incl. traversal forms) → 404 below.
     const asset = ctx.assets.get(u.pathname);
-    // Batch 142 fix 1: the /v2 files are only served for a RAW request path that is already
-    // clean. The URL parser collapses "." / ".." segments, turns backslashes into slashes and
-    // drops tabs / newlines, so a collapsed path can land exactly on a fixed asset
-    // ("/v2/../app.js", "/v2/app.js/..", "/v2//app.js"). Whenever the raw path is under /v2, or
-    // the collapsed path is a /v2 asset, the raw path must equal the collapsed one — otherwise
-    // the fixed 404. The legacy routes keep their historic behaviour.
+    // Batch 142 fix 1 / 145a fix 1: the /v2 files are only served for a RAW request path that is
+    // already clean. The URL parser collapses "." / ".." segments, turns backslashes into slashes,
+    // drops tabs / newlines and reads a leading "//v2" as an authority, so a collapsed path can land
+    // on a fixed asset, the redirect entry or /health ("/v2/../app.js", "/v2/app.js/..",
+    // "//v2/../index.html", "//v2/../health"). Whenever the raw path is under /v2 (one or more leading
+    // slashes), or the collapsed path is a /v2 asset, the raw path must equal the collapsed one —
+    // otherwise the fixed 404. This runs BEFORE /health and the redirect.
     if (isV2RawPath(rawPathOf(req)) || (asset && isV2Path(u.pathname))) {
       if (rawPathOf(req) !== u.pathname) return sendJson(res, 404, ERR.not_found);
     }
+
+    if (u.pathname === "/health") {
+      return sendJson(res, 200, { status: "ok" });
+    }
+
+    // Batch 145a: the retired legacy entry redirects to the one page. No auth (the
+    // bearer lives only in the URL fragment, which the browser carries across).
+    const redirect = LEGACY_REDIRECTS.get(u.pathname);
+    if (redirect !== undefined) {
+      return sendRedirect(res, redirect);
+    }
+
     if (asset) {
       return sendAsset(res, asset);
-    }
-
-    if (u.pathname === "/api/runs") {
-      if (!bearerOk(req.headers.authorization, ctx.token)) {
-        return sendJson(res, 401, ERR.unauthorized);
-      }
-      let query;
-      try {
-        query = parseRunsQuery(sp, ctx.now());
-      } catch (e) {
-        if (!(e instanceof BadRequest)) return sendJson(res, 500, ERR.internal);
-        return sendJson(res, 400, ERR.bad_request);
-      }
-      try {
-        const result = await ctx.getOwnerRuns({
-          runDir: ctx.runDir,
-          workspaceRoot: ctx.workspaceRoot,
-          knownAgentIds: ctx.knownAgentIds,
-          ...(query.latest !== undefined ? { latest: query.latest } : {}),
-          ...(query.scanScope ? { scanScope: query.scanScope } : {}),
-          ...(query.historyRange ? { historyRange: query.historyRange } : {}),
-          now: ctx.now(),
-          // M12-18/M12-20: thread the long-lived in-memory run-summary cache so
-          // warm history reads reuse facts without re-parsing transcripts. The
-          // cache stores only metadata-validated facts; every query still
-          // re-applies workspace/agent/heartbeat/range/limit fresh.
-          readSummaryFn: ctx.readSummaryFn,
-        });
-        return sendJson(res, 200, result);
-      } catch {
-        return sendJson(res, 500, ERR.internal);
-      }
-    }
-
-    if (u.pathname === "/api/activity") {
-      if (!bearerOk(req.headers.authorization, ctx.token)) {
-        return sendJson(res, 401, ERR.unauthorized);
-      }
-      let query;
-      try {
-        query = parseActivityQuery(sp);
-      } catch (e) {
-        if (!(e instanceof BadRequest)) return sendJson(res, 500, ERR.internal);
-        return sendJson(res, 400, ERR.bad_request);
-      }
-      try {
-        const result = await ctx.getOwnerActivity({
-          runId: query.runId,
-          runDir: ctx.runDir,
-          workspaceRoot: ctx.workspaceRoot,
-          knownAgentIds: ctx.knownAgentIds,
-          // Server-owned env authority: when the trusted config PROVIDES env, it
-          // is threaded to the redactor; when omitted, NOTHING is threaded so the
-          // service + projector fall through to process.env (the single SSOT
-          // default at runActivityProjection's createSecretRedactor(env ?? process.env)).
-          ...(ctx.env !== undefined ? { env: ctx.env } : {}),
-          now: ctx.now(),
-          ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
-          ...(query.categories !== undefined ? { categories: query.categories } : {}),
-          ...(query.afterSeq !== undefined ? { afterSeq: query.afterSeq } : {}),
-          ...(query.pageSize !== undefined ? { pageSize: query.pageSize } : {}),
-          ...(query.order !== undefined ? { order: query.order } : {}),
-        });
-        return sendJson(res, 200, result);
-      } catch {
-        return sendJson(res, 500, ERR.internal);
-      }
     }
 
     // Batch 141c: the Activity tab's timeline page and one event's full text.
@@ -1152,23 +1019,18 @@ function createHandler(ctx) {
  *
  * @param {object} config
  * @param {string} config.runDir — server-owned runs/ directory (trusted)
- * @param {string} config.workspaceRoot — server-owned canonical Git root (trusted)
- * @param {string[]} [config.knownAgentIds] — registry ids for agentId validation
  * @param {object} [config.env] — server-owned env for the secret redactor. When
  *   OMITTED (production) the service+projector fall through to process.env; when
  *   PROVIDED it overrides exactly (deterministic tests). Never defaulted to {}.
  * @param {string} [config.host="127.0.0.1"] — must be exactly 127.0.0.1
  * @param {number} [config.port=0] — 0 (ephemeral) or integer 1024..65535
- * @param {Function} [config.getOwnerRunsFn] — injectable (testing)
- * @param {Function} [config.getOwnerActivityFn] — injectable (testing)
  * @param {Function} [config.randomBytesFn] — injectable entropy source
  *   `(size:number) => Buffer|Uint8Array` for tests; default crypto.randomBytes.
  *   Output is validated fail-closed (exactly 32 bytes → 64 lowercase hex).
  * @param {Function} [config.nowFn] — clock (ms) for liveness (testing)
  * @param {Function} [config.loadAssetFn] — injectable fixed-asset loader
  *   `(name:string) => Buffer|Uint8Array|string` for tests; default reads the
- *   fixed assets (the legacy UI and the "v2/…" files) from src/owner-dashboard/
- *   relative to this module.
+ *   fixed assets (the "v2/…" files) from src/owner-dashboard/ relative to this module.
  *   Loading is eager + fail-closed: a missing asset throws BEFORE listen.
  * @param {Function} [config.createReadModelFn] — injectable (testing) Owner
  *   read-model factory `() => {refresh, snapshot}`; default
@@ -1194,10 +1056,17 @@ function createHandler(ctx) {
  *   after a successful one.
  */
 export function createOwnerDashboardServer(config) {
+  if (config === null || typeof config !== "object") {
+    throw new TypeError("invalid config: an object is required");
+  }
+  // Fail closed on removed / misspelled keys BEFORE host, port or any asset/token side effect.
+  const unknownKeys = Object.keys(config).filter((key) => !CONFIG_KEYS.has(key)).sort();
+  if (unknownKeys.length > 0) {
+    throw new TypeError(`unknown owner dashboard config key(s): ${unknownKeys.join(", ")}`);
+  }
   const {
-    runDir, workspaceRoot, knownAgentIds = [], env,
+    runDir, env,
     host = LOOPBACK_HOST, port,
-    getOwnerRunsFn, getOwnerActivityFn,
     randomBytesFn, nowFn, loadAssetFn,
     createReadModelFn, createWorkerStreamsFn, refreshIntervalMs,
   } = config;
@@ -1242,23 +1111,10 @@ export function createOwnerDashboardServer(config) {
   // removed; only the injectable randomBytesFn entropy source is accepted.
   const issuedToken = issueToken(randomBytesFn);
 
-  // M12-18/M12-20: the ONE in-memory run-summary cache for the long-lived
-  // dashboard server. It stores only metadata-validated extractRunFacts payloads
-  // (no second index/sidecar, no disk); warm reads reuse facts without
-  // re-parsing. Every query still re-applies workspace/agent/heartbeat/range/
-  // limit against the current binding, so the cache can never freeze a result.
-  const summaryCache = createRunSummaryCache();
-
   const ctx = {
-    runDir,
-    workspaceRoot,
-    knownAgentIds,
     env,
     token: issuedToken,
     assets,
-    getOwnerRuns: getOwnerRunsFn ?? getOwnerRuns,
-    getOwnerActivity: getOwnerActivityFn ?? getOwnerActivity,
-    readSummaryFn: (filePath) => summaryCache.read(filePath),
     now: typeof nowFn === "function" ? nowFn : () => Date.now(),
     // Batch 141a: proves a run's delivery objects against its repository (commit type,
     // parent = base, actual changed files = changedFiles, message + author/committer identity)

@@ -419,7 +419,6 @@ test("RO-20: garbage input collapses to unknown — never throws", () => {
 test("RO-M1: an UNDECLARED run keeps readOnlyObservation absent (byte-compatible ordinary payload)", () => {
   const page = projectRunActivity(projSnap([startedEvent(), writtenEvent("src/a.js")]), {
     runId: RUN_ID,
-    audience: "lead",
   });
   assert.equal("readOnlyObservation" in page, false, "field absent for an undeclared run");
   // The ordinary contract is intact.
@@ -430,7 +429,7 @@ test("RO-M1: an UNDECLARED run keeps readOnlyObservation absent (byte-compatible
 test("RO-M2: a DECLARED run attaches readOnlyObservation from the same frozen snapshot", () => {
   const page = projectRunActivity(
     projSnap([startedEvent(), declaredEvent(), writtenEvent("src/a.js")]),
-    { runId: RUN_ID, audience: "lead" },
+    { runId: RUN_ID },
   );
   assert.ok(page.readOnlyObservation, "field present for a declared run");
   assert.equal(page.readOnlyObservation.status, "writes_observed");
@@ -446,7 +445,7 @@ test("RO-M3: declared run via cursor continuation projects the FROZEN prefix; fr
     ...Array.from({ length: 15 }, (_, i) => messageEvent(`m${i}`)),
   ];
   const page1 = projectRunActivity(projSnap(prefix), {
-    runId: RUN_ID, audience: "lead", pageSize: 8,
+    runId: RUN_ID, pageSize: 8,
   });
   assert.ok(page1.nextCursor, "page 1 has a cursor");
   assert.equal(page1.readOnlyObservation.status, "no_writes_observed");
@@ -454,14 +453,14 @@ test("RO-M3: declared run via cursor continuation projects the FROZEN prefix; fr
   // Append a later write while the run is still running.
   const grownRunning = [...prefix, writtenEvent("src/late.js")];
   const cont = projectRunActivity(projSnap(grownRunning), {
-    runId: RUN_ID, audience: "lead", pageSize: 8, cursor: page1.nextCursor,
+    runId: RUN_ID, pageSize: 8, cursor: page1.nextCursor,
   });
   assert.equal(cont.readOnlyObservation.status, "no_writes_observed",
     "continuation stays bound to the frozen prefix (append-only stable)");
   assert.equal(cont.readOnlyObservation.complete, false, "snapshot still running");
 
   const freshRunning = projectRunActivity(projSnap(grownRunning), {
-    runId: RUN_ID, audience: "lead", pageSize: 8,
+    runId: RUN_ID, pageSize: 8,
   });
   assert.equal(freshRunning.readOnlyObservation.status, "writes_observed",
     "fresh page-1 observes the appended write (in-flight alert)");
@@ -470,7 +469,7 @@ test("RO-M3: declared run via cursor continuation projects the FROZEN prefix; fr
   // After the natural terminal transition, a fresh read is complete.
   const grownTerminal = [...grownRunning, stateEvent("completed")];
   const freshTerminal = projectRunActivity(projSnap(grownTerminal, true), {
-    runId: RUN_ID, audience: "lead", pageSize: 8,
+    runId: RUN_ID, pageSize: 8,
   });
   assert.equal(freshTerminal.readOnlyObservation.status, "writes_observed");
   assert.equal(freshTerminal.readOnlyObservation.complete, true);
@@ -484,7 +483,7 @@ test("RO-M4: a snapshot carrying a foreign-run event fails closed at the envelop
   assert.throws(
     () => projectRunActivity(
       projSnap([startedEvent(), declaredEvent({ runId: OTHER_RUN_ID })]),
-      { runId: RUN_ID, audience: "lead" },
+      { runId: RUN_ID },
     ),
     /runId binding failed/,
     "envelope binding rejects the foreign event fail-closed",

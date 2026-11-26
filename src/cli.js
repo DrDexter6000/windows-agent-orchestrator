@@ -19,7 +19,7 @@ import { readSupervisorState } from "./daemonSupervisor.js";
 import { daemonCommand } from "./commands/daemon.js";
 import { registryCommand } from "./commands/registry.js";
 // TD-98 阶段 2b：runs 命令族拆到 src/commands/runs.js（行为不变，纯搬迁）。
-import { runsCommand, buildDashboard, runsDashboardCommand, runDashboardWeb } from "./commands/runs.js";
+import { runsCommand, buildDashboard, runsDashboardCommand } from "./commands/runs.js";
 // M12-8F: top-level `dashboard` 命令族（人类 Owner 启动器，wao dashboard）。
 import { dashboardCommand } from "./commands/dashboard.js";
 // TD-98 阶段 2c：worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
@@ -71,8 +71,8 @@ import { parseOptions, loadPrompt, displayModel, resolveTargetCwd } from "./comm
 // Re-export：保持外部 import 路径（test/cli.test.js）不变。
 export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
 // buildDashboard / runsDashboardCommand 从 runs.js re-export（test/cli.test.js 依赖）。
-// M12-8D: runDashboardWeb（runs dashboard --web）同源 re-export。
-export { buildDashboard, runsDashboardCommand, runDashboardWeb };
+// 145a：runDashboardWeb 不再 re-export——顶层 dashboard 启动器直接从 commands/runs.js 导入。
+export { buildDashboard, runsDashboardCommand };
 // resolveArtifactPath 从 wao.js re-export（原 cli.js export，保持符号可见）。
 export { resolveArtifactPath };
 // statusCommand / collectCommand 从 observe.js re-export（test/isolation-infra/cli.test.js 与 cli-runs.test.js 依赖）。

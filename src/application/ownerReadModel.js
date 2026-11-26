@@ -58,7 +58,7 @@
 // 的时间点，连同它所取事件的 seq 一起记：终态（terminalSeq）、quietSince 所取的事件
 // （quietSinceSeq）、交付收口（delivery.settledSeq，取较晚的那条事件）、裁决
 // （delivery.acceptance.decidedSeq）、额度观测（capacity.observedSeq）。seq 是事件信封里的
-// 正整数、与 /api/activity 同一个数；旧转录没有或不合法就是 null，不编造。
+// 正整数、与 /api/worker/activity 的 seq 同一个数；旧转录没有或不合法就是 null，不编造。
 //
 // 写清楚、不改的口径（140c 要知道）：
 //   - delivery.verification.status 是**有效**验证状态（复验链完成时用复验结果），
@@ -484,7 +484,7 @@ function memberOf(set, value) {
 const canonicalCommit = (value) => (typeof value === "string" && isCanonicalCommitId(value) ? value : null);
 
 /**
- * 事件号：事件信封里的 seq（正整数，与 /api/activity 的 seq 同一个数）。旧转录没有、或不是
+ * 事件号：事件信封里的 seq（正整数，与 /api/worker/activity 的 seq 同一个数）。旧转录没有、或不是
  * 正整数 → null：读不到就是读不到，不编造。事项的证据引用 runId#seq 用它。
  */
 const seqOf = (event) => (Number.isInteger(event?.seq) && event.seq > 0 ? event.seq : null);

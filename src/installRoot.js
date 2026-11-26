@@ -14,8 +14,9 @@
 // (WAO_INSTALL_ROOT) — never argv, never a shell string. Only that opt-in env
 // redirects resolution; the legacy `npm run cli -- ...` path (no env) keeps
 // process.cwd() resolution byte-for-byte. The caller cwd is STILL the default
-// observed target project for `wao dashboard`; --cwd is still only the workspace
-// authority; explicit --run-dir is still an explicit override that is never
+// target for `wao dashboard`'s strict Git check; --cwd only chooses the directory
+// that must be a Git worktree (the per-run-directory /v2 board takes no project
+// filter from it); explicit --run-dir is still an explicit override that is never
 // rebased.
 //
 // This module is intentionally pure (no process.env / process.cwd reads except

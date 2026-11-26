@@ -40,7 +40,6 @@ import {
   rebaseConfigPaths,
 } from "../../src/installRoot.js";
 import { dashboardCommand, resolveCanonicalGitRoot } from "../../src/commands/dashboard.js";
-import { canonicalizeWorkspacePath } from "../../src/application/workspaceBinding.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -157,7 +156,7 @@ test("RESOLVER: rebaseConfigPaths rebases WAO-owned runDir+registry, leaves abso
 // D) DASHBOARD (in-process) — rebased config → install-root runDir/registry;
 //    --cwd stays the workspace; --run-dir NOT rebased.
 // =====================================================================
-test("DASHBOARD: rebased config → server runDir + registry from install root; workspace stays the --cwd Git project", async () => {
+test("DASHBOARD: rebased config → the server runDir comes from the install root; --cwd stays the observed Git project", async () => {
   const install = mkdtempSync(join(tmpdir(), "wao-dash-install-"));
   const target = makeGitRepo("wao-dash-target-");
   try {
@@ -170,22 +169,18 @@ test("DASHBOARD: rebased config → server runDir + registry from install root; 
     const lc = makeControllableLifecycle();
     const server = makeFakeServer();
     let created = null;
-    let regPath = null;
     const p = dashboardCommand(["--cwd", target], config, {
       gitRootFn: (cwd) => resolveCanonicalGitRoot(cwd),
       openUrlFn: async () => {},
       createServerFn: (cfg) => { created = cfg; return server; },
-      readRegistryFn: async (rp) => { regPath = rp; return { listAgents: () => [] }; },
       lifecycle: lc,
       log: () => {},
     });
     await flush();
     assert.equal(created.runDir, join(install, "runs"),
       "runDir resolved from the install root, not the caller cwd");
-    assert.equal(regPath, join(install, "config", "agents.json"),
-      "registry read from the install root, not the caller cwd");
-    assert.equal(created.workspaceRoot, canonicalizeWorkspacePath(target),
-      "workspaceRoot is the --cwd Git project, NOT the install root");
+    assert.deepEqual(Object.keys(created).sort(), ["port", "runDir"],
+      "the dashboard server takes no workspace root any more (145a: its only reader was the retired list API)");
     lc.resolve();
     await p;
   } finally {
@@ -209,7 +204,6 @@ test("DASHBOARD: explicit --run-dir is NOT rebased (stays relative to the caller
       gitRootFn: (cwd) => resolveCanonicalGitRoot(cwd),
       openUrlFn: async () => {},
       createServerFn: (cfg) => { created = cfg; return server; },
-      readRegistryFn: async () => ({ listAgents: () => [] }),
       lifecycle: lc,
       log: () => {},
     });

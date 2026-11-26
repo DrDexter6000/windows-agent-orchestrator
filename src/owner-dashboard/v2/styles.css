@@ -587,6 +587,49 @@ button:focus-visible {
 .wgroup-cards .wcard:last-child { border-bottom: 0; }
 .wstarting { margin-top: 4px; }
 
+/* 145a: with the side panel open at 1024px the list column is only 55vw - gutter wide, and the five fixed
+   columns left the title about 15px (one character). At these widths the title keeps a real minimum (160px)
+   and type / lane move to their own line inside the same grid row instead of pushing the card — and the
+   page — sideways. The base five-column layout above is unchanged at 1440px; at ≤1000px the panel takes
+   the whole width and the base layout already has room.
+   145a fix 1: the breakpoint joins the full-width block exactly (≤1000 / >1000), so a fractional viewport
+   can never fall between two queries that both miss. */
+@media (width > 1000px) and (width <= 1300px) {
+  .wcard-l1 {
+    grid-template-columns: 20px minmax(160px, 1fr) 216px;
+    grid-template-areas:
+      "sym head run"
+      ". type lane";
+  }
+
+  .wcard-l1 > .sym { grid-area: sym; }
+  .wcard-head { grid-area: head; }
+  .wcard-type { grid-area: type; }
+  .wcard-lane { grid-area: lane; }
+  .wcard-run { grid-area: run; }
+}
+
+/* 145a fix 1: the side panel is 45% wide (~460px at 1024), and its one-row title row gave the 206px run
+   number all of its width, squeezing the title to ~100px. At this narrow-panel range the run number moves
+   below the title (the close button stays top-right) and the title keeps a 200px minimum. At 1440 the
+   one-row flex layout above is unchanged. */
+@media (width > 1000px) and (width <= 1200px) {
+  .sb-title-row {
+    display: grid;
+    grid-template-columns: minmax(200px, 1fr) auto;
+    grid-template-areas:
+      "title close"
+      "run run";
+    align-items: baseline;
+    column-gap: 16px;
+    row-gap: 4px;
+  }
+
+  .sb-title-row > .sb-title { grid-area: title; }
+  .sb-title-row > .sb-run { grid-area: run; }
+  .sb-title-row > .sb-close { grid-area: close; justify-self: end; }
+}
+
 /* ===== worker side panel ===== */
 
 /* Starts below the top bar, covers the right 45% of the page; 1px seam on its left. */
@@ -892,7 +935,9 @@ button:focus-visible {
 
 /* ===== narrow windows ===== */
 
-@media (max-width: 1000px) {
+/* 145a fix 1: the full-width-panel block ends exactly where the narrow-card block starts (both use the
+   Media Queries Level 4 range syntax), so no fractional viewport can fall between them. */
+@media (width <= 1000px) {
   :root { --gutter: 24px; }
 
   .type-row { grid-template-columns: minmax(150px, 1fr) 40px minmax(0, 1fr); }

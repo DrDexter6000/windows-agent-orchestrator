@@ -714,7 +714,7 @@ test("真实树：shared 成员全部出边只指向 node: 或 shared（零上�
 });
 
 test("真实树：asset 排除生效——owner-dashboard 磁盘存在但不入扫描集", () => {
-  assert.ok(existsSync(join(REPO_ROOT, "src", "owner-dashboard", "app.js")), "asset 文件真实存在");
-  assert.ok(!REAL.files.includes("src/owner-dashboard/app.js"), "asset 桶不进扫描集");
+  assert.ok(existsSync(join(REPO_ROOT, "src", "owner-dashboard", "v2", "app.js")), "asset 文件真实存在");
+  assert.ok(!REAL.files.includes("src/owner-dashboard/v2/app.js"), "asset 桶不进扫描集");
   assert.ok(REAL.files.every((rel) => !rel.startsWith(ASSET_PREFIX)), "扫描集无任何 owner-dashboard 路径");
 });

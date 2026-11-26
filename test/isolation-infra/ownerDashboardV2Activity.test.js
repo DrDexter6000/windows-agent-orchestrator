@@ -293,11 +293,7 @@ function drive(handler, { method = "GET", url = "/", headers = {} } = {}) {
 
 const makeServer = (extra = {}) => createOwnerDashboardServer({
   runDir: "/server/owned/runs",
-  workspaceRoot: "/server/owned/ws",
-  knownAgentIds: ["coder_low"],
   env: {},
-  getOwnerRunsFn: async () => ({ runs: [], returnedCount: 0, matchedCount: 0, truncated: false }),
-  getOwnerActivityFn: async () => ({}),
   nowFn: () => GEN_MS,
   ...extra,
 });
@@ -617,6 +613,45 @@ test("A7 a terminal run: the last page is taken once, polling stops, and the foo
   assert.equal(pages.length, asked);
   assert.match(readV2("i18n.js"), /"sb\.a\.ended": "已结束，共 \{n\} 条"/);
 });
+
+test("A26 (145a migration) the page that ends the run repairs an in-place exit code: the command row shown without one gains its exit code from the terminal page's update, with no duplicate row and no further request", async () => {
+  const b = transcript("run_end_exit");
+  b.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+  b.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-9" });
+  const before = [...b.events];
+  b.clock(T0 + 2000).add("run.event", { kind: "tool_result", tool: "call-9", output: "1 failing test", isError: true });
+  b.clock(T0 + 3000).add("run.completed", {});
+  const after = [...b.events];
+
+  let served = before;
+  const pages = [];
+  const feed = activity.createActivityFeed({
+    fetchPage: async (query) => {
+      pages.push(query);
+      return { ok: true, body: pageOf("run_end_exit", served, query) };
+    },
+    fetchFull: async () => ({ ok: false, reason: "notFound" }),
+    now: () => GEN_MS,
+  });
+  feed.open("run_end_exit");
+  await settle();
+  let vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.rows.find((row) => row.code === "CMD").exitCode, null, "the command was read before its result existed");
+  assert.equal(vm.terminal, false);
+
+  served = after; // the result and the terminal event land together
+  await feed.poll();
+  vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.terminal, true, "the run has ended");
+  const command = vm.rows.find((row) => row.code === "CMD");
+  assert.deepEqual([command.exitCode, command.exitSource], [1, "inferred"], "the same command row caught up from the terminal page's update");
+  assert.equal(vm.rows.filter((row) => row.code === "CMD").length, 1, "no second copy of the command");
+  assert.equal(vm.freshness.kind, "ended");
+  const asked = pages.length;
+  assert.equal(await feed.poll(), false, "a run that has ended is not asked again");
+  assert.equal(pages.length, asked);
+});
+
 
 test("A8 A -> B -> A: every open starts a new epoch; an answer for the old A (or for B) is dropped even when it arrives after the Owner is back on A", async () => {
   const aEvents = everyType("run_a");

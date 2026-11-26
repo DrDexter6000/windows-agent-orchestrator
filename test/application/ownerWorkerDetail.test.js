@@ -747,8 +747,6 @@ async function buildWorld() {
   let clock = NOW;
   const server = createOwnerDashboardServer({
     runDir: s.runDir,
-    workspaceRoot: world.base,
-    knownAgentIds: [],
     env: SERVER_ENV,
     nowFn: () => clock,
   });
@@ -1342,7 +1340,7 @@ test("不存在或不可用 → 固定 404，不回显 runId 以外的任何东�
 test("首次发布之前：/api/worker 200 + status loading（不带数据）；/api/artifact 固定 404", async () => {
   assert.equal(W.preRefresh.status, 200);
   assert.deepEqual(jsonOf(W.preRefresh), { status: "loading" });
-  const s = createOwnerDashboardServer({ runDir: W.store.runDir, workspaceRoot: W.base, env: SERVER_ENV, nowFn: () => NOW });
+  const s = createOwnerDashboardServer({ runDir: W.store.runDir, env: SERVER_ENV, nowFn: () => NOW });
   const r = await drive(s.handler, { url: artifactUrl("run_image", W.deliveryOne, 0), headers: { authorization: `Bearer ${s.token}` } });
   assert.equal(r.status, 404);
   await s.close();
@@ -1381,7 +1379,7 @@ test("读模型的两个只读入口：readRunEvents 的授权同 resolveRun（�
 test("内部失败 → 固定 500，错误原文（含路径）不出接口；读模型没有这两个读入口 → 固定 404", async () => {
   const boom = `EACCES: permission denied, open '${W.repo}\\secret.jsonl' ${EXACT_SECRET}`;
   const throwing = createOwnerDashboardServer({
-    runDir: W.store.runDir, workspaceRoot: W.base, env: SERVER_ENV, nowFn: () => NOW,
+    runDir: W.store.runDir, env: SERVER_ENV, nowFn: () => NOW,
     createReadModelFn: (input) => ({ ...createOwnerReadModel(input), readRunEvents: async () => { throw new Error(boom); } }),
   });
   assert.equal(await throwing.refreshNow(), "ready");
@@ -1395,7 +1393,7 @@ test("内部失败 → 固定 500，错误原文（含路径）不出接口；�
   await throwing.close();
 
   const bare = createOwnerDashboardServer({
-    runDir: W.store.runDir, workspaceRoot: W.base, nowFn: () => NOW,
+    runDir: W.store.runDir, nowFn: () => NOW,
     createReadModelFn: (input) => {
       const { refresh, snapshot } = createOwnerReadModel(input);
       return { refresh, snapshot };
@@ -1421,18 +1419,19 @@ test("闭集：交付物的 kind / state / reason 都落在导出的闭集里（
   }
 });
 
-test("路由是闭集：服务源码里的 /api/ 路由恰好是这 10 个（第 141c 批起含 worker/activity 与 worker/event，第 144 批起含 worker/stream 三条二级路径）；其余 /api/* 固定 404", async () => {
+test("路由是闭集：服务源码里的 /api/ 路由恰好是这 8 个（第 145a 批删掉旧界面的 /api/runs 与 /api/activity）；其余 /api/* 固定 404", async () => {
   const src = readFileSync(join(fileURLToPath(new URL(".", import.meta.url)), "../..", "src", "ownerDashboardServer.js"), "utf8");
   // 第 141c 批：路径允许一级或两级（`/api/worker/activity`）。旧正则只认一级，会让新路由悄悄漏出守卫。
   const declared = new Set([...src.matchAll(/"\/api\/([a-z]+(?:\/[a-z]+)?)"/g)].map((m) => m[1]));
   assert.deepEqual(
     [...declared].sort(),
-    ["activity", "artifact", "attention", "overview", "runs", "worker", "worker/activity", "worker/event", "worker/stream", "workers"],
+    ["artifact", "attention", "overview", "worker", "worker/activity", "worker/event", "worker/stream", "workers"],
   );
   for (const url of [
     "/api/worker/extra", "/api/artifacts", "/api/Worker", "/api/", "/api/worker/", "/api/worker/activity/x", "/api/worker/Activity",
     "/api/worker/events", "/api/worker/activity/", "/api/workers/activity", "/api/activity/event",
     "/api/worker/stream/", "/api/worker/streams", "/api/worker/Stream",
+    "/api/runs", "/api/activity", "/api/runs/extra",
   ]) {
     assert.equal((await W.get(url)).status, 404, url);
   }
@@ -1678,7 +1677,7 @@ test("headOfRedactedText：先 exact 脱敏、再形状脱敏、再清控制字�
 async function miniWorld(repoKey = W.repo) {
   const store = makeStore(repoKey);
   const server = createOwnerDashboardServer({
-    runDir: store.runDir, workspaceRoot: store.base, knownAgentIds: [], env: SERVER_ENV, nowFn: () => NOW,
+    runDir: store.runDir, env: SERVER_ENV, nowFn: () => NOW,
   });
   const auth = { authorization: `Bearer ${server.token}` };
   return {

@@ -7,7 +7,7 @@
 //
 // Sections:
 //   S  server   /v2 routes: status, MIME, headers, closed route table, 404 forms,
-//               legacy routes untouched, data routes still need the token
+//               the retired legacy entry (302 → /v2/), data routes still need the token
 //   P  pure     string table, formatting, page fragment, cycle commit, last-visit
 //               window, Overview / Attention view models (no DOM)
 //   V  views    the DOM builders, run against a tiny in-memory DOM
@@ -20,7 +20,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,7 +46,7 @@ const JS_TYPE = "text/javascript; charset=utf-8";
 const CSS_TYPE = "text/css; charset=utf-8";
 const HTML_TYPE = "text/html; charset=utf-8";
 
-// ===== fake request/response drive (same shape as ownerDashboardWeb.test.js) =====
+// ===== fake request/response drive (the same shape the other dashboard tests use) =====
 
 function drive(handler, { method = "GET", url = "/", headers = {} } = {}) {
   const req = { method, url, headers: { ...headers } };
@@ -66,11 +66,7 @@ function drive(handler, { method = "GET", url = "/", headers = {} } = {}) {
 function makeServer(extra = {}) {
   return createOwnerDashboardServer({
     runDir: "/server/owned/runs",
-    workspaceRoot: "/server/owned/ws",
-    knownAgentIds: ["coder_low"],
     env: {},
-    getOwnerRunsFn: async () => ({ runs: [], returnedCount: 0, matchedCount: 0, truncated: false }),
-    getOwnerActivityFn: async () => ({}),
     nowFn: () => 1_000_000,
     ...extra,
   });
@@ -89,7 +85,7 @@ function assertSafeHeaders(r, contentType) {
 // S) SERVER
 // =====================================================================
 
-test("S1 /v2 and /v2/ serve v2/index.html as text/html with the legacy safe headers", async () => {
+test("S1 /v2 and /v2/ serve v2/index.html as text/html with the base safe headers", async () => {
   const s = makeServer();
   const file = readV2("index.html");
   for (const url of ["/v2", "/v2/", "/v2?x=1", "/v2/?x=1"]) {
@@ -99,7 +95,8 @@ test("S1 /v2 and /v2/ serve v2/index.html as text/html with the legacy safe head
     assert.equal(r.body, file, `${url} serves the real v2/index.html bytes`);
     assert.equal(Number(r.headers["content-length"]), Buffer.byteLength(file));
   }
-  assert.notEqual((await drive(s.handler, { url: "/v2" })).body, (await drive(s.handler, { url: "/" })).body, "v2 is not the legacy page");
+  // 145a: "/" no longer serves a page — it points at this one (S6).
+  assert.equal((await drive(s.handler, { url: "/" })).status, 302);
 });
 
 test("S2 every v2 module and the stylesheet has one fixed route: status, MIME, exact bytes", async () => {
@@ -118,17 +115,13 @@ test("S3 the static table is a closed set: source routes, loaded names and the v
   const table = server.slice(server.indexOf("const STATIC_ASSETS"), server.indexOf("// Preload the fixed assets"));
   const routes = [...table.matchAll(/route: "([^"]+)"/g)].map((m) => m[1]).sort();
   assert.deepEqual(routes, [
-    "/", "/app.js", "/index.html", "/styles.css",
     "/v2", "/v2/", "/v2/activity.js", "/v2/activityview.js", "/v2/api.js", "/v2/app.js", "/v2/artifacts.js", "/v2/detail.js", "/v2/i18n.js", "/v2/model.js", "/v2/sidebarview.js",
     "/v2/store.js", "/v2/styles.css", "/v2/views.js", "/v2/workers.js", "/v2/workersview.js",
-  ].sort(), "exactly the legacy four plus the v2 routes; /v2/index.html is not a route");
+  ].sort(), "exactly the v2 routes; /v2/index.html is not a route and no legacy asset is served");
   // The loader is asked for exactly these file names (once each, however many routes share one).
   const asked = [];
   makeServer({ loadAssetFn: (name) => { asked.push(name); return Buffer.from(`/* ${name} */`); } });
-  assert.deepEqual([...asked].sort(), [
-    "app.js", "index.html", "styles.css",
-    ...V2_FILES.map((f) => `v2/${f}`),
-  ].sort());
+  assert.deepEqual([...asked].sort(), V2_FILES.map((f) => `v2/${f}`).sort());
   // Nothing in the v2 directory is left unserved, and nothing served is missing on disk.
   assert.deepEqual(readdirSync(V2).sort(), [...V2_FILES].sort(), "the v2 directory holds exactly the served files");
 });
@@ -154,7 +147,7 @@ test("S4 traversal, case variants, an extra path level and unlisted names are 40
   }
 });
 
-test("S5 forms the URL parser collapses onto an asset (dot segments, encoded dots, backslashes) are 404 for /v2 — the legacy routes keep their behavior", async () => {
+test("S5 forms the URL parser collapses onto an asset (dot segments, encoded dots, backslashes) are 404 for /v2 — the retired legacy paths reach no file", async () => {
   const s = makeServer();
   const collapsing = [
     "/v2/app.js/..",        // -> /v2/        (the v2 page)
@@ -167,6 +160,9 @@ test("S5 forms the URL parser collapses onto an asset (dot segments, encoded dot
     // onto the LEGACY assets ("/v2\..\app.js" parses to "/app.js"). Encoded backslashes are the same boundary.
     "/v2\\..\\app.js", "/v2\\..\\index.html", "/v2\\..\\", "/v2\\app.js\\..", "/v2\\", "/v2%5C..%5Capp.js", "/v2%5c..%5capp.js", "/v2/..%5Capp.js", "/v2%5C",
     "/v2/%2e%2e/%2e%2e/etc/passwd", "/v2/../../package.json",
+    // 145a 修正一：原始路径以多个斜杠开头时，URL 解析器会把 //v2 当成 authority；这些形态同样
+    // 不得落到 /v2 之外的 redirect / health / 文件。
+    "//v2/../app.js", "//v2/../v2/app.js", "//v2/app.js", "///v2/app.js", "//v2//app.js", "//v2/../index.html", "//v2/../health",
   ];
   for (const url of collapsing) {
     const r = await drive(s.handler, { url });
@@ -178,21 +174,35 @@ test("S5 forms the URL parser collapses onto an asset (dot segments, encoded dot
   for (const url of ["/v2", "/v2/", "/v2/app.js", "/v2/styles.css", "/v2/app.js?x=1", "/v2?a=b#frag"]) {
     assert.equal((await drive(s.handler, { url })).status, 200, url);
   }
-  // The legacy routes are untouched: their dot-segment forms still collapse onto a fixed asset, never onto disk.
-  assert.equal((await drive(s.handler, { url: "/app.js/.." })).body, read("index.html"));
-  assert.equal((await drive(s.handler, { url: "/./app.js" })).body, read("app.js"));
-  assert.equal((await drive(s.handler, { url: "/index.html/.." })).status, 200);
+  // The retired legacy paths reach no file: a collapse onto the old "/" is the redirect (S6), and the old
+  // assets are not served at all.
+  const collapsedHome = await drive(s.handler, { url: "/app.js/.." });
+  assert.equal(collapsedHome.status, 302);
+  assert.equal(collapsedHome.headers.location, "/v2/");
+  assert.equal((await drive(s.handler, { url: "/./app.js" })).status, 404);
+  assert.equal((await drive(s.handler, { url: "/index.html/.." })).status, 302);
 });
-test("S6 the legacy routes still serve exactly the legacy files (v2 changed none of them)", async () => {
+test("S6 (145a) the legacy UI is retired: / and /index.html answer 302 to /v2/ (empty body, safe headers, no token); its assets and data routes are gone", async () => {
   const s = makeServer();
-  const legacy = [["/", "index.html", HTML_TYPE], ["/index.html", "index.html", HTML_TYPE], ["/styles.css", "styles.css", CSS_TYPE], ["/app.js", "app.js", JS_TYPE]];
-  for (const [url, file, type] of legacy) {
+  for (const url of ["/", "/index.html", "/?x=1", "/index.html?x=1"]) {
     const r = await drive(s.handler, { url });
-    assert.equal(r.status, 200, url);
-    assertSafeHeaders(r, type);
-    assert.equal(r.body, read(file), `${url} serves src/owner-dashboard/${file} byte for byte`);
+    assert.equal(r.status, 302, url);
+    assert.equal(r.headers.location, "/v2/", `${url}: Location is exactly the new entry`);
+    assert.equal(r.body, "", `${url}: no body (the browser keeps the fragment across the redirect)`);
+    assert.equal(Number(r.headers["content-length"]), 0, `${url}: content-length 0`);
+    assertSafeHeaders(r);
+    assert.ok(!("access-control-allow-origin" in r.headers), `${url}: no CORS opt-in`);
+    assert.ok(!JSON.stringify(r.headers).includes(s.token), `${url}: no token in the redirect`);
   }
-  assert.ok(legacy.every(([, file]) => !read(file).includes("/v2/")), "legacy files do not reference v2");
+  // The retired UI files are no longer served, and the old data routes are the fixed 404 (no auth probe).
+  for (const url of ["/app.js", "/styles.css", "/api/runs", "/api/activity", "/api/runs?limit=1", "/api/activity?runId=run_x"]) {
+    const r = await drive(s.handler, { url });
+    assert.equal(r.status, 404, url);
+    assert.deepEqual(JSON.parse(r.body), { error: "not_found" }, url);
+    assertSafeHeaders(r);
+  }
+  // The one entry that serves the page is /v2/.
+  assert.equal((await drive(s.handler, { url: "/v2/" })).status, 200);
 });
 
 test("S7 assets need no token; every data route answers 401 without one (and with a wrong one)", async () => {
@@ -201,7 +211,8 @@ test("S7 assets need no token; every data route answers 401 without one (and wit
     assert.equal((await drive(s.handler, { url })).status, 200, `${url} without auth`);
   }
   const data = [
-    "/api/overview", "/api/workers", "/api/attention", "/api/runs", "/api/activity", "/api/worker", "/api/artifact",
+    "/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact",
+    "/api/worker/activity", "/api/worker/event", "/api/worker/stream",
     "/api/overview?x=1", "/api/workers?project=shop-api",
   ];
   const wrong = { authorization: `Bearer ${"0".repeat(64)}` };
@@ -216,13 +227,15 @@ test("S7 assets need no token; every data route answers 401 without one (and wit
   assert.equal(ok.status, 200, "the issued token is accepted (loading before the first round)");
 });
 
-test("S8 the v2 page has the legacy CSP plus ONE thing (img-src blob:): no inline script/style, no eval, no wildcard, no external source", async () => {
+test("S8 the v2 page has the base CSP plus ONE thing (img-src blob:): no inline script/style, no eval, no wildcard, no external source", async () => {
   const s = makeServer();
   const v2 = (await drive(s.handler, { url: "/v2" })).headers["content-security-policy"];
-  const legacy = (await drive(s.handler, { url: "/" })).headers["content-security-policy"];
-  assert.equal(v2, legacy.replace("img-src 'self' data:", "img-src 'self' data: blob:"), "the legacy policy with blob: added to img-src, byte for byte otherwise");
+  // 145a: there is no legacy page any more; every other response (the redirect, /health, JSON) keeps the base policy.
+  const base = (await drive(s.handler, { url: "/health" })).headers["content-security-policy"];
+  assert.equal(v2, base.replace("img-src 'self' data:", "img-src 'self' data: blob:"), "the base policy with blob: added to img-src, byte for byte otherwise");
+  assert.equal((await drive(s.handler, { url: "/" })).headers["content-security-policy"], base, "the redirect carries the base policy");
   assert.match(v2, /img-src 'self' data: blob:/);
-  assert.ok(!legacy.includes("blob:"), "the legacy page is not relaxed");
+  assert.ok(!base.includes("blob:"), "the data responses are not relaxed");
   assert.match(v2, /default-src 'self'/);
   assert.match(v2, /object-src 'none'/);
   assert.match(v2, /base-uri 'none'/);
@@ -246,11 +259,13 @@ test("S9 non-GET on a v2 asset is 405; the token is in no v2 body or header", as
 });
 
 test("S10 LOAD: the injected loader gets the v2 names; a missing v2 file fails closed before listen", async () => {
-  const s = makeServer({ loadAssetFn: (name) => `/* injected:${name} */` });
+  const asked = [];
+  const s = makeServer({ loadAssetFn: (name) => { asked.push(name); return `/* injected:${name} */`; } });
   assert.equal((await drive(s.handler, { url: "/v2/model.js" })).body, "/* injected:v2/model.js */");
   assert.equal((await drive(s.handler, { url: "/v2" })).body, "/* injected:v2/index.html */");
   assert.equal((await drive(s.handler, { url: "/v2/" })).body, "/* injected:v2/index.html */");
-  assert.equal((await drive(s.handler, { url: "/app.js" })).body, "/* injected:app.js */", "legacy names unchanged");
+  // 145a: the legacy asset names are no longer loaded at all.
+  assert.deepEqual(asked.filter((n) => !n.startsWith("v2/")), [], "the loader is asked for v2 names only");
   assert.throws(
     () => makeServer({
       loadAssetFn: (name) => {
@@ -262,7 +277,7 @@ test("S10 LOAD: the injected loader gets the v2 names; a missing v2 file fails c
   );
 });
 
-test("S11 real HTTP, raw request paths: /v2/../app.js and /v2/app.js/.. are 404 on the wire; clean paths and the legacy forms are 200", async () => {
+test("S11 real HTTP, raw request paths: /v2/../app.js and /v2/app.js/.. are 404 on the wire; clean paths are 200, the retired forms reach no file", async () => {
   const model = { async refresh() {}, snapshot: (args) => ({ generatedAt: new Date(args.now).toISOString(), projects: [], runs: [], consults: [] }) };
   const s = makeServer({ createReadModelFn: () => model });
   const { port } = await s.listen();
@@ -272,7 +287,7 @@ test("S11 real HTTP, raw request paths: /v2/../app.js and /v2/app.js/.. are 404 
       const req = http.request({ host: "127.0.0.1", port, path: rawPath, method: "GET" }, (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve({ status: res.statusCode, type: res.headers["content-type"], body: Buffer.concat(chunks).toString("utf8") }));
+        res.on("end", () => resolve({ status: res.statusCode, type: res.headers["content-type"], location: res.headers.location, body: Buffer.concat(chunks).toString("utf8") }));
       });
       req.on("error", reject);
       req.end();
@@ -282,14 +297,20 @@ test("S11 real HTTP, raw request paths: /v2/../app.js and /v2/app.js/.. are 404 
     for (const raw of [
       "/v2/../app.js", "/v2/app.js/..", "/v2/./app.js", "/v2//app.js", "/v2/%2e%2e/app.js", "/v2/..", "/v2/../package.json",
       "/v2\\..\\app.js", "/v2\\..\\index.html", "/v2\\app.js", "/v2%5C..%5Capp.js", "/v2%5c..%5capp.js",
+      // 145a 修正一：双斜杠开头的原始路径（new URL 会把 //v2 当 authority）固定 404，不落到 redirect/health。
+      "//v2/../app.js", "//v2/../v2/app.js", "//v2/app.js", "///v2/app.js", "//v2//app.js", "//v2/../index.html", "//v2/../health",
     ]) {
       const r = await get(raw);
       assert.equal(r.status, 404, raw);
       assert.deepEqual(JSON.parse(r.body), { error: "not_found" });
     }
-    assert.equal((await get("/app.js/..")).body, read("index.html"), "the legacy form is as before");
-    assert.equal((await get("/app.js")).body, read("app.js"), "the legacy script itself is served as before");
-    assert.equal((await get("/")).body, read("index.html"));
+    assert.equal((await get("/app.js/..")).status, 302, "a collapsed retired path reaches the redirect, not a file");
+    assert.equal((await get("/app.js")).status, 404, "the retired script is not served");
+    assert.equal((await get("/styles.css")).status, 404, "the retired stylesheet is not served");
+    const root = await get("/");
+    assert.equal(root.status, 302);
+    assert.equal(root.location, "/v2/");
+    assert.equal(root.body, "");
   } finally {
     await s.close();
   }
@@ -2366,12 +2387,13 @@ test("G15 app.js: the clipboard failure falls back to selecting the text; no wri
   assert.match(app, /if \(token === null \|\| polling\) return/);
 });
 
-test("G16 the legacy UI is untouched by the v2 guard: its own files are still the only ones the old guards read", () => {
+test("G16 (145a) the legacy UI is gone from the tree: src/owner-dashboard holds only v2/, so the v2 guard reads the only client there is", () => {
   for (const name of ["index.html", "styles.css", "app.js"]) {
-    assert.ok(readFileSync(join(SRC, name)).length > 0, `legacy ${name} still exists beside v2/`);
+    assert.equal(existsSync(join(SRC, name)), false, `the retired legacy ${name} is removed`);
   }
-  assert.doesNotMatch(read("app.js"), /\/api\/(overview|workers|attention)/, "the legacy client still speaks only /api/runs and /api/activity");
-  assert.notEqual(read("app.js"), readV2("app.js"));
+  assert.deepEqual(readdirSync(SRC).sort(), ["v2"], "only the v2 directory remains under src/owner-dashboard/");
+  assert.ok(existsSync(join(V2, "app.js")), "the v2 client is the one UI");
+  assert.doesNotMatch(readV2("app.js"), /\/api\/(runs|activity)\b/, "the v2 client never speaks the retired routes");
 });
 
 test("G17 the marker / count landing is wired end to end: top bar and project markers pick the section, the fragment carries it, the app focuses it once drawn", () => {

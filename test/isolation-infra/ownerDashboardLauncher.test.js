@@ -17,9 +17,8 @@
 //      bound, no git is run (except the two real-git canonical-root cases), no
 //      browser is launched, no OS signal is delivered.
 //
-//   C) LEGACY — `runs dashboard --web` does not auto-open and keeps its
-//      fail-soft non-Git fallback; `node src/cli.js help` documents the primary
-//      `wao dashboard` command.
+//   C) RETIRED — `runs dashboard --web` now fails with the fixed text pointing
+//      at `wao dashboard`; the old non-Git fail-soft path is gone with it.
 //
 //   F) OPENER — the injected spawn seam of the production Windows opener:
 //      resolve on the child's spawn event (NOT exit), unref() after spawn,
@@ -37,6 +36,7 @@ import { fileURLToPath } from "node:url";
 
 import { dashboardCommand, resolveCanonicalGitRoot, openInWindowsDefaultBrowser } from "../../src/commands/dashboard.js";
 import { runDashboardWeb, runsDashboardCommand } from "../../src/commands/runs.js";
+import { RUNS_DASHBOARD_WEB_RETIRED_MESSAGE } from "../../src/cliHelp.js";
 import { canonicalizeWorkspacePath } from "../../src/application/workspaceBinding.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 
@@ -159,10 +159,10 @@ test("LAUNCHER: defaults are strict Git-root + auto-open once (target cwd = proc
     await flush();
     assert.deepEqual(gitCalls, [process.cwd()],
       "strict Git-root resolved from process.cwd() by default (WAO_TARGET_CWD ignored)");
-    assert.equal(created.workspaceRoot, "/canonical/ws", "canonical root threaded to the server");
+    assert.equal(created.runDir, resolve(baseConfig.runDir), "runDir threaded to the server");
     assert.equal(openUrls.length, 1, "auto-open defaults ON, exactly once");
-    assert.match(openUrls[0], /^http:\/\/127\.0\.0\.1:7654\/#token=[0-9a-f]{64}$/,
-      "opened URL is the generated fragment-token URL");
+    assert.match(openUrls[0], /^http:\/\/127\.0\.0\.1:7654\/v2\/#token=[0-9a-f]{64}$/,
+      "opened URL is the generated fragment-token URL at the /v2/ entry");
     assert.ok(!openUrls[0].includes("?"), "no query string — token only in fragment");
     lc.resolve();
     await p;
@@ -220,10 +220,10 @@ test("LAUNCHER: explicit --cwd with spaces works (real git, full chain)", async 
       log: () => {},
     }));
     await flush();
-    assert.equal(created.workspaceRoot, canonicalizeWorkspacePath(dir),
-      "--cwd with spaces resolves through git to the canonical root");
+    assert.equal(created.runDir, resolve(baseConfig.runDir),
+      "--cwd with spaces resolves through git; the runDir stays the configured one");
     assert.equal(openUrls.length, 1, "URL opened once");
-    assert.match(openUrls[0], /^http:\/\/127\.0\.0\.1:7654\/#token=[0-9a-f]{64}$/);
+    assert.match(openUrls[0], /^http:\/\/127\.0\.0\.1:7654\/v2\/#token=[0-9a-f]{64}$/);
     lc.resolve();
     await p;
   } finally {
@@ -263,7 +263,7 @@ test("LAUNCHER: browser opener failure logs a warning, lifecycle stays active, c
   assert.equal(server.closeCalled, false, "server NOT closed by an opener failure");
   assert.ok(logs.some((l) => /无法自动打开浏览器/.test(l)),
     "concise warning logged on opener failure");
-  assert.ok(logs.some((l) => /^http:\/\/127\.0\.0\.1:7654\/#token=/.test(l)),
+  assert.ok(logs.some((l) => /^http:\/\/127\.0\.0\.1:7654\/v2\/#token=/.test(l)),
     "URL line still printed (manual open possible)");
   // The server closes ONLY on lifecycle completion.
   lc.resolve();
@@ -273,43 +273,27 @@ test("LAUNCHER: browser opener failure logs a warning, lifecycle stays active, c
 });
 
 // =====================================================================
-// C) LEGACY — `runs dashboard --web` unchanged (no auto-open, fail-soft)
+// C) RETIRED — `runs dashboard --web` fails with the fixed text (145a)
 // =====================================================================
-test("LEGACY: runs dashboard --web does NOT auto-open and retains the non-Git fallback", async () => {
-  const lc = makeControllableLifecycle();
-  const server = makeFakeServer();
-  const logs = [];
-  let created = null;
-  const p = runsDashboardCommand(["--web"], baseConfig, {
-    createServerFn: (cfg) => { created = cfg; return server; },
-    proveWorkspaceFn: () => { throw new Error("not a git repo"); },
-    readRegistryFn: async () => ({ listAgents: () => [] }),
-    lifecycle: lc,
-    log: (s) => logs.push(s),
-  });
-  await flush();
-  assert.equal(server.listenCalled, true, "legacy still starts (fail-soft, no Git needed)");
-  assert.ok(typeof created.workspaceRoot === "string" && created.workspaceRoot.length > 0,
-    "fail-soft fallback root is non-empty (dashboard starts without Git)");
-  assert.equal(logs.length, 2, "exactly two lines — no auto-open, no browser noise");
-  assert.ok(!logs.join("\n").includes("打开"), "no browser-open wording in legacy output");
-  lc.resolve();
-  await p;
+test("RETIRED: runs dashboard --web throws the fixed text and starts nothing", async () => {
+  await assert.rejects(
+    () => runsDashboardCommand(["--web"], baseConfig),
+    (error) => error.message === RUNS_DASHBOARD_WEB_RETIRED_MESSAGE,
+  );
 });
 
-test("LEGACY: runDashboardWeb without the new hooks behaves byte-identically (2 log lines)", async () => {
+test("RETIRED: runDashboardWeb (the launcher seam) prints the /v2/ URL + Ctrl-C only", async () => {
   const lc = makeControllableLifecycle();
   const logs = [];
   const server = makeFakeServer();
   const p = runDashboardWeb({ web: true, port: "7654" }, baseConfig, {
     createServerFn: () => server,
-    proveWorkspaceFn: (cwd) => ({ root: cwd }),
-    readRegistryFn: async () => ({ listAgents: () => [] }),
     lifecycle: lc,
     log: (s) => logs.push(s),
   });
   await flush();
   assert.equal(logs.length, 2, "URL + Ctrl-C only");
+  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:7654\/v2\/#token=[0-9a-f]{64}$/);
   lc.resolve();
   await p;
 });
@@ -326,6 +310,9 @@ test("HELP: `wao dashboard` is listed with its launcher flags", () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout, /dashboard \[--cwd DIR\] \[--port N\] \[--run-dir DIR\] \[--no-open\]/,
     "help documents the primary `wao dashboard` command and its flags");
+  // 145a: the retired web flag is no longer advertised for the text dashboard.
+  assert.doesNotMatch(r.stdout, /runs dashboard --web/, "the retired `runs dashboard --web` line is gone from help");
+  assert.match(r.stdout, /runs dashboard \[--watch N\]/, "the text dashboard line itself is unchanged");
 });
 
 // =====================================================================

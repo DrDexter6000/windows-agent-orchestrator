@@ -2,9 +2,10 @@
 //
 // M12-8 Package A: SHARED read-only activity timeline projector.
 //
-// Both the Lead-view MCP tool (run_activity, via src/mcp/server.js) and the
-// internal owner view call projectRunActivity. Neither may return raw service
-// output. The projector owns:
+// The Lead-view MCP tool (run_activity, via src/mcp/server.js) calls
+// projectRunActivity; the Owner audience was retired in 145a and the Owner
+// activity projections (ownerWorkerActivity.js) reuse only its row/summary
+// helpers. No caller may return raw service output. The projector owns:
 //   - exact run binding: EVERY object event in the snapshot must carry
 //     runId === the requested runId; missing/mismatched/conflicting envelope
 //     facts fail closed BEFORE any structured activity result — never degrade
@@ -29,15 +30,14 @@
 //     input or output, the run.error text, credentials, PID/session id, an
 //     absolute path in the file_written path field, or unknown payload; NO
 //     semantic summary/recommendation/progress estimate;
-//   - per-page caps (entries + text excerpt) bounded per audience; an
+//   - per-page caps (entries + text excerpt) bounded; an
 //     explicitly provided invalid pageSize is REJECTED, never silently clamped;
 //   - opaque base64url cursor codec binding runId digest + frozen raw-snapshot
-//     digest + event count + view (audience + canonicalized unique sorted
-//     filter set + afterSeq) digest + position — so a Lead cursor can never be
-//     accepted by the owner view or vice versa;
+//     digest + event count + view (canonicalized unique sorted filter set +
+//     afterSeq) digest + position;
 //   - frozen-prefix replay protection: append-only safe, mutation/shrink/
-//     cross-run/cross-view/cross-audience/malformed/noncanonical/oversized/
-//     out-of-range all fail closed.
+//     cross-run/cross-view/malformed/noncanonical/oversized/out-of-range all
+//     fail closed.
 //
 // Architectural contract:
 //   - No file I/O, no MCP SDK / zod / command imports.
@@ -189,16 +189,11 @@ function emptyCounts() {
   };
 }
 
-// ===== Per-audience caps. Owner sees a larger excerpt + larger default page;
-// both reuse the SAME classifier / redaction / cursor machinery. =====
+// ===== Page caps (Lead view; the Owner audience was retired in 145a) =====
 
 export const LEAD_TEXT_EXCERPT_CAP = 4000;
 export const LEAD_PAGE_DEFAULT = 8;
 export const LEAD_PAGE_HARD_CAP = 50;
-
-export const OWNER_TEXT_EXCERPT_CAP = 8000;
-export const OWNER_PAGE_DEFAULT = 50;
-// Owner and Lead share the same absolute page hard cap (the cursor/replay bound).
 const PAGE_HARD_CAP = LEAD_PAGE_HARD_CAP;
 
 // Dynamic-string caps (exported so the MCP output schema reuses the EXACT
@@ -230,7 +225,7 @@ export const ACTIVITY_TS_CAP = 64;
 //     "r": "<runIdDigest>",   // sha256(runId).slice(0,16) base64url — 16 bytes
 //     "s": "<snapDigest>",    // raw-event snapshot prefix digest
 //     "n": <eventCount>,      // raw-event count of the frozen prefix
-//     "f": "<viewDigest>",    // digest of the view (audience + filter set + afterSeq + order)
+//     "f": "<viewDigest>",    // digest of the view (filter set + afterSeq + order)
 //     "p": <position>         // index into the filtered+ordered entry list
 //   }
 //
@@ -340,29 +335,28 @@ function sortKeysDeep(obj) {
   return sorted;
 }
 
-// ===== View digest (audience + category filter + afterSeq + order) =====
+// ===== View digest (category filter + afterSeq + order) =====
 //
-// Binds the continuation to the EXACT view page 1 used. A different audience
-// (lead vs owner), a different category set, a different afterSeq, or a
-// different order is a different view → reject (cross-view). null/undefined
-// categories ≡ "all" (canonical null); a provided subset is canonicalized to
-// its UNIQUE sorted set (duplicates collapse — ["message","message"] ≡
-// ["message"]).
+// Binds the continuation to the EXACT view page 1 used. A different category
+// set, a different afterSeq, or a different order is a different view → reject
+// (cross-view). null/undefined categories ≡ "all" (canonical null); a provided
+// subset is canonicalized to its UNIQUE sorted set (duplicates collapse —
+// ["message","message"] ≡ ["message"]).
 //
-// The audience is part of the digest so a Lead-view cursor can never be
-// accepted by the owner view (or vice versa).
+// The digest keeps the historical `u:"lead"` slot. The Owner audience was
+// retired in 145a (this projector is only the Lead view now), and keeping the
+// slot preserves every cursor issued before the retirement byte-for-byte.
 //
 // M12-8C Package C — order binding. The asc DEFAULT MUST preserve the EXACT
 // legacy digest ({c,a,u}) so every existing asc cursor — Lead view, every wild
 // token issued before order existed — stays byte-valid under the SAME digest
 // algorithm. desc is a distinct view ({c,a,u,o:"desc"}), so a desc cursor can
-// never be accepted by an asc view (or vice versa): a desc Owner bootstrap is
-// cursor-bound and rejects cross-order continuation.
+// never be accepted by an asc view (or vice versa).
 
-function computeViewDigest(categories, afterSeq, audience, order) {
+function computeViewDigest(categories, afterSeq, order) {
   const c = categories == null ? null : [...new Set(categories)].sort();
   const a = afterSeq == null ? null : afterSeq;
-  const u = audience === "owner" ? "owner" : "lead";
+  const u = "lead";
   if (order !== "desc") {
     return sha256Base64url(JSON.stringify({ c, a, u }));
   }
@@ -732,17 +726,16 @@ function buildEntry(event, category, redactor, textCap, toolResultsById, pending
  * @param {string} [opts.cursor] — opaque continuation token (null/undefined for page 1)
  * @param {string[]|null} [opts.categories] — closed-set category filter (null/undefined ≡ all)
  * @param {number} [opts.afterSeq] — only events with seq > afterSeq (null/undefined ≡ none)
- * @param {"lead"|"owner"} [opts.audience] — caps selector (default "lead")
- * @param {number} [opts.pageSize] — entries per page (default per audience;
+ * @param {number} [opts.pageSize] — entries per page (default LEAD_PAGE_DEFAULT;
  *        an explicitly provided invalid pageSize is REJECTED, never clamped)
  * @param {"asc"|"desc"} [opts.order] — closed-set entry order (projector default
  *        "asc": chronological, and compatible with old asc cursor digests; desc =
  *        newest first). desc is cursor-bound, stable on an append-only frozen
- *        snapshot, and rejects cross-order/cross-audience/cross-run/filter
- *        cursors. desc NEVER changes the classifier, redaction-before-bound,
- *        caps, counts, or total — it only reverses the filtered safe-entry list
- *        before pagination. The MCP run_activity tool exposes `order` and passes
- *        desc by default since decision 0069 (the Lead asks "what is it doing now").
+ *        snapshot, and rejects cross-order/cross-run/filter cursors. desc NEVER
+ *        changes the classifier, redaction-before-bound, caps, counts, or total —
+ *        it only reverses the filtered safe-entry list before pagination. The MCP
+ *        run_activity tool exposes `order` and passes desc by default since
+ *        decision 0069 (the Lead asks "what is it doing now").
  * @param {object} [opts.env] — env for the secret redactor (default process.env)
  * @returns {object} safe payload: runId, agentId, backend, state, terminal,
  *                   scopeObservation (M12-14 advisory, from the frozen prefix),
@@ -751,7 +744,7 @@ function buildEntry(event, category, redactor, textCap, toolResultsById, pending
  *                   counts, total, entries, pageSize, truncated, nextCursor
  */
 export function projectRunActivity(rawSnapshot, {
-  runId, cursor, categories, afterSeq, audience, pageSize, order, env,
+  runId, cursor, categories, afterSeq, pageSize, order, env,
 } = {}) {
   if (!rawSnapshot || typeof rawSnapshot !== "object") throw new Error("invalid activity snapshot");
   if (!isValidRunId(runId)) throw new Error("invalid runId");
@@ -778,9 +771,8 @@ export function projectRunActivity(rawSnapshot, {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new Error("invalid afterSeq");
   }
 
-  const isOwner = audience === "owner";
-  const textCap = isOwner ? OWNER_TEXT_EXCERPT_CAP : LEAD_TEXT_EXCERPT_CAP;
-  const pageDefault = isOwner ? OWNER_PAGE_DEFAULT : LEAD_PAGE_DEFAULT;
+  const textCap = LEAD_TEXT_EXCERPT_CAP;
+  const pageDefault = LEAD_PAGE_DEFAULT;
   // Reject invalid explicitly-provided pageSize rather than silently clamp:
   // the MCP schema already rejects out-of-range values, and a direct caller
   // must get an error, not a surprise page size (project convention: invalid
@@ -806,10 +798,9 @@ export function projectRunActivity(rawSnapshot, {
   const redactor = createSecretRedactor(env ?? process.env);
 
   // View digest (page-1 emission + continuation binding share this). Binds
-  // audience + canonicalized unique sorted filter set + afterSeq + order, so a
-  // Lead cursor can never be accepted by an owner view, and an asc cursor can
-  // never be accepted by a desc view (or vice versa).
-  const viewDigest = computeViewDigest(categories, afterSeq, audience, ord);
+  // the canonicalized unique sorted filter set + afterSeq + order, so an asc
+  // cursor can never be accepted by a desc view (or vice versa).
+  const viewDigest = computeViewDigest(categories, afterSeq, ord);
 
   // Cursor decode + binding (runId / frozen snapshot / view / position).
   let cursorObj = null;

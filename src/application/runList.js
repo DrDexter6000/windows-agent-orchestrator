@@ -16,11 +16,11 @@
 //     query-scoped workspace verifier SSOT.
 
 import { basename, join, resolve } from "node:path";
-import { readdirSync, existsSync, realpathSync, readFileSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, realpathSync, readFileSync, openSync, readSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES } from "../transcript.js";
-import { resolveTranscriptPath, listTranscriptsDeep } from "../projectBuckets.js";
+import { listTranscriptsDeep } from "../projectBuckets.js";
 import { identityOfFirstEvent, deriveProjectBucketSlug, productionProjectIo } from "../projectIdentity.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
@@ -54,27 +54,6 @@ function scanRunFiles(runDir) {
     .map((e) => e.path);
 }
 
-// M12-20: enumerate the CURRENT owner-lease candidates — the .owner-<runId>
-// heartbeat files backgroundRunner writes while a runner is alive (and deletes
-// on exit). This reads runDir once with readdirSync and filters to .owner-*
-// files: the directory read touches every entry (its cost grows with the total
-// directory size, including historical transcripts), but the EXPENSIVE downstream
-// work — opening/parsing each transcript, per-run workspace verification, and
-// ownerLiveness — runs ONLY for these lease candidates, so no historical
-// transcript is opened, parsed, or verified. The corresponding transcript file
-// is <runId>.jsonl (validated and read downstream exactly like a default-scan
-// file). isValidRunId filters any oddly-named lease file; the runId slice
-// matches ownerFilePath()'s naming.
-function scanOwnerLeaseCandidates(runDir) {
-  if (!existsSync(runDir)) return [];
-  const files = readdirSync(runDir);
-  return files
-    .filter((f) => f.startsWith(".owner-"))
-    .map((f) => f.slice(".owner-".length))
-    .filter((runId) => isValidRunId(runId))
-    .sort();
-}
-
 /**
  * Extract the smallest EXACT static run facts from parsed transcript events.
  *
@@ -93,7 +72,7 @@ function scanOwnerLeaseCandidates(runDir) {
  * 保持历史读法；任一事件带信封即严格绑定，混信封下不可归属降级 pending。
  * runId 缺省（既有直接调用的兼容形状）时保持历史无绑定读法——R21（TD-128
  * W1）起 runSummaryCache 的 read() 以缓存 key 的文件名 stem 调用本函数，
- * MCP lead_preflight（activeRuns/recentRuns）/ Owner 看板等缓存路径与直读分支同语义。
+ * MCP lead_preflight（activeRuns/recentRuns）等缓存路径与直读分支同语义。
  * R21 (TD-128 W3)：updatedAt 同 scope 绑定派生（末【绑定】事件 ts）。
  * agentId/ownershipEvents 维持全量事件派生（events[0] 类按 TD-128 类级登记）。
  *
@@ -115,10 +94,10 @@ export function extractRunFacts(events, runId = null) {
   const rawAgentId = events[0]?.agentId;
   // R21 (TD-128 W3)：updatedAt = 末【绑定】事件 ts（与 R20-C 已绑的 --latest
   // 排序键同形状、内部自洽）——外 run 远期尾条不再拉动 recentRuns 行的
-  // updatedAt 及由其派生的排序 / historyRange 窗。runId 缺省或全无信封时
+  // updatedAt 及由其派生的排序 / --since 窗。runId 缺省或全无信封时
   // scope === events（历史读法恒等）；合法全绑定 transcript 上绑定派生与
   // 全量派生同值（探针钉）。零绑定事件（整份只有外 run 信封行）→ null
-  // （宁可缺事实，不入 history 窗）。ts 仍是校验过的 ISO 时间戳。
+  // （宁可缺事实，不入 --since 窗）。ts 仍是校验过的 ISO 时间戳。
   const lastTs = scope[scope.length - 1]?.ts ?? null;
   let updatedAt = null;
   if (lastTs && typeof lastTs === "string") {
@@ -194,9 +173,8 @@ function finalizeSummary(runId, facts, knownAgentIds, input) {
 
 // TD-153: transcript-updated window key — the summary updatedAt (already the
 // bound-derived last-event ts, R21 TD-128 W3) as epoch ms; NaN when the run
-// cannot be placed in time. The ONE definition shared by the M12-20
-// historyRange window and the --since window (same key discipline — no second
-// time source; R20-C C-4 绑定纪律同款).
+// cannot be placed in time. The ONE definition shared by the --since window
+// (same key discipline — no second time source; R20-C C-4 绑定纪律同款).
 function summaryWindowMs(facts) {
   return facts.updatedAt != null ? Date.parse(facts.updatedAt) : NaN;
 }
@@ -227,39 +205,20 @@ function summaryWindowMs(facts) {
  *   read. Every query still re-applies workspace authorization,
  *   knownAgentIds, heartbeat, activeOnly, sorting and limit.
  * @param {Function} [input.createWorkspaceVerifierFn] — test injection
- * @param {"active"|"history"} [input.scanScope] — M12-20: extends the ONE listRuns
- *   SSOT (NOT a second classifier). "active" enumerates owner-lease candidates
- *   (.owner-<runId>) via a single readdirSync of runDir and includes ONLY
- *   proven-active runs — so the expensive per-run work (transcript open/parse +
- *   workspace verification + ownerLiveness) is O(current lease candidates); no
- *   historical transcript is opened or parsed (the directory read itself still
- *   touches every entry). "history" scans run_*.jsonl and filters by a bounded
- *   inclusive transcript-updated range. When ABSENT (MCP recentRuns / CLI)
- *   behavior is byte-identical to before: full scan + unresolvedCount.
- * @param {{fromMs:number, toMs:number}} [input.historyRange] — M12-20: the
- *   bounded inclusive [fromMs, toMs] window for scanScope:"history", keyed on
- *   the transcript-derived summary updatedAt (not filesystem mtime). Ignored
- *   unless scanScope === "history".
  * @param {number} [input.sinceMs] — TD-153: keep only runs with activity in
  *   the last sinceMs milliseconds (inclusive lower bound, measured from the
  *   same single nowMs snapshot liveness uses). Keyed on the summary updatedAt
  *   projection (the last BOUND event ts — the exact same key --latest sorting
- *   and the M12-20 historyRange window use); legacy no-envelope transcripts
- *   keep the historic last-event-ts reading; a run whose updatedAt cannot be
- *   placed in time (null/unparseable) is excluded — fail-closed, same choice
- *   as the history window.
- * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount?: number, scanScope?: string, workspaceAuthorizationUnavailable?: true}>}
+ *   uses); legacy no-envelope transcripts keep the historic last-event-ts
+ *   reading; a run whose updatedAt cannot be placed in time (null/unparseable)
+ *   is excluded — fail-closed.
+ * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount?: number, workspaceAuthorizationUnavailable?: true}>}
  *   - runs: array of {runId, agentId, state, terminal, updatedAt,
  *             activityStatus, activityBasis}
- *   - matchedCount: eligible runs AFTER the activeOnly / active-scope /
- *     history / state / since filters, BEFORE the limit
- *   - unresolvedCount: ONLY in the default scope (scanScope absent): the
- *     full-scan count of known non-terminal runs lacking a fresh owner
- *     heartbeat (pre-limit, independent of activeOnly). ABSENT for
- *     scanScope "active"|"history" (the full inventory is intentionally not
- *     scanned in active; history reports a bounded window, not full health).
- *   - scanScope: ONLY for scanScope "active"|"history" (echoes the input so a
- *     client can guard mode/epoch races). ABSENT in the default scope.
+ *   - matchedCount: eligible runs AFTER the activeOnly / state / since filters,
+ *     BEFORE the limit
+ *   - unresolvedCount: the full-scan count of known non-terminal runs lacking a
+ *     fresh owner heartbeat (pre-limit, independent of activeOnly)
  *   - workspaceAuthorizationUnavailable: true ONLY when a non-null
  *     authorizedWorkspaceRoot could not be re-proven (the root vanished / is no
  *     longer a canonical Git top-level, or the proof failed). Callers MUST treat
@@ -301,8 +260,6 @@ export async function listRuns(input) {
     nowMs,
     checkLivenessFn,
     livenessThresholdMs,
-    scanScope,
-    historyRange,
     // TD-190 D3 只读过滤（2026-10-09）：按项目身份过滤候选——@sandbox/@scratch/
     // @unattributed 三选择器按身份类别；其它值按 projectIdentity 归一（完整路径
     // → 项目键精确匹配；裸名 → displayName/slug 大小写不敏感匹配）。零布局
@@ -366,37 +323,18 @@ export async function listRuns(input) {
       // unknown；CLI runs list 本来就不带 authorizedWorkspaceRoot，不受影响）。
       // TD-256 的 `null` 是刻意的"门禁关闭"死形状（调用方必须省略该键），
       // 保持原样的 fail-closed 空集，不标成读失败。
-      if (scanScope === undefined) {
-        return authorizedWorkspaceRoot === null
-          ? { runs: [], matchedCount: 0 }
-          : { runs: [], matchedCount: 0, workspaceAuthorizationUnavailable: true };
-      }
-      return {
-        runs: [],
-        matchedCount: 0,
-        scanScope,
-        ...(authorizedWorkspaceRoot === null ? {} : { workspaceAuthorizationUnavailable: true }),
-      };
+      return authorizedWorkspaceRoot === null
+        ? { runs: [], matchedCount: 0 }
+        : { runs: [], matchedCount: 0, workspaceAuthorizationUnavailable: true };
     }
   }
 
-  // M12-20: the candidate set depends on scanScope. "active" enumerates the
-  // CURRENT owner-lease candidates (.owner-<runId>) via a single readdirSync of
-  // runDir — the expensive per-run work (transcript open/parse + workspace
-  // verification + ownerLiveness) is O(current lease candidates); no historical
-  // transcript is opened or parsed. "history" and the default scope scan the
-  // run_*.jsonl inventory (history then filters by a bounded transcript-updated
-  // range below). Each candidate flows through the SAME downstream pipeline
-  // (facts → workspace → activity), so scanScope is an input to the ONE
-  // classifier, never a second classifier.
-  let candidates;
-  if (scanScope === "active") {
-    candidates = scanOwnerLeaseCandidates(resolvedRunDir)
-      .map((runId) => ({ runId, filePath: resolveTranscriptPath(resolvedRunDir, runId) }));
-  } else {
-    candidates = scanRunFiles(resolvedRunDir)
-      .map((filePath) => ({ runId: basename(filePath).replace(/\.jsonl$/, ""), filePath }));
-  }
+  // Every candidate flows through the SAME downstream pipeline (facts →
+  // workspace → activity). 145a: the dashboard-only lease fast-path was
+  // retired with the legacy Owner UI; every caller scans the run_*.jsonl
+  // inventory (CLI runs list / MCP runs_list / lead_preflight).
+  let candidates = scanRunFiles(resolvedRunDir)
+    .map((filePath) => ({ runId: basename(filePath).replace(/\.jsonl$/, ""), filePath }));
 
   // TD-190 projectFilter（只读、前置）。终审 F4/M2 修正：
   //  - 分类经共享 identityOfFirstEvent（在档事实优先——与迁移计划器同语义）；
@@ -451,8 +389,7 @@ export async function listRuns(input) {
   const collectUnresolved = Number.isInteger(unresolvedCandidatesCap) && unresolvedCandidatesCap > 0;
   const unresolvedCandidates = [];
   for (const { runId, filePath } of candidates) {
-    // Validate runId from filename / lease-name (active candidates are already
-    // pre-filtered; this is a no-op for them and kept for default/history).
+    // Validate the runId taken from the file name (run_*.jsonl).
     if (!isValidRunId(runId)) continue;
 
     // Static run facts come from ONE of two exact sources:
@@ -509,34 +446,20 @@ export async function listRuns(input) {
     // as the --agent filter: a filtered-out run never reaches the activity
     // classification below, so terminal-state runs skip ownerLiveness
     // entirely and unresolvedCount keeps the --agent precedent (it reflects
-    // the FILTERED set — full-inventory semantics stay with the default
-    // MCP scope, which passes no row filters).
+    // the FILTERED set — full-inventory semantics stay with an unfiltered
+    // MCP call, which passes no row filters).
     if (stateFilter !== undefined && facts.state !== stateFilter) continue;
 
     // TD-153: --since keeps runs with provable activity INSIDE the last
     // sinceMs window (inclusive lower bound, from the same single nowMs
     // snapshot liveness uses — the direction opposite to prune --older-than,
     // which selects the over-age tail). Keyed on summaryWindowMs (the ONE
-    // transcript-updated window key shared with the M12-20 history filter):
-    // legacy no-envelope transcripts keep the historic last-event-ts reading;
-    // a run whose updatedAt cannot be placed in time is excluded (fail-closed
-    // — cannot be proven in-window).
+    // transcript-updated window key): legacy no-envelope transcripts keep the
+    // historic last-event-ts reading; a run whose updatedAt cannot be placed in
+    // time is excluded (fail-closed — cannot be proven in-window).
     if (sinceMs !== undefined) {
       const ms = summaryWindowMs(facts);
       if (!Number.isFinite(ms) || ms < now - sinceMs) continue;
-    }
-
-    // M12-20 history: bounded INCLUSIVE range filter on the transcript-derived
-    // summary updatedAt (NOT filesystem mtime). A run whose updatedAt cannot be
-    // placed in time (null/unparseable) is excluded — it cannot be proven
-    // in-window. Terminal + active + unresolved runs are all eligible here;
-    // history never forces activeOnly.
-    if (scanScope === "history") {
-      const range = historyRange && Number.isFinite(historyRange.fromMs) && Number.isFinite(historyRange.toMs)
-        ? historyRange : null;
-      if (!range) continue;
-      const ms = summaryWindowMs(facts);
-      if (!Number.isFinite(ms) || ms < range.fromMs || ms > range.toMs) continue;
     }
 
     // M12-15: closed-set activity classification. Computed once per run AFTER
@@ -565,30 +488,22 @@ export async function listRuns(input) {
       } else {
         activityStatus = "unresolved";
         activityBasis = "no_fresh_owner_heartbeat";
-        // unresolvedCount is the FULL-INVENTORY health signal — it is only
-        // meaningful in the default scope (the only scope that scans the whole
-        // inventory). active/history intentionally do not surface it.
-        if (scanScope === undefined) {
-          unresolvedCount += 1;
-          // TD-341：unresolved 候选与计数同一判定点收集（缺 updatedAt 如实为
-          // null，排序垫底；上限截断在收尾做，这里先收全量内存内小数组）。
-          if (collectUnresolved) {
-            unresolvedCandidates.push({ runId, updatedAt: facts.updatedAt ?? null });
-          }
+        // unresolvedCount is the FULL-INVENTORY health signal (pre-limit,
+        // independent of activeOnly).
+        unresolvedCount += 1;
+        // TD-341：unresolved 候选与计数同一判定点收集（缺 updatedAt 如实为
+        // null，排序垫底；上限截断在收尾做，这里先收全量内存内小数组）。
+        if (collectUnresolved) {
+          unresolvedCandidates.push({ runId, updatedAt: facts.updatedAt ?? null });
         }
       }
     }
 
-    // activeOnly (default scope, MCP preflight activeRuns / CLI) returns ONLY proven-active
+    // activeOnly (MCP preflight activeRuns / CLI) returns ONLY proven-active
     // runs. Terminal / unknown / unresolved runs are excluded — but unresolved
     // stays discoverable via the ordinary list and is counted in unresolvedCount
     // (full scan, pre-limit, independent of activeOnly).
     if (activeOnly && activityStatus !== "active") continue;
-    // M12-20 active scope: include ONLY proven-active runs. A stale / corrupt /
-    // missing heartbeat, a terminal state, or an unknown state is excluded —
-    // NEVER inferred failed/dead/stopped (the run may still be running; the
-    // Owner can find it via the default list or a history window).
-    if (scanScope === "active" && activityStatus !== "active") continue;
 
     const summary = finalizeSummary(runId, facts, knownAgentIds, input);
     if (!summary) continue;
@@ -614,29 +529,21 @@ export async function listRuns(input) {
     summaries.length = limit;
   }
 
-  // M12-20: the default scope (no scanScope — MCP recentRuns / CLI) reports the
-  // full-scan unresolvedCount. active/history instead echo scanScope so a client
-  // can guard mode/epoch races; they NEVER surface unresolvedCount (the full
-  // inventory is intentionally not scanned in active, and history is a bounded
-  // window — neither is the full-inventory health signal).
-  if (scanScope === undefined) {
-    // TD-341：候选只在显式要求时随结果返回（内部用途；updatedAt 新到旧、null
-    // 垫底、runId 升序破平，按上限截断——超出上限的照旧只计入 unresolvedCount）。
-    if (collectUnresolved) {
-      unresolvedCandidates.sort((a, b) => {
-        const tsA = a.updatedAt ?? "";
-        const tsB = b.updatedAt ?? "";
-        if (tsA !== tsB) return tsB.localeCompare(tsA); // descending（null/空垫底）
-        return a.runId.localeCompare(b.runId); // ascending tiebreak
-      });
-      return {
-        runs: summaries,
-        matchedCount,
-        unresolvedCount,
-        unresolvedCandidates: unresolvedCandidates.slice(0, unresolvedCandidatesCap),
-      };
-    }
-    return { runs: summaries, matchedCount, unresolvedCount };
+  // TD-341：候选只在显式要求时随结果返回（内部用途；updatedAt 新到旧、null
+  // 垫底、runId 升序破平，按上限截断——超出上限的照旧只计入 unresolvedCount）。
+  if (collectUnresolved) {
+    unresolvedCandidates.sort((a, b) => {
+      const tsA = a.updatedAt ?? "";
+      const tsB = b.updatedAt ?? "";
+      if (tsA !== tsB) return tsB.localeCompare(tsA); // descending（null/空垫底）
+      return a.runId.localeCompare(b.runId); // ascending tiebreak
+    });
+    return {
+      runs: summaries,
+      matchedCount,
+      unresolvedCount,
+      unresolvedCandidates: unresolvedCandidates.slice(0, unresolvedCandidatesCap),
+    };
   }
-  return { runs: summaries, matchedCount, scanScope };
+  return { runs: summaries, matchedCount, unresolvedCount };
 }

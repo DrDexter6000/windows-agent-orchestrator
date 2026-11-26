@@ -20,7 +20,6 @@ import {
   LEAD_TEXT_EXCERPT_CAP,
   LEAD_PAGE_DEFAULT,
   LEAD_PAGE_HARD_CAP,
-  OWNER_TEXT_EXCERPT_CAP,
   OTHER_EVENT_LABEL,
   computeEventSnapshotDigestForTest,
   // M12-19: typed cursor-rejection signal + bounded recovery SSOT.
@@ -86,7 +85,6 @@ function snap(events, opts = {}) {
 function project(events, opts = {}) {
   return projectRunActivity(snap(events), {
     runId: RUN_ID,
-    audience: "lead",
     ...opts,
   });
 }
@@ -532,34 +530,24 @@ test("#11c-filter M12-16: correction is a member of ACTIVITY_CATEGORIES (filtera
 });
 
 // =====================================================================
-// #15 owner and lead modes share classifiers/cursor/redaction but expose different caps
+// #15 the Lead view's text / page caps are bounded (the Owner audience was retired in 145a)
 // =====================================================================
-test("#15 owner and lead share classification+redaction+cursor; differ only in caps", () => {
+test("#15 the single Lead view bounds the text excerpt and uses the lead page default", () => {
   resetSeq();
-  const longText = "z".repeat(OWNER_TEXT_EXCERPT_CAP + 50);
+  const longText = "z".repeat(LEAD_TEXT_EXCERPT_CAP + 50);
   const events = [
     msgEvent("assistant", longText),
     cmdEvent(1),
     fileWrittenEvent("src/a.js"),
     stateEvent("completed"),
   ];
-  const lead = projectRunActivity(snap(events), { runId: RUN_ID, audience: "lead" });
-  const owner = projectRunActivity(snap(events), { runId: RUN_ID, audience: "owner" });
-  // SAME closed-set categories/order/counts (shared classifier).
-  assert.deepEqual(lead.entries.map((e) => e.category), owner.entries.map((e) => e.category));
-  assert.deepEqual(lead.counts, owner.counts);
-  assert.equal(lead.total, owner.total);
-  // SAME redaction policy (no raw payload in either).
-  assert.equal(lead.entries[2].path, owner.entries[2].path);
-  // DIFFERENT text caps: owner excerpt is strictly larger than lead.
-  assert.ok(owner.entries[0].text.length > lead.entries[0].text.length, "owner text cap larger");
-  assert.ok(lead.entries[0].text.length <= LEAD_TEXT_EXCERPT_CAP);
-  assert.ok(owner.entries[0].text.length <= OWNER_TEXT_EXCERPT_CAP);
+  const lead = projectRunActivity(snap(events), { runId: RUN_ID });
+  assert.equal(lead.entries[0].text.length, LEAD_TEXT_EXCERPT_CAP, "the excerpt stops at the lead cap");
   assert.equal(lead.entries[0].truncated, true);
-  // cursor machinery shared: a lead page-1 cursor is structurally valid and the
-  // codec round-trips identically for both audiences.
-  const leadMulti = projectRunActivity(snap([...events, ...events]), { runId: RUN_ID, audience: "lead", pageSize: 2 });
-  assert.ok(leadMulti.nextCursor, "cursor emitted for multi-page lead view");
+  assert.equal(lead.pageSize, LEAD_PAGE_DEFAULT, "the default page size is the lead default");
+  // The cursor machinery still round-trips.
+  const leadMulti = projectRunActivity(snap([...events, ...events]), { runId: RUN_ID, pageSize: 2 });
+  assert.ok(leadMulti.nextCursor, "cursor emitted for multi-page view");
   const dec = decodeActivityCursor(leadMulti.nextCursor);
   assert.equal(dec.v, 1);
   assert.ok(Number.isInteger(dec.p));
@@ -681,22 +669,9 @@ test("secrets in backend and state (top-level facts) are redacted before the lab
 });
 
 // =====================================================================
-// CURSOR VIEW BINDING (closeout): the view digest now includes the audience
-// and the canonicalized UNIQUE sorted filter set, so a Lead cursor can never
-// be accepted by the owner view, and duplicate-category filters are one view.
+// CURSOR VIEW BINDING (closeout): the view digest includes the canonicalized
+// UNIQUE sorted filter set and afterSeq, so duplicate-category filters are one view.
 // =====================================================================
-test("a Lead cursor is REJECTED by the owner view (audience bound in view digest)", () => {
-  resetSeq();
-  const events = [];
-  for (let i = 0; i < 15; i += 1) events.push(msgEvent("assistant", `m${i}`));
-  const leadPage = projectRunActivity(snap(events), { runId: RUN_ID, audience: "lead", pageSize: 5 });
-  assert.ok(leadPage.nextCursor, "lead page 1 has a cursor");
-  assert.throws(
-    () => projectRunActivity(snap(events), { runId: RUN_ID, audience: "owner", cursor: leadPage.nextCursor, pageSize: 5 }),
-    /view|filter/,
-    "owner view must reject a Lead cursor",
-  );
-});
 
 test("duplicate categories collapse: a continuation with a canonical-equivalent filter set is accepted", () => {
   resetSeq();
@@ -722,7 +697,7 @@ test("cross-afterSeq cursor REJECTS (afterSeq bound in view digest)", () => {
 // =====================================================================
 // PAGESIZE (closeout): an explicitly provided invalid pageSize is REJECTED,
 // never silently clamped (project convention: invalid values are rejected,
-// not masked). Omitted/null still means the per-audience default.
+// not masked). Omitted/null still means the lead default.
 // =====================================================================
 test("invalid explicitly-provided pageSize REJECTED, never silently clamped", () => {
   resetSeq();
@@ -740,9 +715,9 @@ test("invalid explicitly-provided pageSize REJECTED, never silently clamped", ()
 //
 // asc default preserves EVERY existing Lead behavior AND old asc cursor
 // digest compatibility (byte-identical view digest). desc gives latest-first
-// Owner bootstrap, is cursor-bound, stable on an append-only frozen snapshot,
-// and rejects cross-order/cross-audience/cross-run/filter cursors. desc never
-// changes the closed-set classifier, redaction-before-bound, or caps.
+// reads, is cursor-bound, stable on an append-only frozen snapshot, and
+// rejects cross-order/cross-run/filter cursors. desc never changes the
+// closed-set classifier, redaction-before-bound, or caps.
 // =====================================================================
 
 // Build a multi-page snapshot so cursors are emitted.
@@ -857,17 +832,6 @@ test("ORDER cross-order cursor REJECTS both directions (view digest binds order)
     () => project(events, { cursor: descPage.nextCursor, pageSize: 5 }),
     /view|filter|order/,
     "asc view rejects a desc cursor",
-  );
-});
-
-test("ORDER cross-audience cursor still rejects for desc (audience+order both bound)", () => {
-  const events = multiPageEvents(15);
-  const ownerDesc = projectRunActivity(snap(events), { runId: RUN_ID, audience: "owner", order: "desc", pageSize: 5 });
-  assert.ok(ownerDesc.nextCursor);
-  // A lead desc view must reject the owner desc cursor (audience differs).
-  assert.throws(
-    () => projectRunActivity(snap(events), { runId: RUN_ID, audience: "lead", order: "desc", cursor: ownerDesc.nextCursor, pageSize: 5 }),
-    /view|filter|order/,
   );
 });
 
@@ -1005,7 +969,7 @@ test("M12-19 proj: cross-run cursor rejects via the typed CursorRejectedError (n
   // Cursor ISSUED for RUN_ID over RUN_ID's events.
   const eventsA = [];
   for (let i = 0; i < 15; i += 1) eventsA.push(msgEvent("assistant", `m${i}`));
-  const page1 = projectRunActivity(snap(eventsA), { runId: RUN_ID, audience: "lead", pageSize: 5 });
+  const page1 = projectRunActivity(snap(eventsA), { runId: RUN_ID, pageSize: 5 });
   assert.ok(page1.nextCursor);
   // A DIFFERENT run's events (bound to run_OTHER) replayed with RUN_ID's cursor.
   // The envelope check passes (events belong to run_OTHER); the cursor's runId

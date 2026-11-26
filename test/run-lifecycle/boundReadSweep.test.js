@@ -2397,7 +2397,7 @@ test("R20C-DB-1: 篡改探针 + 合法/legacy 回归 — --latest 排序键 = �
 //       喂 report() PASS/判定的假绿方向）、runStop.js:137（授权失败回显
 //       terminalState 绑定，boundReportScope 语义——授权检查先于 session
 //       门，pre-envelope legacy 可达该路径，保持历史回显）、runList.js:112
-//       （updatedAt = 末绑定事件 ts——排序/historyRange 键与 R20-C 已绑的
+//       （updatedAt = 末绑定事件 ts——排序/--since 键与 R20-C 已绑的
 //       --latest 排序键同形状、内部自洽）。
 //
 // 探针诚实口径（同本文件既有各节）：只验跨 run/无信封形状；篡改尾条用
@@ -2509,7 +2509,7 @@ test("R21-AW-6: 篡改探针 — 终态快照的 compact 重建只含本 run 绑
   } finally { cleanupDir(dir); }
 });
 
-// ----- W3：runList updatedAt（排序 / historyRange 键） -----
+// ----- W3：runList updatedAt（排序 / --since 键） -----
 
 test("R21-LST-3: 篡改探针 — runs list 行 updatedAt/排序只由本 run 绑定事件末条 ts 供给（外 run 远期尾条不再拉动）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-r21-lst3-"));

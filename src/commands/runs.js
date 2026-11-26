@@ -117,6 +117,8 @@ import {
 import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
 import { parseOptions, resolveTargetCwd, loadPrompt } from "./shared.js";
+// 第 145a 批：`runs dashboard --web` 的退役文案（与 `wao ask` 同一个墓碑写法）。
+import { RUNS_DASHBOARD_WEB_RETIRED_MESSAGE } from "../cliHelp.js";
 // 第 137a 批：`runs continue --delivery-spec-file` 与 `wao run` 同一个解析器与
 // 文件格式（同层 commands 模块间的既有写法，如 lifecycle.js ← run.js）。
 import { loadDeliverySpec } from "./run.js";
@@ -159,12 +161,13 @@ import { validateBoundedWaitTimeout } from "../application/timeoutPolicy.js";
 import { deliveryContinuableHint } from "../application/runContinue.js";
 // 第 120 批：谱系派生"被取代"（与 lead_preflight / 交付读面 / 回收同一份实现）。
 import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGate } from "../application/lineageSupersession.js";
-// M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
-// reuses the SINGLE application SSOTs — no second parser/classifier/redactor).
-// Shared workspace authority (proveWorkspaceRoot) + registry IDs (readRegistry).
+// M12-8D: `wao dashboard` reuses the ownerDashboardServer boundary.
+// 第 145a 批：`runs dashboard --web` 退役，runDashboardWeb 只剩 `wao dashboard`
+// 一个调用方——原来只为旧路径保留的"非 Git 目录也能启动"的 fail-soft 分支、
+// 工作区证明与注册表读取随旧界面一起删除。
 import { createOwnerDashboardServer } from "../ownerDashboardServer.js";
 import { proveWorkspaceRoot } from "../application/workspaceBinding.js";
-import { readRegistry, KNOWN_BACKENDS } from "../registry.js";
+import { KNOWN_BACKENDS } from "../registry.js";
 // 第 137a 批：三条 CLI 入口委托的服务与其边界常量——与 MCP run_continue /
 // run_correct / run_delivery_repackage 同一份（不抄第二份清单或上限）。
 import {
@@ -2359,22 +2362,13 @@ async function runsDiagnoseCommand(args, config) {
  * 🟢 工具域：只读聚合，绝不 retry/stop/改状态。省 Lead 在多命令间轮询的精力。
  * 支持：--watch N（N 秒重刷）/ --format json / --agent <id> 过滤 / --latest N 取最近 N 个。
  */
-export async function runsDashboardCommand(args, config, injections = {}) {
+export async function runsDashboardCommand(args, config) {
+  // 第 145a 批：`runs dashboard --web` 退役——固定文案、非零退出（`wao ask` 同款）。
+  // 在 parseOptions 之前按原始参数判定：`--web` 不再是一个"已实现"的旗标，帮助行也删了。
+  if (args.includes("--web")) throw new Error(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE);
   const options = parseOptions(args);
 
-  // M12-8D: `--web` launches a local read-only Owner dashboard HTTP boundary.
-  // It is mutually exclusive with the live text refresh and JSON output. The
-  // non-web path below is byte-compatible with the prior behavior.
-  if (options.web) {
-    if (options.watch !== undefined && options.watch !== false) {
-      throw new Error("--web cannot be combined with --watch");
-    }
-    if (options.format === "json") {
-      throw new Error("--web cannot be combined with --format json");
-    }
-    await runDashboardWeb(options, config, injections);
-    return;
-  }
+  // 不带 --web 的文本仪表盘一字不动（--watch / --format json / --agent / --latest）。
 
   const runDir = resolve(options.runDir ?? config.runDir);
   const agentFilter = options.agent;
@@ -2485,85 +2479,39 @@ export async function runsDashboardCommand(args, config, injections = {}) {
 }
 
 /**
- * M12-8D: launch the local Owner read-only dashboard HTTP boundary and stay alive
- * until SIGINT/SIGTERM. Reuses ownerDashboardServer (the single loopback
+ * M12-8D / 第 145a 批: launch the local Owner read-only dashboard HTTP boundary and
+ * stay alive until SIGINT/SIGTERM. Reuses ownerDashboardServer (the single loopback
  * read-only boundary) — there is no second parser/classifier/redactor here.
  *
- * Server-owned inputs (never client-supplied) come from the SHARED authorities:
- *   - runDir         — config.runDir (same SSOT as the text dashboard),
- *   - workspaceRoot  — proveWorkspace(targetCwd) canonical Git root (the SAME
- *                      ownership authority runStop/listRuns use),
- *   - knownAgentIds  — readRegistry() agent ids (the SAME registry authority).
+ * The ONLY caller is the top-level `wao dashboard` launcher. `runs dashboard --web`
+ * is retired, so the legacy-only seams are gone: no fail-soft workspace proof, no
+ * registry read, no target-cwd fallback. The strict Git proof lives in the launcher.
  *
- * It prints exactly one URL — http://127.0.0.1:<port>/#token=<64hex> — plus a
+ * Server-owned inputs come from the SHARED authorities:
+ *   - runDir — config.runDir / an explicit --run-dir (same SSOT as the text dashboard).
+ *
+ * It prints exactly one URL — http://127.0.0.1:<port>/v2/#token=<64hex> — plus a
  * Ctrl-C line, then blocks until a shutdown signal. It performs NO control
- * action, opens no browser, writes no config, and changes no selection.
+ * action, writes no config, and changes no selection.
  *
  * Every external dependency is injectable so tests cover startup / fragment /
- * conflict / shutdown WITHOUT a real socket, git, registry, or signal.
+ * shutdown WITHOUT a real socket or signal.
  *
- * @param {object} options — parsed CLI options (web/port/runDir/cwd/…)
- * @param {object} config — process config (runDir/registry/stateDir)
+ * @param {object} options — parsed CLI options (port/runDir)
+ * @param {object} config — process config (runDir/bypassed registry/stateDir)
  * @param {object} [injections]
  * @param {Function} [injections.createServerFn] — server factory (testing)
- * @param {Function} [injections.proveWorkspaceFn] — workspace authority (testing)
- * @param {Function} [injections.readRegistryFn] — registry reader (testing)
  * @param {{wait:Function, cancel?:Function}} [injections.lifecycle] — shutdown waitable (testing)
  * @param {Function} [injections.log] — stdout sink (testing)
- * @param {string} [injections.targetCwd] — pre-resolved target cwd (M12-8F
- *   `wao dashboard` launcher; absent → legacy resolveTargetCwd chain)
- * @param {string} [injections.workspaceRoot] — pre-resolved STRICT canonical
- *   Git root (M12-8F launcher; absent → legacy fail-soft prove fallback)
  * @param {Function} [injections.afterListen] — advisory post-listen hook,
- *   receives the printed URL (M12-8F auto-open; absent → never opens)
+ *   receives the printed URL (the launcher's auto-open; absent → never opens)
  */
 export async function runDashboardWeb(options, config, injections = {}) {
   const createServer = injections.createServerFn ?? createOwnerDashboardServer;
-  // dashboard 只读 root；dirty 不参与（TD-138：省一次 git status）。
-  const prove = injections.proveWorkspaceFn ?? proveWorkspaceRoot;
-  const readReg = injections.readRegistryFn ?? readRegistry;
   const lifecycle = injections.lifecycle ?? createProcessLifecycle();
   const log = injections.log ?? ((s) => console.log(s));
 
-  // M12-8F: the `wao dashboard` launcher pre-resolves BOTH the target cwd and
-  // the STRICT canonical Git root and threads them in. Legacy `runs dashboard
-  // --web` passes neither and keeps the existing resolveTargetCwd + fail-soft
-  // prove behavior byte-for-byte.
-  const targetCwd = injections.targetCwd ?? resolveTargetCwd(options);
   const runDir = resolve(options.runDir ?? config.runDir);
-
-  // Shared workspace authority: the canonical Git root of the target cwd. If the
-  // cwd is not a provable workspace, the dashboard still starts — no run matches
-  // ownership (shown as cross_workspace) rather than crashing the command.
-  // (M12-8F: the launcher already proved the root strictly before listen.)
-  let workspaceRoot;
-  if (injections.workspaceRoot !== undefined) {
-    workspaceRoot = injections.workspaceRoot;
-  } else {
-    try {
-      workspaceRoot = prove(targetCwd).root;
-    } catch {
-      workspaceRoot = targetCwd;
-    }
-  }
-
-  // Shared registry authority: agent ids for agentId validation. Registry
-  // unavailable → agentIds render as "unknown" (fail soft, do not crash).
-  // P0 (2026-10-03): readRegistry returns {listAgents, getAgent, rawEntries}
-  // and NEVER had an `agents` array — the old Array.isArray(reg.agents) check
-  // was a day-one wiring defect that silently emptied knownAgentIds (every
-  // run showed agentId "unknown" in production; injected test fakes matched
-  // the wrong shape and hid it). Same shape family as the M12-25B finding in
-  // the MCP path (src/mcp/server.js knownAgentIds block).
-  let knownAgentIds = [];
-  try {
-    const reg = await readReg(resolve(config.registry ?? "config/agents.json"));
-    if (reg && typeof reg.listAgents === "function") {
-      knownAgentIds = reg.listAgents()
-        .map((a) => a && a.id)
-        .filter((id) => typeof id === "string");
-    }
-  } catch { /* registry unavailable → "unknown" agentIds */ }
 
   // Optional --port: 0 (ephemeral, default) or integer. The server validates the
   // full 0|1024..65535 range fail-closed; here we only coerce the CLI string.
@@ -2574,17 +2522,17 @@ export async function runDashboardWeb(options, config, injections = {}) {
     port = n;
   }
 
-  const server = createServer({ runDir, workspaceRoot, knownAgentIds, port });
+  const server = createServer({ runDir, port });
   const addr = await server.listen();
-  // The token lives ONLY in the URL fragment; the server never receives it.
-  const url = `http://127.0.0.1:${addr.port}/#token=${server.token}`;
+  // 第 145a 批：默认入口是 /v2/。旧书签的 /#token=… 与 /index.html 由服务端 302 到
+  // /v2/，浏览器跨重定向保留片段，所以长期令牌仍然只走片段、不进查询串与日志。
+  const url = `http://127.0.0.1:${addr.port}/v2/#token=${server.token}`;
   log(url);
   log("(Ctrl-C to stop)");
 
   // M12-8F: advisory post-listen hook — the `wao dashboard` launcher auto-opens
-  // the printed URL here (exactly once) unless --no-open. Legacy passes no hook
-  // and never opens. A failing hook is ADVISORY: the URL is already printed, so
-  // warn concisely and keep serving.
+  // the printed URL here (exactly once) unless --no-open. A failing hook is
+  // ADVISORY: the URL is already printed, so warn concisely and keep serving.
   if (typeof injections.afterListen === "function") {
     try {
       await injections.afterListen(url);

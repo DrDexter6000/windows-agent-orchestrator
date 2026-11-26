@@ -427,7 +427,6 @@ test("RO-R5: NO HARD GATE — a readOnly run with confirmed writes reaches its N
     });
     const page = projectRunActivity(snapshot, {
       runId: run.transcript.context.runId,
-      audience: "lead",
     });
     assert.equal(page.readOnlyObservation.status, "writes_observed");
     assert.equal(page.readOnlyObservation.complete, true);

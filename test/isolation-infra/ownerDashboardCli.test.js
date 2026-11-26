@@ -1,24 +1,27 @@
 // test/ownerDashboardCli.test.js
 //
-// M12-8D Package D — `runs dashboard --web` CLI adapter (TDD).
+// `runDashboardWeb` — the launcher behind `wao dashboard` (145a: `runs dashboard
+// --web` is retired; this is the only caller left, so the old legacy seams are
+// gone with it).
 //
-// The web command is exercised via INJECTION: a fake server factory, a fake
-// workspace authority, a fake registry reader, a controllable shutdown lifecycle,
-// and a capturing stdout sink. No real socket is bound, no git is run, no
-// registry file is read, and no OS signal is delivered — so startup / fragment /
-// conflict / shutdown are all deterministic.
+// The web command is exercised via INJECTION: a fake server factory, a controllable
+// shutdown lifecycle, and a capturing stdout sink. No real socket is bound, no git
+// is run, no registry file is read, and no OS signal is delivered — so startup /
+// fragment / retirement / shutdown are all deterministic.
 //
 // Non-web behavior is byte-compatible (covered by test/cli.test.js); here we
-// only assert the new --web surface.
+// only assert the web surface.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { runDashboardWeb, runsDashboardCommand } from "../../src/commands/runs.js";
-import { readRegistry } from "../../src/registry.js";
+import { RUNS_DASHBOARD_WEB_RETIRED_MESSAGE } from "../../src/cliHelp.js";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
 // Flush the microtask + macrotask queues so an async function can run until it
 // parks at an injected await (here: lifecycle.wait()).
@@ -56,8 +59,6 @@ const baseConfig = { runDir: "/runs", registry: "config/agents.json" };
 function defaultInjections(server, lc, extras = {}) {
   return {
     createServerFn: () => server,
-    proveWorkspaceFn: (cwd) => ({ root: cwd }),
-    readRegistryFn: async () => ({ listAgents: () => [] }),
     lifecycle: lc,
     log: () => {},
     ...extras,
@@ -67,7 +68,7 @@ function defaultInjections(server, lc, extras = {}) {
 // =====================================================================
 // STARTUP + FRAGMENT — exactly one URL (token in fragment) + Ctrl-C line
 // =====================================================================
-test("STARTUP: prints exactly one URL (#token=<64hex>, path '/') + Ctrl-C line", async () => {
+test("STARTUP: prints exactly one URL (#token=<64hex>, the /v2/ entry) + Ctrl-C line", async () => {
   const lc = makeControllableLifecycle();
   const logs = [];
   const server = makeFakeServer({ port: 7654, token: "ab".repeat(32) });
@@ -78,8 +79,6 @@ test("STARTUP: prints exactly one URL (#token=<64hex>, path '/') + Ctrl-C line",
     baseConfig,
     {
       createServerFn: (cfg) => { created = cfg; return server; },
-      proveWorkspaceFn: (cwd) => ({ root: "/canonical/ws" }),
-      readRegistryFn: async () => ({ listAgents: () => [{ id: "coder_low" }] }),
       lifecycle: lc,
       log: (s) => logs.push(s),
     },
@@ -93,15 +92,13 @@ test("STARTUP: prints exactly one URL (#token=<64hex>, path '/') + Ctrl-C line",
   assert.equal(settled, false, "stays alive until shutdown signal");
   assert.equal(server.listenCalled, true, "listened");
   assert.equal(logs.length, 2, "exactly two log lines (no auto-open / no extra noise)");
-  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:7654\/#token=[0-9a-f]{64}$/, "URL shape: host:port/#token=<64hex>");
+  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:7654\/v2\/#token=[0-9a-f]{64}$/, "URL shape: host:port/v2/#token=<64hex>");
   assert.ok(logs[0].endsWith("#token=" + "ab".repeat(32)), "token is the server-issued 64-hex");
   assert.ok(!logs[0].includes("?"), "no query string — token only in fragment");
   assert.equal(logs[1], "(Ctrl-C to stop)");
 
-  // Server-owned inputs threaded from the SHARED authorities.
+  // Server-owned inputs threaded from the ONE remaining caller: the run directory and the port.
   assert.equal(created.port, 7654);
-  assert.deepEqual(created.knownAgentIds, ["coder_low"]);
-  assert.equal(created.workspaceRoot, "/canonical/ws");
   assert.ok(typeof created.runDir === "string" && created.runDir.length > 0);
 
   // Shutdown: resolving the lifecycle closes the server and the command returns.
@@ -121,46 +118,41 @@ test("FRAGMENT: default port (ephemeral) — printed URL uses the listen port, n
     baseConfig,
     {
       createServerFn: (cfg) => { created = cfg; return server; },
-      proveWorkspaceFn: (cwd) => ({ root: cwd }),
-      readRegistryFn: async () => ({ listAgents: () => [] }),
       lifecycle: lc,
       log: (s) => logs.push(s),
     },
   );
   await flush();
   assert.equal(created.port, 0, "no --port → ephemeral (0) sent to the server");
-  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:4321\/#token=[0-9a-f]{64}$/, "URL uses listen port");
+  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:4321\/v2\/#token=[0-9a-f]{64}$/, "URL uses listen port and the /v2/ entry");
   lc.resolve();
   await p;
 });
 
 // =====================================================================
-// CONFLICT — --web rejects --watch and --format json (async → assert.rejects)
+// RETIRED — `runs dashboard --web` fails with the fixed text (the `wao ask` style)
 // =====================================================================
-test("CONFLICT: --web with --watch is rejected (clear error, before any server)", async () => {
-  await assert.rejects(
-    () => runsDashboardCommand(["--web", "--watch", "5"], baseConfig),
-    /--web.*--watch|--watch.*--web/i,
-  );
+test("RETIRED: runs dashboard --web throws the fixed text pointing at wao dashboard (never reaches a server)", async () => {
+  for (const args of [["--web"], ["--web", "--port", "7654"], ["--web", "--watch", "5"], ["--web", "--format", "json"]]) {
+    await assert.rejects(
+      () => runsDashboardCommand(args, baseConfig),
+      (error) => error.message === RUNS_DASHBOARD_WEB_RETIRED_MESSAGE,
+      args.join(" "),
+    );
+  }
+  assert.match(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE, /runs dashboard --web/);
+  assert.match(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE, /wao dashboard/);
 });
 
-test("CONFLICT: --web with --format json is rejected", async () => {
-  await assert.rejects(
-    () => runsDashboardCommand(["--web", "--format", "json"], baseConfig),
-    /--web.*--format|--format.*--web/i,
-  );
-});
-
-test("CONFLICT: --web alone does NOT throw on the conflict checks", async () => {
-  // Reaches runDashboardWeb (which then parks at the injected lifecycle). The
-  // conflict checks themselves must pass for plain --web.
-  const lc = makeControllableLifecycle();
-  const server = makeFakeServer();
-  const p = runsDashboardCommand(["--web"], baseConfig, defaultInjections(server, lc));
-  await flush();
-  assert.equal(server.listenCalled, true, "--web reached the server");
-  lc.resolve();
-  await p;
+test("RETIRED: the CLI exits non-zero with that text (and prints no URL)", () => {
+  const r = spawnSync(process.execPath, [join(ROOT, "src", "cli.js"), "runs", "dashboard", "--web"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  assert.equal(r.status, 1, `exit code 1 (stderr: ${r.stderr})`);
+  assert.ok(r.stderr.includes(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE), "the fixed text is on stderr");
+  assert.ok(!/http:\/\/127\.0\.0\.1/.test(r.stdout + r.stderr), "no dashboard URL is printed");
 });
 
 // =====================================================================
@@ -183,34 +175,33 @@ test("PORT: non-integer --port is rejected before the server is created", async 
 });
 
 // =====================================================================
-// SHARED AUTHORITY — workspace + registry results threaded; fail-soft
+// AUTHORITY — the server-owned runDir + explicit port are threaded; no legacy
+// workspace/registry resolution remains (145a: only `wao dashboard` calls this)
 // =====================================================================
-test("AUTHORITY: proveWorkspace + readRegistry outputs threaded to the server", async () => {
+test("AUTHORITY: the server receives the runDir from config and the explicit port; nothing legacy is resolved", async () => {
   const lc = makeControllableLifecycle();
   let created = null;
-  let proveCalled = false;
-  let registryCalled = false;
   const p = runDashboardWeb(
-    { web: true },
+    { web: true, port: "7654", runDir: "/explicit/runs" },
     baseConfig,
     {
       createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-      proveWorkspaceFn: () => { proveCalled = true; return { root: "/canonical/root" }; },
-      readRegistryFn: async () => { registryCalled = true; return { listAgents: () => [{ id: "coder_hq" }, { id: "kimi_low" }] }; },
+      // Legacy seams are gone: providing them changes nothing, because nothing reads them.
+      proveWorkspaceFn: () => { throw new Error("must not be called"); },
+      readRegistryFn: async () => { throw new Error("must not be called"); },
       lifecycle: lc,
       log: () => {},
     },
   );
   await flush();
-  assert.equal(proveCalled, true, "shared workspace authority invoked");
-  assert.equal(registryCalled, true, "shared registry reader invoked");
-  assert.equal(created.workspaceRoot, "/canonical/root", "canonical root threaded");
-  assert.deepEqual(created.knownAgentIds, ["coder_hq", "kimi_low"], "registry ids threaded");
+  assert.deepEqual(Object.keys(created).sort(), ["port", "runDir"], "exactly the two server-owned inputs remain");
+  assert.equal(created.port, 7654);
+  assert.equal(created.runDir, resolve("/explicit/runs"), "an explicit --run-dir wins over config.runDir (resolved from the caller cwd)");
   lc.resolve();
   await p;
 });
 
-test("AUTHORITY: unprovable workspace fails SOFT (dashboard still starts)", async () => {
+test("AUTHORITY: without --run-dir the config runDir is used", async () => {
   const lc = makeControllableLifecycle();
   let created = null;
   const p = runDashboardWeb(
@@ -218,34 +209,12 @@ test("AUTHORITY: unprovable workspace fails SOFT (dashboard still starts)", asyn
     baseConfig,
     {
       createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-      proveWorkspaceFn: () => { throw new Error("not a git repo"); },
-      readRegistryFn: async () => ({ listAgents: () => [] }),
       lifecycle: lc,
       log: () => {},
     },
   );
   await flush();
-  assert.ok(typeof created.workspaceRoot === "string" && created.workspaceRoot.length > 0, "falls back without crashing");
-  lc.resolve();
-  await p;
-});
-
-test("AUTHORITY: registry unavailable fails SOFT (empty knownAgentIds)", async () => {
-  const lc = makeControllableLifecycle();
-  let created = null;
-  const p = runDashboardWeb(
-    { web: true },
-    baseConfig,
-    {
-      createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-      proveWorkspaceFn: (cwd) => ({ root: cwd }),
-      readRegistryFn: async () => { throw new Error("no registry"); },
-      lifecycle: lc,
-      log: () => {},
-    },
-  );
-  await flush();
-  assert.deepEqual(created.knownAgentIds, [], "registry failure → empty ids, no crash");
+  assert.equal(created.runDir, resolve(baseConfig.runDir), "config.runDir resolved for the server");
   lc.resolve();
   await p;
 });
@@ -268,133 +237,4 @@ test("SHUTDOWN: server is closed in a finally (runs even if wait rejects)", asyn
     /signal/,
   );
   assert.equal(server.closeCalled, true, "close ran in finally despite the rejected wait");
-});
-
-// =====================================================================
-// P0 (2026-10-03) — REAL registry shape regression pins.
-//
-// The production readRegistry() has ALWAYS returned {listAgents, getAgent,
-// rawEntries} and never an `agents` array; runDashboardWeb's old
-// Array.isArray(reg.agents) check was a day-one wiring defect that silently
-// emptied knownAgentIds (every production run showed agentId "unknown";
-// injected fakes matched the wrong shape and hid it — same family as the
-// M12-25B finding in the MCP path). These pins bind the dashboard wiring to
-// the REAL reader + REAL file shape so the seam cannot drift silently again.
-// =====================================================================
-
-// Real fs reads park on the libuv thread pool — one setImmediate flush is not
-// enough for the real reader. Bounded poll until the command reaches
-// createServerFn (or fail loudly if it never does).
-async function waitFor(pred, label) {
-  for (let i = 0; i < 200 && !pred(); i++) {
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  assert.ok(pred(), label);
-}
-
-function writeRegistry(dir, agents) {
-  const regPath = join(dir, "agents.json");
-  writeFileSync(regPath, JSON.stringify({ agents }), "utf8");
-  return regPath;
-}
-
-test("P0 REAL-SHAPE: real readRegistry ids reach the server (exact ids, not just non-empty)", async () => {
-  const lc = makeControllableLifecycle();
-  const dir = mkdtempSync(join(tmpdir(), "wao-dash-reg-"));
-  let created = null;
-  try {
-    // codex entries: process backend with no registry-required extras, so the
-    // pin exercises the wiring, not per-backend validation.
-    const regPath = writeRegistry(dir, {
-      coder_hq: { backend: "codex", cwd: "/x" },
-      researcher: { backend: "codex", cwd: "/x" },
-    });
-    const p = runDashboardWeb(
-      { web: true },
-      { ...baseConfig, registry: regPath },
-      {
-        createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-        proveWorkspaceFn: (cwd) => ({ root: cwd }),
-        // NOTE: no readRegistryFn — the PRODUCTION reader runs against a real file.
-        lifecycle: lc,
-        log: () => {},
-      },
-    );
-    await waitFor(() => created !== null, "createServerFn reached (real fs read settled)");
-    assert.deepEqual(created.knownAgentIds, ["coder_hq", "researcher"],
-      "exact real-registry ids threaded (order = file order)");
-    lc.resolve();
-    await p;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("P0 FROZEN-SHAPE: readRegistry exposes listAgents() and no agents array", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-dash-shape-"));
-  try {
-    const regPath = writeRegistry(dir, { coder_hq: { backend: "codex", cwd: "/x" } });
-    const reg = await readRegistry(regPath);
-    assert.equal(typeof reg.listAgents, "function", "listAgents is the dashboard/MCP consumption surface");
-    assert.ok(Array.isArray(reg.listAgents()), "listAgents() returns an array");
-    assert.ok(!Array.isArray(reg.agents), "no agents array on the service shape — consumers must use listAgents()");
-    assert.deepEqual(reg.listAgents().map((a) => a.id), ["coder_hq"], "normalized entries carry id");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("P0 DEGRADED: corrupt registry file fails SOFT (empty ids, no crash)", async () => {
-  const lc = makeControllableLifecycle();
-  const dir = mkdtempSync(join(tmpdir(), "wao-dash-corrupt-"));
-  let created = null;
-  try {
-    const regPath = join(dir, "agents.json");
-    writeFileSync(regPath, "{ not json", "utf8");
-    const p = runDashboardWeb(
-      { web: true },
-      { ...baseConfig, registry: regPath },
-      {
-        createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-        proveWorkspaceFn: (cwd) => ({ root: cwd }),
-        lifecycle: lc,
-        log: () => {},
-      },
-    );
-    await waitFor(() => created !== null, "createServerFn reached despite corrupt registry");
-    assert.deepEqual(created.knownAgentIds, [], "corrupt registry → empty ids (degraded 'unknown'), server still starts");
-    lc.resolve();
-    await p;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("P0 DEGRADED: one malformed entry fails the whole list SOFT (documented readRegistry semantics)", async () => {
-  const lc = makeControllableLifecycle();
-  const dir = mkdtempSync(join(tmpdir(), "wao-dash-badentry-"));
-  let created = null;
-  try {
-    const regPath = writeRegistry(dir, {
-      coder_hq: { backend: "codex", cwd: "/x" },
-      broken: {}, // missing backend → normalizeAgent throws inside listAgents()
-    });
-    const p = runDashboardWeb(
-      { web: true },
-      { ...baseConfig, registry: regPath },
-      {
-        createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-        proveWorkspaceFn: (cwd) => ({ root: cwd }),
-        lifecycle: lc,
-        log: () => {},
-      },
-    );
-    await waitFor(() => created !== null, "createServerFn reached despite malformed entry");
-    assert.deepEqual(created.knownAgentIds, [],
-      "single malformed entry → whole list degrades to empty (agentIds 'unknown'), no crash");
-    lc.resolve();
-    await p;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

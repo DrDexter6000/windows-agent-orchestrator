@@ -110,23 +110,21 @@ test("TD-220: thinking is count-only; envelope labels fixed; collect audits skip
     "isolation_violation"];
   assert.deepEqual([...ENVELOPE_ACTIVITY_LABELS], labels);
   const payload = { text: "SECRET", payload: "SECRET", prompt: "SECRET", parts: [{ text: "SECRET" }], kind: "SECRET" };
-  for (const audience of ["lead", "owner"]) {
-    const r = project([
-      { ...payload, kind: "thinking" },
-      ...types.map((type) => ({ type, ...payload })),
-      { type: "messages.collected", ...payload },
-      { type: "unrecognized", ...payload },
-      { kind: "future_worker_kind", payload: "SECRET" },
-      { type: "toString", ...payload },
-    ], { audience });
-    assert.deepEqual(r.entries[0], { category: "thinking", ts, seq: 1 });
-    assert.deepEqual(r.entries.slice(1, types.length + 1).map((e) => e.kind), labels);
-    for (const e of r.entries.slice(1, types.length + 1)) assert.deepEqual(Object.keys(e).sort(), ["category", "kind", "seq", "ts"]);
-    assert.equal(r.counts.thinking, 1);
-    assert.equal(r.counts.envelope, types.length);
-    assert.equal(r.counts.other, 3);
-    assert.equal(r.total, 1 + types.length + 3);
-    assert.equal(JSON.stringify(r).includes("SECRET"), false);
-    for (const e of r.entries.slice(types.length + 1)) assert.equal(e.label, "[unknown_event]");
-  }
+  const r = project([
+    { ...payload, kind: "thinking" },
+    ...types.map((type) => ({ type, ...payload })),
+    { type: "messages.collected", ...payload },
+    { type: "unrecognized", ...payload },
+    { kind: "future_worker_kind", payload: "SECRET" },
+    { type: "toString", ...payload },
+  ], {});
+  assert.deepEqual(r.entries[0], { category: "thinking", ts, seq: 1 });
+  assert.deepEqual(r.entries.slice(1, types.length + 1).map((e) => e.kind), labels);
+  for (const e of r.entries.slice(1, types.length + 1)) assert.deepEqual(Object.keys(e).sort(), ["category", "kind", "seq", "ts"]);
+  assert.equal(r.counts.thinking, 1);
+  assert.equal(r.counts.envelope, types.length);
+  assert.equal(r.counts.other, 3);
+  assert.equal(r.total, 1 + types.length + 3);
+  assert.equal(JSON.stringify(r).includes("SECRET"), false);
+  for (const e of r.entries.slice(types.length + 1)) assert.equal(e.label, "[unknown_event]");
 });

@@ -1170,7 +1170,7 @@ test("TD-153: listRuns sinceMs 时间窗（新鲜保留/超龄排除/下界含�
     await writeJsonl(dir, "run_old", [
       { type: "run.started", ts: td153Iso(TD153_NOW - 10 * TD153_DAY) },
     ]);
-    // 恰在下界上（NOW - 7d）：含端保留（与 historyRange inclusive 语义一致）
+    // 恰在下界上（NOW - 7d）：含端保留（与 --since inclusive 语义一致）
     await writeJsonl(dir, "run_edge", [
       { type: "run.started", ts: td153Iso(TD153_NOW - 7 * TD153_DAY) },
     ]);

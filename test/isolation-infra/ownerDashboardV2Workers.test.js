@@ -25,7 +25,7 @@
 
 import { test, after, mock } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -60,11 +60,7 @@ function drive(handler, { method = "GET", url = "/", headers = {} } = {}) {
 
 const makeServer = (extra = {}) => createOwnerDashboardServer({
   runDir: "/server/owned/runs",
-  workspaceRoot: "/server/owned/ws",
-  knownAgentIds: ["coder_low"],
   env: {},
-  getOwnerRunsFn: async () => ({ runs: [], returnedCount: 0, matchedCount: 0, truncated: false }),
-  getOwnerActivityFn: async () => ({}),
   nowFn: () => 1_000_000,
   ...extra,
 });
@@ -598,6 +594,38 @@ test("D1 the detail feed: A -> B -> A never shows an old answer — every select
   assert.equal(pending.length, 6);
   assert.equal(pending[5].runId, "run_d");
 });
+
+test("D1b (145a migration) one selection, one request at a time: a refresh while the selection's request is in flight issues no second request, so an older answer can never land after a newer one", async () => {
+  const pending = [];
+  const feed = detail.createDetailFeed({
+    fetchDetail: (runId) => new Promise((resolve) => pending.push({ runId, resolve })),
+    onChange: () => {},
+  });
+  const settle = async () => { await new Promise((resolve) => setImmediate(resolve)); };
+  const answer = (title) => ({ ok: true, body: { status: "ready", generatedAt: GEN, runId: "run_a", identity: { title } } });
+
+  feed.open("run_a");
+  await settle();
+  assert.equal(pending.length, 1, "the selection's one request is on its way");
+  feed.refresh();
+  feed.refresh();
+  feed.refresh();
+  await settle();
+  assert.equal(pending.length, 1, "the refreshes stack nothing: with one request per selection there is no older second answer to arrive late");
+  pending[0].resolve(answer("A"));
+  await settle();
+  assert.equal(feed.get().body.identity.title, "A");
+
+  // Only after it settled does the next refresh issue the next request; the answers stay in order.
+  feed.refresh();
+  await settle();
+  assert.equal(pending.length, 2, "the next refresh asks again");
+  pending[1].resolve(answer("A2"));
+  await settle();
+  assert.equal(feed.get().body.identity.title, "A2", "the newest answer is the one on screen");
+  feed.close();
+});
+
 
 test("D2 the detail feed outcomes: ready, not found, not published yet, a failed refresh keeps the last good data, an answer for another run is no data", async () => {
   const run = finishedRow("run_x");
@@ -2117,9 +2145,10 @@ test("A7 the run numbers named on Overview and Attention open the panel on the W
 
 const directives = (csp) => new Map(csp.split(";").map((d) => d.trim()).filter(Boolean).map((d) => { const [name, ...values] = d.split(/\s+/); return [name, values]; }));
 
-test("G1 CSP: the /v2 files get the legacy policy plus ONE source — blob: in img-src; the legacy page and every data response are not relaxed", async () => {
+test("G1 CSP: the /v2 files get the base policy plus ONE source — blob: in img-src; no other response is relaxed (145a: no legacy page is left)", async () => {
   const s = makeServer();
-  const legacy = (await drive(s.handler, { url: "/" })).headers["content-security-policy"];
+  // The base policy, read from a response that is not a /v2 file (145a: "/" is the redirect, /health a JSON answer).
+  const legacy = (await drive(s.handler, { url: "/health" })).headers["content-security-policy"];
   const base = directives(legacy);
   assert.deepEqual(base.get("img-src"), ["'self'", "data:"]);
   const v2Urls = ["/v2", "/v2/", ...["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "styles.css"].map((f) => `/v2/${f}`)];
@@ -2134,7 +2163,7 @@ test("G1 CSP: the /v2 files get the legacy policy plus ONE source — blob: in i
     assert.ok(!/unsafe-inline|unsafe-eval|\*|https?:|data:[^ ;]*script/.test(csp), url);
     assert.ok(!/script-src|style-src|connect-src|font-src|frame-src|media-src/.test(csp), `${url}: no further source list`);
   }
-  // Not relaxed: the legacy page and its files, the 404, the data routes (JSON and 401), the health route.
+  // Not relaxed: the redirect, the retired assets (404), the data routes (JSON and 401), the health route.
   const auth = { authorization: `Bearer ${s.token}` };
   for (const [url, headers] of [["/", {}], ["/app.js", {}], ["/styles.css", {}], ["/nothing", {}], ["/health", {}], ["/api/overview", auth], ["/api/workers", auth], ["/api/attention", auth], ["/api/worker?runId=run_1", auth], ["/api/overview", {}]]) {
     const csp = (await drive(s.handler, { url, headers })).headers["content-security-policy"];
@@ -2143,14 +2172,14 @@ test("G1 CSP: the /v2 files get the legacy policy plus ONE source — blob: in i
   }
 });
 
-test("G2 reading the brief (the migrated 'no .prompt' guard): /v2 may show the bound brief the server sends — and still reads no session, path, cwd or raw-command field; the legacy guard stays in ownerDashboardWeb.test.js", () => {
+test("G2 reading the brief (the migrated 'no .prompt' guard): /v2 may show the bound brief the server sends — and still reads no session, path, cwd or raw-command field", () => {
   const v2Code = ["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js"].map(codeOf).join("\n");
   assert.match(codeOf("detail.js"), /body\.brief\.text/, "the brief reaches the panel as the server's brief.text");
   assert.match(codeOf("sidebarview.js"), /vm\.brief\.text/, "and is drawn as text");
   assert.doesNotMatch(v2Code, /\.(sessionId|serveUrl|worktreePath|cwd|rawCommand|argv|pid|transcriptPath)\b/, "no session, path or raw-command field is read in /v2");
   assert.doesNotMatch(v2Code, /\.prompt\b/, "the brief is read from the DTO's brief, never from a prompt field");
-  // The legacy file is the one under the old guard, and it is a different file.
-  assert.notEqual(readFileSync(join(V2, "..", "app.js"), "utf8"), readV2("app.js"));
+  // 145a: the legacy file this guard used to be paired with is gone; /v2 is now the only client under guard.
+  assert.equal(existsSync(join(V2, "..", "app.js")), false, "the retired legacy app.js is removed");
 });
 
 test("G3 the closed request set and the single network call, with the panel's routes: detail, image, Activity page, full text and the event stream", () => {
@@ -2208,12 +2237,12 @@ test("G5 the layout of the spec: panel from below the top bar, 45% wide, 1px sea
   assert.match(rule(".wcard-l2"), /white-space:\s*nowrap/);
   assert.match(rule(".wcard-title"), /text-overflow:\s*ellipsis/, "the title is what gives way");
   assert.match(rule(".sb-foot"), /position:\s*sticky/);
-  assert.match(css, /@media \(max-width: 1000px\)[\s\S]*\.sidebar \{ width: 100%/, "a narrow window gives the panel the whole width");
+  assert.match(css, /@media \(width <= 1000px\)[\s\S]*\.sidebar \{ width: 100%/, "a narrow window gives the panel the whole width");
   const html = readV2("index.html");
   assert.match(html, /<aside class="sidebar" id="sidebar" hidden><\/aside>/);
   assert.ok(html.indexOf('id="main"') < html.indexOf('id="sidebar"'));
   // Batch 143b: the /v2 motion guard (curve, durations, reduced motion, reflow-free properties) lives in
-  // ownerDashboardV2Activity.test.js. The legacy UI's styles.css is still motion-free (ownerDashboardBoard).
+  // ownerDashboardV2Activity.test.js. The legacy UI that had its own motion-free guard is retired (145a).
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/, "the motion the design adds is switched off for reduced motion");
 });
 
@@ -2496,6 +2525,8 @@ test("F6 Copy ref carries the event number the evidence names for THIS run (the 
 const cssSource = readV2("styles.css");
 const cssRule = (selector) => new RegExp(`(?:^|\\n)${selector.replace(/[.[\]()|*+?^$\\/]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(cssSource)?.[1] ?? "";
 const px = (text, pattern) => { const m = pattern.exec(text); assert.ok(m, `${pattern} in ${JSON.stringify(text)}`); return Number(m[1]); };
+/** The body of one top-level @media block (its inner rules end indented; the block closes at column 0). */
+const mediaBlock = (query) => new RegExp(`@media ${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([\\s\\S]*?)\\n\\}\\n`).exec(cssSource)?.[1] ?? "";
 
 test("F7a the filter row (five selects + the search box) is ONE row at 1440px: fixed-basis selects that may shrink, an upper limit, a search box from 160px; only a narrower window wraps", () => {
   const gutter = px(cssSource, /--gutter:\s*(\d+)px/);
@@ -2614,6 +2645,62 @@ test("F7b the card: type, lane and run number own FIXED columns (English sets th
     }
     assert.equal(byClass(cardByRun(root, "run_nolane"), "wcard-lane")[0].textContent, "");
   }
+});
+
+test("F7c (145a) at 1024px with the side panel open the card title keeps a real minimum: type and lane wrap instead of squeezing it, and the card never widens the page", () => {
+  // 145a 修正一：相邻断点首尾相接——<=1000 与 >1000 两条查询覆盖所有（含小数）视口宽度，
+  // 不再留 1000px < width < 1001px 的空档。
+  assert.match(cssSource, /@media \(width <= 1000px\) \{/, "the full-width panel block ends at 1000px");
+  assert.match(cssSource, /@media \(width > 1000px\) and \(width <= 1300px\) \{/, "the narrow-card block starts where it ends");
+  assert.doesNotMatch(cssSource, /min-width:\s*1001px|max-width:\s*1000px/, "no exclusive 1000/1001 pair is left");
+  const block = mediaBlock("(width > 1000px) and (width <= 1300px)");
+  assert.ok(block, "a narrow-window card rule exists");
+  const l1 = /\.wcard-l1\s*\{([^}]*)\}/.exec(block);
+  assert.ok(l1, "the narrow .wcard-l1 rule exists");
+  assert.match(l1[1], /grid-template-columns:\s*20px minmax\(160px, 1fr\) 216px/, "the title column keeps a 160px minimum");
+  assert.match(l1[1], /grid-template-areas:\s*"sym head run"\s*". type lane"/, "type and lane move to their own line instead of squeezing the title");
+  for (const area of ["sym", "head", "type", "lane", "run"]) {
+    assert.match(block, new RegExp(`grid-area:\\s*${area}\\b`), `${area} has a named place`);
+  }
+  // The arithmetic at 1024 (the width the Owner looks at): the list column keeps 55vw minus the 48px gutter and
+  // the card 8px padding on each side. The narrow tracks (20 + 160 + 216) and two 10px gaps fit it with room to
+  // spare, so the card can never push the page sideways.
+  const gutter = px(cssSource, /--gutter:\s*(\d+)px/);
+  const pad = px(cssRule(".wcard-btn"), /padding:\s*\d+px (\d+)px/);
+  const gap = px(cssRule(".wcard-l1"), /column-gap:\s*(\d+)px/);
+  const column = Math.round(1024 * 0.55) - gutter;
+  const needed = 20 + 160 + 216 + 2 * gap;
+  assert.equal(column, 515, "the list column at 1024");
+  assert.ok(needed <= column - 2 * pad, `the narrow card needs ${needed}px of the ${column - 2 * pad}px inner column`);
+  // At 1440 the base one-line layout is unchanged and the title still gets well over its minimum.
+  const baseTitle = Math.round(1440 * 0.55) - gutter - 2 * pad - (20 + 108 + 100 + 216 + 4 * gap);
+  assert.ok(baseTitle >= 160, `1440 keeps the base layout with a ${baseTitle}px title`);
+});
+
+test("F7d (145a fix 1) at 1024 the side-panel title keeps a real width: the run number moves below it, the close button stays top-right; 1440 keeps the one-row layout", () => {
+  const base = cssRule(".sb-title-row");
+  assert.match(base, /display:\s*flex/, "the 1440 one-row layout is unchanged");
+  assert.match(base, /gap:\s*16px/);
+  const block = mediaBlock("(width > 1000px) and (width <= 1200px)");
+  assert.ok(block, "a narrow-sidebar title rule exists");
+  const row = /\.sb-title-row\s*\{([^}]*)\}/.exec(block);
+  assert.ok(row, "the narrow .sb-title-row rule exists");
+  assert.match(row[1], /display:\s*grid/, "the row becomes a two-line grid");
+  assert.match(row[1], /grid-template-columns:\s*minmax\(200px, 1fr\) auto/, "the title column keeps a 200px minimum");
+  assert.match(row[1], /grid-template-areas:\s*"title close"\s*"run run"/, "the run number moves below the title; close stays beside it");
+  for (const area of ["title", "run", "close"]) {
+    assert.match(block, new RegExp(`grid-area:\\s*${area}\\b`), `${area} has a named place`);
+  }
+  // At 1024 the fixed panel is 45% wide (~460px); its 32px side paddings leave ~396px. Title 200 +
+  // close 36 + the 16px column gap fit with room to spare, so the title is never squeezed to a character.
+  const width = 1024;
+  const sidebar = Math.round(width * 0.45);
+  const inner = sidebar - 2 * 32;
+  const title = inner - 36 - 16;
+  assert.ok(title >= 200, `the title gets ${title}px at ${width}px`);
+  // At 1440 the one-row layout has the whole title width it had before.
+  const wideTitle = Math.round(1440 * 0.45) - 2 * 32 - 206 - 36 - 2 * 16;
+  assert.ok(wideTitle >= 200, `the one-row title keeps ${wideTitle}px at 1440px`);
 });
 
 test("F8 Deliverable reads Commit -> Verification -> the Lead's decision (-> the review), the ticks of finished steps are the secondary grey, and a tab that is not picked is weight 400", async () => {

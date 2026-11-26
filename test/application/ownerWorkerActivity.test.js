@@ -453,8 +453,6 @@ async function buildWorld() {
   let clock = NOW;
   const server = createOwnerDashboardServer({
     runDir: s.runDir,
-    workspaceRoot: base,
-    knownAgentIds: [],
     env: SERVER_ENV,
     nowFn: () => clock,
   });

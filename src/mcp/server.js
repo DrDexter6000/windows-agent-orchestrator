@@ -6713,7 +6713,6 @@ export function createWaoMcpServer({
 
         const page = projectRunActivity(snapshot, {
           runId,
-          audience: "lead",
           order: input?.order ?? "desc",
           ...(input?.categories ? { categories: input.categories } : {}),
           ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),

@@ -432,7 +432,7 @@ test("frozen cursor stability: continuation projects the page-1 frozen prefix; f
     ...Array.from({ length: 15 }, (_, i) => messageEvent(`m${i}`)),
     writtenEvent("src/a.js"),
   ];
-  const page1 = projectRunActivity(projSnap(base), { runId: RUN_ID, audience: "lead", pageSize: 8 });
+  const page1 = projectRunActivity(projSnap(base), { runId: RUN_ID, pageSize: 8 });
   assert.ok(page1.nextCursor, "page 1 has a cursor");
   assert.equal(page1.scopeObservation.status, "within_declared_paths");
   assert.equal(page1.scopeObservation.complete, false);
@@ -440,14 +440,14 @@ test("frozen cursor stability: continuation projects the page-1 frozen prefix; f
   // Append a later OUTSIDE file write.
   const grown = [...base, writtenEvent("test/bad.js")];
   const page2 = projectRunActivity(projSnap(grown), {
-    runId: RUN_ID, audience: "lead", cursor: page1.nextCursor, pageSize: 8,
+    runId: RUN_ID, cursor: page1.nextCursor, pageSize: 8,
   });
   assert.equal(page2.scopeObservation.status, "within_declared_paths",
     "a continuation cursor cannot be altered by an appended outside write");
   assert.equal(page2.scopeObservation.observedFileCount, 1, "frozen prefix observation");
 
   // A FRESH page-1 call observes the appended outside write.
-  const fresh = projectRunActivity(projSnap(grown), { runId: RUN_ID, audience: "lead", pageSize: 8 });
+  const fresh = projectRunActivity(projSnap(grown), { runId: RUN_ID, pageSize: 8 });
   assert.equal(fresh.scopeObservation.status, "outside_declared_paths");
   assert.equal(fresh.scopeObservation.observedFileCount, 2);
   assert.deepEqual(fresh.scopeObservation.outsidePaths, ["test/bad.js"]);
@@ -460,26 +460,26 @@ test("frozen cursor stability on a terminal snapshot: complete stays true across
     writtenEvent("src/a.js"),
     stateEvent("completed"),
   ];
-  const pageT1 = projectRunActivity(projSnap(baseT, true), { runId: RUN_ID, audience: "lead", pageSize: 8 });
+  const pageT1 = projectRunActivity(projSnap(baseT, true), { runId: RUN_ID, pageSize: 8 });
   assert.ok(pageT1.nextCursor, "terminal page 1 has a cursor");
   assert.equal(pageT1.scopeObservation.status, "within_declared_paths");
   assert.equal(pageT1.scopeObservation.complete, true);
 
   const grownT = [...baseT, writtenEvent("test/bad.js")];
   const pageT2 = projectRunActivity(projSnap(grownT, true), {
-    runId: RUN_ID, audience: "lead", cursor: pageT1.nextCursor, pageSize: 8,
+    runId: RUN_ID, cursor: pageT1.nextCursor, pageSize: 8,
   });
   assert.equal(pageT2.scopeObservation.status, "within_declared_paths", "frozen prefix observation");
   assert.equal(pageT2.scopeObservation.complete, true, "terminal frozen prefix keeps complete=true");
 
-  const freshT = projectRunActivity(projSnap(grownT, true), { runId: RUN_ID, audience: "lead", pageSize: 8 });
+  const freshT = projectRunActivity(projSnap(grownT, true), { runId: RUN_ID, pageSize: 8 });
   assert.equal(freshT.scopeObservation.status, "outside_declared_paths");
   assert.equal(freshT.scopeObservation.complete, true);
 });
 
 test("non-delivery snapshot through projectRunActivity: readable as unknown, zero throw, entries intact", () => {
   const events = [startedEvent({ delivery: undefined }), messageEvent("hello"), writtenEvent("src/a.js")];
-  const r = projectRunActivity(projSnap(events), { runId: RUN_ID, audience: "lead" });
+  const r = projectRunActivity(projSnap(events), { runId: RUN_ID });
   assert.equal(r.scopeObservation.status, "unknown");
   assert.equal(r.scopeObservation.complete, false);
   assert.equal(r.scopeObservation.source, SCOPE_OBSERVATION_SOURCE);

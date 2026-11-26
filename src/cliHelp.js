@@ -14,6 +14,7 @@
 
 export const SPAWN_RETIRED_MESSAGE = 'Command "spawn" was retired. Use "run" for foreground waiting ("spawn --wait") or "run --background" for one background agent; for multiple agents, dispatch one "run --background" per agent, then use "runs wait <id1> <id2> ... --until-settled".';
 export const WAO_ASK_RETIRED_MESSAGE = 'Command "wao ask" was retired. Use "run" instead; for read-only tasks, use "run --read-only".';
+export const RUNS_DASHBOARD_WEB_RETIRED_MESSAGE = 'Command "runs dashboard --web" was retired. Use "wao dashboard" instead.';
 
 export const HELP_TEXT = `Windows Agent Orchestrator PoC
 
@@ -46,7 +47,6 @@ Commands:
   runs metrics <runId>|--summary [--lineage] [--run-dir DIR] [--format json]   # --lineage 列整条续修谱系各轮与自身用量合计；--summary 按自身用量相加（会话累计不重复计）
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
-  runs dashboard --web [--port N] [--run-dir DIR] [--cwd DIR]   # local read-only Owner dashboard
   dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner dashboard launcher (global wao command; auto-opens browser)
   runs diagnose <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> [--run-dir DIR] [--cwd DIR] [--format json] [--wait-ms N]   # 交付状态查询（只读，--wait-ms 为有界等待）；--cwd 指定仓库根（缺省 WAO_TARGET_CWD，再当前目录）供主分支 WAO-Adopted-From 采纳查询
@@ -108,7 +108,7 @@ Notes:
   - 完整用法与场景说明见使用手册（wao manual 列各页；wao manual <页> <节> 按节读；没有全局 wao 时在安装根 npm run cli -- manual）。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
-  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与不带 --web 的 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
+  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时

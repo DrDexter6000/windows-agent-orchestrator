@@ -68,7 +68,7 @@ export function openStreamWorld({ prefix = "wao-owner-stream-", nowMs, config = 
   const runDir = join(base, "runs");
   mkdirSync(runDir, { recursive: true });
   const server = createOwnerDashboardServer({
-    runDir, workspaceRoot: repo, knownAgentIds: [], env: {},
+    runDir, env: {},
     ...(nowMs === undefined ? {} : { nowFn: () => nowMs }),
     ...config,
   });

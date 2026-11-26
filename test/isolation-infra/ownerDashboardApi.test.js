@@ -32,7 +32,6 @@
 //     （每次返回同一个 Promise，成功后重复调用也一样）；close() 之后 listen() 拒绝、不开端口
 //   - 缺省接线：不注入时用 createOwnerReadModel({ runDir, nowFn })；非法 refreshIntervalMs
 //     在构造时就拒绝
-//   - 旧的 /api/runs 与 /api/activity 不受刷新状态影响
 //   - 第 141c 批：/api/worker/activity 与 /api/worker/event 的路由守卫（AW 开头的用例）——无令牌 401、
 //     只许 GET、多余 / 重复 / 缺失 / 形状不对 400、不可用 404（含 seq 不存在、part 不适用、页号越界）、
 //     首次发布前 activity 200 loading / event 404、内部失败固定 500，以及响应里没有仓库 / 工作树路径
@@ -342,19 +341,11 @@ function fakeReadModel({ snapshotFactory = () => fixtureSnapshot(), onRefresh = 
   return { model, calls };
 }
 
-const unusedRunsFn = async () => ({ runs: [], returnedCount: 0, matchedCount: 0, truncated: false });
-const unusedActivityFn = async (input) => ({
-  runId: input.runId, available: true, unavailableReason: null,
-  activity: { entries: [], total: 0, counts: {}, nextCursor: null },
-  liveness: { ownerHeartbeat: "n/a", secondsSinceHeartbeat: null },
-});
-
 /** 建服务：缺省注入假读模型（不注入时走缺省工厂，见 DEFAULT WIRING）。 */
 function makeServer({ readModel, refreshIntervalMs, nowFn, port } = {}) {
   const clock = typeof nowFn === "function" ? nowFn : () => NOW;
   return createOwnerDashboardServer({
-    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: {},
-    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn,
+    runDir: RUN_DIR, env: {},
     nowFn: clock,
     ...(readModel !== undefined ? { createReadModelFn: () => readModel } : {}),
     ...(refreshIntervalMs !== undefined ? { refreshIntervalMs } : {}),
@@ -1259,8 +1250,7 @@ test("DEFAULT WIRING: 不注入 createReadModelFn 时用 createOwnerReadModel({ 
   const runDir = join(base, "runs");
   try {
     const s = createOwnerDashboardServer({
-      runDir, workspaceRoot: join(base, "ws"), knownAgentIds: [], env: {},
-      getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn,
+      runDir, env: {},
       nowFn: () => NOW,
     });
     assert.equal(await s.refreshNow(), "ready");
@@ -1284,34 +1274,6 @@ test("CONFIG: refreshIntervalMs 缺省 5000；不是正整数时构造时就拒�
   for (const good of [1, 5000, 60_000]) {
     assert.doesNotThrow(() => makeServer({ readModel: fakeReadModel().model, refreshIntervalMs: good }), `accepts ${good}`);
   }
-});
-
-// =====================================================================
-// 旧接口不受影响
-// =====================================================================
-test("LEGACY: /api/runs 与 /api/activity 不受刷新状态影响——loading 时照常服务，读模型一轮都没跑", async () => {
-  const { model, calls } = fakeReadModel();
-  let runsCalls = 0;
-  let activityCalls = 0;
-  const s = createOwnerDashboardServer({
-    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: {},
-    getOwnerRunsFn: async () => { runsCalls += 1; return { runs: [{ runId: "run_a" }], returnedCount: 1, matchedCount: 1, truncated: false }; },
-    getOwnerActivityFn: async (input) => { activityCalls += 1; return { ...unusedActivityFn(input), liveness: { ownerHeartbeat: "fresh", secondsSinceHeartbeat: 1 } }; },
-    nowFn: () => NOW,
-    createReadModelFn: () => model,
-  });
-  const runs = await drive(s.handler, { url: "/api/runs?limit=1", headers: auth(s) });
-  assert.deepEqual(jsonOf(runs), { runs: [{ runId: "run_a" }], returnedCount: 1, matchedCount: 1, truncated: false });
-  const activity = await drive(s.handler, { url: "/api/activity?runId=run_a", headers: auth(s) });
-  assert.equal(jsonOf(activity).liveness.ownerHeartbeat, "fresh");
-  assert.equal(runsCalls, 1);
-  assert.equal(activityCalls, 1);
-  assert.equal(calls.refresh, 0, "旧接口不触发读模型刷新");
-  // 旧接口的查询参数闭集不变。
-  const bad = await drive(s.handler, { url: "/api/runs?project=alpha", headers: auth(s) });
-  assert.equal(bad.status, 400);
-  const unknown = await drive(s.handler, { url: "/api/overview/runs", headers: auth(s) });
-  assert.equal(unknown.status, 404);
 });
 
 // =====================================================================
@@ -1352,8 +1314,7 @@ function guardModel({ events = guardEvents(), throws = null, withReader = true }
 }
 async function guardServer(options = {}) {
   const s = createOwnerDashboardServer({
-    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: GUARD_ENV,
-    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn,
+    runDir: RUN_DIR, env: GUARD_ENV,
     nowFn: () => NOW,
     createReadModelFn: () => guardModel(options),
   });
@@ -1474,8 +1435,7 @@ test("AW 不可用 → 固定 404，不回显 runId：未知运行、不在快�
   await s.close();
   // 读模型没有 readRunEvents：两个接口都是固定 404。
   const bare = createOwnerDashboardServer({
-    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: GUARD_ENV,
-    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn, nowFn: () => NOW,
+    runDir: RUN_DIR, env: GUARD_ENV, nowFn: () => NOW,
     createReadModelFn: () => guardModel({ withReader: false }),
   });
   assert.equal(await bare.refreshNow(), "ready");
@@ -1546,18 +1506,18 @@ test("AW LEAK: 响应里没有仓库 / 工作树 / 运行目录路径、令牌�
   await s.close();
 });
 
-test("AW 与 /api/worker 同一套：401 / 405 / 400 / 404 的错误体逐字相同，旧接口与 /api/worker 的路由不受影响", async () => {
+test("AW 与 /api/worker 同一套：401 / 405 / 400 / 404 的错误体逐字相同，/api/workers 与 /api/worker 的路由不受影响（旧 /api/runs 为固定 404）", async () => {
   const s = await guardServer();
   const worker = await drive(s.handler, { url: "/api/worker?runId=run_nobody", headers: auth(s) });
   const aw = await drive(s.handler, { url: `${ACTIVITY}?runId=run_nobody`, headers: auth(s) });
   assert.equal(aw.status, worker.status);
   assert.equal(aw.body, worker.body);
-  // 紧邻的路径仍是固定 404，旧接口照常。
+  // 紧邻的路径仍是固定 404。
   for (const url of [`${ACTIVITY}/`, `${ACTIVITY}/x`, `${EVENT}/`, `${EVENT}s`, "/api/worker/", "/api/worker/Activity"]) {
     assert.equal((await drive(s.handler, { url, headers: auth(s) })).status, 404, url);
   }
   assert.equal((await drive(s.handler, { url: "/api/workers", headers: auth(s) })).status, 200);
-  assert.equal((await drive(s.handler, { url: "/api/runs?limit=1", headers: auth(s) })).status, 200);
+  assert.equal((await drive(s.handler, { url: "/api/runs?limit=1", headers: auth(s) })).status, 404, "145a: the retired list API is gone");
   assert.ok(AW_ROUTES.length === 2);
   await s.close();
 });
@@ -1610,8 +1570,7 @@ function streamStub({ full = false, throws = null, opened = { ok: false, reason:
 }
 async function streamServer(t, { model, stub, refresh = true } = {}) {
   const s = createOwnerDashboardServer({
-    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: GUARD_ENV,
-    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn,
+    runDir: RUN_DIR, env: GUARD_ENV,
     nowFn: () => NOW,
     createReadModelFn: () => model,
     ...(stub === undefined ? {} : { createWorkerStreamsFn: () => stub.hub }),
@@ -1815,8 +1774,7 @@ test("SW close() 先断流：关服务时路由交出去的流被全断开；cre
   assert.equal(stub.closed, 1, "close() 断开全部流连接（先于关 server）");
   // 不注入工厂：用真的流（真实连接下的断流见 ownerDashboardV2Stream.test.js E6）。
   assert.throws(() => createOwnerDashboardServer({
-    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: {},
-    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn, nowFn: () => NOW,
+    runDir: RUN_DIR, env: {}, nowFn: () => NOW,
     createReadModelFn: () => fakeReadModel().model, createWorkerStreamsFn: "not a function",
   }), TypeError);
 });

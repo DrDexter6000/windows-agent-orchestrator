@@ -1,17 +1,18 @@
 // src/commands/dashboard.js
 //
 // M12-8F: top-level `wao dashboard` — the ergonomic HUMAN Owner launcher for
-// the existing loopback read-only Owner dashboard (M12-8C/D).
+// the loopback read-only Owner dashboard (M12-8C/D).
 //
-// Contract (differs from the legacy nested `runs dashboard --web` ONLY in the
-// launcher layer; the server boundary itself is NOT changed):
+// Contract:
 //   - target cwd defaults to process.cwd() — intentionally NOT
 //     resolveTargetCwd()'s WAO_TARGET_CWD chain: this is a human launcher, not
 //     a worker dispatch path
-//   - the canonical Git root of the target cwd is resolved STRICTLY; a non-Git
-//     cwd fails BEFORE listen with one actionable message (legacy fails soft)
-//   - the generated fragment-token URL is opened in the Windows default browser
-//     exactly once by default; --no-open performs zero open attempts
+//   - the target cwd must be inside a Git repository; otherwise ONE actionable
+//     message is printed BEFORE listen (the strict proof is the launcher's; no
+//     route needs the resolved root since 145a retired the list API)
+//   - the generated fragment-token URL — http://127.0.0.1:<port>/v2/#token=… —
+//     is opened in the Windows default browser exactly once by default;
+//     --no-open performs zero open attempts
 //   - browser launch failure is advisory: the URL is already printed, warn and
 //     keep the server running
 //   - stays foreground until Ctrl-C/SIGTERM (the shared lifecycle)
@@ -102,23 +103,21 @@ export function openInWindowsDefaultBrowser(url, { spawnFn } = {}) {
  * Top-level `wao dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]`.
  *
  * Every external dependency is injectable (git-root resolver, browser opener,
- * plus the runDashboardWeb seams: server factory, registry reader, lifecycle,
- * logger) so tests never bind a socket, run git, launch a browser, or deliver
- * an OS signal.
+ * plus the runDashboardWeb seams: server factory, lifecycle, logger) so tests
+ * never bind a socket, run git, launch a browser, or deliver an OS signal.
  *
- * Delegates to runDashboardWeb with a pre-resolved targetCwd + STRICT canonical
- * workspaceRoot and an afterListen open hook. `runs dashboard --web` passes
- * none of those and keeps its byte-identical fail-soft behavior.
+ * Delegates to runDashboardWeb with an afterListen open hook. 第 145a 批：
+ * `runs dashboard --web` 退役后这是它唯一的调用方，workspace/registry 的线程与
+ * fail-soft 分支已删除。
  *
  * @param {string[]} args — CLI args after `dashboard`
- * @param {object} config — process config (runDir/registry/stateDir)
+ * @param {object} config — process config (runDir/stateDir)
  * @param {object} [injections]
- * @param {Function} [injections.gitRootFn] — strict canonical-root resolver
+ * @param {Function} [injections.gitRootFn] — strict Git-root resolver (the proof)
  * @param {Function} [injections.openUrlFn] — default-browser opener
  * @param {Function} [injections.spawnFn] — spawn factory for the production
  *   opener (tests; only used when openUrlFn is absent)
  * @param {Function} [injections.createServerFn] — server factory (passthrough)
- * @param {Function} [injections.readRegistryFn] — registry reader (passthrough)
  * @param {{wait:Function, cancel?:Function}} [injections.lifecycle] — shutdown waitable (passthrough)
  * @param {Function} [injections.log] — stdout sink (passthrough)
  */
@@ -129,11 +128,12 @@ export async function dashboardCommand(args, config, injections = {}) {
   // Human launcher: default = process.cwd() (never WAO_TARGET_CWD).
   const targetCwd = options.cwd ? resolve(options.cwd) : process.cwd();
 
-  // Strict Git-root proof: a non-Git target must fail BEFORE the server listens
+  // Strict Git proof: a non-Git target must fail BEFORE the server listens
   // (and therefore before any browser open) with one actionable message.
-  let workspaceRoot;
+  // 第 145a 批：旧界面与 /api/runs 退役后，解析出的 Git 根不再有消费方——这里只保留
+  // "必须在 Git 项目里启动"的门口事实。
   try {
-    workspaceRoot = gitRoot(targetCwd);
+    gitRoot(targetCwd);
   } catch {
     throw linesError([
       `wao dashboard 需要 Git 仓库：${targetCwd} 不在任何 Git 仓库内。`,
@@ -148,8 +148,6 @@ export async function dashboardCommand(args, config, injections = {}) {
 
   await runDashboardWeb(options, config, {
     ...injections,
-    targetCwd,
-    workspaceRoot,
     // Open the printed fragment-token URL exactly once after listen, unless
     // --no-open (zero open attempts). A failing opener rejects here; the
     // runDashboardWeb afterListen backstop turns that into a warning and keeps
