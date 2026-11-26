@@ -18,7 +18,8 @@
 //   B  blobs    the image store: every blob URL is revoked, late answers create none
 //   K  keys     arrow keys, Esc, outside click
 //   V  views    the DOM builders, run against a tiny in-memory DOM
-//   G  guards   CSP, closed request set, one fetch, brief reading, no motion
+//   G  guards   CSP, closed request set, one fetch, brief reading (the motion guard moved to the
+//               Activity test in batch 143b)
 //
 // Deterministic and dependency-free: no network, no browser, no runtime, no Git.
 
@@ -274,8 +275,9 @@ test("W2 the row DTO: the current delivery commit (canonical id, no path) and th
   assert.equal(row("run_rev").delivery.commit, COMMIT("a"));
   assert.deepEqual(Object.keys(row("run_rev").delivery).sort(), ["acceptance", "branchPresent", "changedCount", "commit", "settlement", "verification"], "exactly these keys: a file COUNT but no path, no settle time, no reverify chain");
   assert.equal(row("run_rev").delivery.changedCount, 11);
-  assert.deepEqual(row("run_sol").consult, { groupId: "shop-api:consult_order", seatsIn: 2, seatsTotal: 3, q1: "PASS" }, "a seat that has answered carries its own verdict");
+  assert.deepEqual(row("run_sol").consult, { groupId: "shop-api:consult_order", seatsIn: 2, seatsTotal: 3, finished: false, q1: "PASS" }, "a seat that has answered carries its own verdict, and the group is not finished while kimi runs");
   assert.deepEqual(row("run_astra").consult.q1, "FIX_FIRST");
+  assert.equal(row("run_kimi").consult.finished, false);
   assert.equal(row("run_kimi").consult.q1, null, "a seat still running has none");
   assert.equal(row("run_fail").delivery, null, "a run with no delivery has no summary");
   assert.deepEqual(row("run_rev").round, { number: 1, complete: true });
@@ -1088,11 +1090,18 @@ test("B5 the closed request set: each route has only its own query keys, each of
   const good = [
     "/api/overview", "/api/workers", "/api/workers?project=shop-api", "/api/attention", "/api/attention?project=shop-api",
     "/api/worker?runId=run_1", `/api/artifact?runId=run_1&commit=${C}&fileIndex=0`, `/api/artifact?runId=run-1_B&commit=${"f".repeat(64)}&fileIndex=1234567`,
+    "/api/worker/activity?runId=run_1", "/api/worker/activity?runId=run_1&beforeSeq=0&limit=200&filter=messages",
+    "/api/worker/event?runId=run-1_B&seq=1&part=output&page=2",
   ];
   for (const path of good) assert.equal(api.isDataPath(path), true, path);
   const bad = [
     "/api/worker", "/api/worker?runId=", "/api/worker?runId=run_1&runId=run_2", "/api/worker?runId=run_1&x=1", "/api/worker?x=1", "/api/worker?runId=../x", "/api/worker?runId=run%201",
-    "/api/worker?runId=-bad", "/api/worker/activity?runId=run_1", "/api/worker/event?runId=run_1&seq=1&part=output", `/api/worker?runId=${"a".repeat(129)}`,
+    "/api/worker?runId=-bad", `/api/worker?runId=${"a".repeat(129)}`,
+    "/api/worker/activity", "/api/worker/activity?runId=", "/api/worker/activity?runId=run_1&beforeSeq=-1", "/api/worker/activity?runId=run_1&beforeSeq=01",
+    "/api/worker/activity?runId=run_1&beforeSeq=1000000000", "/api/worker/activity?runId=run_1&limit=0", "/api/worker/activity?runId=run_1&limit=201",
+    "/api/worker/activity?runId=run_1&limit=0200", "/api/worker/activity?runId=run_1&filter=nope", "/api/worker/activity?runId=run_1&x=1",
+    "/api/worker/event", "/api/worker/event?runId=run_1&part=output", "/api/worker/event?runId=run_1&seq=0&part=output",
+    "/api/worker/event?runId=run_1&seq=1&part=nope", "/api/worker/event?runId=run_1&seq=1&part=output&page=0", "/api/worker/event?runId=run_1&seq=1&part=output&x=1",
     "/api/artifact", "/api/artifact?runId=run_1", `/api/artifact?runId=run_1&commit=${C}`, `/api/artifact?runId=run_1&commit=${C.toUpperCase()}&fileIndex=0`,
     `/api/artifact?runId=run_1&commit=${"c".repeat(39)}&fileIndex=0`, `/api/artifact?runId=run_1&commit=${C}&fileIndex=01`, `/api/artifact?runId=run_1&commit=${C}&fileIndex=-1`,
     `/api/artifact?runId=run_1&commit=${C}&fileIndex=12345678`, `/api/artifact?runId=run_1&commit=${C}&fileIndex=0&x=1`,
@@ -1103,8 +1112,20 @@ test("B5 the closed request set: each route has only its own query keys, each of
   assert.equal(api.workersPath(), "/api/workers");
   assert.equal(api.workersPath("shop-api"), "/api/workers?project=shop-api");
   assert.equal(api.workerPath("run_1"), "/api/worker?runId=run_1");
+  assert.equal(api.activityPath({ runId: "run_1" }), "/api/worker/activity?runId=run_1");
+  assert.equal(api.activityPath({ runId: "run_1", afterSeq: 42 }), "/api/worker/activity?runId=run_1&afterSeq=42");
+  assert.equal(api.activityPath({ runId: "run_1", afterSeq: 42, beforeSeq: 100, limit: 200, filter: "messages" }), "/api/worker/activity?runId=run_1&afterSeq=42&beforeSeq=100&limit=200&filter=messages");
+  assert.equal(api.activityPath({ runId: "run_1", beforeSeq: 0, limit: 200, filter: "messages" }), "/api/worker/activity?runId=run_1&beforeSeq=0&limit=200&filter=messages");
+  assert.equal(api.eventPath({ runId: "run_1", seq: 7, part: "output", page: 2 }), "/api/worker/event?runId=run_1&seq=7&part=output&page=2");
+  assert.equal(api.eventPath({ runId: "run_1", seq: 7, part: "message" }), "/api/worker/event?runId=run_1&seq=7&part=message");
   assert.throws(() => api.workersPath("bad slug"), /not one of the dashboard routes/);
   assert.throws(() => api.workerPath("a&b=c"), /not one of the dashboard routes/);
+  assert.throws(() => api.activityPath({ runId: "run_1", filter: "nope" }), /not one of the dashboard routes/);
+  assert.throws(() => api.activityPath({ runId: "run_1", limit: 201 }), /not one of the dashboard routes/);
+  for (const afterSeq of [-1, 1.5, "01", "", 1_000_000_000]) {
+    assert.throws(() => api.activityPath({ runId: "run_1", afterSeq }), /not one of the dashboard routes/, `afterSeq=${afterSeq}`);
+  }
+  assert.throws(() => api.eventPath({ runId: "run_1", seq: 0, part: "output" }), /not one of the dashboard routes/);
   assert.throws(() => api.artifactPath({ runId: "run_1", commit: "abc", fileIndex: 0 }), /not one of the dashboard routes/);
   assert.throws(() => api.artifactPath({ runId: "run_1", commit: C0(), fileIndex: -1 }), /not one of the dashboard routes/);
   function C0() { return COMMIT("c"); }
@@ -1260,7 +1281,7 @@ test("V1 the Workers page (real rows): two groups with counts, single-column car
   assert.equal(line(cardByRun(root, "run_fresh"), 2), "Running 20m · last progress just now");
   assert.equal(line(cardByRun(root, "run_kimi"), 2), "Running 6m · last progress 5m ago");
   // Line two, finished: how it ended, when, and what it delivered.
-  assert.equal(line(cardByRun(root, "run_rev"), 2), "Done 4h ago · aaaaaaaa · 11 files · verify passed · awaiting Lead", "the commit, how many files, the verification, where the Lead stands");
+  assert.equal(line(cardByRun(root, "run_rev"), 2), "Done 4h ago · aaaaaaaa · declared 11 files · verify passed · awaiting Lead", "the commit, the transcript's declared file count (labelled as a claim), the verification, where the Lead stands");
   assert.equal(line(cardByRun(root, "run_fail"), 2), "Failed 30m ago · backend_error");
   assert.equal(line(cardByRun(root, "run_stop"), 2), "Stopped 1h ago");
   assert.equal(line(cardByRun(root, "run_done"), 2), "Done 3h ago");
@@ -1293,7 +1314,7 @@ test("V1 the Workers page (real rows): two groups with counts, single-column car
   const zh = pageOf(vm, "zh").root;
   assert.deepEqual(byClass(zh, "section-title").map((n) => n.textContent), ["运行中6", "已结束7"]);
   assert.equal(line(cardByRun(zh, "run_quiet"), 2), "运行中 50 分钟 · 最后进展 40 分钟前 · 静默");
-  assert.equal(line(cardByRun(zh, "run_rev"), 2), "完成 4 小时前 · aaaaaaaa · 11 个文件 · 验证通过 · 等 Lead 裁决");
+  assert.equal(line(cardByRun(zh, "run_rev"), 2), "完成 4 小时前 · aaaaaaaa · 声明 11 个文件 · 验证通过 · 等 Lead 裁决");
   assert.equal(line(cardByRun(zh, "run_cont"), 1), "●Search index第 2 轮写代码glm-prorun_cont");
   assert.equal(line(cardByRun(zh, "run_sol"), 2), "完成 40 分钟前 · PASS", "the verdict is data: the same word in both languages");
   assert.equal(line(cardByRun(zh, "run_quiet"), 1).includes("run_quiet"), true);
@@ -1547,7 +1568,7 @@ test("V8 Deliverable, a code delivery drawn (real body): commit, source, files, 
   assert.equal(byClass(brief, "sb-text")[0].textContent, "# Migrate orders table\nThe task text.", "the brief, as the server bound it");
   assert.equal(byClass(brief, "sb-panel")[0].textContent.includes("Commit"), false, "one tab at a time");
   const activity = panelRoot(vm, "en", SUI({ tab: "activity" })).root;
-  assert.equal(byClass(activity, "empty")[0].textContent, "The live timeline comes in the next batch.");
+  assert.equal(byClass(activity, "empty")[0].textContent, "Loading…", "without a feed the tab says it is loading; the Activity test drives the real filter row and stream");
   // A running worker opens on Activity; the Owner's pick sticks over the default.
   const running = panelOf(await bodyOf({ run: snapLive("run_live"), events: (() => { const b = builder("run_live"); head(b); working(b, T0 + 3000); return b.events; })() }));
   assert.equal(running.defaultTab, "activity");
@@ -2101,7 +2122,7 @@ test("G1 CSP: the /v2 files get the legacy policy plus ONE source — blob: in i
   const legacy = (await drive(s.handler, { url: "/" })).headers["content-security-policy"];
   const base = directives(legacy);
   assert.deepEqual(base.get("img-src"), ["'self'", "data:"]);
-  const v2Urls = ["/v2", "/v2/", ...["app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "styles.css"].map((f) => `/v2/${f}`)];
+  const v2Urls = ["/v2", "/v2/", ...["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "styles.css"].map((f) => `/v2/${f}`)];
   for (const url of v2Urls) {
     const csp = (await drive(s.handler, { url })).headers["content-security-policy"];
     const got = directives(csp);
@@ -2123,7 +2144,7 @@ test("G1 CSP: the /v2 files get the legacy policy plus ONE source — blob: in i
 });
 
 test("G2 reading the brief (the migrated 'no .prompt' guard): /v2 may show the bound brief the server sends — and still reads no session, path, cwd or raw-command field; the legacy guard stays in ownerDashboardWeb.test.js", () => {
-  const v2Code = ["app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js"].map(codeOf).join("\n");
+  const v2Code = ["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js"].map(codeOf).join("\n");
   assert.match(codeOf("detail.js"), /body\.brief\.text/, "the brief reaches the panel as the server's brief.text");
   assert.match(codeOf("sidebarview.js"), /vm\.brief\.text/, "and is drawn as text");
   assert.doesNotMatch(v2Code, /\.(sessionId|serveUrl|worktreePath|cwd|rawCommand|argv|pid|transcriptPath)\b/, "no session, path or raw-command field is read in /v2");
@@ -2132,23 +2153,25 @@ test("G2 reading the brief (the migrated 'no .prompt' guard): /v2 may show the b
   assert.notEqual(readFileSync(join(V2, "..", "app.js"), "utf8"), readV2("app.js"));
 });
 
-test("G3 the closed request set and the single network call, with the panel's two routes: /api/worker and /api/artifact", () => {
+test("G3 the closed request set and the single network call, with the panel's routes: detail, image, Activity page and full text", () => {
   const app = codeOf("app.js");
   assert.match(app, /request\(workerPath\(runId\), token\)/, "the detail goes through the closed builder");
   assert.match(app, /requestImage\(artifactPath\(\{ runId: spec\.runId, commit: spec\.commit, fileIndex: spec\.fileIndex \}\), token\)/, "an image is bound to commit and index");
+  assert.match(app, /request\(activityPath\(query\), token, activitySignal\(\)\)/, "the Activity page goes through the closed builder");
+  assert.match(app, /request\(eventPath\(query\), token, activitySignal\(\)\)/, "the full text goes through the closed builder");
   assert.match(app, /request\(path, token\)/, "the list routes come from endpointsFor");
-  assert.deepEqual([...codeOf("api.js").matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)].length, 1, "ONE direct network call in api.js, shared by the JSON and the image request");
-  assert.equal([...codeOf("api.js").matchAll(/await get\(/g)].length, 2, "...used by exactly those two");
-  const all = ["app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "i18n.js"].map((n) => [n, codeOf(n)]);
+  assert.deepEqual([...codeOf("api.js").matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)].length, 1, "ONE direct network call in api.js, shared by the JSON, image and Activity requests");
+  assert.equal([...codeOf("api.js").matchAll(/await get\(/g)].length, 2, "...used by exactly those two request functions");
+  const all = ["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "i18n.js"].map((n) => [n, codeOf(n)]);
   for (const [name, code] of all) {
     if (name !== "api.js") assert.doesNotMatch(code, /(?<![A-Za-z0-9_$.])fetch\s*\(/, `${name}: no network call`);
-    assert.doesNotMatch(code, /\/api\/worker\/(activity|event)/, `${name}: the Activity routes are not open yet`);
+    assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser/, `${name}: no markup parsing`);
   }
   assert.equal(readV2("api.js").match(/method:\s*["']([A-Z]+)["']/g).join(), 'method: "GET"');
 });
 
 test("G4 blob URLs are made and revoked in one place (app.js, through the store); nothing else makes a URL, a Blob or sets a source", () => {
-  for (const name of ["api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js"]) {
+  for (const name of ["activity.js", "activityview.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js"]) {
     const code = codeOf(name);
     assert.doesNotMatch(code, /createObjectURL|revokeObjectURL|new Blob|FileReader|URL\.|window\.open|location\.href/, `${name}: no URL made here`);
     assert.doesNotMatch(code, /\.src\s*=|setAttribute\(\s*["']srcdoc/, `${name}: no assignment to a source`);
@@ -2157,7 +2180,7 @@ test("G4 blob URLs are made and revoked in one place (app.js, through the store)
   assert.equal([...app.matchAll(/URL\.createObjectURL\(blob\)/g)].length, 1);
   assert.equal([...app.matchAll(/URL\.revokeObjectURL\(url\)/g)].length, 1);
   assert.match(app, /window\.addEventListener\("pagehide", \(\) => images\.release\(\)\)/, "leaving the page revokes every one");
-  assert.match(app, /images\.want\(wanted\);\s*renderSidebar\(/, "what is on screen is what the store holds: asked at every draw");
+  assert.match(app, /images\.want\(wanted\);[\s\S]{0,400}renderSidebar\(/, "what is on screen is what the store holds: asked at every draw");
   assert.match(codeOf("sidebarview.js"), /h\("img", \{ class: "thumb", src: view\.url, alt: image\.path \}\)/, "an <img> only from a store URL, with the path as its alt text");
   assert.ok(!/<img/i.test(readV2("index.html")), "no image in the page itself");
 });
@@ -2188,11 +2211,13 @@ test("G5 the layout of the spec: panel from below the top bar, 45% wide, 1px sea
   const html = readV2("index.html");
   assert.match(html, /<aside class="sidebar" id="sidebar" hidden><\/aside>/);
   assert.ok(html.indexOf('id="main"') < html.indexOf('id="sidebar"'));
-  assert.doesNotMatch(css, /transition|animation|@keyframes|scroll-behavior|will-change|box-shadow/i, "no motion and no shadow (the panel opens and closes at once in this batch)");
+  // Batch 143b: the /v2 motion guard (curve, durations, reduced motion, reflow-free properties) lives in
+  // ownerDashboardV2Activity.test.js. The legacy UI's styles.css is still motion-free (ownerDashboardBoard).
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/, "the motion the design adds is switched off for reduced motion");
 });
 
 test("G6 the sources are clean: no control characters, UTF-8 only, and every backslash in a regular expression is a backslash", () => {
-  const files = ["app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "styles.css", "index.html"];
+  const files = ["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "styles.css", "index.html"];
   for (const name of files) {
     const bytes = readFileSync(join(V2, name));
     const text = bytes.toString("utf8");
@@ -2267,7 +2292,7 @@ test("F1 a delivery whose facts contradict each other is NOT 'no deliverable': t
   assert.equal(panelOf(await bodyOf({ run: snapLive("run_nx"), events: (() => { const b = builder("run_nx"); head(b); return b.events; })() })).deliverable.kind, "none");
 });
 
-test("F2 finished cards say how many files a delivery changed and the verdict of an answered review seat — from the server's snapshot facts, never a path", async () => {
+test("F2 (143b fix 3) finished cards say how many files a delivery DECLARED (labelled as the transcript's claim) and the verdict of an answered review seat; the verification stays a separate fact — never a path", async () => {
   const bodies = await variantChain((snap) => {
     rowOfRun(snap, "run_rev").delivery.changedCount = 1;
     rowOfRun(snap, "run_unres").delivery.changedCount = null;
@@ -2281,16 +2306,16 @@ test("F2 finished cards say how many files a delivery changed and the verdict of
   const vm = workers.buildWorkers(bodies, { refMs: GEN_MS, view: workers.emptyView() });
   const { root } = pageOf(vm);
   const l2 = (id) => line(cardByRun(root, id), 2);
-  assert.equal(l2("run_rev"), "Done 4h ago · aaaaaaaa · 1 file · verify passed · awaiting Lead", "one file is singular");
+  assert.equal(l2("run_rev"), "Done 4h ago · aaaaaaaa · declared 1 file · verify passed · awaiting Lead", "one file is singular, and the count is labelled as the transcript's claim");
   assert.equal(l2("run_unres"), "Done 5h ago · 01234567 · verify passed · awaiting Lead", "no count on record: none is shown, none invented");
-  assert.equal(l2("run_cont"), "Done 1h ago · eeeeeeee · 0 files · verify passed · awaiting Lead", "zero is a count too");
+  assert.equal(l2("run_cont"), "Done 1h ago · eeeeeeee · declared 0 files · verify passed · awaiting Lead", "zero is a count too");
   assert.equal(l2("run_sol"), "Done 40m ago · PASS_WITH_NOTES");
   assert.equal(l2("run_astra"), "Done 30m ago · FIX_FIRST");
   assert.equal(l2("run_kimi"), "Done 1m ago · PASS");
   assert.equal(l2("run_mute"), "Done 20m ago", "a seat that finished without answering has no verdict");
   assert.equal(l2("run_fail"), "Failed 30m ago · backend_error", "a run with no delivery or review has neither");
   const zh = pageOf(vm, "zh").root;
-  assert.equal(line(cardByRun(zh, "run_rev"), 2), "完成 4 小时前 · aaaaaaaa · 1 个文件 · 验证通过 · 等 Lead 裁决");
+  assert.equal(line(cardByRun(zh, "run_rev"), 2), "完成 4 小时前 · aaaaaaaa · 声明 1 个文件 · 验证通过 · 等 Lead 裁决");
   // The row carries a number and a closed word, nothing path-like.
   const row = bodies.workers.workers.find((r) => r.runId === "run_rev");
   assert.equal(typeof row.delivery.changedCount, "number");
@@ -2505,21 +2530,55 @@ test("F7a the filter row (five selects + the search box) is ONE row at 1440px: f
   assert.match(cssRule(".wk-filters .chip"), /max-width:\s*\d+px/);
 });
 
-test("F7a2 a set filter is a chip as wide as its words: the block may then wrap (the search box moves down) instead of cutting the chip", async () => {
+test("F7a2 (143b fix 4) a set filter is a chip in the SAME one-row column: chips and selects are capped and may shrink, so the search box keeps its place at 1440px in both languages", async () => {
   const none = pageOf(await listOf()).root;
   assert.equal(byClass(none, "wk-filters")[0].className, "wk-filters", "no chip: the fixed one-row block");
-  const set = pageOf(await listOf({ ...workers.emptyView("shop-api"), lane: "opus" })).root;
-  assert.equal(byClass(set, "wk-filters")[0].className, "wk-filters wk-filters-chips");
-  assert.match(cssRule(".wk-filters-chips"), /flex:\s*0 1 auto/);
-  assert.match(cssRule(".wk-filters-chips"), /flex-wrap:\s*wrap/);
+  // All five filters set (one chip each) + the search box, as the widest real case.
+  const view = { project: "shop-api", lane: "deepseek-flash", type: "delivery_review", status: "starting", health: "process_only", q: "" };
+  const set = pageOf(await listOf({ ...workers.emptyView(), ...view })).root;
+  const block = byClass(set, "wk-filters")[0];
+  assert.equal(block.className, "wk-filters wk-filters-chips");
+  assert.equal(byClass(set, "chip").length, 5, "five labelled chips, all in that one block");
+  assert.ok(byClass(set, "wk-search")[0].parentNode === block.parentNode, "the search box is the block's sibling: it stays in the same row");
+  // The arithmetic of the row at 1440px (the list is still 744px wide).
+  const gutter = px(cssSource, /--gutter:\s*(\d+)px/);
+  const listWidth = Math.round(1440 * 0.55) - gutter;
+  const filters = cssRule(".wk-filters");
+  const chips = cssRule(".wk-filters-chips");
+  const gap = px(filters, /gap:\s*(\d+)px/);
+  const topGap = px(cssRule(".wk-top"), /gap:\s*\d+px (\d+)px/);
+  const searchMin = px(cssRule(".wk-search"), /min-width:\s*(\d+)px/);
+  const reserve = px(chips, /max-width:\s*calc\(100% - (\d+)px\)/);
+  assert.equal(reserve, searchMin + topGap, "the chip column stops exactly where the search box's 160px + the row gap begin");
+  const column = listWidth - reserve;
+  assert.equal(column, listWidth - searchMin - topGap, "the chips keep the rest of the row");
+  assert.ok(column >= 5 * 100, `the five chips share ${column}px of the ${listWidth}px column`);
+  assert.match(chips, /flex:\s*1 1 calc\(5 \* var\(--wk-select\) \+ 4 \* \d+px\)/, "the block may shrink from the five-select width");
+  assert.match(chips, /min-width:\s*0/, "and below its content, instead of pushing the search box down");
+  assert.match(chips, /flex-wrap:\s*nowrap/, "a chip never wraps inside the block");
+  const chip = cssRule(".wk-filters .chip");
+  assert.match(chip, /flex:\s*0 1 auto/);
+  assert.match(chip, /min-width:\s*0/);
+  assert.match(chip, /max-width:\s*\d+px/, "a chip is bounded");
+  assert.match(cssRule(".wk-filters .chip > span:first-child"), /text-overflow:\s*ellipsis/, "a long value gives way inside its chip");
+  // Long values in both languages: the widest chip is wider than the share one chip would get, so the
+  // column must be allowed to shrink and the chip must cut its text (an estimate of the glyph widths).
+  const long = "a".repeat(40);
+  const labels = [...i18n.LANGS].flatMap((lang) => [
+    i18n.t(lang, "filter.project", { name: long }), i18n.t(lang, "wk.chip.lane", { name: long }),
+    i18n.t(lang, "wk.chip.type", { name: "delivery_review" }), i18n.t(lang, "wk.chip.status", { name: "starting" }),
+  ]);
+  const widest = Math.max(...labels.map((label) => [...label].reduce((sum, ch) => sum + (ch.charCodeAt(0) > 0x2e80 ? 14 : 8), 0)));
+  assert.ok(widest > 220, `a long English/Chinese value exceeds the chip's own limit (${widest}px)`);
+  assert.ok(5 * 220 > reserve, "and five full-width chips exceed the column: only shrinking + an ellipsis keep it on one row");
   // Clearing the last chip returns to the fixed block, on the same element.
   const root = region();
   renderWorkersPage(root, await listOf({ ...workers.emptyView("shop-api") }), "en", recorder());
-  const block = byClass(root, "wk-filters")[0];
-  assert.equal(block.className, "wk-filters wk-filters-chips");
+  const live = byClass(root, "wk-filters")[0];
+  assert.equal(live.className, "wk-filters wk-filters-chips");
   renderWorkersPage(root, await listOf(), "en", recorder());
-  assert.equal(byClass(root, "wk-filters")[0], block, "the same element");
-  assert.equal(block.className, "wk-filters");
+  assert.equal(byClass(root, "wk-filters")[0], live, "the same element");
+  assert.equal(live.className, "wk-filters");
 });
 test("F7b the card: type, lane and run number own FIXED columns (English sets the width) so the run number never moves with the language; the title is serif 600 22/30 and the card stays 64px", async () => {
   const l1 = cssRule(".wcard-l1");
@@ -2645,4 +2704,82 @@ test("F9c the app, Copy ref: the clipboard gets runId#seq when the evidence name
   b.clickOn(byClass(b.elements.sidebar, "btn")[0]);
   await b.tick();
   assert.equal(b.copied.at(-1), "run_quiet#0138");
+});
+
+// =====================================================================
+// FIXES FROM THE 143a REVIEW (batch 143b): each one failed before its change
+// =====================================================================
+
+test("F10 (143b fix 1) a lane filter that hides the last Starting seat does not move its review group to Finished: the server judges the WHOLE group, the page only filters the cards it draws", async () => {
+  const bodies = await variantChain((snap) => {
+    // The last seat is still being handed over (Starting); the other two have ended.
+    Object.assign(rowOfRun(snap, "run_kimi"), { stage: "starting", lastEffectAt: null });
+  });
+  const full = workers.buildWorkers(bodies, { refMs: GEN_MS, view: workers.emptyView() });
+  assert.equal(cardOf(full, "run_sol").consult.finished, false, "the group fact is the whole group's, not the ended seats'");
+
+  // lane=sol hides run_kimi (kimi lane) and run_astra (astra lane): only the ended run_sol is drawn.
+  const view = { ...workers.emptyView(), lane: "sol" };
+  const filtered = workers.buildWorkers(bodies, { refMs: GEN_MS, view });
+  const group = filtered.running.entries.find((entry) => entry.kind === "group");
+  assert.ok(group, "the visible ended seat stays inside its Running review group");
+  assert.deepEqual(group.cards.map((card) => card.runId), ["run_sol"], "only that seat is visible ...");
+  assert.equal(group.finished, false, "... but the group is not Finished while a filtered-out seat still runs");
+  assert.deepEqual([group.seatsIn, group.seatsTotal], [2, 3], "the head still counts the whole group");
+  assert.ok(!filtered.finished.entries.some((entry) => entry.kind === "group" || (entry.kind === "card" && entry.card.runId === "run_sol")), "and it is not also under Finished");
+  assert.equal(byClass(pageOf(filtered).root, "wgroup").length, 1, "the page draws it once, under Running");
+
+  // When the whole group has ended, the same filter shows the group under Finished.
+  const allDone = await variantChain((snap) => {
+    Object.assign(rowOfRun(snap, "run_kimi"), { state: "completed", terminal: true, liveness: "terminal", stage: "terminal", terminalAt: ago(MIN), lastEffectAt: ago(MIN) });
+    snap.consults[0].seats[2] = snapSeat("run_kimi", "PASS");
+  });
+  const done = workers.buildWorkers(allDone, { refMs: GEN_MS, view });
+  const doneGroup = done.finished.entries.find((entry) => entry.kind === "group");
+  assert.ok(doneGroup, "all seats in: the group is Finished");
+  assert.equal(doneGroup.finished, true);
+  assert.deepEqual(doneGroup.cards.map((card) => card.runId), ["run_sol"]);
+});
+
+test("F11 (143b fix 2) a failed run older than the 24h attention window still copies its bound terminal event number, from /api/worker itself; only with no such fact does it fall back to the bare run number", async () => {
+  const oldFail = snapRun("run_old_fail", {
+    title: "Failed two days ago",
+    state: "failed",
+    startedAt: ago(3 * DAY),
+    terminalAt: ago(2 * DAY),
+    lastEffectAt: ago(2 * DAY),
+    terminalSeq: 90,
+    failure: { category: "provider_error", code: "backend_error" },
+  });
+  const bodies = await chain(snapshotOf({ runs: [oldFail] }));
+  assert.ok(!JSON.stringify(bodies.attention).includes("run_old_fail"), "fixture: the failure has left the 24-hour attention window, so no item names its event");
+  const vm = workers.buildWorkers(bodies, { refMs: GEN_MS, view: { ...workers.emptyView(), run: "run_old_fail" } });
+  assert.equal(vm.open.seq, null, "no attention evidence is left to name an event number");
+
+  const b = builder("run_old_fail");
+  head(b);
+  working(b, T0 + 3000);
+  terminal(b, T0 + 5000, "failed");
+  const body = await bodyOf({ run: oldFail, events: b.events });
+  assert.equal(body.refSeq, 90, "the detail carries the snapshot's terminal event number independently of the attention item");
+
+  const panel = detail.buildSidebar({ feed: { runId: "run_old_fail", epoch: 1, phase: "ready", body, problem: null }, open: vm.open, nowMs: GEN_MS });
+  assert.equal(panel.ref, "run_old_fail#0090");
+  assert.equal(byClass(panelRoot(panel).root, "ref")[0].textContent, "run_old_fail#0090", "the footer shows exactly the string that is copied");
+  assert.equal(byClass(panelRoot(panel, "zh").root, "ref")[0].textContent, "run_old_fail#0090", "the same reference in both languages");
+
+  // While the detail is still on its way there is no bound fact: the reference stays the bare run number.
+  const pending = detail.buildSidebar({ feed: { runId: "run_old_fail", epoch: 1, phase: "loading", body: null, problem: null }, open: vm.open, nowMs: GEN_MS });
+  assert.equal(pending.ref, "run_old_fail");
+  // A run whose snapshot has no event number at all never invents one.
+  const noSeq = await bodyOf({ run: snapRun("run_no_seq"), events: (() => { const e = builder("run_no_seq"); head(e); return e.events; })() });
+  assert.equal(noSeq.refSeq, null);
+  // The precedence follows the fact in force, not the greatest number: a delivery waiting for the Lead
+  // anchors on its settle event even when the terminal event has a higher number.
+  const settled = snapRun("run_settled_ref", { terminalSeq: 8, delivery: snapDelivery({ settledSeq: 7 }) });
+  assert.equal((await bodyOf({ run: settled, events: (() => { const e = builder("run_settled_ref"); head(e); return e.events; })() })).refSeq, 7);
+  // A failed run with a capacity observation: the greater of the failed item's terminal event and the
+  // lane item's observation, exactly as the attention evidence of that run reports it.
+  const capped = snapRun("run_cap_ref", { state: "failed", terminalSeq: 30, capacity: { code: "rate_limited", observedAt: ago(HOUR), observedSeq: 36 } });
+  assert.equal((await bodyOf({ run: capped, events: (() => { const e = builder("run_cap_ref"); head(e); return e.events; })() })).refSeq, 36);
 });

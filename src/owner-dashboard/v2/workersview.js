@@ -99,7 +99,9 @@ function lineTwo(card, lang) {
   const delivery = card.delivery;
   if (delivery !== null) {
     if (delivery.commit !== null) parts.push({ text: delivery.commit, mono: true });
-    if (delivery.changedCount !== null) parts.push({ text: tn(lang, "sb.d.files", delivery.changedCount) });
+    // The count is the transcript's CLAIM about the delivery (the Git check is the detail's job), so the
+    // card says where it comes from; the verification result stays a separate fact beside it.
+    if (delivery.changedCount !== null) parts.push({ text: tn(lang, "wk.filesDeclared", delivery.changedCount) });
     if (delivery.verification !== null) parts.push({ text: t(lang, `wk.verify.${delivery.verification}`) });
     if (delivery.problem !== null) parts.push({ text: t(lang, `wk.problem.${delivery.problem}`) });
     if (delivery.decision !== null) parts.push({ text: t(lang, `wk.decision.${delivery.decision}`), tone: delivery.decision === "awaiting" ? "red" : null });

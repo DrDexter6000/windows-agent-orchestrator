@@ -1472,8 +1472,8 @@ test("会审几席已到: 已到终态且收到答复才算；完成但没答复
   );
   const rows = selectOwnerWorkers(snap, derive(snap), { now: NOW });
   const consultOfRow = (runId) => rows.find((row) => row.run.runId === runId).consult;
-  assert.deepEqual(consultOfRow("run_s4"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5, q1: null }, "还在跑、没有结论：q1 是 null");
-  assert.deepEqual(consultOfRow("run_s1"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5, q1: "PASS" }, "同组各席共用组摘要，各带本席自己的结论");
+  assert.deepEqual(consultOfRow("run_s4"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5, finished: false, q1: null }, "还在跑、没有结论：q1 是 null；还有席没结束，整组未结束");
+  assert.deepEqual(consultOfRow("run_s1"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5, finished: false, q1: "PASS" }, "同组各席共用组摘要，各带本席自己的结论");
   assert.equal(consultOfRow("run_other"), null, "不是会审席位");
   // q1：只有已答复的席位、且结论在闭集内才给；没答复就算 seat 上写着结论也不给，闭集外的值不透传。
   const verdicts = [

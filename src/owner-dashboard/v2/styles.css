@@ -7,8 +7,9 @@
  * Meaning never rests on color alone: red always comes with a solid circle and
  * words, amber with a triangle and words; zero turns label and number gray.
  *
- * No web fonts are bundled or linked: system fallback stacks only. This batch has
- * no motion at all (a later batch adds it, only for /v2).
+ * No web fonts are bundled or linked: system fallback stacks only. Batch 143b adds the motion the
+ * design specifies (and only for /v2): the motion section at the end of this file lists every duration,
+ * all on one curve, and a prefers-reduced-motion rule turns it all off.
  *
  * English decides the minimum widths of the navigation, the counts and the type
  * column; Chinese sits left-aligned in the same grid.
@@ -27,6 +28,9 @@
   --selected: #ECEFF2;   /* selected row */
   --skeleton: #E9E7E5;   /* loading placeholder */
   --focus: #20252B;
+
+  /* One curve for every duration (designs/v2/README.md 动效): cubic ease-out, no bounce. */
+  --ease: cubic-bezier(0.215, 0.61, 0.355, 1);
 
   /* Latin faces first, CJK faces after: a Latin letter takes the first stack member that has it,
      a Chinese character falls through to the CJK members (SimSun, which has Latin glyphs of its
@@ -509,9 +513,16 @@ button:focus-visible {
    widens them; the search box starts at 160px and takes what is left. Only a narrower window wraps the row. */
 .wk-select { flex: 0 1 var(--wk-select); min-width: 0; max-width: 140px; }
 .wk-search { flex: 1 1 160px; min-width: 160px; }
-/* With a filter SET the row holds chips as wide as their words: the block then takes its natural width and may wrap,
-   so it is the search box that moves down, not a chip that is cut ("Project: sho…"). */
-.wk-filters-chips { flex: 0 1 auto; flex-wrap: wrap; }
+/* With a filter SET the row holds chips instead of some selects. Chips and selects share ONE column with
+   an upper limit that may shrink (min-width 0), so the search box keeps its 160 px place in the same row
+   at 1440px; a long English or Chinese chip gives way with an ellipsis instead of pushing the search box
+   to the next line. Only a narrower window wraps the row. */
+.wk-filters-chips {
+  flex: 1 1 calc(5 * var(--wk-select) + 4 * 8px);
+  max-width: calc(100% - 172px);
+  flex-wrap: nowrap;
+  min-width: 0;
+}
 .wk-filters .chip { flex: 0 1 auto; min-width: 0; max-width: 220px; }
 .wk-filters .chip > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -717,6 +728,167 @@ button:focus-visible {
   border-top: 1px solid var(--line);
 }
 
+/* ===== worker side panel: Activity tab ===== */
+
+/* Four columns, as the design: event number | time | type code | summary. The three short columns are
+   fixed, so event numbers and times line up down the stream; the summary is the one that wraps. */
+.act-filter { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 0; margin: 0 0 8px; }
+
+.act-filter-btn {
+  padding: 2px 0;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-2);
+  font: 600 14px/20px var(--sans);
+  cursor: pointer;
+}
+
+.act-filter-btn[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.act-filter-btn:hover { color: var(--ink); }
+
+.act-dot { color: var(--ink-2); }
+.act-hidden { margin: 0 0 8px; font: 400 14px/20px var(--sans); }
+
+.act-list { list-style: none; margin: 0; padding: 0; }
+
+.act-row {
+  display: grid;
+  grid-template-columns: 96px 72px 56px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.act-c { min-width: 0; }
+.act-c2, .act-c3 { white-space: nowrap; }
+.act-c4 { overflow-wrap: anywhere; font: 400 14px/20px var(--sans); }
+.act-seq { color: var(--ink-2); }
+.act-code { font-weight: 600; }
+
+.act-seq-btn {
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.act-seq-btn:hover { text-decoration: underline; }
+.act-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.act-summary { white-space: pre-wrap; overflow-wrap: anywhere; }
+.act-path { color: var(--ink); }
+.act-stats, .act-exit, .act-fold-sum { color: var(--ink-2); }
+
+.act-pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: var(--page);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.act-full-text { margin-top: 2px; }
+.act-more {
+  margin-top: 2px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--ink-2);
+  font: 600 14px/20px var(--sans);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.act-fold-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--ink-2);
+  font: 400 14px/20px var(--sans);
+  cursor: pointer;
+}
+
+.act-omitted { margin: 2px 0; font: 400 13px/20px var(--mono); }
+
+/* A state change is a rule across the whole row (the four cells are still there). */
+.act-state { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.act-gap { padding: 6px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); font: 400 13px/20px var(--mono); }
+.act-isolation { margin-top: 6px; }
+
+/* A hole the 5 s catch-up did not reach: a line of its own, with the way out next to it. */
+.act-unloaded {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+  font: 400 13px/20px var(--mono);
+}
+
+.act-unloaded-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+
+.act-reload-btn {
+  flex: none;
+  padding: 2px 8px;
+  background: var(--surface);
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  font: 600 13px/20px var(--sans);
+  cursor: pointer;
+}
+
+.act-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; }
+
+.act-page-btn {
+  padding: 2px 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 400 13px/20px var(--sans);
+  cursor: pointer;
+}
+
+.act-page-btn:disabled { color: var(--ink-2); cursor: default; }
+.act-page { color: var(--ink-2); }
+
+.act-stream {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font: 400 14px/20px var(--sans);
+}
+
+.act-follow { color: var(--ink); }
+.act-paused { color: var(--ink-2); }
+
+.act-new-btn {
+  padding: 4px 10px;
+  background: var(--surface);
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  font: 600 14px/20px var(--sans);
+  cursor: pointer;
+}
+
+.act-status { margin-left: auto; color: var(--ink-2); }
+.act-status-stale { color: var(--amber); font-weight: 600; }
+.act-older { margin: 8px 0 0; font: 400 14px/20px var(--sans); }
+
 /* ===== narrow windows ===== */
 
 @media (max-width: 1000px) {
@@ -731,4 +903,139 @@ button:focus-visible {
   .sidebar { width: 100%; min-width: 0; padding: 24px; }
   .axis { grid-template-columns: 1fr; }
   .axis-notes { grid-column: 1; }
+}
+
+/* ===== motion (decision 0131 A3; /v2 only) ===== */
+
+/* Motion: reference motion-prompt #068, #071, #005, #050, #069, #081 (MIT License, © 2026 Shohei Ohtaki, https://showheyohtaki.github.io/motion-prompt/). */
+/* Every duration uses the one curve, var(--ease); no bounce. Only transform / opacity / clip-path and color
+   change — never width, height, top, left, margin or padding, so nothing reflows while it moves.
+   Page switches are 0 ms: the page body is replaced, nothing on .page transitions. */
+
+/* #068 Step indicator: 300 ms — a newly reached step grows its connecting line and lands its mark. */
+.step-glyph { transition: color 300ms var(--ease); }
+.step + .step::before { transform-origin: left center; }
+.step-arrive::before { animation: step-line 300ms var(--ease); }
+.step-arrive .step-glyph { animation: step-mark 300ms var(--ease); }
+
+@keyframes step-line {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes step-mark {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: none; }
+}
+
+/* #071 Badge: first 200 ms; +1 300 ms from 1.30x; cleared 250 ms, the color mark recedes to grey. The
+   number keeps its width (2ch, tabular), so the bar never shifts when the count grows. */
+.badge-n { width: 2ch; text-align: right; font-variant-numeric: tabular-nums; }
+.badge-first .badge-n { animation: badge-first 200ms var(--ease); }
+.badge-bump .badge-n { animation: badge-bump 300ms var(--ease); }
+.badge-needsYou.badge-clear { animation: badge-clear-red 250ms var(--ease); }
+.badge-alerts.badge-clear { animation: badge-clear-amber 250ms var(--ease); }
+
+@keyframes badge-first {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes badge-bump {
+  from { transform: scale(1.3); }
+  to { transform: none; }
+}
+
+@keyframes badge-clear-red {
+  from { color: var(--red); }
+  to { color: var(--ink-2); }
+}
+
+@keyframes badge-clear-amber {
+  from { color: var(--amber); }
+  to { color: var(--ink-2); }
+}
+
+/* #005 Mask reveal: 650 ms — a row that appeared at this draw slides out from behind a 1 px clip line;
+   the text stays opaque and moves 8 px, under one 24 px line. Existing rows never carry the class. */
+.item-new { animation: item-reveal 650ms var(--ease); }
+
+@keyframes item-reveal {
+  from { clip-path: inset(0 0 calc(100% - 1px) 0); transform: translateY(-8px); }
+  to { clip-path: inset(0); transform: none; }
+}
+
+/* #050 Drawer: open 380 ms from the right, close 350 ms back the same way. The top bar does not move
+   (the panel is fixed below it; only the panel itself is transformed). sidebarview.js hides it after
+   the close, unless the Owner reduced motion. */
+.sidebar { animation: drawer-open 380ms var(--ease); }
+.sidebar.sb-closing { animation: drawer-close 350ms var(--ease) forwards; }
+
+@keyframes drawer-open {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+
+@keyframes drawer-close {
+  from { transform: none; }
+  to { transform: translateX(100%); }
+}
+
+/* #069 Skeleton: the placeholder appears in 150 ms; a 160 px light band sweeps it every 900 ms; the
+   content that replaces it appears in 300 ms (addContentIn, only when the first load ends). */
+.sk-set { margin: 16px 0 8px; }
+.sk { position: relative; overflow: hidden; border-radius: 4px; background: var(--skeleton); animation: sk-in 150ms var(--ease); }
+.sk-title { width: 46%; height: 30px; }
+.sk-line { width: 100%; height: 14px; margin-top: 10px; }
+.sk-short { width: 64%; }
+.sk-block { width: 100%; height: 96px; margin-top: 14px; }
+.sk::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 160px;
+  background: linear-gradient(90deg, rgb(255 255 255 / 0), rgb(255 255 255 / 0.75), rgb(255 255 255 / 0));
+  transform: translateX(-200px);
+  animation: sk-sweep 900ms var(--ease) infinite;
+}
+.content-in { animation: content-in 300ms var(--ease); }
+
+@keyframes sk-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sk-sweep {
+  from { transform: translateX(-200px); }
+  to { transform: translateX(1600px); }
+}
+
+@keyframes content-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* #081 Hover lift: in and out, 300 ms each — the card rises 1 px and gains a 1 px grey outline (outline,
+   not border: it takes no room). */
+.wcard { transition: transform 300ms var(--ease), outline-color 300ms var(--ease); outline: 1px solid transparent; outline-offset: -1px; }
+.wcard:hover { transform: translateY(-1px); outline-color: var(--line); }
+
+/* Sidebar event append: a synchronous 120 ms fade, no stagger; following keeps the stream at the bottom. */
+.act-in { animation: act-in 120ms var(--ease); }
+
+@keyframes act-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Reduced motion: show the result at once — no animation, no transition. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

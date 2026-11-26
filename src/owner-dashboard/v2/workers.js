@@ -215,8 +215,15 @@ function cardOf(row, refMs, index) {
     associated: attached.length > 0,
     unsettled,
     round,
+    // The group facts are the server's: the whole group's seat count / how many arrived / whether it has
+    // ended (every seat's run terminal, whether or not that seat survived the page's filters).
     consult: isObject(row.consult) && typeof row.consult.groupId === "string"
-      ? { groupId: row.consult.groupId, seatsIn: Number(row.consult.seatsIn) || 0, seatsTotal: Number(row.consult.seatsTotal) || 0 }
+      ? {
+        groupId: row.consult.groupId,
+        seatsIn: Number(row.consult.seatsIn) || 0,
+        seatsTotal: Number(row.consult.seatsTotal) || 0,
+        finished: typeof row.consult.finished === "boolean" ? row.consult.finished : null,
+      }
       : null,
     // A review seat that has answered: its own verdict (closed set), shown on the finished card.
     q1: isObject(row.consult) && Q1_VALUES.includes(row.consult.q1) ? row.consult.q1 : null,
@@ -252,6 +259,10 @@ const compareSeats = (a, b) => byText(a.lane ?? "", b.lane ?? "") || byText(a.ru
  * One entry per solo card and per review group. Seats of one review (same consult groupId) sit together in
  * ONE entry that lives in Running while any seat has not ended, else in Finished; its sort keys are those
  * of its members (any associated / unsettled one; the quietest running seat; the latest end).
+ *
+ * Whether the group has ended is the SERVER's fact (consult.finished over ALL seats): filtering a
+ * still-starting seat out of the page must not move the remaining, ended seats to Finished. Only when the
+ * server does not state it (an older body) does the old "no visible live seat" rule apply.
  */
 function entriesOf(cards) {
   const groups = new Map();
@@ -276,7 +287,9 @@ function entriesOf(cards) {
     }
     entry.cards.sort(compareSeats);
     const live = entry.cards.filter((card) => card.outcome === null);
-    entry.finished = live.length === 0;
+    // The server's whole-group fact first; the visible seats only decide when it is absent.
+    const declared = entry.cards.map((card) => card.consult?.finished).find((value) => typeof value === "boolean");
+    entry.finished = declared === undefined ? live.length === 0 : declared;
     entry.associated = entry.cards.some((card) => card.associated);
     entry.unsettled = entry.cards.some((card) => card.unsettled);
     const progress = (live.length > 0 ? live : entry.cards).map((card) => card.progressMs).filter((ms) => ms !== null);

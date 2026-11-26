@@ -50,16 +50,27 @@
 //
 // seq 的真实性：seq 是转录里写的真实事件号，合法范围 1 … OWNER_SEQ_MAX（与路由的九位十进制同一个界），
 // 范围外的按没有处理。seqState = ok（唯一、按数组顺序递增）/ missing（旧档没有事件号，seq 为 null）/
-// conflict（重复或倒退，seq 照写入值给）。只有 ok 的事件能被 beforeSeq 与 /api/worker/event 寻址。
+// conflict（重复或倒退，seq 照写入值给）。只有 ok 的事件能被 afterSeq、beforeSeq 与 /api/worker/event 寻址。
 //
-// 翻页按数组顺序切：beforeSeq 取"第一个 seq ≥ beforeSeq 的 ok 事件"之前的事件，页与页首尾相接，
-// 不重不漏。limit 数的是"单位"：要显示的时间线事件与缺口行各算一个（折叠成一行的运行时活动按吞下的
+// 翻页按数组顺序切：beforeSeq 取"第一个 seq ≥ beforeSeq 的 ok 事件"之前的事件；afterSeq 是下界
+// （只取 seq 大于它的 ok 事件），可与 beforeSeq 同用，取 (afterSeq, beforeSeq) 内最新的一页。页与页
+// 首尾相接，不重不漏；range 覆盖页内所有带号事件（包括被筛选 / 未上时间线的），客户端用它判断游标
+// 是否接上。limit 数的是"单位"：要显示的时间线事件与缺口行各算一个（折叠成一行的运行时活动按吞下的
 // 事件数算）。页的起点必须落在 ok 事件上（翻页游标才有号可用）：窗口起点不是 ok 事件时先往前（更早）
-// 找最近的 ok 事件当起点，这一页可以多于 limit 个单位，但不超过 OWNER_ACTIVITY_PAGE_MAX；往前
+// 找最近的 ok 事件当起点；含 gap 的页不得多出 limit（多出的单位留给上一页），只有整段无号、
+// 没有 gap 的页可以扩到 OWNER_ACTIVITY_PAGE_MAX；往前
 // 找不到或太远就往后找最近的 ok 事件（页比 limit 小）；两头都没有 ok 事件时：窗口之前全是没有
 // 事件号的事件，页一直取到最早（older.available=false，older.reason="unnumbered"）；这一段本身超过
 // OWNER_ACTIVITY_PAGE_MAX 时只给最新的 PAGE_MAX 个单位并标 older.reason="capped"（被跳过的事件在
 // 页外，older.beforeSeq 只在更早处还有 ok 事件时给，指向它）。
+//
+// 缺口/预算：gap 行也是一个单位，计入 limit。页首（afterSeq 之后、lower 之前）的缺口在本页预算还
+// 容得下时放在页首，否则留给上一页（older 指向 lower 的 ok 事件，下一请求返回这条 gap）。range
+// 覆盖本页返回的每一行：缺口、冲突号行、折叠区间和隐藏事件都算。双游标区间只有缺口时返回 gap 页，
+// 不返回空页；已作为冲突行返回的 seq 不会再被 gap 覆盖。
+//
+// 交叉事件更新：命令行本身在页的 seq 之前，但它的退出码来自页里的 tool_result；updates 只带这种
+// 已经显示过的行的新版本，不进入 rows/range，也不影响条数与覆盖范围。
 //
 // 增删行：file_written 事件本身不带行数，目前没有任何后端给出绑定的增删行观测，所以 WRITE 行的
 // added / deleted 一律 null（未知）。交付层面的 numstat 在 /api/worker 的交付物里（系统观测）。
@@ -88,13 +99,15 @@ export const OWNER_OLDER_REASONS = Object.freeze(["unnumbered", "capped"]);
 /** /api/worker/event 能取的部分（闭集）；每类事件只有一个：MSG→message、CMD→command、OUT→output、ERR→error。 */
 export const OWNER_EVENT_PARTS = Object.freeze(["command", "output", "message", "error"]);
 
-/** 合法事件号的上界（九位十进制，与路由 /api/worker/activity 的 beforeSeq、/api/worker/event 的 seq 同一个界）。 */
+/** 合法事件号的上界（九位十进制，与路由 /api/worker/activity 的 afterSeq、beforeSeq、/api/worker/event 的 seq 同一个界）。 */
 export const OWNER_SEQ_MAX = 999_999_999;
 /** 一页至多返回多少个单位（时间线事件与缺口行）——缺省与上限相同。 */
 export const OWNER_ACTIVITY_LIMIT_DEFAULT = 200;
 export const OWNER_ACTIVITY_LIMIT_MAX = 200;
 /** 为了让页起点落在 ok 事件上，一页最多可以扩到多少个单位。 */
 export const OWNER_ACTIVITY_PAGE_MAX = 1000;
+/** 一页最多带出多少条“更早命令行被补上退出码”的 updates（同时受 limit 与本页 rows 预算约束）。 */
+export const OWNER_ACTIVITY_UPDATES_MAX = 200;
 /** 助手消息给前几行。 */
 export const OWNER_MESSAGE_HEAD_LINES = 6;
 /** 命令输出 / 工具结果给头几行、尾几行。 */
@@ -490,13 +503,21 @@ function prepare({ runId, events, env, onProcessText }) {
     else if (event.kind === "tool_result" && typeof event.tool === "string" && !resultByTool.has(event.tool)) resultByTool.set(event.tool, event);
   }
   const redactor = createSecretRedactor(env ?? process.env);
+  const items = numbered.map((entry) => ({ ...entry, cls: classify(entry.event, commandIds) }));
+  const commandByTool = new Map();
+  for (const item of items) {
+    if (item.event.type === "run.event" && item.event.kind === "command" && typeof item.event.toolCallId === "string") {
+      commandByTool.set(item.event.toolCallId, item);
+    }
+  }
   const view = {
     runId,
     env: env ?? process.env,
-    items: numbered.map((entry) => ({ ...entry, cls: classify(entry.event, commandIds) })),
+    items,
     gapAt: gapsOf(values, firstAt),
     state: findState(scope),
     resultByTool,
+    commandByTool,
     worktree: boundWorktreePath(scope, runId),
     inferExit: EXIT_CODE_INFERENCE_PROVEN_BACKENDS.has(String(findLatestBound(scope, "session.created", runId)?.backend ?? "")),
     redactor,
@@ -650,38 +671,40 @@ function extendFold(fold, item) {
 // ===== 页的起点 =====
 
 /**
- * 窗口 = 本页区间里最近 limit 个单位（单位 = 要显示的时间线事件，或一个缺口；key 是它在数组里的位置，
- * 缺口排在上界事件之前半格）。页的起点必须落在 ok 事件上：
+ * 窗口 = 本页区间 [lower, cut) 里最近 limit 个单位（单位 = 要显示的时间线事件，或一个缺口；key 是它在
+ * 数组里的位置，缺口排在上界事件之前半格）。页的起点必须落在 ok 事件上，且不能低于下界 lower：
  *   1. 窗口起点往前（更早）找最近的 ok 事件，只要不比 PAGE_MAX 个单位更远；
  *   2. 否则往后找最近的 ok 事件（页比 limit 小，被让出的事件在下一页）；
- *   3. 两头都没有：更早处全是没有事件号的事件——能整个放进一页就取到最早（unnumbered），放不下只给最新
- *      的 PAGE_MAX 个单位（capped）；更早处有 ok 事件时 beforeSeq 指向它。
+ *   3. 两头都没有：本区间里没有被号事件可当游标，页从 lower（或页上限）开始，不能再往前翻。
  * 窗口最老的单位是缺口时，这个缺口让给更早的一页（它排在那一页的末尾）——除非它正好是本区间最后
  * 一个单位（limit=1 的翻页），那就把页起点再往前挪一格，把它放进来。
  */
-function chooseStart({ units, items, cut, limit }) {
+function chooseStart({ units, items, cut, limit, lower }) {
   const none = { available: false, beforeSeq: null, reason: null };
-  if (units.length <= limit) return { start: 0, older: none };
+  if (units.length <= limit) return { start: lower, older: none };
   const oldest = units[units.length - limit];
   const s0 = oldest.gap && oldest.at >= cut ? oldest.at - 1 : oldest.at;
-  const hardAt = units.length > OWNER_ACTIVITY_PAGE_MAX ? units[units.length - OWNER_ACTIVITY_PAGE_MAX].at : 0;
+  const hardAt = units.length > OWNER_ACTIVITY_PAGE_MAX ? units[units.length - OWNER_ACTIVITY_PAGE_MAX].at : lower;
   const numbered = (start) => {
-    const available = units[0].key < start;
+    const available = start > lower;
     return { start, older: { available, beforeSeq: available ? items[start].seq : null, reason: null } };
   };
 
   let back = s0;
-  while (back >= 0 && items[back].seqState !== "ok") back -= 1;
-  if (back >= 0 && back >= hardAt) return numbered(back);
+  while (back >= lower && items[back].seqState !== "ok") back -= 1;
+  if (back >= lower && back >= hardAt) return numbered(back);
 
   let forward = s0 + 1;
   while (forward < cut && items[forward].seqState !== "ok") forward += 1;
   if (forward < cut) return numbered(forward);
 
-  if (back < 0) {
-    return { start: hardAt, older: { available: false, beforeSeq: null, reason: hardAt === 0 ? "unnumbered" : "capped" } };
+  const start = Math.max(lower, hardAt);
+  if (back >= lower) {
+    // There is a numbered event before the window, but more than PAGE_MAX unnumbered units between it
+    // and the page: cap the page and point older at that event (the legacy "capped" jump).
+    return { start, older: { available: true, beforeSeq: items[back].seq, reason: "capped" } };
   }
-  return { start: hardAt, older: { available: true, beforeSeq: items[back].seq, reason: "capped" } };
+  return { start, older: { available: false, beforeSeq: null, reason: hardAt === 0 ? "unnumbered" : "capped" } };
 }
 
 // ===== 活动页 =====
@@ -692,18 +715,22 @@ function chooseStart({ units, items, cut, limit }) {
  * @param {object} input
  * @param {string} input.runId — 已验过形状的 runId
  * @param {object[]} input.events — 这一刻读到的该运行的转录事件
+ * @param {number} [input.afterSeq] — 只取 seq 大于 afterSeq 的 ok 事件（下界，含隐藏事件覆盖范围）
  * @param {number} [input.beforeSeq] — 只取第一个 seq ≥ beforeSeq 的 ok 事件之前的事件（向上翻页）
  * @param {number} [input.limit] — 至多多少个单位（缺省 / 上限 200；见文件头"limit 数的是单位"）
  * @param {"all"|"messages"|"commands"|"errors"} [input.filter]
  * @param {object} [input.env] — 脱敏用的环境（缺省 process.env）
  * @param {(chars: number) => void} [input.onProcessText] — 测试接缝：每次把多长的原文交给脱敏管道
- * @returns {object} { runId, state, terminal, filter, limit, total, range, older{available,beforeSeq,reason}, hidden, rows }
+ * @returns {object} { runId, state, terminal, filter, limit, total, range, older{available,beforeSeq,reason}, hidden, rows, updates }
  */
 export function projectWorkerActivity({
-  runId, events, beforeSeq, limit = OWNER_ACTIVITY_LIMIT_DEFAULT, filter = "all", env, onProcessText,
+  runId, events, afterSeq, beforeSeq, limit = OWNER_ACTIVITY_LIMIT_DEFAULT, filter = "all", env, onProcessText,
 }) {
   if (!Number.isInteger(limit) || limit < 1 || limit > OWNER_ACTIVITY_LIMIT_MAX) throw new RangeError("invalid limit");
   if (!OWNER_ACTIVITY_FILTERS.includes(filter)) throw new RangeError("invalid filter");
+  if (afterSeq !== undefined && !(Number.isInteger(afterSeq) && afterSeq >= 0 && afterSeq <= OWNER_SEQ_MAX)) {
+    throw new RangeError("invalid afterSeq");
+  }
   if (beforeSeq !== undefined && !(Number.isInteger(beforeSeq) && beforeSeq >= 0 && beforeSeq <= OWNER_SEQ_MAX)) {
     throw new RangeError("invalid beforeSeq");
   }
@@ -712,24 +739,71 @@ export function projectWorkerActivity({
   const { items, gapAt } = view;
   const included = items.map((item) => item.cls !== null && accepts(filter, item.cls));
 
-  // 页的终点：第一个 seq ≥ beforeSeq 的 ok 事件的位置（没有就是转录末尾）。
+  // 下界：第一个 seq > afterSeq 的带号事件。afterSeq 只是对外的 seq 游标，没有号的旧档不走这条路径。
+  let lower = 0;
+  if (afterSeq !== undefined) {
+    const at = items.findIndex((item) => item.seqState === "ok" && item.seq > afterSeq);
+    lower = at < 0 ? items.length : at;
+  }
+
+  // 页的终点：第一个 seq ≥ beforeSeq 的 ok 事件的位置（没有就是转录末尾）；下界之后的区间为空时
+  // 终点抬到下界，页为空、range 仍是这段空区间的覆盖范围。
   let cut = items.length;
   if (beforeSeq !== undefined) {
     const at = items.findIndex((item) => item.seqState === "ok" && item.seq >= beforeSeq);
     if (at >= 0) cut = at;
   }
+  if (cut < lower) cut = lower;
   // 终点之前的单位（缺口排在上界事件之前；上界就是终点处事件的缺口，是上一页的末尾）。
   const units = [];
-  for (let i = 0; i <= cut; i += 1) {
-    if (gapAt.has(i)) units.push({ key: i - 0.5, at: i, gap: true });
+  for (let i = lower; i <= cut; i += 1) {
+    if (gapAt.has(i) && i > lower) units.push({ key: i - 0.5, at: i, gap: true });
     if (i < cut && included[i]) units.push({ key: i, at: i, gap: false });
   }
-  const { start, older } = chooseStart({ units, items, cut, limit });
+  const chosen = chooseStart({ units, items, cut, limit, lower });
+  let start = chosen.start;
+  // 游标区间的第一个缺口：它排在 lower 事件之前，不在 units 里；只在本页预算还容得下时放到页首，
+  // 否则留给上一页（older 指向 lower 事件，下一请求会返回这条 gap）。
+  let startGap = null;
+  if (afterSeq !== undefined && Number.isInteger(lower) && lower <= cut) {
+    const gap = gapAt.get(lower);
+    if (gap !== undefined) {
+      const from = Math.max(gap.fromSeq, afterSeq + 1);
+      if (from <= gap.toSeq) startGap = { row: "gap", fromSeq: from, toSeq: gap.toSeq, count: gap.toSeq - from + 1 };
+    }
+  }
+  // A page that contains a gap must also stay within limit. chooseStart may step back to an ok event to
+  // make beforeSeq addressable; when that would overfill a gap page, step forward instead and leave the
+  // leading units to the older page.
+  const pageUnits = (s, includeStart) => (includeStart ? 1 : 0)
+    + units.reduce((sum, unit) => sum + (unit.at > s || (unit.at === s && unit.gap === false) ? 1 : 0), 0);
+  if (startGap !== null || units.some((unit) => unit.gap)) {
+    let include = start === lower && units.length < limit;
+    if (pageUnits(start, include) > limit) {
+      const windowAt = (units[Math.max(0, units.length - limit)] ?? { at: lower }).at;
+      let candidate = Math.max(start, windowAt);
+      while (candidate < cut && items[candidate].seqState !== "ok") candidate += 1;
+      if (candidate < cut) start = candidate;
+    }
+  }
+  const includeStartGap = startGap !== null && start === lower && units.length < limit;
+  let older = chosen.older;
+  if (start !== chosen.start) {
+    older = start > lower && items[start].seqState === "ok" && Number.isInteger(items[start].seq)
+      ? { available: true, beforeSeq: items[start].seq, reason: null }
+      : { available: false, beforeSeq: null, reason: "capped" };
+  }
+  if (includeStartGap) older = { available: false, beforeSeq: null, reason: null };
+  else if (startGap !== null && start === lower) older = { available: true, beforeSeq: items[lower].seq, reason: null };
+  if (!older.available && start > lower && items[start].seqState === "ok" && Number.isInteger(items[start].seq)) {
+    older = { available: true, beforeSeq: items[start].seq, reason: null };
+  }
 
   const rows = [];
   const hidden = { filtered: 0, folded: 0, unlisted: 0 };
   let fromSeq = null;
   let toSeq = null;
+  if (includeStartGap) rows.push(startGap);
   for (let i = start; i <= cut; i += 1) {
     const gap = gapAt.get(i);
     // 起点之前的缺口归更早的一页（排在它的末尾）；终点处的缺口归本页（i === cut）。
@@ -753,6 +827,55 @@ export function projectWorkerActivity({
       rows.push(eventRow(item, view));
     }
   }
+  // range 必须包住本页返回的每一行：缺口行、冲突号行、折叠区间都算；同时保留事件循环对隐藏
+  // 事件的覆盖（fromSeq/toSeq 在筛选之前就更新了）。
+  for (const row of rows) {
+    let from = null;
+    let to = null;
+    if (row.row === "event") {
+      if (Number.isInteger(row.seq)) from = row.seq;
+      to = from;
+    } else {
+      if (Number.isInteger(row.fromSeq)) from = row.fromSeq;
+      if (Number.isInteger(row.toSeq)) to = row.toSeq;
+    }
+    if (from !== null) fromSeq = fromSeq === null ? from : Math.min(fromSeq, from);
+    if (to !== null) toSeq = toSeq === null ? to : Math.max(toSeq, to);
+  }
+  if (fromSeq === null && toSeq === null && afterSeq !== undefined) {
+    // 空区间：保留 {afterSeq+1, afterSeq} 的约定（游标不前进）。
+    fromSeq = afterSeq + 1;
+    toSeq = afterSeq;
+  }
+
+  // A command's exit code is inferred from a LATER tool_result, so its row changes even though its own
+  // seq is before the page. The updates array carries those changed rows without putting them in the
+  // page's range: counts and coverage stay based on the interval only. Only a command that had NO exit
+  // code before, whose first result is the one in this page, and that is at/before the cursor qualifies;
+  // rows and updates share the page's unit budget.
+  const updates = [];
+  const updatedSeqs = new Set();
+  const usedUnits = pageUnits(start, includeStartGap);
+  const updateBudget = Math.max(0, Math.min(limit, OWNER_ACTIVITY_UPDATES_MAX) - usedUnits);
+  if (afterSeq !== undefined) {
+    for (let i = start; i < cut; i += 1) {
+      if (updates.length >= updateBudget) break;
+      const item = items[i];
+      if (item.cls === null || item.cls.code !== "OUT" || item.cls.outputOf !== "command") continue;
+      if (typeof item.event.tool !== "string") continue;
+      const command = view.commandByTool.get(item.event.tool);
+      if (command === undefined || !Number.isInteger(command.seq) || updatedSeqs.has(command.seq)) continue;
+      if (command.seq > afterSeq) continue; // the cursor's command is still part of the new page
+      if (Number.isInteger(command.event.exitCode)) continue; // it already had a wire exit code
+      if (view.resultByTool.get(item.event.tool) !== item.event) continue; // not the result used for inference
+      if (!accepts(filter, command.cls)) continue; // an update must never leak a row this filter hides
+      if (rows.some((row) => row.row === "event" && row.seq === command.seq)) continue;
+      const exit = exitOf(command.event, view);
+      if (exit.exitCode === null) continue;
+      updatedSeqs.add(command.seq);
+      updates.push(eventRow(command, view));
+    }
+  }
 
   return {
     runId,
@@ -765,6 +888,7 @@ export function projectWorkerActivity({
     older,
     hidden,
     rows,
+    updates,
   };
 }
 

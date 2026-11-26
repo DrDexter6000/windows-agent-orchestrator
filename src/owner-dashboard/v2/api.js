@@ -10,18 +10,23 @@
 //   - It is NEVER written to the page, a log or an error. It leaves this module
 //     only as the Authorization header of a request to /api/*.
 //
-// DATA PLANE: the page may read exactly these five read-only routes; the request
+// DATA PLANE: the page may read exactly these seven read-only routes; the request
 // functions refuse any other path (and any query that is not the route's own closed,
 // shape-checked key set), and this module holds the only direct network call in the v2
 // code. Every request is a GET with the bearer, never cached, no referrer.
 //   /api/overview /api/workers[?project=] /api/attention   the three list pages
 //   /api/worker?runId=                                     one worker's detail (JSON)
 //   /api/artifact?runId=&commit=&fileIndex=                one delivered image (a blob)
+//   /api/worker/activity?runId=&afterSeq=&beforeSeq=&limit=&filter=  one page of the event timeline
+//   /api/worker/event?runId=&seq=&part=&page=              one page of an event's full text
 
 import { readStored, writeStored } from "./store.js";
 
 export const TOKEN_STORAGE_KEY = "wao_v2_token";
-export const API_PATHS = Object.freeze(["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact"]);
+export const API_PATHS = Object.freeze([
+  "/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact",
+  "/api/worker/activity", "/api/worker/event",
+]);
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 const TOKEN_RE = /^[0-9a-f]{64}$/;
@@ -61,6 +66,12 @@ const SLUG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 const RUN_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
 const COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const FILE_INDEX_RE = /^(?:0|[1-9][0-9]{0,6})$/;
+const SEQ_RE = /^[1-9][0-9]{0,8}$/;
+const BEFORE_SEQ_RE = /^(?:0|[1-9][0-9]{0,8})$/;
+const LIMIT_RE = /^(?:[1-9][0-9]?|1[0-9][0-9]|200)$/;
+const PAGE_RE = /^(?:[1-9][0-9]{0,5})$/;
+const ACTIVITY_FILTER_RE = /^(?:all|messages|commands|errors)$/;
+const EVENT_PART_RE = /^(?:command|output|message|error)$/;
 
 /** Per route: the closed query keys, each with its shape and whether it is required. */
 const QUERY_SHAPES = Object.freeze({
@@ -72,6 +83,19 @@ const QUERY_SHAPES = Object.freeze({
     runId: { re: RUN_ID_RE, required: true },
     commit: { re: COMMIT_RE, required: true },
     fileIndex: { re: FILE_INDEX_RE, required: true },
+  },
+  "/api/worker/activity": {
+    runId: { re: RUN_ID_RE, required: true },
+    afterSeq: { re: BEFORE_SEQ_RE, required: false },
+    beforeSeq: { re: BEFORE_SEQ_RE, required: false },
+    limit: { re: LIMIT_RE, required: false },
+    filter: { re: ACTIVITY_FILTER_RE, required: false },
+  },
+  "/api/worker/event": {
+    runId: { re: RUN_ID_RE, required: true },
+    seq: { re: SEQ_RE, required: true },
+    part: { re: EVENT_PART_RE, required: true },
+    page: { re: PAGE_RE, required: false },
   },
 });
 
@@ -110,6 +134,14 @@ export const workersPath = (project = null) => build("/api/workers", [["project"
 export const workerPath = (runId) => build("/api/worker", [["runId", runId]]);
 /** One delivered image, bound to the delivery commit and the file's index in the changed list. */
 export const artifactPath = ({ runId, commit, fileIndex }) => build("/api/artifact", [["runId", runId], ["commit", commit], ["fileIndex", fileIndex]]);
+/** One page of the event timeline; `afterSeq` is a lower bound, `beforeSeq` pages upwards. */
+export const activityPath = ({ runId, afterSeq = null, beforeSeq = null, limit = null, filter = null }) => build("/api/worker/activity", [
+  ["runId", runId], ["afterSeq", afterSeq], ["beforeSeq", beforeSeq], ["limit", limit], ["filter", filter],
+]);
+/** One page of one event's full text (part is command | output | message | error). */
+export const eventPath = ({ runId, seq, part, page = null }) => build("/api/worker/event", [
+  ["runId", runId], ["seq", seq], ["part", part], ["page", page],
+]);
 
 // ===== the one network call =====
 
@@ -118,10 +150,13 @@ const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 /**
  * GET one route with the bearer. Never throws on a network problem and never reflects the server's text:
  * { ok: true, response } or { ok: false, reason } with reason one of "unauthorized" | "notFound" |
- * "network" | "server".
+ * "network" | "server". An optional caller signal (a selection / filter change) cancels the request; the
+ * timeout still applies.
  */
-async function get(path, token, accept) {
+async function get(path, token, accept, signal = null) {
   let response;
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const combined = signal !== null && typeof AbortSignal.any === "function" ? AbortSignal.any([timeout, signal]) : timeout;
   try {
     response = await fetch(path, {
       method: "GET",
@@ -129,7 +164,7 @@ async function get(path, token, accept) {
       cache: "no-store",
       credentials: "omit",
       referrerPolicy: "no-referrer",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: combined,
     });
   } catch {
     return { ok: false, reason: "network" };
@@ -145,9 +180,9 @@ async function get(path, token, accept) {
  * one of "unauthorized" | "notFound" | "network" | "server". A route outside the closed set, or the
  * image route, is refused before anything leaves the page.
  */
-export async function request(path, token) {
+export async function request(path, token, signal = null) {
   if (!isDataPath(path) || path.startsWith("/api/artifact")) throw new Error("request: path is not one of the dashboard routes");
-  const got = await get(path, token, "application/json");
+  const got = await get(path, token, "application/json", signal);
   if (!got.ok) return got;
   try {
     return { ok: true, body: await got.response.json() };
@@ -160,9 +195,9 @@ export async function request(path, token) {
  * GET one delivered image (the /api/artifact route only) as a Blob. Only png / jpeg / webp come back as
  * data; anything else is a "server" failure. The caller turns the blob into an object URL and revokes it.
  */
-export async function requestImage(path, token) {
+export async function requestImage(path, token, signal = null) {
   if (!isDataPath(path) || !path.startsWith("/api/artifact")) throw new Error("request: path is not one of the dashboard routes");
-  const got = await get(path, token, "image/png, image/jpeg, image/webp");
+  const got = await get(path, token, "image/png, image/jpeg, image/webp", signal);
   if (!got.ok) return got;
   try {
     const blob = await got.response.blob();

@@ -414,6 +414,10 @@ export function buildSidebar({ feed, open, nowMs }) {
   const identity = isObject(body.identity) ? body.identity : {};
   const health = healthOf(body, refMs);
   const axisDelivery = deliveryAxis(body.delivery, body.run, refMs);
+  // The Copy ref follows the detail's own bound event number (the snapshot fact, which survives the
+  // attention item's 24-hour window); only with none does it fall back to the event the attention
+  // evidence named, then to the bare run number.
+  const boundSeq = Number.isInteger(body.refSeq) && body.refSeq > 0 ? body.refSeq : seq;
   // "Not in the current list" is all a missing row proves while a filter is set. Once the detail shows that the
   // worker belongs to ANOTHER project than the project filter, say that: the filter is what hides it.
   const ownProject = text(identity.project?.slug);
@@ -421,6 +425,7 @@ export function buildSidebar({ feed, open, nowMs }) {
   return {
     kind: "detail",
     ...base,
+    ref: workerRef(open.runId, boundSeq),
     note,
     title: text(identity.title) ?? open.runId,
     subtitle: text(identity.subtitle),

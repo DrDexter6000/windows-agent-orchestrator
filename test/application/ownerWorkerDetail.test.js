@@ -853,7 +853,7 @@ test("写代码·验证通过：身份、健康、Run 轴、交付轴、交付�
 
 test("DTO 白名单：顶层与各块的键集固定，没有 deliveryRef / 工作树 / 仓库路径", async () => {
   const d = await W.worker("run_code_pass");
-  assert.deepEqual(Object.keys(d).sort(), ["brief", "consult", "deliverable", "delivery", "generatedAt", "health", "identity", "run", "runId", "status"]);
+  assert.deepEqual(Object.keys(d).sort(), ["brief", "consult", "deliverable", "delivery", "generatedAt", "health", "identity", "refSeq", "run", "runId", "status"]);
   assert.deepEqual(Object.keys(d.identity).sort(), ["elapsedMs", "laneKey", "project", "roleId", "startedAt", "subtitle", "taskType", "title"]);
   assert.deepEqual(Object.keys(d.health).sort(), ["failure", "lastEffectAt", "lastHeartbeatAt", "lastProcessActiveAt", "lastVitalAt", "liveness"]);
   assert.deepEqual(Object.keys(d.run).sort(), ["stage", "stageAgeMs", "stageSince", "state", "terminalAt"]);

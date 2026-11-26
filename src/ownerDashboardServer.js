@@ -88,9 +88,11 @@
 // resolveRun + the request-time re-read of the transcript), same fixed 404 for a run
 // that is not usable. Both are Owner-only projections (ownerWorkerActivity), separate
 // from the Lead-side run_activity cursor / path / output contract, which is untouched.
-//   - GET /api/worker/activity?runId=&beforeSeq=&limit=&filter=
+//   - GET /api/worker/activity?runId=&afterSeq=&beforeSeq=&limit=&filter=
 //     The latest `limit` (default and max 200) timeline events, or the page before
-//     `beforeSeq`; filter is the closed set all | messages | commands | errors.
+//     `beforeSeq`; `afterSeq` is a lower bound (only events with a greater seq) and can
+//     be used alone or with `beforeSeq` (the latest page inside that interval). filter is
+//     the closed set all | messages | commands | errors.
 //     Before the first publication it answers the status (loading), like /api/worker.
 //   - GET /api/worker/event?runId=&seq=&part=&page=
 //     One page of the full text of `runId#seq` (part is the closed set command |
@@ -111,6 +113,17 @@
 //   - The /v2 static files (and only they) answer with the base CSP plus ONE source: img-src also allows
 //     blob:, because the panel shows a delivered image from a blob URL it made with the bearer. The legacy
 //     UI and every data response keep the base policy.
+//
+// Batch 143b (decision 0131 A3): two small, closed additions on the same read-only boundary.
+//   - A /api/workers consult summary also carries `finished`: whether the WHOLE review group has ended
+//     (every seat's run in a terminal state), so a lane filter that hides a still-starting seat cannot
+//     move the group to Finished on the page. It is a boolean computed from the snapshot, never from the
+//     rows that survived a filter.
+//   - /api/worker's detail DTO carries `refSeq`: the event number of the run's own bound snapshot fact
+//     the Copy ref should name (the failed run's terminal event, or the later capacity observation; the
+//     decision / settle event of a delivery; the last real progress; else the terminal event). It stays
+//     available after the attention item itself has left the 24-hour window; with no such fact it is
+//     null and the page falls back to the bare run number. No new text, no path.
 //
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
 // node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
@@ -280,6 +293,8 @@ const STATIC_ASSETS = Object.freeze([
   { route: "/v2", file: "v2/index.html", type: HTML },
   { route: "/v2/", file: "v2/index.html", type: HTML },
   { route: "/v2/styles.css", file: "v2/styles.css", type: CSS },
+  { route: "/v2/activity.js", file: "v2/activity.js", type: JS },
+  { route: "/v2/activityview.js", file: "v2/activityview.js", type: JS },
   { route: "/v2/app.js", file: "v2/app.js", type: JS },
   { route: "/v2/api.js", file: "v2/api.js", type: JS },
   { route: "/v2/artifacts.js", file: "v2/artifacts.js", type: JS },
@@ -484,7 +499,7 @@ const ITEM_KEYS = Object.freeze([
   "followUpRuns",
 ]);
 const FOLLOW_UP_RUN_KEYS = Object.freeze(["runId", "state"]);
-const CONSULT_KEYS = Object.freeze(["groupId", "seatsIn", "seatsTotal", "q1"]);
+const CONSULT_KEYS = Object.freeze(["groupId", "seatsIn", "seatsTotal", "finished", "q1"]);
 const EVIDENCE_KEYS = Object.freeze(["runId", "at", "seq"]);
 const FAILURE_KEYS = Object.freeze(["category", "code"]);
 const CAPACITY_KEYS = Object.freeze(["kind", "state", "observedAt"]);
@@ -753,17 +768,22 @@ async function serveWorker(ctx, req, res, sp) {
 
 // Canonical decimal digits only (no sign, no leading zeros, bounded length). The nine-digit bound is
 // OWNER_SEQ_MAX (999999999) — the same bound the projection applies to the event numbers in a
-// transcript, so a list never hands out a beforeSeq this route would reject.
+// transcript, so a list never hands out an afterSeq / beforeSeq this route would reject.
 const SEQ_RE = /^[1-9][0-9]{0,8}$/; // an event number: 1 .. OWNER_SEQ_MAX
 const BEFORE_SEQ_RE = /^(0|[1-9][0-9]{0,8})$/; // 0 is allowed: "before everything" is an empty page
 const LIMIT_RE = /^[1-9][0-9]{0,2}$/; // then bounded by OWNER_ACTIVITY_LIMIT_MAX
 const PAGE_RE = /^[1-9][0-9]{0,5}$/; // 1-based page number
 
 function parseWorkerActivityQuery(sp) {
-  assertStrictKeys(sp, new Set(["runId", "beforeSeq", "limit", "filter"]));
+  assertStrictKeys(sp, new Set(["runId", "afterSeq", "beforeSeq", "limit", "filter"]));
   const runId = sp.get("runId");
   if (!isValidRunId(runId)) throw new BadRequest();
   const query = { runId };
+  if (sp.has("afterSeq")) {
+    const raw = sp.get("afterSeq");
+    if (!BEFORE_SEQ_RE.test(raw) || Number(raw) > OWNER_SEQ_MAX) throw new BadRequest();
+    query.afterSeq = Number(raw);
+  }
   if (sp.has("beforeSeq")) {
     const raw = sp.get("beforeSeq");
     if (!BEFORE_SEQ_RE.test(raw) || Number(raw) > OWNER_SEQ_MAX) throw new BadRequest();
@@ -811,6 +831,7 @@ async function serveWorkerActivity(ctx, req, res, sp) {
     const page = projectWorkerActivity({
       runId: query.runId,
       events: source.events,
+      ...(query.afterSeq !== undefined ? { afterSeq: query.afterSeq } : {}),
       ...(query.beforeSeq !== undefined ? { beforeSeq: query.beforeSeq } : {}),
       ...(query.limit !== undefined ? { limit: query.limit } : {}),
       ...(query.filter !== undefined ? { filter: query.filter } : {}),

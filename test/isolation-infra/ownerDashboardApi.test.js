@@ -1393,17 +1393,18 @@ test("AW METHOD: 两个新接口只许 GET——其余方法 405 + Allow: GET，
   await s.close();
 });
 
-test("AW QUERY: /api/worker/activity 只认 runId（必填）+ beforeSeq + limit + filter——多余键、重复键、缺失、形状不对都 400，固定错误体", async () => {
+test("AW QUERY: /api/worker/activity 只认 runId（必填）+ afterSeq + beforeSeq + limit + filter——多余键、重复键、缺失、形状不对都 400，固定错误体", async () => {
   const s = await guardServer();
   const bad = [
     ACTIVITY, `${ACTIVITY}?runId=`, `${ACTIVITY}?runId=bad/path`, `${ACTIVITY}?runId=-dash`, `${ACTIVITY}?runId=../x`, `${ACTIVITY}?runId=a%00b`,
     // 多余的键（含客户端想塞路径、项目、游标的）
     `${GOOD_ACTIVITY}&x=1`, `${GOOD_ACTIVITY}&runDir=${encodeURIComponent(RUN_DIR)}`, `${GOOD_ACTIVITY}&path=x`, `${GOOD_ACTIVITY}&project=alpha`,
-    `${GOOD_ACTIVITY}&cursor=abc`, `${GOOD_ACTIVITY}&afterSeq=1`, `${GOOD_ACTIVITY}&seq=2`, `${GOOD_ACTIVITY}&page=1`, `${GOOD_ACTIVITY}&categories=message`,
+    `${GOOD_ACTIVITY}&cursor=abc`, `${GOOD_ACTIVITY}&seq=2`, `${GOOD_ACTIVITY}&page=1`, `${GOOD_ACTIVITY}&categories=message`,
     // 重复的键
-    `${GOOD_ACTIVITY}&runId=${GUARD_RUN}`, `${GOOD_ACTIVITY}&limit=5&limit=5`, `${GOOD_ACTIVITY}&beforeSeq=5&beforeSeq=5`, `${GOOD_ACTIVITY}&filter=all&filter=all`,
+    `${GOOD_ACTIVITY}&runId=${GUARD_RUN}`, `${GOOD_ACTIVITY}&limit=5&limit=5`, `${GOOD_ACTIVITY}&beforeSeq=5&beforeSeq=5`, `${GOOD_ACTIVITY}&afterSeq=5&afterSeq=5`, `${GOOD_ACTIVITY}&filter=all&filter=all`,
     // 形状不对
     ...["-1", "01", "1.5", "abc", "", "1e2", "+1", "0x1", " 1", "1234567890"].map((v) => `${GOOD_ACTIVITY}&beforeSeq=${encodeURIComponent(v)}`),
+    ...["-1", "01", "1.5", "abc", "", "1e2", "+1", "0x1", " 1", "1234567890"].map((v) => `${GOOD_ACTIVITY}&afterSeq=${encodeURIComponent(v)}`),
     ...["0", "201", "-1", "01", "1.5", "abc", "", "1e2", "+1", "1000"].map((v) => `${GOOD_ACTIVITY}&limit=${encodeURIComponent(v)}`),
     ...["ALL", "All", "all,messages", "messages,errors", "tool", "", "command", " all", "messages ", "other"].map((v) => `${GOOD_ACTIVITY}&filter=${encodeURIComponent(v)}`),
   ];
@@ -1413,7 +1414,7 @@ test("AW QUERY: /api/worker/activity 只认 runId（必填）+ beforeSeq + limit
     assert.deepEqual(jsonOf(r), { error: "bad_request" });
     assertSafeHeaders(r);
   }
-  for (const query of ["", "&limit=1", "&limit=200", "&beforeSeq=0", "&beforeSeq=999999999", "&filter=messages", "&filter=commands", "&filter=errors", "&filter=all", "&beforeSeq=6&limit=3&filter=all"]) {
+  for (const query of ["", "&limit=1", "&limit=200", "&beforeSeq=0", "&beforeSeq=999999999", "&afterSeq=0", "&afterSeq=999999999", "&afterSeq=3&beforeSeq=6", "&filter=messages", "&filter=commands", "&filter=errors", "&filter=all", "&beforeSeq=6&limit=3&filter=all", "&afterSeq=2&beforeSeq=6&limit=3&filter=all"]) {
     const r = await drive(s.handler, { url: `${GOOD_ACTIVITY}${query}`, headers: auth(s) });
     assert.equal(r.status, 200, `${query} → 200`);
     assertSafeHeaders(r);
@@ -1702,8 +1703,8 @@ test("WIRE SEATS: /api/workers 的行给会审席位所在组的摘要 { groupId
   const workers = (await getJson(s, "/api/workers")).workers;
   const row = (id) => workers.find((entry) => entry.runId === id);
   for (const id of ["run_seat1", "run_seat2", "run_seat3"]) {
-    assert.deepEqual(row(id).consult, { groupId: "alpha:consult_9", seatsIn: 1, seatsTotal: 3, q1: verdictOf[id] }, `${id}: 完成且答复的一席已到；完成没答复的、在跑的不算；结论只给已答复的那一席自己的`);
-    assert.deepEqual(sortedKeys(row(id).consult), ["groupId", "q1", "seatsIn", "seatsTotal"]);
+    assert.deepEqual(row(id).consult, { groupId: "alpha:consult_9", seatsIn: 1, seatsTotal: 3, finished: false, q1: verdictOf[id] }, `${id}: 完成且答复的一席已到；完成没答复的、在跑的不算；还有一席在跑，整组未结束；结论只给已答复的那一席自己的`);
+    assert.deepEqual(sortedKeys(row(id).consult), ["finished", "groupId", "q1", "seatsIn", "seatsTotal"]);
   }
   assert.equal(row("run_live").consult, null, "不是会审席位");
   assert.equal(row("run_wait").consult, null, "被审运行不是席位");

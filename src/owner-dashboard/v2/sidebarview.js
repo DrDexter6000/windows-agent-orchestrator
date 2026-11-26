@@ -5,18 +5,70 @@
 // (already redacted, folded and bounded there); the panel is read-only — its buttons only open another
 // worker, pick a tab, fold a list, or copy a reference.
 
-import { chevron, h, mount, symbol } from "./views.js";
+import { chevron, h, invalidateRegion, mount, skeletonNodes, symbol } from "./views.js";
 import { formatAgo, formatDuration, t, tn } from "./i18n.js";
 import { TABS, activeTab } from "./detail.js";
+import { renderActivity } from "./activityview.js";
 
 const MARK_GLYPHS = { done: "✓", current: "●", future: "○", unknown: "?", bad: "▲", ended: "■" };
 
+/** The step marks of the last draw, per panel root: only a step whose mark CHANGED animates (300 ms). */
+const lastMarks = new WeakMap();
+/** The pending close timer of a panel root (the drawer slides back for 350 ms before it hides). */
+const closeTimers = new WeakMap();
+/** The five stable regions of an open panel (head / axes / tabs / panel / foot), per root. */
+const frames = new WeakMap();
+/** The stable Activity host inside a panel region, so its list is never rebuilt wholesale. */
+const activityHosts = new WeakMap();
+/** Bumped whenever a detail frame is (re)created, so an old message signature can never suppress it. */
+const frameEpoch = new WeakMap();
+
+const addClass = (node, name) => {
+  const classes = new Set(String(node.className ?? "").split(/\s+/).filter(Boolean));
+  classes.add(name);
+  node.className = [...classes].join(" ");
+};
+const removeClass = (node, name) => {
+  const classes = String(node.className ?? "").split(/\s+/).filter((cls) => cls !== "" && cls !== name);
+  node.className = classes.join(" ");
+};
+/**
+ * Reduced motion: show the result at once. An environment that cannot answer `matchMedia` (the Node tests'
+ * fake window, a very old browser) is treated as reduced: no animation is better than a stuck panel.
+ */
+const reducedMotion = () => {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return true;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches === true;
+};
+
+/**
+ * The step ids whose mark changed since the last draw (done / current / bad / ended). The first draw of a
+ * panel animates nothing: the design's 300 ms line growth is "a state arrived", not "the panel opened".
+ */
+function arrivedSteps(root, vm) {
+  const previous = lastMarks.get(root);
+  const sameRun = previous !== undefined && previous.runId === vm.runId;
+  const next = new Map();
+  const arrived = new Set();
+  const collect = (axis, steps) => {
+    for (const step of steps) {
+      const key = `${axis}:${step.id}`;
+      next.set(key, step.mark);
+      if (sameRun && previous.marks.get(key) !== step.mark && step.mark !== "future") arrived.add(key);
+    }
+  };
+  collect("run", vm.axes.run.steps);
+  if (vm.axes.delivery !== null) collect("delivery", vm.axes.delivery.steps);
+  lastMarks.set(root, { runId: vm.runId, marks: next });
+  return arrived;
+}
+
 // ===== axes =====
 
-function stepNode(step, lang, label) {
+function stepNode(step, lang, label, arrived = false, axis = "run") {
   return h(
     "li",
-    { class: `step step-${step.mark}` },
+    { class: `step step-${step.mark}${arrived ? " step-arrive" : ""}`, "data-step": `${axis}:${step.id}` },
     h("span", { class: "step-glyph", "aria-hidden": "true", text: MARK_GLYPHS[step.mark] }),
     h("span", { class: "step-label", text: label }),
     h("span", { class: "sr-only", text: ` (${t(lang, `sb.mark.${step.mark}`)})` }),
@@ -33,24 +85,24 @@ function axisRow(name, steps, lang, notes) {
   );
 }
 
-function runAxisNode(axis, lang) {
+function runAxisNode(axis, lang, arrived) {
   const notes = [];
   if (axis.stageUnknown) notes.push(h("span", { class: "tone-amber", text: t(lang, "sb.stageUnknown") }));
   if (axis.startingAgeMs !== null) {
     notes.push(h("span", { class: axis.startingSlow ? "tone-amber" : "muted", text: t(lang, "sb.startingFor", { d: formatDuration(lang, axis.startingAgeMs) }) }));
   }
-  return axisRow(t(lang, "sb.axis.run"), axis.steps.map((step) => stepNode(step, lang, t(lang, `sb.step.${step.id}`))), lang, notes);
+  return axisRow(t(lang, "sb.axis.run"), axis.steps.map((step) => stepNode(step, lang, t(lang, `sb.step.${step.id}`), arrived.has(`run:${step.id}`), "run")), lang, notes);
 }
 
 function previousDecisionWord(decision, lang) {
   return t(lang, `sb.prev.${decision === "accepted" || decision === "rejected" || decision === "superseded" ? decision : "pending"}`);
 }
 
-function deliveryAxisNode(axis, lang, actions) {
+function deliveryAxisNode(axis, lang, actions, arrived) {
   const steps = axis.steps.map((step) => {
     const label = t(lang, `sb.step.${step.id}`);
     const detail = step.id === "verify" && step.detail !== null && step.detail !== undefined ? ` · ${t(lang, `sb.d.vstatus.${step.detail}`)}` : "";
-    return stepNode(step, lang, `${label}${detail}`);
+    return stepNode(step, lang, `${label}${detail}`, arrived.has(`delivery:${step.id}`), "delivery");
   });
   const notes = [];
   if (axis.problem !== null) notes.push(h("span", { class: "tone-amber", text: t(lang, `sb.delivery.problem.${axis.problem}`) }));
@@ -148,20 +200,14 @@ function headerNodes(vm, lang, actions) {
 
 // ===== tabs =====
 
-function tabsNode(tab, lang, actions) {
-  return h(
-    "nav",
-    { class: "sb-tabs", "aria-label": t(lang, "sb.tabs") },
-    TABS.map((id) => h("button", {
-      type: "button",
-      class: "sb-tab",
-      "aria-pressed": tab === id ? "true" : "false",
-      "data-fk": `tab:${id}`,
-      on: { click: () => actions.setTab(id) },
-      text: t(lang, `sb.tab.${id}`),
-    })),
-  );
-}
+const tabsButtons = (tab, lang, actions) => TABS.map((id) => h("button", {
+  type: "button",
+  class: "sb-tab",
+  "aria-pressed": tab === id ? "true" : "false",
+  "data-fk": `tab:${id}`,
+  on: { click: () => actions.setTab(id) },
+  text: t(lang, `sb.tab.${id}`),
+}));
 
 // ===== Deliverable =====
 
@@ -364,15 +410,13 @@ function briefNodes(vm, lang) {
   ];
 }
 
-function footerNode(vm, lang, sui, actions) {
+function footerNodes(vm, lang, sui, actions) {
   const copy = sui.copy !== null && sui.copy !== undefined ? sui.copy : null;
-  return h(
-    "footer",
-    { class: "sb-foot" },
+  return [
     h("code", { class: "ref mono", "data-ref": `worker:${vm.runId}`, text: vm.ref }),
     h("button", { type: "button", class: "btn", "data-fk": "sb-copy", on: { click: () => actions.copyWorkerRef(vm) }, text: t(lang, copy === "ok" ? "at.copied" : "at.copy") }),
     copy === "fail" ? h("span", { class: "copy-status", role: "status", text: t(lang, "at.copyFailed") }) : null,
-  );
+  ];
 }
 
 function messageNodes(vm, lang, actions) {
@@ -388,44 +432,142 @@ function messageNodes(vm, lang, actions) {
       h("button", { type: "button", class: "sb-close", "aria-label": t(lang, "sb.close"), "data-fk": "sb-close", on: { click: () => actions.closeWorker() }, text: "✕" }),
     ),
     vm.note === null ? null : h("p", { class: "sb-note", role: "status", text: t(lang, `sb.note.${vm.note}`) }),
+    vm.message === "loading" ? skeletonNodes() : null,
     h("p", { class: "message", role: "status", text: t(lang, key) }),
   ];
 }
 
-function detailNodes(vm, lang, sui, wanted, views, actions) {
-  const tab = activeTab(sui.tab, vm.defaultTab);
-  const axes = [
-    runAxisNode(vm.axes.run, lang),
-    vm.axes.delivery === null ? null : deliveryAxisNode(vm.axes.delivery, lang, actions),
-    vm.axes.consult === null ? null : consultAxisNode(vm.axes.consult, lang, actions),
-  ];
-  return [
-    h("div", { class: "sb-head" }, headerNodes(vm, lang, actions)),
-    h("div", { class: "sb-axes" }, axes),
-    tabsNode(tab, lang, actions),
-    h(
-      "div",
-      { class: "sb-panel" },
-      tab === "activity" ? h("p", { class: "empty", text: t(lang, "sb.activity.soon") }) : null,
-      tab === "deliverable" ? deliverableNodes(vm, lang, sui, wanted, views, actions) : null,
-      tab === "brief" ? briefNodes(vm, lang) : null,
-    ),
-    footerNode(vm, lang, sui, actions),
-  ];
+// ===== the panel's stable regions =====
+
+/**
+ * Five direct children of the aside, created once and updated separately afterwards: the header, the two
+ * progress axes, the tabs, the tab body and the footer. A quiet poll may redraw the header (its ages tick)
+ * without touching the Activity list, a selection or the scroll position.
+ */
+function ensureFrame(root) {
+  const current = frames.get(root);
+  if (current !== undefined && root.children.length === 5 && root.children[0] === current.head && root.children[4] === current.foot) {
+    current.created = false;
+    return current;
+  }
+  const head = h("div", { class: "sb-head" });
+  const axes = h("div", { class: "sb-axes" });
+  const tabs = h("nav", { class: "sb-tabs" });
+  const panel = h("div", { class: "sb-panel" });
+  const foot = h("footer", { class: "sb-foot" });
+  root.replaceChildren(head, axes, tabs, panel, foot);
+  const next = { head, axes, tabs, panel, foot, created: true };
+  frames.set(root, next);
+  frameEpoch.set(root, (frameEpoch.get(root) ?? 0) + 1);
+  return next;
 }
+
+/** The Activity tab's own stable host inside the panel; the Deliverable / Brief tabs replace the panel. */
+function ensureActivityHost(panel) {
+  const host = activityHosts.get(panel);
+  if (host !== undefined && host.parentNode === panel) return host;
+  const next = h("div", { class: "act-host" });
+  panel.replaceChildren(next);
+  activityHosts.set(panel, next);
+  return next;
+}
+
+const headSignature = (vm, lang) => JSON.stringify(["head", vm.runId, vm.note, vm.title, vm.subtitle, vm.type, vm.lane, vm.projectName, vm.elapsedMs, vm.health, vm.stale, lang]);
+const axesSignature = (vm, lang) => JSON.stringify(["axes", vm.axes, lang]);
+const tabsSignature = (tab, lang) => JSON.stringify(["tabs", tab, lang]);
+const footSignature = (vm, lang, sui) => JSON.stringify(["foot", vm.runId, vm.ref, sui.copy, lang]);
+const panelSignature = (vm, tab, lang, sui, wanted, views) => (tab === "deliverable"
+  ? JSON.stringify(["deliverable", vm.deliverable, sui.filesOpen, sui.imageOpen, wanted, views, lang])
+  : JSON.stringify(["brief", vm.brief, lang]));
 
 /**
  * Draw the side panel into `root` (an <aside>): hidden and empty while no worker is open. `sui` is
- * { tab, filesOpen, imageOpen, copy }; `wanted` the images the Deliverable needs (detail.imagesWanted) and
- * `views` the image store's view (id -> { state, url }). All of them take part in the signature, so a toggle
- * redraws and a quiet poll does not.
+ * { tab, filesOpen, imageOpen, copy, eventCopy }; `wanted` the images the Deliverable needs
+ * (detail.imagesWanted), `views` the image store's view (id -> { state, url }) and `activity` the
+ * Activity tab's view model (activity.buildActivityView of the feed).
+ *
+ * Closing is the one change that keeps the DOM for a moment: the panel slides back for 350 ms (CSS) and is
+ * hidden after that, unless the Owner reduced motion — then it is hidden at once.
  */
-export function renderSidebar(root, vm, lang, sui, wanted, views, actions) {
+export function renderSidebar(root, vm, lang, sui, wanted, views, actions, activity = null) {
   if (vm === null) {
-    root.setAttribute("hidden", "");
-    return mount(root, "closed", () => []);
+    const timer = closeTimers.get(root);
+    if (root.getAttribute("hidden") !== null) {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        closeTimers.delete(root);
+        removeClass(root, "sb-closing");
+      }
+      return false;
+    }
+    if (reducedMotion()) {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        closeTimers.delete(root);
+      }
+      removeClass(root, "sb-closing");
+      root.setAttribute("hidden", "");
+      lastMarks.delete(root);
+      return mount(root, "closed", () => []);
+    }
+    if (timer === undefined) {
+      addClass(root, "sb-closing");
+      const closing = setTimeout(() => {
+        closeTimers.delete(root);
+        removeClass(root, "sb-closing");
+        root.setAttribute("hidden", "");
+        lastMarks.delete(root);
+        mount(root, "closed", () => []);
+      }, 350);
+      closeTimers.set(root, closing);
+    }
+    return false;
   }
+  const closing = closeTimers.get(root);
+  if (closing !== undefined) {
+    clearTimeout(closing);
+    closeTimers.delete(root);
+  }
+  removeClass(root, "sb-closing");
   root.removeAttribute("hidden");
   root.setAttribute("aria-label", t(lang, "sb.label"));
-  return mount(root, JSON.stringify([vm, lang, sui, views]), () => (vm.kind === "detail" ? detailNodes(vm, lang, sui, wanted, views, actions) : messageNodes(vm, lang, actions)));
+
+  if (vm.kind !== "detail") {
+    return mount(root, JSON.stringify(["message", vm, lang, frameEpoch.get(root) ?? 0]), () => messageNodes(vm, lang, actions));
+  }
+
+  const frame = ensureFrame(root);
+  let changed = frame.created;
+  const tab = activeTab(sui.tab, vm.defaultTab);
+
+  changed = mount(frame.head, headSignature(vm, lang), () => headerNodes(vm, lang, actions)) || changed;
+
+  const arrived = arrivedSteps(root, vm);
+  const axes = [
+    runAxisNode(vm.axes.run, lang, arrived),
+    vm.axes.delivery === null ? null : deliveryAxisNode(vm.axes.delivery, lang, actions, arrived),
+    vm.axes.consult === null ? null : consultAxisNode(vm.axes.consult, lang, actions),
+  ];
+  changed = mount(frame.axes, axesSignature(vm, lang), () => axes) || changed;
+
+  frame.tabs.setAttribute("aria-label", t(lang, "sb.tabs"));
+  changed = mount(frame.tabs, tabsSignature(tab, lang), () => tabsButtons(tab, lang, actions)) || changed;
+
+  if (tab === "activity") {
+    if (activity === null) {
+      changed = mount(frame.panel, JSON.stringify(["activity-loading", lang]), () => [h("p", { class: "empty", text: t(lang, "sb.loading") })]) || changed;
+    } else {
+      changed = renderActivity(ensureActivityHost(frame.panel), activity, lang, sui, actions) || changed;
+    }
+    // The panel is owned by the Activity frame now; a later Deliverable / Brief mount must not trust an
+    // older signature for this node (switching Brief -> Activity -> Brief must draw Brief again).
+    invalidateRegion(frame.panel);
+  } else {
+    changed = mount(frame.panel, panelSignature(vm, tab, lang, sui, wanted, views), () => (tab === "deliverable"
+      ? deliverableNodes(vm, lang, sui, wanted, views, actions)
+      : briefNodes(vm, lang))) || changed;
+  }
+
+  changed = mount(frame.foot, footSignature(vm, lang, sui), () => footerNodes(vm, lang, sui, actions)) || changed;
+  return changed;
 }

@@ -12,7 +12,8 @@
 //               window, Overview / Attention view models (no DOM)
 //   V  views    the DOM builders, run against a tiny in-memory DOM
 //   G  guards   closed endpoint set, one network call, no markup parsing, no
-//               inline handlers, no motion, closed static table, contrast, fonts
+//               inline handlers, closed static table, contrast, fonts (the motion guard
+//               moved to ownerDashboardV2Activity.test.js in batch 143b)
 //
 // Deterministic and dependency-free: no network, no browser, no runtime.
 
@@ -38,7 +39,7 @@ const read = (...parts) => readFileSync(join(SRC, ...parts), "utf8");
 const readV2 = (name) => read("v2", name);
 
 const V2_JS = [
-  "app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js",
+  "activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js",
 ];
 const V2_FILES = ["index.html", "styles.css", ...V2_JS];
 const JS_TYPE = "text/javascript; charset=utf-8";
@@ -118,7 +119,7 @@ test("S3 the static table is a closed set: source routes, loaded names and the v
   const routes = [...table.matchAll(/route: "([^"]+)"/g)].map((m) => m[1]).sort();
   assert.deepEqual(routes, [
     "/", "/app.js", "/index.html", "/styles.css",
-    "/v2", "/v2/", "/v2/api.js", "/v2/app.js", "/v2/artifacts.js", "/v2/detail.js", "/v2/i18n.js", "/v2/model.js", "/v2/sidebarview.js",
+    "/v2", "/v2/", "/v2/activity.js", "/v2/activityview.js", "/v2/api.js", "/v2/app.js", "/v2/artifacts.js", "/v2/detail.js", "/v2/i18n.js", "/v2/model.js", "/v2/sidebarview.js",
     "/v2/store.js", "/v2/styles.css", "/v2/views.js", "/v2/workers.js", "/v2/workersview.js",
   ].sort(), "exactly the legacy four plus the v2 routes; /v2/index.html is not a route");
   // The loader is asked for exactly these file names (once each, however many routes share one).
@@ -463,7 +464,12 @@ test("P9 request(): closed route set, bearer header only, outcomes without any s
     await assert.rejects(() => api.request(path, TOKEN), /not one of the dashboard routes/, path);
   }
   assert.equal(calls.length, before, "a refused path never reaches the network");
-  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact"]);
+  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact", "/api/worker/activity", "/api/worker/event"]);
+  // Batch 143b: the two Activity routes are now part of the set and go through the same request function.
+  globalThis.fetch = reply(200, { status: "ready" });
+  assert.deepEqual(await api.request(api.activityPath({ runId: "run_1", filter: "messages" }), TOKEN), { ok: true, body: { status: "ready" } });
+  assert.deepEqual(await api.request(api.eventPath({ runId: "run_1", seq: 2, part: "message" }), TOKEN), { ok: true, body: { status: "ready" } });
+  assert.match(calls.at(-1).url, /^\/api\/worker\/event\?runId=run_1&seq=2&part=message$/);
 });
 
 test("P10 page fragment: three pages, default Overview, project filter only on Workers/Attention", () => {
@@ -2085,16 +2091,16 @@ const allJs = () => V2_JS.map((name) => [name, sourceOf(name)]);
 /** Code without // and block comments (the sources hold no "//" inside a string). */
 const codeOf = (name) => sourceOf(name).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-// Decision 0131 A3 (batch 143a): the closed endpoint set grew by the side panel's two routes. The
-// Activity tab's two routes (/api/worker/activity, /api/worker/event) stay out until their batch.
-test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact", () => {
+// Decision 0131 A3 (batch 143b): the closed endpoint set grew by the Activity tab's two routes. They are
+// read-only pages of the same worker transcript and go through the same single request function.
+test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact, /api/worker/activity, /api/worker/event", () => {
   const found = new Set();
   for (const [, text] of allJs()) for (const m of text.matchAll(/\/api\/([A-Za-z0-9_-]+)(\/[A-Za-z0-9_-]+)?/g)) found.add(m[1] + (m[2] ?? ""));
-  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "worker", "workers"], "no other endpoint anywhere in the v2 code (no /api/worker/activity, /api/worker/event yet)");
+  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "worker", "worker/activity", "worker/event", "workers"], "no other endpoint anywhere in the v2 code");
   // No query string is spelled out in code: the only queries are the ones api.js builds for its own closed key sets.
   assert.ok(!/\/api\/[A-Za-z]+\?/.test(allJs().map(([name]) => codeOf(name)).join("\n")), "no query string literal on a data route");
   assert.doesNotMatch(readV2("index.html"), /\/api\//);
-  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/worker", "/api/workers"]);
+  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/worker", "/api/worker/activity", "/api/worker/event", "/api/workers"]);
   // The pages ask for no route outside the set.
   for (const page of model.PAGES) for (const path of [...model.endpointsFor(page), ...model.endpointsFor(page, "shop-api")]) assert.ok(api.isDataPath(path), `${page}: ${path}`);
 });
@@ -2132,9 +2138,14 @@ test("G4 same-origin only: every reference in the page is under /v2/ (or the dat
   const html = readV2("index.html");
   const refs = [...html.matchAll(/\b(?:href|src)="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(refs.sort(), ["/v2/app.js", "/v2/styles.css", refs.find((r) => r.startsWith("data:image/png")) ].sort());
+  // Batch 143b: the stylesheet's motion credit names the motion-prompt library once, in a comment (the
+  // design requires the attribution). It is the ONLY external URL a /v2 file may contain.
+  const MOTION_CREDIT = "https://showheyohtaki.github.io/motion-prompt/";
   for (const name of V2_FILES) {
-    assert.doesNotMatch(readV2(name), /https?:\/\/|\/\/[a-z0-9.-]+\.[a-z]{2,}/i, `${name}: no external URL`);
+    const source = readV2(name).split(MOTION_CREDIT).join("");
+    assert.doesNotMatch(source, /https?:\/\/|\/\/[a-z0-9.-]+\.[a-z]{2,}/i, `${name}: no external URL`);
   }
+  assert.equal(readV2("styles.css").split(MOTION_CREDIT).length - 1, 1, "the credit URL appears once (a comment) in the stylesheet");
   assert.doesNotMatch(readV2("styles.css"), /@import|@font-face|url\(/i, "the stylesheet loads nothing");
   // Every import resolves to a v2 file that the server serves.
   const served = new Set(V2_JS);
@@ -2169,19 +2180,19 @@ test("G5 the token never reaches the page, a URL, a log, a message or storage ot
 });
 
 test("G6 DOM-free modules never touch the DOM or browser globals", () => {
-  for (const name of ["model.js", "i18n.js", "store.js", "workers.js", "detail.js", "artifacts.js"]) {
+  for (const name of ["activity.js", "model.js", "i18n.js", "store.js", "workers.js", "detail.js", "artifacts.js"]) {
     assert.doesNotMatch(codeOf(name), /\b(document|window|navigator|localStorage|sessionStorage|location|history|fetch|setTimeout)\b/, name);
   }
   assert.doesNotMatch(codeOf("api.js"), /\b(document|window|navigator|localStorage|sessionStorage|location)\b/, "api.js talks through injected getters");
 });
 
-test("G7 no motion in v2: no transition / animation / keyframes, no smooth scroll, no timers for effects", () => {
-  const css = readV2("styles.css");
-  assert.doesNotMatch(css, /transition|animation|@keyframes|scroll-behavior|will-change/i);
+// Batch 143b moves the motion guard to ownerDashboardV2Activity.test.js (curve, durations, reduced motion,
+// reflow-free properties). What stays here is that /v2 has no SCRIPTED motion: every move is CSS.
+test("G7 no scripted motion in v2: no element.animate, no requestAnimationFrame, no smooth scroll; the CSS guard lives in ownerDashboardV2Activity.test.js", () => {
   for (const [name, text] of allJs()) {
     assert.doesNotMatch(text, /\.animate\s*\(|requestAnimationFrame|behavior\s*:\s*["']smooth|scrollIntoView|scrollTo\s*\(|classList/, `${name}: no scripted motion`);
   }
-  assert.doesNotMatch(readV2("index.html"), /transition|animation/i);
+  assert.match(readV2("styles.css"), /@media \(prefers-reduced-motion: reduce\)/, "the stylesheet turns its motion off for reduced motion (the full guard is the Activity test's)");
 });
 
 test("G8 the static table and the old guard: v2 files are all reachable only through fixed routes", async () => {
@@ -2224,8 +2235,10 @@ test("G9 the palette is CSS variables with the designed values", () => {
     page: "#F6F7F8", surface: "#FFFFFF", selected: "#ECEFF2", skeleton: "#E9E7E5",
   };
   for (const [name, hex] of Object.entries(expected)) assert.equal(cssVar(css, name).toUpperCase(), hex, `--${name}`);
-  // Colors are written once, as variables (the rest of the stylesheet refers to them).
-  const outsideRoot = css.replace(/:root\s*\{[^}]*\}/, "");
+  // Colors are written once, as variables (the rest of the stylesheet refers to them). Comments are
+  // stripped first: batch 143b's motion attribution names the motion-prompt issue numbers (#068 …), which
+  // are not colors.
+  const outsideRoot = css.replace(/:root\s*\{[^}]*\}/, "").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.doesNotMatch(outsideRoot, /#[0-9A-Fa-f]{3,8}\b/, "no color literal outside :root");
 });
 

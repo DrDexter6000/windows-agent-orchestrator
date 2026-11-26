@@ -539,6 +539,35 @@ function failureBlock(run, events, redactor, env) {
 // ===== 装配 =====
 
 /**
+ * 这个运行在快照里"绑定了事件号"的事实（第 143b 批修正二），作为 Copy ref 的 runId#seq。
+ * 这些都是快照里已有的绑定事实，所以事项移出 Attention 的 24 小时窗口以后仍能给出同一个引用。
+ *
+ * 取与 Attention 证据同样的落点，而不是简单取最大：失败 / 超时取终态事件（有额度观测时取较晚的观测，
+ * 与事项的"同一运行多条证据取最大"一致）；其余按当前事实的落点——Lead 裁决 → 交付收口 → 额度观测 →
+ * 最后实质进展 → 终态。一个都没有（旧档没有事件号 / 没有这类事实）就是 null，前端回退到裸 run 号，
+ * 不编造。
+ */
+function boundRefSeq(run) {
+  const valid = (value) => Number.isInteger(value) && value >= 1;
+  if (run?.state === "failed" || run?.state === "timed_out") {
+    // A failed run has a failed item (its terminal event) and possibly a capacity item (the observation);
+    // the attention evidence of the same run takes the greater of the two.
+    const values = [run?.terminalSeq, run?.capacity?.observedSeq].filter(valid);
+    return values.length === 0 ? null : Math.max(...values);
+  }
+  // Otherwise the anchor of the fact in force, in the same order the attention items use it.
+  const candidates = [
+    run?.delivery?.acceptance?.decidedSeq,
+    run?.delivery?.settledSeq,
+    run?.capacity?.observedSeq,
+    run?.quietSinceSeq,
+    run?.terminalSeq,
+  ];
+  for (const value of candidates) if (valid(value)) return value;
+  return null;
+}
+
+/**
  * 单个 worker 的详情 DTO。
  *
  * @param {object} input
@@ -617,6 +646,9 @@ export async function projectWorkerDetail({
 
   return {
     runId: run.runId,
+    // The Copy ref's event number: the greatest bound snapshot fact of THIS run (see boundRefSeq). It is
+    // independent of the attention item, which may have left the 24-hour window already.
+    refSeq: boundRefSeq(run),
     identity: {
       title: titles.title,
       subtitle: titles.subtitle,

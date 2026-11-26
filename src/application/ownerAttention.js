@@ -681,6 +681,10 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
  * 席位运行 → 它所在会审组的摘要，外加本席自己已给出的结论 q1（闭集；没答复或结论不在闭集内为 null）。
  * 一个运行同时出现在多个组里时取 createdAt 最早的那个组（快照里的 consults 已按 createdAt 升序）。
  * 没有座位或没有 consultId 的组记录不成摘要。
+ *
+ * finished（第 143b 批修正一）：整组是否结束，按**全部**席位的运行状态判定（每一席都到终态），
+ * 与列表上可见的席位无关——按车道等筛选掉还在启动的那一席后，整组仍不能算结束。前端只筛可见卡片，
+ * 不再用"看得见的席都结束了"代替整组事实。
  */
 function consultBySeatRun(snapshot) {
   const out = new Map();
@@ -692,6 +696,7 @@ function consultBySeatRun(snapshot) {
       groupId: `${text(consult.projectSlug) ?? ""}:${consultId}`,
       seatsIn: consultSeatsArrived(seats),
       seatsTotal: seats.length,
+      finished: seats.every((seat) => TERMINAL_STATES.includes(seat?.runState)),
     };
     for (const seat of seats) {
       // q1: this seat's own verdict (closed set), only for a seat that has answered; null otherwise.
@@ -712,11 +717,13 @@ function consultBySeatRun(snapshot) {
  * @param {{now: number, project?: string|null}} options — now 与那份 attention 同一个；
  *   project 给了就只留该项目的运行
  * @returns {Array<{run: object, laneKey: string|null, title: string|null, subtitle: string|null,
- *   attentionIds: string[], consult: {groupId: string, seatsIn: number, seatsTotal: number, q1: string|null}|null}>}
+ *   attentionIds: string[], consult: {groupId: string, seatsIn: number, seatsTotal: number,
+ *   finished: boolean, q1: string|null}|null}>}
  *   attentionIds 是该运行挂着的未了结事项的 id（先 decide 后 anomalies，各按列表顺序；给了
  *   project 时只列 projectSlugs 含该项目的事项，与 /api/attention?project=X 一致）；
  *   consult 是这个运行（当会审席位时）所在会审组的摘要：groupId 是 <项目 slug>:<consultId>，
- *   seatsIn 是几席已到（consultSeatsArrived 口径：已到终态且收到答复），seatsTotal 是总席数；
+ *   seatsIn 是几席已到（consultSeatsArrived 口径：已到终态且收到答复），seatsTotal 是总席数，
+ *   finished 是整组是否结束（全部席位都到终态；与可见席位无关）；
  *   不是会审席位、或没有会审组记录就是 null
  */
 export function selectOwnerWorkers(snapshot, attention, { now, project = null } = {}) {

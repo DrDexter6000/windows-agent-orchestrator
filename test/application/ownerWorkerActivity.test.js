@@ -54,6 +54,7 @@ import {
 const {
   OWNER_ACTIVITY_FULL_ALWAYS_MAX_CHARS,
   OWNER_ACTIVITY_PAGE_MAX,
+  OWNER_ACTIVITY_UPDATES_MAX,
   OWNER_ACTIVITY_REQUEST_RAW_BUDGET_CHARS,
   OWNER_ACTIVITY_WINDOW_CHARS,
   OWNER_ACTIVITY_WINDOW_MARGIN_CHARS,
@@ -588,6 +589,180 @@ test("limit：缺省 200、可调小、超过上限或形状不对由路由拒�
   }
   assert.deepEqual(seen, [2, ...rangeOf(5, 454)]);
 });
+
+test("afterSeq：单独使用时取游标之后最新的一页；与 beforeSeq 同用时取这段区间最新的一页，页区间互不重叠，older 不越过下界", async () => {
+  const latest = await W.activity("run_long", "afterSeq=254");
+  assert.deepEqual(seqsOf(latest), rangeOf(255, 454));
+  assert.deepEqual(latest.range, { fromSeq: 255, toSeq: 454 });
+  assert.deepEqual(latest.older, { available: false, beforeSeq: null, reason: null }, "到了下界，不能再往前");
+
+  const first = await W.activity("run_long", "afterSeq=440&limit=10");
+  assert.deepEqual(seqsOf(first), rangeOf(445, 454));
+  assert.deepEqual(first.range, { fromSeq: 445, toSeq: 454 });
+  assert.deepEqual(first.older, { available: true, beforeSeq: 445, reason: null });
+  const top = await W.activity("run_long", "afterSeq=440&limit=10&beforeSeq=445");
+  assert.deepEqual(seqsOf(top), rangeOf(441, 444));
+  assert.deepEqual(top.range, { fromSeq: 441, toSeq: 444 }, "下界从头覆盖，即使第一条事件是 #441 也标出这段区间");
+  assert.deepEqual(top.older, { available: false, beforeSeq: null, reason: null });
+
+  // 一路往上翻，每一页都在下界之上，拼起来正好是 (100, 150)。
+  const seen = [];
+  let query = "afterSeq=100&beforeSeq=150&limit=10";
+  for (let guard = 0; guard < 20; guard += 1) {
+    const page = await W.activity("run_long", query);
+    assert.ok(seqsOf(page).every((seq) => seq > 100 && seq < 150), `页里出现了下界之外的事件：${seqsOf(page)}`);
+    seen.unshift(...seqsOf(page));
+    if (!page.older.available) break;
+    assert.ok(page.older.beforeSeq > 100, "older.beforeSeq 不越过下界");
+    query = `afterSeq=100&beforeSeq=${page.older.beforeSeq}&limit=10`;
+  }
+  assert.deepEqual(seen, rangeOf(101, 149));
+
+  const empty = await W.activity("run_long", "afterSeq=454");
+  assert.deepEqual(empty.rows, [], "游标之后没有事件：空页");
+  assert.deepEqual(empty.older, { available: false, beforeSeq: null, reason: null });
+});
+
+test("afterSeq 和 beforeSeq 一样是 0..OWNER_SEQ_MAX 的整数：越界、负数、小数、非数字都被拒绝", async () => {
+  for (const seq of [0, 1, OWNER_SEQ_MAX]) {
+    const r = await W.get(`/api/worker/activity?runId=run_long&afterSeq=${seq}`);
+    assert.equal(r.status, 200, `afterSeq=${seq}`);
+  }
+  for (const seq of ["-1", "1.5", "abc", "01", String(OWNER_SEQ_MAX + 1), "99999999999999999999"]) {
+    const r = await W.get(`/api/worker/activity?runId=run_long&afterSeq=${encodeURIComponent(seq)}`);
+    assert.equal(r.status, 400, `afterSeq=${seq}: ${r.body.slice(0, 120)}`);
+  }
+  // 两个下界/上界可以同用；形状错的那一个单独拒绝。
+  assert.equal((await W.get("/api/worker/activity?runId=run_long&afterSeq=100&beforeSeq=200")).status, 200);
+  assert.equal((await W.get("/api/worker/activity?runId=run_long&afterSeq=bad&beforeSeq=200")).status, 400);
+  assert.equal((await W.get("/api/worker/activity?runId=run_long&afterSeq=100&beforeSeq=bad")).status, 400);
+  for (const bad of [-1, 1.5, "5", null, OWNER_SEQ_MAX + 1]) {
+    assert.throws(() => projectWorkerActivity({ runId: "run_long", events: [], afterSeq: bad, env: {} }), RangeError, `afterSeq=${String(bad)}`);
+  }
+});
+
+test("updates 只带真正变了的命令行：已有退出码的 5 条命令配 5 条结果不产生更新；无退出码的第一条结果才产生一条", () => {
+  assert.ok(OWNER_ACTIVITY_UPDATES_MAX <= OWNER_ACTIVITY_LIMIT_MAX);
+  const withWire = builder("run_upd_wire");
+  withWire.add("session.created", { backend: "claude-code" });
+  for (let i = 1; i <= 5; i += 1) command(withWire, `cmd${i}`, `wire${i}`, { exitCode: 0 });
+  for (let i = 1; i <= 5; i += 1) output(withWire, `wire${i}`, "ok", false);
+  const wirePage = projectWorkerActivity({ runId: "run_upd_wire", events: withWire.events, afterSeq: withWire.events[5].seq, limit: 200, filter: "commands", env: {} });
+  assert.deepEqual(wirePage.updates, [], "命令本来就有退出码，不能重发");
+
+  const inferred = builder("run_upd_infer");
+  inferred.add("session.created", { backend: "claude-code" });
+  command(inferred, "needs-exit", "infer1");
+  const commandSeq = inferred.last();
+  output(inferred, "infer1", "1 failing", true);
+  const page = projectWorkerActivity({ runId: "run_upd_infer", events: inferred.events, afterSeq: commandSeq, limit: 2, filter: "commands", env: {} });
+  assert.equal(page.rows.length, 1);
+  assert.equal(page.updates.length, 1);
+  assert.deepEqual([page.updates[0].seq, page.updates[0].exitCode, page.updates[0].exitSource], [commandSeq, 1, "inferred"]);
+  assert.ok(page.rows.length + page.updates.length <= 2, "rows 与 updates 共用这一页的预算");
+});
+
+test("sol 第 5 条：200 条已自带退出码的命令 + 200 条结果，afterSeq 最后一条命令、Commands 下 updates 为 0", () => {
+  const b = builder("run_upd_200");
+  b.add("session.created", { backend: "claude-code" });
+  for (let i = 1; i <= 200; i += 1) command(b, `cmd${i}`, `many${i}`, { exitCode: 0 });
+  const lastSeq = b.last();
+  for (let i = 1; i <= 200; i += 1) output(b, `many${i}`, "ok", false);
+  const page = projectWorkerActivity({ runId: "run_upd_200", events: b.events, afterSeq: lastSeq, limit: 200, filter: "commands", env: {} });
+  assert.equal(page.rows.length, 200);
+  assert.deepEqual(page.updates, [], "退出码早已存在，不能把 200 条命令全部重发");
+  assert.ok(page.rows.length + page.updates.length <= 200);
+});
+
+
+test("updates 受本页预算约束：5 条待补退出码的命令 + 5 条结果、limit=3 时一页总数仍是 3", () => {
+  const b = builder("run_upd_cap");
+  b.add("session.created", { backend: "claude-code" });
+  for (let i = 1; i <= 5; i += 1) command(b, `cmd${i}`, `cap${i}`);
+  const lastSeq = b.last();
+  for (let i = 1; i <= 5; i += 1) output(b, `cap${i}`, "1 failing", true);
+  const page = projectWorkerActivity({ runId: "run_upd_cap", events: b.events, afterSeq: lastSeq, limit: 3, filter: "commands", env: {} });
+  assert.ok(page.rows.length <= 3);
+  assert.ok(page.rows.length + page.updates.length <= 3, `rows ${page.rows.length} + updates ${page.updates.length}`);
+});
+
+
+test("afterSeq 页的 range 从区间起点算：下界之后先缺一段号时，fromSeq 是 afterSeq+1，页首补出真实缺口", () => {
+  const events = messagesWithSeqs("run_gap3", [2, 5, 7]);
+  const page = projectWorkerActivity({ runId: "run_gap3", events, afterSeq: 2, env: {} });
+  assert.deepEqual(page.range, { fromSeq: 3, toSeq: 7 }, "不是从第一条实际事件 #5 算，否则 #3–#4 看起来像接上了下界");
+  assert.deepEqual(gapsOf(page), [
+    { row: "gap", fromSeq: 3, toSeq: 4, count: 2 },
+    { row: "gap", fromSeq: 6, toSeq: 6, count: 1 },
+  ], "页首的缺口和页内的真实缺口都如实给出");
+  assert.deepEqual(seqsOf(page), [5, 7]);
+});
+
+
+test("gap 计入页预算：200 条事件 + 页首 gap 时第一页仍是 200 行；gap 留在上一页，range 包住本页每一行", () => {
+  const events = messagesWithSeqs("run_gaphead", [1, ...rangeOf(4, 203)]);
+  const first = projectWorkerActivity({ runId: "run_gaphead", events, afterSeq: 1, limit: 200, env: {} });
+  assert.equal(first.rows.length, 200, "不是 200 条事件再加一条 gap");
+  assert.deepEqual(first.range, { fromSeq: 4, toSeq: 203 }, "range 从本页第一行开始，不虚报 #2–#3");
+  assert.deepEqual(first.older, { available: true, beforeSeq: 4, reason: null });
+  const gap = projectWorkerActivity({ runId: "run_gaphead", events, afterSeq: 1, beforeSeq: 4, limit: 200, env: {} });
+  assert.deepEqual(gap.rows, [{ row: "gap", fromSeq: 2, toSeq: 3, count: 2 }], "gap 单独一页，没有丢");
+  assert.deepEqual(gap.range, { fromSeq: 2, toSeq: 3 });
+  assert.deepEqual(gap.older, { available: false, beforeSeq: null, reason: null });
+  for (const page of [first, gap]) assert.ok(page.rows.length <= 200);
+});
+
+test("双游标区间只剩缺口时返回 gap 页，不是空页", () => {
+  const events = messagesWithSeqs("run_gaponly", [1, 4, 6]);
+  const onlyGap = projectWorkerActivity({ runId: "run_gaponly", events, afterSeq: 1, beforeSeq: 4, env: {} });
+  assert.deepEqual(onlyGap.rows, [{ row: "gap", fromSeq: 2, toSeq: 3, count: 2 }]);
+  assert.deepEqual(onlyGap.range, { fromSeq: 2, toSeq: 3 });
+  assert.deepEqual(onlyGap.older, { available: false, beforeSeq: null, reason: null });
+});
+
+test("页尾 gap 也进 range：afterSeq=1&beforeSeq=6 的 #5 缺口必须落在 range.toSeq 里", () => {
+  const events = messagesWithSeqs("run_gaptail", [1, 4, 6]);
+  const withTail = projectWorkerActivity({ runId: "run_gaptail", events, afterSeq: 1, beforeSeq: 6, env: {} });
+  assert.deepEqual(
+    withTail.rows.map((row) => (row.row === "gap" ? `gap${row.fromSeq}-${row.toSeq}` : `#${row.seq}`)),
+    ["gap2-3", "#4", "gap5-5"],
+  );
+  assert.deepEqual(withTail.range, { fromSeq: 2, toSeq: 5 }, "range.toSeq 包住页尾 gap #5，不只是 #4");
+  assert.deepEqual(withTail.older, { available: false, beforeSeq: null, reason: null });
+});
+
+test("页首 gap 也要占预算：limit=3 时 3 个事件单位已经占满，gap 留给上一页", () => {
+  const events = messagesWithSeqs("run_gaptight", [1, 4, 6]);
+  const tight = projectWorkerActivity({ runId: "run_gaptight", events, afterSeq: 1, limit: 3, env: {} });
+  assert.deepEqual(tight.rows.map((row) => (row.row === "gap" ? `gap${row.fromSeq}-${row.toSeq}` : `#${row.seq}`)), ["#4", "gap5-5", "#6"]);
+  assert.equal(tight.rows.length, 3);
+  assert.deepEqual(tight.older, { available: true, beforeSeq: 4, reason: null });
+});
+
+test("冲突号已经作为行返回时，gap 不再覆盖它：转录顺序 #1、#8、#2 里，#2 是冲突行，缺口从 #3 开始", () => {
+  const events = messagesWithSeqs("run_gapconflict", [1, 8, 2]);
+  const page = projectWorkerActivity({ runId: "run_gapconflict", events, afterSeq: 1, env: {} });
+  const conflict = page.rows.find((row) => row.row === "event" && row.seq === 2);
+  assert.equal(conflict.seqState, "conflict");
+  const gap = page.rows.find((row) => row.row === "gap");
+  assert.deepEqual([gap.fromSeq, gap.toSeq], [3, 7], "缺口不包含已经显示的 #2");
+  assert.deepEqual(page.range, { fromSeq: 2, toSeq: 8 }, "range 同时包住冲突行和缺口");
+});
+
+
+test("afterSeq 页的 updates 带出被后续 tool_result 补全的更早命令行：它不在 rows/range 里，只供客户端按 key 替换", async () => {
+  const page = await W.activity("run_shapes", `afterSeq=${S.cmdInferred}`);
+  assert.ok(seqsOf(page).includes(S.outShort), "结果之后的输出行仍在页里");
+  assert.ok(!seqsOf(page).includes(S.cmdInferred), "命令行本身不在页的 rows 里");
+  const update = page.updates.find((row) => row.row === "event" && row.seq === S.cmdInferred);
+  assert.ok(update, "更新通道带出了更早的命令行");
+  assert.deepEqual([update.exitCode, update.exitSource], [0, "inferred"], "用的是服务端投影的退出码，不是客户端猜的");
+  assert.ok(page.range.fromSeq > S.cmdInferred, "更新不会把页的覆盖区间往左拉");
+  const messages = await W.activity("run_shapes", `afterSeq=${S.cmdInferred}&filter=messages`);
+  assert.deepEqual(messages.updates, [], "筛选把命令行隐藏时，更新通道也不会把它漏出来");
+});
+
+
 
 // ===== 2. 各类事件的内容 =====
 

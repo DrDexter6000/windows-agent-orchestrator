@@ -387,12 +387,16 @@ test("BOARD R3 WIRING: cards are real buttons reusing selectRun; pills + lane na
 // R8) ACCESSIBILITY HARD PINS
 // =====================================================================
 
-test("BOARD R8 A11Y CSS: visible focus style on cards; no motion introduced", () => {
+test("BOARD R8 A11Y CSS (legacy UI only): visible focus on cards; the legacy styles.css stays motion-free", () => {
   const css = readAsset("styles.css");
+  // Decision 0131 A3 (batch 143b): the motion the design specifies is /v2 only. This guard binds the
+  // LEGACY page's stylesheet, which must stay motion-free; /v2's motion has its own guard in
+  // ownerDashboardV2Activity.test.js (curve, durations, reduced motion, reflow-free properties).
+  assert.notEqual(css, readAsset("v2/styles.css"), "the file under guard is the legacy styles.css, not the /v2 one");
   assert.match(css, /\.board-card:focus-visible\s*\{[^}]*outline/,
     "keyboard focus on a card is visibly styled");
   assert.doesNotMatch(css, /transition|animation|@keyframes/i,
-    "the dashboard stays motion-free (board adds none)");
+    "the legacy dashboard stays motion-free (the /v2 motion is scoped to /v2)");
   // Terminal de-emphasis must not lower text contrast: no opacity anywhere in
   // the board section (contrast is preserved structurally, not via alpha).
   assert.ok(css.indexOf(".board") > 0, "board section exists");

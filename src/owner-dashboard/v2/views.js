@@ -43,7 +43,32 @@ export function h(tag, props, ...children) {
 export const symbol = (glyph, tone = null) => h("span", { class: tone === null ? "sym" : `sym sym-${tone}`, "aria-hidden": "true", text: glyph });
 export const chevron = (open) => h("span", { class: open ? "chev chev-open" : "chev", "aria-hidden": "true" });
 
+/** Add one class name to a node (the fake DOMs of the tests have plain className strings, as do real nodes). */
+function addClass(node, name) {
+  const classes = new Set(String(node.className ?? "").split(/\s+/).filter(Boolean));
+  classes.add(name);
+  node.className = [...classes].join(" ");
+}
+
+/**
+ * The 300 ms "content appeared" fade: applied once, to the children a region drew when it stopped showing
+ * its first-load skeleton. A quiet poll does not call it (mount leaves the DOM alone).
+ */
+export function addContentIn(root) {
+  for (const child of root.children ?? []) {
+    if (child !== null && typeof child === "object" && child.nodeType === 1) addClass(child, "content-in");
+  }
+}
+
 const signatures = new WeakMap();
+
+/**
+ * Forget a region's last signature. The caller replaced the region's children outside mount() (the
+ * Activity tab has its own stable frame); the next mount() must redraw instead of trusting the old value.
+ */
+export function invalidateRegion(root) {
+  signatures.delete(root);
+}
 
 function focusedKey(root) {
   const active = document.activeElement;
@@ -104,13 +129,15 @@ function freshnessLabel(freshness, lang) {
   return "";
 }
 
-function badge(kind, count, tone, lang, actions) {
+function badge(kind, count, tone, lang, actions, anim = null) {
   const needs = kind === "needsYou";
+  const classes = ["badge", `badge-${kind}`, `badge-${tone}`];
+  if (anim !== null) classes.push(`badge-${anim}`);
   return h(
     "button",
     {
       type: "button",
-      class: `badge badge-${kind} badge-${tone}`,
+      class: classes.join(" "),
       "data-fk": `top:${kind}`,
       on: { click: () => actions.navigate("attention", null, needs ? "decide" : "anomalies") },
     },
@@ -133,7 +160,7 @@ function langButton(code, label, lang, actions) {
 
 const separator = () => h("span", { class: "sep", "aria-hidden": "true", text: "|" });
 
-function topbarNodes(vm, lang, actions) {
+function topbarNodes(vm, lang, actions, anim) {
   const nav = h(
     "nav",
     { class: "nav", "aria-label": t(lang, "nav.label") },
@@ -150,9 +177,9 @@ function topbarNodes(vm, lang, actions) {
   const side = h(
     "div",
     { class: "topbar-side" },
-    badge("needsYou", vm.counts === null ? null : vm.counts.needsYou, vm.tones.needsYou, lang, actions),
+    badge("needsYou", vm.counts === null ? null : vm.counts.needsYou, vm.tones.needsYou, lang, actions, anim.needsYou),
     separator(),
-    badge("alerts", vm.counts === null ? null : vm.counts.alerts, vm.tones.alerts, lang, actions),
+    badge("alerts", vm.counts === null ? null : vm.counts.alerts, vm.tones.alerts, lang, actions, anim.alerts),
     separator(),
     fresh,
     separator(),
@@ -167,9 +194,32 @@ function topbarNodes(vm, lang, actions) {
   return [h("div", { class: "topbar-inner" }, h("span", { class: "brand", text: "WAO" }), nav, side)];
 }
 
-/** Draw the top bar (same on every page). */
+/** The count of the last draw, per bar: a +1 bumps (300 ms), a clear recedes (250 ms), the first 200 ms. */
+const lastCounts = new WeakMap();
+
 export function renderTopbar(root, vm, lang, actions) {
-  return mount(root, JSON.stringify([vm, lang]), () => topbarNodes(vm, lang, actions));
+  const previous = lastCounts.get(root);
+  const animFor = (kind, count) => {
+    if (count === null || count === undefined) return null;
+    if (previous === undefined) return "first";
+    const before = previous[kind];
+    if (before === null || before === undefined) return "first";
+    if (count > before) return "bump";
+    if (count === 0 && before > 0) return "clear";
+    return null;
+  };
+  const anim = {
+    needsYou: animFor("needsYou", vm.counts === null ? null : vm.counts.needsYou),
+    alerts: animFor("alerts", vm.counts === null ? null : vm.counts.alerts),
+  };
+  const redrew = mount(root, JSON.stringify([vm, lang]), () => topbarNodes(vm, lang, actions, anim));
+  if (redrew) {
+    lastCounts.set(root, {
+      needsYou: vm.counts === null ? null : vm.counts.needsYou,
+      alerts: vm.counts === null ? null : vm.counts.alerts,
+    });
+  }
+  return redrew;
 }
 
 // ===== shared pieces =====
@@ -468,14 +518,18 @@ function itemMeta(item, lang) {
   }
   return [names, several, duration].filter((part) => part !== null && part !== "").join(" · ");
 }
-function itemRow(item, index, lang, ui, actions) {
+function itemRow(item, index, lang, ui, actions, isNew = false) {
   const selected = ui.selected === item.id;
   const detailId = `detail-${item.section}-${index}`;
   const [tone, glyph] = item.section === "decide" ? ["red", "●"] : item.section === "anomalies" ? ["amber", "▲"] : ["gray", "✓"];
   const title = item.headline === null ? kindLabel(item.kind, lang) : `${kindLabel(item.kind, lang)} · ${item.headline}`;
+  const classes = ["item"];
+  if (selected) classes.push("item-selected");
+  // Mask reveal (650 ms) only for a row that appeared after the previous draw.
+  if (isNew) classes.push("item-new");
   return h(
     "li",
-    { class: selected ? "item item-selected" : "item" },
+    { class: classes.join(" ") },
     h(
       "button",
       {
@@ -509,18 +563,19 @@ function disclosure(label, open, focusKey, onClick) {
   );
 }
 
-function sectionNode(kind, section, lang, ui, actions) {
+function sectionNode(kind, section, lang, ui, actions, fresh) {
   const decide = kind === "decide";
   const tone = section.total === 0 ? "gray" : decide ? "red" : "amber";
   const open = ui.legacyOpen[kind] === true;
+  const isNew = (item) => fresh.has(`${item.section}:${item.id}`);
   const list = [];
-  section.items.forEach((item, index) => list.push(itemRow(item, index, lang, ui, actions)));
+  section.items.forEach((item, index) => list.push(itemRow(item, index, lang, ui, actions, isNew(item))));
   if (section.legacy.length > 0) {
     list.push(h(
       "li",
       { class: "legacy" },
       disclosure(t(lang, "at.legacy", { n: section.legacy.length }), open, `legacy:${kind}`, () => actions.toggleLegacy(kind)),
-      open ? h("ul", { class: "rows rows-nested" }, section.legacy.map((item, index) => itemRow(item, section.items.length + index, lang, ui, actions))) : null,
+      open ? h("ul", { class: "rows rows-nested" }, section.legacy.map((item, index) => itemRow(item, section.items.length + index, lang, ui, actions, isNew(item)))) : null,
     ));
   }
   return h(
@@ -542,17 +597,17 @@ function sectionNode(kind, section, lang, ui, actions) {
   );
 }
 
-function attentionNodes(vm, lang, ui, actions) {
+function attentionNodes(vm, lang, ui, actions, fresh) {
   return [
     pageTitle(lang, "attention"),
     filterBar(vm.project, vm.projectName, lang, actions),
-    sectionNode("decide", vm.decide, lang, ui, actions),
-    sectionNode("anomalies", vm.anomalies, lang, ui, actions),
+    sectionNode("decide", vm.decide, lang, ui, actions, fresh),
+    sectionNode("anomalies", vm.anomalies, lang, ui, actions, fresh),
     h(
       "section",
       { class: "section section-resolved" },
       disclosure(t(lang, "at.resolved", { n: vm.resolved.length }), ui.resolvedOpen, "resolved", () => actions.toggleResolved()),
-      ui.resolvedOpen ? h("ul", { class: "rows" }, vm.resolved.map((item, index) => itemRow(item, index, lang, ui, actions))) : null,
+      ui.resolvedOpen ? h("ul", { class: "rows" }, vm.resolved.map((item, index) => itemRow(item, index, lang, ui, actions, fresh.has(`${item.section}:${item.id}`)))) : null,
     ),
   ];
 }
@@ -560,7 +615,38 @@ function attentionNodes(vm, lang, ui, actions) {
 // ===== page body =====
 
 function messageNodes(vm, lang) {
-  return [h("p", { class: "message", role: "status", text: t(lang, `state.${vm.kind}`) })];
+  return [
+    // The first load shows same-shaped placeholder blocks (150 ms in, a 160 px band sweeping every 900 ms)
+    // under the status text; the data itself replaces them and fades in over 300 ms (addContentIn).
+    vm.kind === "loading" ? skeletonNodes() : null,
+    h("p", { class: "message", role: "status", text: t(lang, `state.${vm.kind}`) }),
+  ];
+}
+
+/** Same-shaped grey blocks for the first load; the sweeping band is CSS only. */
+export function skeletonNodes() {
+  return h(
+    "div",
+    { class: "sk-set", "aria-hidden": "true" },
+    h("div", { class: "sk sk-title" }),
+    h("div", { class: "sk sk-line" }),
+    h("div", { class: "sk sk-line sk-short" }),
+    h("div", { class: "sk sk-block" }),
+    h("div", { class: "sk sk-line" }),
+    h("div", { class: "sk sk-line sk-short" }),
+  );
+}
+
+/** The Attention rows the last draw put on screen (only a row that was not there animates). */
+const attentionSeen = new WeakMap();
+
+function attentionKeys(vm) {
+  const keys = new Set();
+  for (const section of ["decide", "anomalies"]) {
+    for (const item of [...vm[section].items, ...vm[section].legacy]) keys.add(`${item.section}:${item.id}`);
+  }
+  for (const item of vm.resolved) keys.add(`${item.section}:${item.id}`);
+  return keys;
 }
 
 /**
@@ -570,9 +656,17 @@ function messageNodes(vm, lang) {
  * so a toggle redraws and a quiet poll does not.
  */
 export function renderMain(root, vm, lang, ui, actions) {
+  if (vm.page === "attention") {
+    const previous = attentionSeen.get(root);
+    const keys = attentionKeys(vm);
+    const fresh = new Set();
+    if (previous !== undefined) for (const key of keys) if (!previous.has(key)) fresh.add(key);
+    const redrew = mount(root, JSON.stringify([vm, lang, ui]), () => attentionNodes(vm, lang, ui, actions, fresh));
+    if (redrew) attentionSeen.set(root, keys);
+    return redrew;
+  }
   return mount(root, JSON.stringify([vm, lang, ui]), () => {
     if (vm.page === "overview") return overviewNodes(vm, lang, actions);
-    if (vm.page === "attention") return attentionNodes(vm, lang, ui, actions);
     return messageNodes(vm, lang);
   });
 }
