@@ -521,14 +521,20 @@ export function tailOfRedactedText(text, redactor, maxChars) {
  * 然后才取头。totalChars = 清洗后的全文长度（UTF-16 码元），truncated 时调用方据此写明
  * "截在哪里"。
  *
+ * 可选的 foldPaths（文本 → 文本）在两层脱敏之后、控制字符清洗与取头之前作用在完整文本上
+ * ——Owner 看板用它把绝对路径折成末段（读模型标题已在用的 foldAbsolutePaths）：路径要在截断之前
+ * 折，否则帽里会留下盘符或目录。
+ *
  * @param {string} text 完整原始文本
  * @param {object} redactor createSecretRedactor() 实例
  * @param {number} maxChars 开头字符上限
+ * @param {((text: string) => string)|null} [foldPaths]
  * @returns {{text: string, truncated: boolean, totalChars: number}}
  */
-export function headOfRedactedText(text, redactor, maxChars) {
+export function headOfRedactedText(text, redactor, maxChars, foldPaths = null) {
   if (typeof text !== "string" || text.length === 0) return { text: "", truncated: false, totalChars: 0 };
-  const safe = sanitizeControls(redactSecretShapes(redactor.redactString(text)));
+  const redacted = redactSecretShapes(redactor.redactString(text));
+  const safe = sanitizeControls(foldPaths === null ? redacted : foldPaths(redacted));
   if (safe.length <= maxChars) return { text: safe, truncated: false, totalChars: safe.length };
   return { text: safeSliceUtf16(safe, 0, maxChars), truncated: true, totalChars: safe.length };
 }

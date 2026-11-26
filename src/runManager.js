@@ -13,7 +13,6 @@ import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor, redactSecretShapes } from "./secretRedaction.js";
-import { escapeControlChars, safeSliceUtf16 } from "./safeText.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
@@ -24,7 +23,7 @@ import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
-import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES, ISOLATION_DESTINATIONS, ISOLATION_DISPLAY_PATH_MAX_CHARS } from "./diagnosis.js";
+import { ISOLATION_VIOLATION_REASONS, ISOLATION_PHYSICAL_ERROR_CODES, ISOLATION_DESTINATIONS, ISOLATION_DISPLAY_PATH_MAX_CHARS, isolationDisplayPath } from "./diagnosis.js";
 // One definition (diagnosis.js) with a compatibility re-export here; both
 // consumers resolve the same binding.
 export { ISOLATION_DISPLAY_PATH_MAX_CHARS };
@@ -855,111 +854,6 @@ function _physicalIsolationEscapedAt(target, effectiveCwd, {
   }
 }
 
-// ===== TD-373: redacted display form for the outside-write fields ===============
-//
-// ONE function for reportedPath and resolvedPath, in this order:
-//   1. this._redact (exact values) → redactSecretShapes (shapes)
-//   2. user-home prefix → "~" after a comparison normalization: separators
-//      unified, `\\?\` / `\\?\UNC\` stripped, `.` segments removed; native,
-//      mixed-separator and MSYS drive forms all match. Only a LEADING home
-//      prefix is replaced.
-//   2b. Username leak guard: after normalization/home replacement, if the
-//      home's last path segment (the user name) still appears as a complete
-//      path segment anywhere (case-insensitive; Win32 trailing dots/spaces
-//      folded), the WHOLE field is omitted — we cannot prove the redaction.
-//   3. control characters escaped (the repository's shared escapeControlChars)
-//   4. UTF-16-safe slice to the shared limit (the repository's safeSliceUtf16)
-//   5. this._redact + redactSecretShapes again on the final string
-//   6. UTF-16-safe slice AGAIN after the final redaction (markers added in step
-//      5 may lengthen the string past the limit).
-function _normalizeHomeCompareParts(text) {
-  if (typeof text !== "string" || text.length === 0) return [];
-  let normalized = text;
-  if (process.platform === "win32") {
-    // MSYS drive form (/c/Users/...) before unifying separators.
-    normalized = normalized.replace(/^\/([A-Za-z])(?=\/|$)/, (match, drive) => `${drive.toUpperCase()}:`);
-    normalized = normalized.replaceAll("/", "\\");
-  }
-  normalized = normalized.replace(/^\\\\\?\\UNC\\/i, "\\\\");
-  normalized = normalized.replace(/^\\\\\?\\/i, "");
-  return normalized
-    .split(/[\\/]+/)
-    .filter((part) => part.length > 0 && part !== ".");
-}
-
-function _homeCompareParts(homeDir) {
-  return _normalizeHomeCompareParts(resolve(homeDir));
-}
-
-function _partsStartWith(parts, prefix) {
-  if (!Array.isArray(parts) || !Array.isArray(prefix) || prefix.length === 0) return false;
-  if (parts.length < prefix.length) return false;
-  const insensitive = process.platform === "win32";
-  for (let index = 0; index < prefix.length; index += 1) {
-    const left = insensitive ? parts[index].toLowerCase() : parts[index];
-    const right = insensitive ? prefix[index].toLowerCase() : prefix[index];
-    if (left !== right) return false;
-  }
-  return true;
-}
-
-function _replaceHomePrefix(text, homeDir) {
-  if (typeof text !== "string" || typeof homeDir !== "string") return text;
-  const homeParts = _homeCompareParts(homeDir);
-  const parts = _normalizeHomeCompareParts(text);
-  if (!_partsStartWith(parts, homeParts)) return text;
-  const rest = parts.slice(homeParts.length).join(sep);
-  return rest.length > 0 ? `~${sep}${rest}` : "~";
-}
-
-// Win32 name identity for the user-name guard: an ADS/stream suffix starts at
-// the first colon (`Alice::$INDEX_ALLOCATION` is the Alice directory), and
-// trailing dots/spaces are ignored by the OS (`Alice.` is `Alice`).
-function _segmentIdentity(segment) {
-  const colon = segment.indexOf(":");
-  const baseName = colon >= 0 ? segment.slice(0, colon) : segment;
-  return baseName.replace(/[ .]+$/, "");
-}
-
-function _containsHomeUserNameSegment(text, homeDir) {
-  if (typeof text !== "string" || typeof homeDir !== "string") return false;
-  const homeParts = _homeCompareParts(homeDir);
-  const userName = homeParts.at(-1);
-  // A drive-root home (`C:\`) has no meaningful user segment; never let `C:`
-  // cause every path on that drive to be omitted.
-  if (typeof userName !== "string" || userName.length === 0 || /^[A-Za-z]:$/.test(userName)) return false;
-  const wanted = userName.toLowerCase();
-  return _normalizeHomeCompareParts(text).some((part) => {
-    if (part === "." || part === "..") return false;
-    return _segmentIdentity(part).toLowerCase() === wanted;
-  });
-}
-
-function _finishIsolationDisplayPath(prepared, redact, homeDir) {
-  const homeReplaced = _replaceHomePrefix(prepared, homeDir);
-  // The user-name guard runs on the already normalized/replaced value: if an
-  // equivalent spelling still exposes the user name as a whole segment, the
-  // caller omits the field entirely.
-  if (_containsHomeUserNameSegment(homeReplaced, homeDir)) return null;
-  const controlsEscaped = escapeControlChars(homeReplaced);
-  const bounded = safeSliceUtf16(controlsEscaped, 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
-  const redactedAgain = redactSecretShapes(redact(bounded));
-  const finalText = safeSliceUtf16(redactedAgain, 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
-  // Re-run the guard on the FINAL text: control-character escaping can turn a
-  // raw `Alice<TAB>` segment into `Alice\t`, and the escape backslash then acts
-  // as a path separator for the segment check, making the user name a complete
-  // segment in the persisted text. Same for markers added by the final
-  // redaction pass.
-  if (_containsHomeUserNameSegment(finalText, homeDir)) return null;
-  return finalText;
-}
-
-function _isolationDisplayPath(rawText, redact, homeDir) {
-  if (typeof rawText !== "string" || rawText.length === 0) return null;
-  const prepared = redactSecretShapes(redact(rawText));
-  return _finishIsolationDisplayPath(prepared, redact, homeDir);
-}
-
 /**
  * Build the TD-373 additive fields for one confirmed-outside violation.
  * Never throws: any classification/redaction failure degrades to destination
@@ -1002,10 +896,10 @@ export function describeIsolationOutsideWrite({
       effectiveCwd,
       deps: { rootsFn },
     });
-    const reportedPath = _isolationDisplayPath(rawPath, redact, homeDir);
+    const reportedPath = isolationDisplayPath(rawPath, redact, homeDir);
     const resolvedPath = resolvedWithheld || resolvedLanding === null
       ? null
-      : _isolationDisplayPath(resolvedLanding, redact, homeDir);
+      : isolationDisplayPath(resolvedLanding, redact, homeDir);
     const escapedAt = physical && !resolvedWithheld && typeof lexicalLanding === "string"
       ? _physicalIsolationEscapedAt(lexicalLanding, effectiveCwd)
       : null;
@@ -1016,7 +910,7 @@ export function describeIsolationOutsideWrite({
       ...(physical
         && typeof escapedAt === "string"
         && escapedAt.length > 0
-        ? { escapedAt: _isolationDisplayPath(escapedAt, redact, homeDir) }
+        ? { escapedAt: isolationDisplayPath(escapedAt, redact, homeDir) }
         : {}),
     };
   } catch {

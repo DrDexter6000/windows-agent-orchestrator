@@ -11,26 +11,35 @@
 //     changedFiles、验证命令与结果）、任务书（最后一条绑定的 prompt.sent）、调研答复
 //     （最后一条助手消息，与会审席取 Q1 同一个 extractFinalAssistantText）、失败诊断
 //     （diagnoseFailure）与隔离违规事件。
-//   - 交付提交的逐文件增删行：调用方注入的 readNumstat（git diff --numstat，只读 Git
-//     对象）。
+//   - 交付对象的证明与逐文件增删行：调用方注入的 proveDelivery（createDeliveryProver：提交类型、
+//     父提交 = 基线、实际变更清单 = changedFiles，通过后给 git diff --numstat 的增删行；只读
+//     Git 对象）。
+//   - 一次响应只用一代事实：交付轴（提交、验证、收口、裁决）、交付物与产物接口都从请求当刻读到
+//     的同一份转录算（liveDeliveryFacts / currentDelivery）；快照只供转录之外的事实（活性、
+//     阶段、谱系、被取代、分支是否还在、会审组）。
 //
 // 边界：
 //   - DTO 走白名单：逐个字段挑出来组装，不整包透传任何应用层对象。gatherDeliveryView 的
 //     deliveryRef（带工作树路径）与快照里的项目 key 一律不出去；项目只给 slug 与名字。
-//   - 所有动态文本先过秘密与形状脱敏（exact + 形状）、再清控制字符、再限长，复用
-//     runActivityProjection 的同一条管道（headOfRedactedText）。路径：交付物文件清单只给
-//     通过仓库相对路径判定（isValidRepoRelativePath：非绝对、无 ..、无空段）的路径，其余
-//     给 [path_withheld]。唯一的例外是隔离违规事件自己的脱敏路径（reportedPath、
-//     resolvedPath、escapedAt），它们本来就是"越界去了哪里"，读侧仍再清一次控制字符、
-//     再限一次长。
+//   - 所有自由文本（任务书、调研答复、诊断证据、验证命令、不可验证原因）走同一条出口链
+//     （safeBody）：exact + 形状脱敏 → 绝对路径折成 `…/末段`（读模型标题已在用的
+//     foldAbsolutePaths）→ 清控制字符 → 限长，复用 runActivityProjection 的 headOfRedactedText；
+//     脱敏与折路径都在截断之前。标题、副标题、项目名在读模型里同样先 exact 脱敏再截断。
+//     文件清单只给通过仓库相对路径判定（isValidRepoRelativePath：非绝对、无 ..、无空段）的
+//     路径，其余给 [path_withheld]。唯一的例外是隔离违规事件自己的路径（reportedPath、
+//     resolvedPath、escapedAt）：它们本来就是"越界去了哪里"，只放行 diagnosis.js 共用投影
+//     处理过的字段（只有越界类原因才有；先脱敏、主目录换成 ~、用户名段守卫、清控制字符与
+//     双向格式控制符、最后才限长），这里不再二次加工。
 //   - 每项事实标明出处：source = system_observed（控制面自己观测到的：交付提交、文件清单、
 //     增删行、验证命令与结果）或 worker_reported（worker 自己写的：调研答复、会审席的
 //     结论）。没有交付物就如实写 none，不按助手的自述补。
 //
-// 交付物的三种状态（state）：bound（有绑定的 Git 产物，对象读得到；调研答复与会审组有
-// 内容也算 bound）、none（尚未观测到交付物）、unavailable（有绑定但对象已不可用：交付
-// 事实自相矛盾、项目仓库不明、Git 读取失败——reason 给闭集原因；转录里的事实仍照给，
-// 读不到的只有增删行）。
+// 交付物的三种状态（state）：bound（有绑定的 Git 产物，对象读得到且与转录声明对得上；调研
+// 答复与会审组有内容也算 bound）、none（尚未观测到交付物）、unavailable（有绑定但对象已不
+// 可用：交付事实自相矛盾——含转录声明的提交 / 基线 / 清单与仓库里的实际对象对不上、项目仓库
+// 不明、Git 读取失败或对象已被清掉——reason 给闭集原因；转录里的事实仍照给，读不到的只有
+// 增删行）。kind 的顺序：会审席 → 生图 → 有绑定的交付事实（写代码）→ 调研角色 → none；
+// deliveryRequested 只表示意图（没有交付事实的普通运行是 none）。
 //
 // 架构契约：不 import src/commands/*、src/mcp/*、MCP SDK 或 zod；只读。
 
@@ -41,10 +50,17 @@ import {
   isValidDiagnosisCode,
   isolationViolationDetail,
 } from "../diagnosis.js";
-import { findLatestBound, validateDeliveryFacts } from "../transcript.js";
-import { isCanonicalCommitId, isValidRepoRelativePath } from "../delivery.js";
-import { extractFinalAssistantText, CONSULT_SEAT_CONTRACT_MARKER } from "./consultService.js";
-import { OWNER_CONSULT_Q1_VALUES, OWNER_LIVENESS_VALUES, OWNER_STAGE_VALUES } from "./ownerReadModel.js";
+import { TERMINAL_STATES, findLatestBound, validateDeliveryFacts } from "../transcript.js";
+import { isCanonicalCommitId, isValidRepoRelativePath, isValidRunId } from "../delivery.js";
+import { extractFinalAssistantText, stripConsultSeatContract } from "./consultService.js";
+import {
+  OWNER_CONSULT_Q1_VALUES,
+  OWNER_LIVENESS_VALUES,
+  OWNER_STAGE_VALUES,
+  foldAbsolutePaths,
+  liveDeliveryFacts,
+  projectDelivery,
+} from "./ownerReadModel.js";
 import { ownerLaneKey, ownerRunTitles } from "./ownerAttention.js";
 import { DELIVERY_VERIFICATION_FAILURE_CODES, DELIVERY_VERIFICATION_STATUSES } from "./runDelivery.js";
 import { headOfRedactedText } from "./runActivityProjection.js";
@@ -66,10 +82,14 @@ export const OWNER_COMMANDS_MAX = 50;
 /** 诊断证据的条数上限与单条字符上限。 */
 export const OWNER_DIAGNOSIS_EVIDENCE_MAX = 10;
 export const OWNER_DIAGNOSIS_FACT_MAX_CHARS = 400;
-/** 隔离违规事件路径类字段的字符上限（与诊断模块同一个上限）。 */
-export const OWNER_ISOLATION_FIELD_MAX_CHARS = 300;
+/** 具名不可验证的原因文本的字符上限。 */
+export const OWNER_UNAVAILABLE_REASON_MAX_CHARS = 400;
 /** 关联会审至多列多少场。 */
 export const OWNER_REVIEWS_MAX = 10;
+/** 一场会审至多列多少个席位行（总数照实给）。 */
+export const OWNER_CONSULT_SEATS_MAX = 20;
+/** 席位行里 runId 的长度上限（合法字符之外再限长）。 */
+export const OWNER_RUN_ID_MAX_CHARS = 128;
 /** 产物接口能取的图片扩展名（与它放行的魔数类型对应：png / jpeg / webp）。 */
 export const OWNER_IMAGE_EXTENSIONS = Object.freeze([".png", ".jpg", ".jpeg", ".webp"]);
 /** 路径判不清或不在仓库内时的占位。 */
@@ -104,13 +124,15 @@ function msOf(value) {
  *   - state "conflict"：交付事实自相矛盾（或校验抛错）——"是哪个提交"没有唯一答案；
  *   - state "bound"：commit / baseCommit 是规范提交号，changedFiles 是引用里的数组原样
  *     （元素是否合法由使用方逐项验）。
+ * createdAt 是这份交付的 delivery_created 事件的时间（读不到为 null）——会审是不是在这份交付之后
+ * 做的要拿它比。
  *
  * @param {object[]} events
  * @param {string} runId
- * @returns {{state: string, commit: string|null, baseCommit: string|null, changedFiles: unknown[], facts: object|null}}
+ * @returns {{state: string, commit: string|null, baseCommit: string|null, changedFiles: unknown[], createdAt: string|null, facts: object|null}}
  */
 export function currentDelivery(events, runId) {
-  const none = { state: "none", commit: null, baseCommit: null, changedFiles: [], facts: null };
+  const none = { state: "none", commit: null, baseCommit: null, changedFiles: [], createdAt: null, facts: null };
   let facts;
   try {
     facts = validateDeliveryFacts(events, { expectedRunId: runId, allowVerificationPending: true });
@@ -121,21 +143,33 @@ export function currentDelivery(events, runId) {
   const ref = facts.createdRef;
   if (ref === null || ref === undefined || typeof ref !== "object") return none;
   if (!isCanonicalCommitId(ref.deliveryCommit) || !isCanonicalCommitId(ref.baseCommit)) return { ...none, state: "conflict" };
+  // 校验选中的 created 事件：它的 delivery 就是 createdRef 这个对象。
+  const createdEvent = events.find((e) => e !== null && typeof e === "object" && e.type === "run.delivery_created" && e.delivery === ref);
   return {
     state: "bound",
     commit: ref.deliveryCommit,
     baseCommit: ref.baseCommit,
     changedFiles: Array.isArray(ref.changedFiles) ? ref.changedFiles : [],
+    createdAt: typeof createdEvent?.ts === "string" ? createdEvent.ts : null,
     facts,
   };
 }
 
 // ===== 文本与路径 =====
 
-/** 动态文本的安全链：脱敏 → 清控制字符 → 限长（取头）。 */
-function safeText(raw, redactor, maxChars) {
-  return headOfRedactedText(raw, redactor, maxChars).text;
+/**
+ * 自由文本的唯一出口链（决定 0131 §3）：精确值 + 形状脱敏 → 绝对路径折成 `…/末段`（读模型标题
+ * 已在用的 foldAbsolutePaths）→ 清控制字符 → 限长（取头）。脱敏与折路径都在截断之前作用在
+ * 完整文本上。隔离违规的路径字段是已批准的例外，走 diagnosis.js 的共用投影，不经这里。
+ */
+function safeBody(raw, redactor, maxChars) {
+  return headOfRedactedText(raw, redactor, maxChars, foldAbsolutePaths);
 }
+
+const safeText = (raw, redactor, maxChars) => safeBody(raw, redactor, maxChars).text;
+
+/** 合法字符且不超长的 runId，否则 null（记录是磁盘上可手改的，runId 不能原样回显）。 */
+const safeRunId = (value) => (typeof value === "string" && value.length <= OWNER_RUN_ID_MAX_CHARS && isValidRunId(value) ? value : null);
 
 /** 文件清单里的路径：只给仓库相对路径（无控制字符），其余 [path_withheld]。 */
 function displayPath(raw, redactor) {
@@ -233,38 +267,56 @@ function deliveryAxis(run, runsById) {
 
 const hasSeat = (consult, runId) => Array.isArray(consult?.seats) && consult.seats.some((seat) => seat?.runId === runId);
 
+const repliedOf = (seat) => (typeof seat?.replied === "boolean" ? seat.replied : null);
+
 function seatRow(seat, runsById) {
-  const seatRun = typeof seat?.runId === "string" ? runsById.get(seat.runId) : undefined;
+  const runId = safeRunId(seat?.runId);
+  const seatRun = runId === null ? undefined : runsById.get(runId);
   return {
     laneKey: (seatRun === undefined ? null : ownerLaneKey(seatRun)) ?? text(seat?.agentId),
     agentId: text(seat?.agentId),
-    runId: text(seat?.runId),
+    runId,
     runState: text(seat?.runState),
     q1: memberOf(OWNER_CONSULT_Q1_VALUES, seat?.q1),
+    replied: repliedOf(seat),
     source: "worker_reported",
   };
 }
 
-/** 一场会审的席位行与分裂标志：split = 给了结论的席位里有两个以上不同的值；没声明 Q1 → null。 */
+/**
+ * 一场会审的席位行与结论口径：
+ *   - verdictsDiffer：给了有效 Q1 的席位里有两个以上**不同**的值；
+ *   - anyFixFirst：任一席是 FIX_FIRST。
+ *   两项分开给：Attention 的 consult_split 是"不同 或 任一 FIX_FIRST"，全员 FIX_FIRST 时前者为
+ *   否、后者为是，详情不能只给一个"分裂"而与它互相矛盾。没声明 Q1 → 两项都是 null。
+ *   结论口径按**全部**席位算；席位行至多 OWNER_CONSULT_SEATS_MAX 行（rowsTruncated 如实标明）。
+ */
 function consultRows(consult, runsById) {
-  const rows = (Array.isArray(consult.seats) ? consult.seats : []).map((seat) => seatRow(seat, runsById));
+  const seats = Array.isArray(consult.seats) ? consult.seats : [];
   const q1Declared = consult.q1Declared === true;
+  const verdicts = new Set(seats.map((seat) => memberOf(OWNER_CONSULT_Q1_VALUES, seat?.q1)).filter((q1) => q1 !== null));
   return {
     q1Declared,
-    split: q1Declared ? new Set(rows.map((row) => row.q1).filter((q1) => q1 !== null)).size >= 2 : null,
-    rows,
+    verdictsDiffer: q1Declared ? verdicts.size >= 2 : null,
+    anyFixFirst: q1Declared ? verdicts.has("FIX_FIRST") : null,
+    rowsTruncated: seats.length > OWNER_CONSULT_SEATS_MAX,
+    rows: seats.slice(0, OWNER_CONSULT_SEATS_MAX).map((seat) => seatRow(seat, runsById)),
   };
 }
 
+/**
+ * 会审轴。几席"已到" = 已到终态**且**收到了答复；席位的运行状态、答复、Q1 各自单列（行里），
+ * 不用其中一项代替另一项：完成但没有答复不算已到，失败但有答复算已到。收齐 = 至少一席且全部已到。
+ */
 function consultAxis(consult, runId) {
   const seats = Array.isArray(consult.seats) ? consult.seats : [];
   const thisSeat = seats.find((seat) => seat?.runId === runId);
-  const arrived = seats.filter((seat) => seat?.runState === "completed").length;
+  const arrived = seats.filter((seat) => TERMINAL_STATES.includes(seat?.runState) && seat?.replied === true).length;
   return {
     consultId: text(consult.consultId),
     createdAt: text(consult.createdAt),
-    reviewedRunId: text(consult.reviewedRunId),
-    thisSeat: { agentId: text(thisSeat?.agentId), runState: text(thisSeat?.runState) },
+    reviewedRunId: safeRunId(consult.reviewedRunId),
+    thisSeat: { agentId: text(thisSeat?.agentId), runState: text(thisSeat?.runState), replied: repliedOf(thisSeat) },
     seatsTotal: seats.length,
     seatsArrived: arrived,
     complete: seats.length > 0 && arrived === seats.length,
@@ -292,26 +344,36 @@ function commandRows(commands, results, redactor) {
   }));
 }
 
-/** 当前提交的有效验证：状态取校验过的事实，命令与结果取绑定当前提交的验证事件（有复验链就取复验结果）。 */
+const verificationOf = (ref) => (ref !== null && typeof ref === "object" && ref.verification !== null && typeof ref.verification === "object"
+  ? ref.verification
+  : null);
+
+/**
+ * 当前提交的有效验证：状态取校验过的事实。**执行结果与失败信息只取绑定的验证结果事件**（有复验
+ * 链就取复验结果）——还在待验证的 created 引用里带的 results 不是结果，没有结果事件时命令只列
+ * 声明、结果为 null。具名不可验证（status unavailable）另给脱敏、折路径后的原因文本。
+ */
 function verificationBlock(delivery, redactor) {
   const facts = delivery.facts;
-  const ref = facts.effectiveRef ?? facts.verificationOutcomeEvent?.delivery ?? facts.createdRef;
-  const verification = ref !== null && typeof ref === "object" && ref.verification !== null && typeof ref.verification === "object"
-    ? ref.verification
-    : {};
+  const outcome = verificationOf(facts.effectiveRef ?? facts.verificationOutcomeEvent?.delivery ?? null);
+  const declared = outcome ?? verificationOf(facts.createdRef) ?? {};
   const status = memberOf(DELIVERY_VERIFICATION_STATUSES, facts.effectiveVerificationStatus);
+  const reason = declared.unavailableReason;
   return {
     source: "system_observed",
     boundCommit: delivery.commit,
     status,
-    commands: commandRows(verification.commands, verification.results, redactor),
-    setupCommands: commandRows(verification.setupCommands, verification.setupResults, redactor),
-    failure: status !== "failed"
+    unavailableReason: status === "unavailable" && typeof reason === "string" && reason.length > 0
+      ? safeText(reason, redactor, OWNER_UNAVAILABLE_REASON_MAX_CHARS)
+      : null,
+    commands: commandRows(declared.commands, outcome?.results, redactor),
+    setupCommands: commandRows(declared.setupCommands, outcome?.setupResults, redactor),
+    failure: status !== "failed" || outcome === null
       ? null
       : {
-        code: memberOf(DELIVERY_VERIFICATION_FAILURE_CODES, verification.failureCode) ?? "unknown",
-        phase: verification.failedPhase === "setup" || verification.failedPhase === "assertion" ? verification.failedPhase : null,
-        commandIndex: nonNegativeInt(verification.failedCommandIndex),
+        code: memberOf(DELIVERY_VERIFICATION_FAILURE_CODES, outcome.failureCode) ?? "unknown",
+        phase: outcome.failedPhase === "setup" || outcome.failedPhase === "assertion" ? outcome.failedPhase : null,
+        commandIndex: nonNegativeInt(outcome.failedCommandIndex),
       },
   };
 }
@@ -344,9 +406,13 @@ function imageItems(delivery, redactor) {
   return out;
 }
 
-/** 写代码 / 生图的交付物：转录里绑定的交付事实 + 读得到时的增删行。 */
-async function gitDeliverable({ kind, events, run, redactor, repoRoot, readNumstat, reviews }) {
-  const delivery = currentDelivery(events, run.runId);
+/**
+ * 写代码 / 生图的交付物：转录里绑定的交付事实（delivery，请求当刻现算的那一份）+ 仓库证明过之后
+ * 的增删行。证明（proveDelivery）每次请求都做：转录只是声明，提交类型、父提交 = 基线、实际变更
+ * 清单 = changedFiles 对不上，或对象已被清掉，如实标 unavailable（转录里的事实仍照给，读不到的
+ * 只有增删行）。
+ */
+async function gitDeliverable({ kind, runId, delivery, redactor, repoRoot, proveDelivery, reviews }) {
   const base = { kind, state: "none", reason: null, commit: null, files: null, verification: null };
   if (delivery.state === "none") return { ...base, ...(kind === "image" ? { images: [] } : { reviews }) };
   if (delivery.state === "conflict") {
@@ -355,12 +421,20 @@ async function gitDeliverable({ kind, events, run, redactor, repoRoot, readNumst
   let state = "bound";
   let reason = null;
   let stats = null;
-  if (repoRoot === null || typeof readNumstat !== "function") {
+  if (repoRoot === null || typeof proveDelivery !== "function") {
     state = "unavailable";
     reason = "repository_unknown";
   } else {
     try {
-      stats = await readNumstat({ repoRoot, baseCommit: delivery.baseCommit, commit: delivery.commit });
+      const proof = await proveDelivery({
+        runId, repoRoot, baseCommit: delivery.baseCommit, commit: delivery.commit, changedFiles: delivery.changedFiles,
+      });
+      if (proof.ok === true) {
+        stats = proof.stats;
+      } else {
+        state = "unavailable";
+        reason = proof.reason === "mismatch" ? "delivery_facts_conflict" : "git_read_failed";
+      }
     } catch {
       state = "unavailable";
       reason = "git_read_failed";
@@ -380,7 +454,7 @@ async function gitDeliverable({ kind, events, run, redactor, repoRoot, readNumst
 function researchDeliverable(events, run, redactor, env) {
   const full = extractFinalAssistantText(events, { runId: run.runId, env });
   if (full.trim().length === 0) return { kind: "research", state: "none", answer: null };
-  const head = headOfRedactedText(full, redactor, OWNER_ANSWER_MAX_CHARS);
+  const head = safeBody(full, redactor, OWNER_ANSWER_MAX_CHARS);
   return {
     kind: "research",
     state: "bound",
@@ -396,35 +470,43 @@ function researchDeliverable(events, run, redactor, env) {
 
 // ===== 任务书 =====
 
-/** 最后一条绑定的 prompt.sent；会审席的固定合同包装（唯一落盘的控制面包装）跳过；没有就如实 missing。 */
-function briefBlock(events, runId, redactor) {
+/**
+ * 最后一条绑定的 prompt.sent；没有就如实 missing。会审席（seatConsult 是它所在的那场会审）的
+ * prompt 末尾是控制面实际追加的固定合同后缀（唯一落盘的控制面包装）：按该场会审记录里声明的
+ * fields 用写入端同一个构造重建这段后缀，精确匹配才剥（stripConsultSeatContract）；匹配不上
+ * 就保留全文。普通任务书正文里引用了标记也原样保留。
+ */
+function briefBlock(events, runId, redactor, seatConsult) {
   const prompt = findLatestBound(events, "prompt.sent", runId)?.prompt;
   let body = typeof prompt === "string" ? prompt : "";
-  const wrapperAt = body.lastIndexOf(CONSULT_SEAT_CONTRACT_MARKER);
-  if (wrapperAt >= 0) body = body.slice(0, wrapperAt);
+  if (seatConsult !== null) body = stripConsultSeatContract(body, seatConsult.declaredFields);
   if (body.trim().length === 0) return { state: "missing", text: null, truncated: false, keptChars: 0, totalChars: 0 };
-  const head = headOfRedactedText(body, redactor, OWNER_BRIEF_MAX_CHARS);
+  const head = safeBody(body, redactor, OWNER_BRIEF_MAX_CHARS);
   return { state: "present", text: head.text, truncated: head.truncated, keptChars: head.text.length, totalChars: head.totalChars };
 }
 
 // ===== 失败诊断 =====
 
-function isolationBlock(fields, redactor) {
+/**
+ * 隔离违规事件的展示字段：已批准的例外（它们本来就是"越界去了哪里"，不折成末段）。字段来自
+ * isolationViolationDetail（src/diagnosis.js，看板与 MCP run_diagnose 共用的唯一读侧投影）：
+ * 只有越界类原因才有 destination 与路径，路径已按写入侧同一条显示规则先脱敏（服务端的 env 精确值与
+ * 形状）、主目录换成 ~、用户名段守卫、清控制字符与双向格式控制符、最后才限长。这里只把缺席的键补成
+ * null，DTO 形状固定；不再二次加工。
+ */
+function isolationBlock(fields) {
   if (fields === null || fields === undefined) return null;
-  // isolationViolationDetail（src/diagnosis.js，看板与 MCP run_diagnose 共用的唯一读侧清理）
-  // 只带可信字段；这里把缺席的键补成 null，DTO 形状固定。
-  const bounded = (value) => (typeof value === "string" ? safeText(value, redactor, OWNER_ISOLATION_FIELD_MAX_CHARS) : null);
   return {
     reason: fields.reason ?? null,
     destination: fields.destination ?? null,
-    reportedPath: bounded(fields.reportedPath),
-    resolvedPath: bounded(fields.resolvedPath),
-    escapedAt: bounded(fields.escapedAt),
+    reportedPath: fields.reportedPath ?? null,
+    resolvedPath: fields.resolvedPath ?? null,
+    escapedAt: fields.escapedAt ?? null,
   };
 }
 
-/** 失败时的诊断：类别与码取闭集，证据文本先脱敏再限长；workdir_escape 另附隔离违规事件的展示字段。 */
-function failureBlock(run, events, redactor) {
+/** 失败时的诊断：类别与码取闭集，证据文本先脱敏、折路径再限长；workdir_escape 另附隔离违规事件的展示字段。 */
+function failureBlock(run, events, redactor, env) {
   if (run.failure === null || run.failure === undefined) return null;
   let diagnosis;
   try {
@@ -443,7 +525,7 @@ function failureBlock(run, events, redactor) {
     category,
     code: category !== null && isValidDiagnosisCode(category, diagnosis.code) ? diagnosis.code : null,
     evidence,
-    isolation: category === "workdir_escape" ? isolationBlock(isolationViolationDetail(events, run.runId), redactor) : null,
+    isolation: category === "workdir_escape" ? isolationBlock(isolationViolationDetail(events, run.runId, { env })) : null,
   };
 }
 
@@ -460,36 +542,61 @@ function failureBlock(run, events, redactor) {
  * @param {number} input.now — 发布快照时的 now（epoch ms）
  * @param {object} [input.env] — 脱敏用的环境（缺省 process.env）
  * @param {string|null} [input.repoRoot] — 项目仓库根（服务端持有，不进 DTO）
- * @param {Function|null} [input.readNumstat] — ({ repoRoot, baseCommit, commit }) → Promise<Map>
+ * @param {Function|null} [input.proveDelivery] — ({ runId, repoRoot, baseCommit, commit, changedFiles }) →
+ *   Promise<{ok: true, stats: Map}|{ok: false, reason}>（createDeliveryProver 的结果）
  * @returns {Promise<object>}
  */
 export async function projectWorkerDetail({
-  run, snapshot, runsById, events, now, env, repoRoot = null, readNumstat = null,
+  run, snapshot, runsById, events, now, env, repoRoot = null, proveDelivery = null,
 }) {
   const redactor = createSecretRedactor(env ?? process.env);
   const consults = Array.isArray(snapshot?.consults) ? snapshot.consults : [];
   const seatOf = consults.find((consult) => hasSeat(consult, run.runId)) ?? null;
+  // 一次响应只用一代事实：当前交付只在请求当刻的转录上算这一次，交付物、交付轴与"会审是不是在
+  // 这份交付之后"都从它出（产物接口也用同一个 currentDelivery）。
+  const delivery = currentDelivery(events, run.runId);
+  const createdMs = msOf(delivery.createdAt);
   const reviews = consults
     .filter((consult) => consult.reviewedRunId === run.runId)
     .slice(0, OWNER_REVIEWS_MAX)
-    .map((consult) => ({
-      consultId: text(consult.consultId),
-      createdAt: text(consult.createdAt),
-      ...consultRows(consult, runsById),
-    }));
+    .map((consult) => {
+      const consultMs = msOf(consult.createdAt);
+      return {
+        consultId: text(consult.consultId),
+        createdAt: text(consult.createdAt),
+        // 这场会审的 createdAt 不早于当前交付的 created 事件时：意见针对的是这份交付；
+        // 否则针对的是更早的候选。两个时刻读不出就不下结论（null）。
+        afterCurrentDelivery: createdMs === null || consultMs === null ? null : consultMs >= createdMs,
+        ...consultRows(consult, runsById),
+      };
+    });
 
+  // kind 的顺序：会审席 → 生图 → 有绑定的交付事实（写代码）→ 调研角色 → none。deliveryRequested
+  // 只表示意图：不能盖过调研类型，也不是历史交付（没有请求标记、但转录里有绑定交付事实）成为
+  // 写代码交付物的前提；只有意图、没有交付事实的普通运行是 none（不按意图补一个写代码交付物）。
   let deliverable;
   if (seatOf !== null) {
-    deliverable = { kind: "consult", state: "bound", consultId: text(seatOf.consultId), reviewedRunId: text(seatOf.reviewedRunId), ...consultRows(seatOf, runsById) };
-  } else if (run.taskType === "image" || run.deliveryRequested === true) {
-    deliverable = await gitDeliverable({
-      kind: run.taskType === "image" ? "image" : "code", events, run, redactor, repoRoot, readNumstat, reviews,
-    });
+    deliverable = { kind: "consult", state: "bound", consultId: text(seatOf.consultId), reviewedRunId: safeRunId(seatOf.reviewedRunId), ...consultRows(seatOf, runsById) };
+  } else if (run.taskType === "image") {
+    deliverable = await gitDeliverable({ kind: "image", runId: run.runId, delivery, redactor, repoRoot, proveDelivery, reviews });
+  } else if (delivery.state !== "none") {
+    deliverable = await gitDeliverable({ kind: "code", runId: run.runId, delivery, redactor, repoRoot, proveDelivery, reviews });
   } else if (run.taskType === "research") {
     deliverable = researchDeliverable(events, run, redactor, env);
   } else {
     deliverable = { kind: "none", state: "none" };
   }
+
+  // 交付轴与交付物同一代：交付事实在请求当刻读到的转录上现算（与快照同一个提取），快照里只有
+  // 转录之外的事实（分支是否还在）才沿用。这一次读到的转录里没有请求标记、或读不出交付事实 →
+  // 交付轴清空（null），**不回退**快照里的旧一代：否则同一响应里交付物是新提交、交付轴还是旧提交。
+  const liveFacts = liveDeliveryFacts(events, run.runId);
+  const axisRun = {
+    ...run,
+    delivery: liveFacts === null
+      ? null
+      : { ...projectDelivery(run.runId, liveFacts, undefined), branchPresent: run.delivery?.branchPresent ?? null },
+  };
 
   const startedMs = msOf(run.startedAt);
   const terminalMs = msOf(run.terminalAt);
@@ -517,8 +624,9 @@ export async function projectWorkerDetail({
       liveness: memberOf(OWNER_LIVENESS_VALUES, run.liveness) ?? "unknown",
       lastEffectAt: text(run.lastEffectAt),
       lastVitalAt: text(run.lastVitalAt),
+      lastHeartbeatAt: text(run.lastHeartbeatAt),
       lastProcessActiveAt: text(run.lastProcessActiveAt),
-      failure: failureBlock(run, events, redactor),
+      failure: failureBlock(run, events, redactor, env),
     },
     run: {
       state: text(run.state),
@@ -527,9 +635,9 @@ export async function projectWorkerDetail({
       stageAgeMs: run.stage === "starting" && stageMs !== null ? Math.max(0, now - stageMs) : null,
       terminalAt: text(run.terminalAt),
     },
-    delivery: deliveryAxis(run, runsById),
+    delivery: deliveryAxis(axisRun, runsById),
     consult: seatOf === null ? null : consultAxis(seatOf, run.runId),
     deliverable,
-    brief: briefBlock(events, run.runId, redactor),
+    brief: briefBlock(events, run.runId, redactor, seatOf),
   };
 }

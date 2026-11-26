@@ -64,17 +64,23 @@
 //   - GET /api/worker?runId=            one worker's detail DTO (ownerWorkerDetail):
 //     identity, health, run axis, delivery axis, consult axis, deliverable, brief.
 //     Authorization is the read model's resolveRun (the run belongs to this run
-//     directory and its content is unambiguous); anything else answers the fixed
-//     404 and echoes nothing. Before the first publication it answers the status
-//     (loading), like the three read-model routes. The DTO is a whitelist
+//     directory and its content is unambiguous) re-checked at REQUEST time against
+//     the files on disk (readRunEvents: every copy is inside the real run directory
+//     — a junction/symlink out of it is refused — and all copies are identical);
+//     anything else answers the fixed 404 and echoes nothing. Before the first
+//     publication it answers the status (loading), like the three read-model routes.
+//     The DTO is a whitelist
 //     assembled field by field — never a whole application object — and carries
 //     no repository path, worktree path or unredacted secret.
 //   - GET /api/artifact?runId=&commit=&fileIndex=   one image of the run's CURRENT
 //     delivery, read from the Git object database only (never the working tree,
 //     never a client path). `commit` must equal the run's current delivery commit
 //     and `fileIndex` must index its changedFiles, so a changed candidate can never
-//     make the same index point at another file. Only png / jpeg / webp by magic
-//     number, bounded size; everything else (incl. SVG) is the fixed 404.
+//     make the same index point at another file. The transcript only CLAIMS the
+//     delivery: the commit, its parent and the actual changed-file list are proven
+//     against the repository first (createDeliveryProver), then the blob is read.
+//     Only png / jpeg / webp by file structure (not just the prefix), bounded size;
+//     everything else (incl. SVG) is the fixed 404.
 //
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
 // node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
@@ -103,7 +109,7 @@ import { createRunSummaryCache } from "./application/runSummaryCache.js";
 import { createOwnerReadModel, OWNER_LIVENESS_VALUES } from "./application/ownerReadModel.js";
 import { deriveOwnerAttention, ownerLanes, selectOwnerWorkers } from "./application/ownerAttention.js";
 import {
-  createNumstatReader,
+  createDeliveryProver,
   isCanonicalCommitId,
   isValidRepoRelativePath,
   readCommitImage,
@@ -628,7 +634,7 @@ async function serveWorker(ctx, req, res, sp) {
       now: pub.now, // the SAME now the publication was built with
       ...(ctx.env !== undefined ? { env: ctx.env } : {}),
       repoRoot: repoRootOf(ctx, source.run),
-      readNumstat: ctx.readNumstat,
+      proveDelivery: ctx.proveDelivery,
     });
     return sendJson(res, 200, { ...ctx.status(), ...detail });
   } catch {
@@ -654,8 +660,9 @@ async function serveArtifact(ctx, req, res, sp) {
   try {
     const source = await loadWorkerSource(ctx, pub, query.runId);
     if (source === null) return sendJson(res, 404, ERR.not_found);
-    // The commit must be the run's CURRENT delivery commit and the index one of its
-    // changedFiles: a changed candidate can never make the same index point elsewhere.
+    // The commit must be the run's CURRENT delivery commit (from the transcript read just
+    // now — the same generation the detail uses) and the index one of its changedFiles: a
+    // changed candidate can never make the same index point elsewhere.
     const delivery = currentDelivery(source.events, query.runId);
     if (delivery.state !== "bound" || delivery.commit !== query.commit) return sendJson(res, 404, ERR.not_found);
     const path = delivery.changedFiles[query.fileIndex];
@@ -663,6 +670,13 @@ async function serveArtifact(ctx, req, res, sp) {
     if (repoRoot === null || typeof path !== "string" || !isValidRepoRelativePath(path)) {
       return sendJson(res, 404, ERR.not_found);
     }
+    // The transcript only CLAIMS the delivery: prove the commit object, its parent, the actual
+    // changed-file list, the "wao-delivery: <runId>" message and the WAO packaging identity
+    // against the repository before any blob is read by index.
+    const proof = await ctx.proveDelivery({
+      runId: query.runId, repoRoot, baseCommit: delivery.baseCommit, commit: delivery.commit, changedFiles: delivery.changedFiles,
+    });
+    if (!proof.ok) return sendJson(res, 404, ERR.not_found);
     const image = await readCommitImage({ repoRoot, commit: delivery.commit, path });
     if (!image.ok) return sendJson(res, 404, ERR.not_found);
     return sendImage(res, image.contentType, image.bytes);
@@ -890,9 +904,12 @@ export function createOwnerDashboardServer(config) {
     getOwnerActivity: getOwnerActivityFn ?? getOwnerActivity,
     readSummaryFn: (filePath) => summaryCache.read(filePath),
     now: typeof nowFn === "function" ? nowFn : () => Date.now(),
-    // Batch 141a: the delivery commit's per-file line counts (immutable objects →
-    // cached per (repo, base, commit)).
-    readNumstat: createNumstatReader(),
+    // Batch 141a: proves a run's delivery objects against its repository (commit type,
+    // parent = base, actual changed files = changedFiles, message + author/committer identity)
+    // and hands back the per-file line
+    // counts. The counts are cached per (repo, base, commit) — objects are immutable — but
+    // the proof itself runs on every request, so a pruned object is never reported bound.
+    proveDelivery: createDeliveryProver(),
   };
 
   // runId → snapshot row, built once per publication (the snapshot object is the key).
@@ -936,7 +953,9 @@ export function createOwnerDashboardServer(config) {
   // and for a pending listen() to settle (a failed listen resolves it; a
   // successful one is then shut). listen() after close() rejects without
   // opening a socket.
-  const readModel = (createReadModelFn ?? ((input) => createOwnerReadModel(input)))({ runDir, nowFn: ctx.now });
+  const readModel = (createReadModelFn ?? ((input) => createOwnerReadModel(input)))({
+    runDir, nowFn: ctx.now, ...(env !== undefined ? { env } : {}),
+  });
   ctx.readModel = readModel; // 141a: /api/worker and /api/artifact read through it
 
   let published = null;

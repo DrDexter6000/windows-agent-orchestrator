@@ -49,6 +49,7 @@ import {
   createOwnerReadModel,
   deriveOwnerTaskType,
   deriveOwnerTitle,
+  foldAbsolutePaths,
   deriveOwnerTitleFacts,
 } from "../../src/application/ownerReadModel.js";
 import {
@@ -1247,6 +1248,13 @@ test("活性：心跳租约恰好 120 秒仍算 process_only、120 秒加 1 毫�
     assert.equal(runOf(snap, "run_lease").lastVitalAt, iso(NOW - 60_000), "lastVitalAt 取事件与心跳里较晚的");
     assert.equal(runOf(snap, "run_lease_over").lastVitalAt, iso(NOW - Q - 1), "过期心跳仍是最后一次体征，照实给");
     assert.equal(runOf(snap, "run_lease_bad").lastVitalAt, iso(NOW - 400_000), "坏租约不提供体征，只剩事件");
+    // lastHeartbeatAt 单独投影：只取租约心跳（不混入事件体征），没有心跳证据就是 null；终态运行不读租约。
+    assert.equal(runOf(snap, "run_lease").lastHeartbeatAt, iso(NOW - 60_000));
+    assert.equal(runOf(snap, "run_lease_over").lastHeartbeatAt, iso(NOW - Q - 1), "过期心跳照实给");
+    for (const runId of ["run_lease_bad", "run_no_lease", "run_done"]) {
+      assert.equal(runOf(snap, runId).lastHeartbeatAt, null, `${runId}：没有心跳证据`);
+    }
+    assert.notEqual(runOf(snap, "run_no_lease").lastVitalAt, null, "没有心跳也有事件里的体征：两项不是一回事");
 
     // 租约是活的：不 refresh、只换 now 也按当下读数算。
     lease("run_lease", NOW + 500_000);
@@ -1610,6 +1618,59 @@ test("标题：先脱敏、再清控制字符、最后限 80 字——跨在截�
   assert.equal(deriveOwnerTitle("见 //server/share/x.md 再说"), "见 …/x.md 再说");
 });
 
+test("路径折叠（共用的 foldAbsolutePaths，第 141 批修正二）：参数值里的路径、加引号的完整路径、带空格或点号的目录都折成 …/末段", () => {
+  const fold = foldAbsolutePaths;
+  // 参数值：--flag=盘符路径 / MSYS 盘符路径 / 全大写环境变量式 NAME=路径。
+  assert.equal(fold("--cwd=/d/projects/x"), "--cwd=…/x", "MSYS 盘符路径跟在 = 后面");
+  assert.equal(fold(String.raw`--out=C:\tmp\a.json`), "--out=…/a.json", "盘符路径跟在 = 后面");
+  assert.equal(fold("CWD=/d/projects/x"), "CWD=…/x", "环境变量式写法");
+  assert.equal(
+    fold(String.raw`node --cwd=/d/p/x --out=C:\tmp\a.json 完成`),
+    "node --cwd=…/x --out=…/a.json 完成",
+    "一句话里的多个参数值各折各的",
+  );
+  // 加引号的完整路径：到配对的收尾引号为止，目录里怎么有空格都整段折。
+  assert.equal(fold(String.raw`"E:\Carloha Agent\src\a.ts"`), '"…/a.ts"');
+  assert.equal(fold(String.raw`'C:\Program Files\nodejs\node.exe'`), "'…/node.exe'");
+  assert.equal(fold(String.raw`"C:\a b c d e\f.txt"`), '"…/f.txt"', "引号里的目录词数不限（不加引号的最多 3 词）");
+  assert.equal(fold(String.raw`"C:\my.proj dir\sub\file.js"`), '"…/file.js"', "引号里的目录词像文件名也整段折");
+  assert.equal(fold(`--cwd="/d/projects/x y/z"`), '--cwd="…/z"', "引号包着的 MSYS 路径");
+  assert.equal(fold(String.raw`'\\srv\my share\x y\z.md'`), "'…/z.md'", "引号包着的 UNC 路径");
+  assert.equal(fold(String.raw`"C:\Data\O'Brien\x.md"`), '"…/x.md"', "路径里有撇号：只认后面是边界的收尾引号");
+  assert.equal(
+    fold(String.raw`node "C:\Program Files\nodejs\node.exe" --out='E:\Carloha Agent\o.json' 完成`),
+    `node "…/node.exe" --out='…/o.json' 完成`,
+  );
+  // 不加引号、目录名带空格 / 点号 / 多个词（至多 3 词，原有规则）。
+  assert.equal(fold(String.raw`E:\Carloha Agent\src\a.ts`), "…/a.ts");
+  assert.equal(fold(String.raw`C:\Program Files\nodejs\node.exe`), "…/node.exe");
+  assert.equal(fold(String.raw`D:\my dir.v2\sub\file.js`), "…/file.js", "点号在最后一个词里：目录后面是分隔符");
+  assert.equal(fold(String.raw`C:\Program Files (x86)\Tool Kit\a.exe`), "…/a.exe");
+});
+
+test("路径折叠：普通文字不被误折（目录名、A/B、分数、and/or、URL、相对路径、参数里的相对值）", () => {
+  const plain = [
+    "在 src 与 test 两个目录里改",
+    "A/B 对比实验",
+    "完成 1/2 的迁移",
+    "and/or 逻辑",
+    "参考 https://example.com/a/b?next=/d/x/y 的说明",
+    "wao/run_x 分支清理",
+    "Q1/Q2 结论",
+    "TCP/IP 与 HTTP/2",
+    "修复 src/a.js 与 test/b.js",
+    "时间 12:30/13:00 与 key=value/other",
+    "git commit -m 'fix: a/b'",
+    "--force=true 与 -n=3 参数",
+    "cwd=. 与 out=a/b/c 相对路径",
+    "写 NAME=value 与 re:/api 不算",
+  ];
+  assert.equal(plain.length, 14);
+  for (const title of plain) {
+    assert.equal(deriveOwnerTitle(title), title, `原样不动：${title}`);
+    assert.equal(foldAbsolutePaths(title), title, `foldAbsolutePaths 原样不动：${title}`);
+  }
+});
 test("标题：控制字符清掉、制表符折成一个空格；限 80 字且超长加 …，不切开代理对", () => {
   const dirty = "# 标题\u0000带\u001b[31m颜色\u0007与\u007f制表\t符";
   const cleaned = deriveOwnerTitle(dirty);
@@ -2381,7 +2442,7 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
       assert.deepEqual(Object.keys(p).sort(), ["branchesObservedAt", "consultRecords", "name", "repo", "slug"]);
     }
     const RUN_KEYS = [
-      "agentId", "availability", "deliveryRequested", "lastEffectAt", "lastProcessActiveAt", "lastVitalAt", "laneId",
+      "agentId", "availability", "deliveryRequested", "lastEffectAt", "lastHeartbeatAt", "lastProcessActiveAt", "lastVitalAt", "laneId",
       "liveness", "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince",
       "startedAt", "state", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
       // 第 140b 批：交付、失败、额度、谱系。

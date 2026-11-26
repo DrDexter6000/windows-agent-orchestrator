@@ -10,8 +10,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import {
@@ -575,6 +575,30 @@ test("141b-ISO-4: 非越界类 reason（物理无法确认等）+ 带 escapedAt 
     "只带 reason；errorCode 等其余键不进这个对象");
 });
 
+test("141b-ISO-4b: 按原因放行——只有闭集内 *_lexical_outside / *_physical_outside 才给 destination 与两个路径；缺失、未知、unresolved、相关性失败的原因带路径也不给", async () => {
+  const paths = { destination: "temp", reportedPath: "linked/evil.js", resolvedPath: "C:\\outside\\evil.js", escapedAt: "linked" };
+  // 缺失原因：没有任何可放行的字段 → 不带对象。
+  const missing = (await diagnoseSeeded({ ...paths })).parsed;
+  assert.equal(missing.category, "workdir_escape");
+  assert.equal(Object.hasOwn(missing, "isolationViolation"), false, "缺失原因 + 路径：不给");
+  // 未知原因（含"像越界"的伪后缀）：同上。
+  for (const reason of ["something_else", "file_written_physical_outside_EXTRA", "evil_lexical_outside", "OUTSIDE"]) {
+    const out = (await diagnoseSeeded({ reason, ...paths })).parsed;
+    assert.equal(Object.hasOwn(out, "isolationViolation"), false, `未知原因 ${reason}：不给`);
+  }
+  // 闭集内但不是越界：只给原因本身（说不清是不是越界，不带"逃去了哪里"）。
+  for (const reason of ISOLATION_VIOLATION_REASONS.filter((r) => !/_(lexical|physical)_outside$/.test(r))) {
+    const out = (await diagnoseSeeded({ reason, ...paths })).parsed;
+    assert.deepEqual(out.isolationViolation, { reason }, `${reason}：只给原因`);
+  }
+  // 对照：闭集内的两类越界照常给（词法没有 escapedAt）。
+  const physical = (await diagnoseSeeded({ reason: "write_intent_physical_outside", ...paths })).parsed;
+  assert.deepEqual(physical.isolationViolation, { reason: "write_intent_physical_outside", ...paths });
+  const lexical = (await diagnoseSeeded({ reason: "write_intent_lexical_outside", ...paths })).parsed;
+  assert.equal(lexical.isolationViolation.reportedPath, "linked/evil.js");
+  assert.equal(Object.hasOwn(lexical.isolationViolation, "escapedAt"), false);
+});
+
 test("141b-ISO-5: 畸形字段——非字符串、闭集外、带控制字符、超长——不回显或被清理、截断", async () => {
   // 非字符串：整项不出现。
   const nonString = (await diagnoseSeeded({
@@ -583,13 +607,15 @@ test("141b-ISO-5: 畸形字段——非字符串、闭集外、带控制字符�
   })).parsed;
   assert.deepEqual(nonString.isolationViolation, { reason: "file_written_physical_outside" }, "非字符串一律不回显");
 
-  // 闭集外：reason / destination 不回显（路径照常清洗后给）。
+  // 闭集外：reason / destination 不回显；原因不在闭集 = 说不清是不是越界，路径一并不给
+  // （第 141 批会审：此前"闭集外的原因 + 合法路径"会被读成已确认越界）。
   const outsideSet = (await diagnoseSeeded({
     reason: "file_written_physical_outside_EXTRA", destination: "C:\\Users\\owner\\secret",
     reportedPath: "a.txt",
   })).parsed;
-  assert.deepEqual(outsideSet.isolationViolation, { reportedPath: "a.txt" }, "闭集外的 reason/destination 不回显");
-  assert.ok(!JSON.stringify(outsideSet).includes("EXTRA") && !JSON.stringify(outsideSet).includes("owner"));
+  assert.equal(outsideSet.category, "workdir_escape");
+  assert.equal(Object.hasOwn(outsideSet, "isolationViolation"), false, "闭集外的 reason：没有可放行的字段，不带对象");
+  assert.ok(!JSON.stringify(outsideSet).includes("EXTRA") && !JSON.stringify(outsideSet).includes("owner") && !JSON.stringify(outsideSet).includes("a.txt"));
 
   // 控制字符：转义成可见写法，原始控制字符一个都不出现在线上。
   const dirty = (await diagnoseSeeded({
@@ -736,5 +762,56 @@ test("141b-ISO-9: tools/list——isolationViolation 是出参里的可选严格
     }
   } finally {
     cleanupDir(dir);
+  }
+});
+
+test("141b-ISO-10: 读侧再脱敏——合法原因 + 转录里写的原始用户目录路径 + 秘密值 + U+202E：content 与 structuredContent 里没有用户名、秘密和双向控制符", async () => {
+  const home = homedir();
+  const userName = basename(home);
+  const exactName = "WAO_141B_PROBE_API_KEY";
+  const exactValue = "probe-exact-value-141b-0001";
+  const shapeSecret = "sk-placeholder0123456789";
+  const bidi = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069", "\u200e", "\u200f"];
+  process.env[exactName] = exactValue;
+  try {
+    const { res, parsed } = await diagnoseSeeded({
+      reason: "file_written_physical_outside",
+      destination: "home",
+      // 主目录下的路径：换成 ~；秘密（精确值与形状）脱敏；双向控制符清掉。
+      reportedPath: join(home, "Documents", `${exactValue}-${shapeSecret}\u202e`, "report.txt"),
+      // 用户名出现在主目录前缀之外：证明不了脱敏干净 → 整个字段不给。
+      resolvedPath: `D:\\backup\\${userName}\\notes.txt`,
+      escapedAt: join(home, `lin\u202ek\u2067`),
+    });
+    assert.equal(parsed.category, "workdir_escape");
+    const iv = parsed.isolationViolation;
+    assert.equal(iv.reason, "file_written_physical_outside");
+    assert.equal(iv.destination, "home");
+    assert.ok(iv.reportedPath.startsWith("~"), `主目录前缀换成 ~（实测 ${iv.reportedPath}）`);
+    assert.ok(iv.reportedPath.includes("report.txt"));
+    assert.equal(Object.hasOwn(iv, "resolvedPath"), false, "用户名段还在 → 整个字段不给");
+    assert.ok(iv.escapedAt.startsWith("~"));
+    assert.deepEqual(res.structuredContent, parsed, "文本块与 structuredContent 一致");
+
+    const blobs = [res.content.find((b) => b.type === "text").text, JSON.stringify(res.structuredContent)];
+    for (const blob of blobs) {
+      assert.ok(!blob.includes(exactValue), "精确值秘密脱敏");
+      assert.ok(!blob.includes(shapeSecret), "形状秘密脱敏");
+      assert.ok(!blob.includes(home) && !blob.includes(JSON.stringify(home).slice(1, -1)), "主目录原样不出现");
+      for (const ch of bidi) assert.ok(!blob.includes(ch), `没有双向控制符 U+${ch.codePointAt(0).toString(16).toUpperCase()}`);
+    }
+    for (const key of ["reportedPath", "escapedAt"]) {
+      const segments = iv[key].split(/[\\/]+/).map((s) => s.toLowerCase());
+      assert.ok(!segments.includes(userName.toLowerCase()), `${key} 里没有用户名段`);
+    }
+    // 先脱敏、后限长：秘密跨在 300 的截断点上也不留半截。
+    const straddle = (await diagnoseSeeded({
+      reason: "write_intent_lexical_outside",
+      reportedPath: `${"p".repeat(ISOLATION_DISPLAY_PATH_MAX_CHARS - 6)} ${exactValue}`,
+    })).parsed.isolationViolation.reportedPath;
+    assert.ok(straddle.length <= ISOLATION_DISPLAY_PATH_MAX_CHARS);
+    assert.ok(!straddle.includes(exactValue.slice(0, 5)), `跨截断点的秘密没有留下前缀（实测 ${straddle.slice(-24)}）`);
+  } finally {
+    delete process.env[exactName];
   }
 });
