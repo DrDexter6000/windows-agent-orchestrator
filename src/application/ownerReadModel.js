@@ -503,6 +503,7 @@ function safeFact(compute, fallback) {
 
 const NO_DELIVERY_OUTCOME = Object.freeze({
   commit: null,
+  changedCount: null,
   verification: null,
   acceptance: null,
   decidedAtMs: null,
@@ -521,6 +522,8 @@ const NO_DELIVERY_OUTCOME = Object.freeze({
  *     三个非交付结局，各给闭集码；
  *   - commit：validateDeliveryFacts 认可的交付提交；交付事实自相矛盾（malformed）时
  *     "是哪个提交"没有唯一答案，不给；
+ *   - changedCount：与 commit 同一份绑定交付引用里 changedFiles 的个数（转录的声明，不是证明；列表卡片的
+ *     "N 个文件"用它；交付事实自相矛盾（malformed）时与 commit 一样不给）；只给个数，不给路径；
  *   - verification：有效验证状态（复验通过就覆盖原始结果）与复验链的状态。malformed
  *     链的 reason 是事件里的原值、没过形状校验，不进来；
  *   - acceptance：裁决状态；decidedAtMs 是裁决事件自己的时间；
@@ -557,7 +560,10 @@ function deliveryFacts(events, runId, state, terminalEvent) {
         }
         : null,
     };
-    if (facts.code !== "delivery_malformed") out.commit = canonicalCommit(facts.createdRef?.deliveryCommit);
+    if (facts.code !== "delivery_malformed") {
+      out.commit = canonicalCommit(facts.createdRef?.deliveryCommit);
+      out.changedCount = Array.isArray(facts.createdRef?.changedFiles) ? facts.createdRef.changedFiles.length : null;
+    }
     // 收口时刻与"交付视图可用"无关：打包/隔离失败时没有可用交付视图，但已收口。
     if (settlement.status === "settled" && settlement.reason === "delivery_settled") {
       // 有效验证来自复验链时，结果事件是复验的结果事件；否则是原始验证结果事件
@@ -902,6 +908,7 @@ export function projectDelivery(runId, delivery, branches) {
   return {
     settlement: { status: delivery.settlement.status, reason: delivery.settlement.reason },
     commit: delivery.commit,
+    changedCount: Number.isInteger(delivery.changedCount) && delivery.changedCount >= 0 ? delivery.changedCount : null,
     verification: delivery.verification === null ? null : {
       status: delivery.verification.status,
       reverify: { status: delivery.verification.reverify.status, reason: delivery.verification.reverify.reason },

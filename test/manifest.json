@@ -81,6 +81,7 @@
       "isolation-infra/ownerDashboardCli.test.js",
       "isolation-infra/ownerDashboardServer.test.js",
       "isolation-infra/ownerDashboardV2.test.js",
+      "isolation-infra/ownerDashboardV2Workers.test.js",
       "isolation-infra/ownerDashboardWeb.test.js",
       "isolation-infra/panelReadiness.test.js",
       "isolation-infra/playbookCatalog.test.js",

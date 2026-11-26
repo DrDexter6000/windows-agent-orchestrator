@@ -868,8 +868,14 @@ test("M12-17 APP: detail render composes the pure fact helpers (no ad-hoc DOM de
   }
 });
 
-test("M12-17 SAFE: app.js never reads prompt/session/absolute-path/raw-command fields", () => {
+// Decision 0131 A3 (batch 143a): this guard now binds ONLY the legacy UI's app.js (src/owner-dashboard/app.js,
+// served at "/"), whose detail pane has no business with a brief. The new front end at /v2 shows the bound
+// brief the /api/worker body carries (brief.text, already redacted, folded and bounded by the server), so it is
+// held to its own guard in ownerDashboardV2Workers.test.js (it may read the brief; it still never reads session,
+// path, cwd or raw-command fields). The legacy rule itself is unchanged.
+test("M12-17 SAFE (legacy UI): app.js never reads prompt/session/absolute-path/raw-command fields", () => {
   const js = readAsset("app.js");
+  assert.notEqual(js, readAsset("v2/app.js"), "the file under guard is the legacy app.js, not the /v2 one");
   assert.doesNotMatch(js, /\.(prompt|sessionId|serveUrl|worktreePath|cwd|rawCommand|argv|pid)\b/,
     "detail/notification rendering reads only fixed safe fields");
 });

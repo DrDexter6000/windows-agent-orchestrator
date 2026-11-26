@@ -2540,7 +2540,7 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
       // 交付对象也是白名单：deliveryRef 的其余字段（worktreePath 等）不整包透传。
       if (run.delivery !== null) {
         assert.deepEqual(Object.keys(run.delivery).sort(), [
-          "acceptance", "ambiguous", "branchPresent", "commit", "isolationFailure", "packagingFailure", "settledAt",
+          "acceptance", "ambiguous", "branchPresent", "changedCount", "commit", "isolationFailure", "packagingFailure", "settledAt",
           "settledSeq", "settlement", "verification",
         ], `${run.runId} 的 delivery 键集`);
         assert.deepEqual(Object.keys(run.delivery.settlement).sort(), ["reason", "status"]);
@@ -2551,6 +2551,7 @@ test("快照里没有任何路径：键集是白名单，任何字符串都不�
     assert.deepEqual(runOf(snap, "run_leak").delivery, {
       settlement: { status: "undeterminable", reason: "terminal_delivery_ambiguous" },
       commit: null,
+      changedCount: null,
       verification: null,
       acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: null,

@@ -218,6 +218,7 @@ function fixtureSnapshot() {
         delivery: {
           settlement: { status: "settled", reason: "delivery_settled", worktreePath: `${WORKSPACE_ROOT}\\.wao-worktrees\\run_wait` },
           commit: "c".repeat(40),
+          changedCount: 11,
           verification: { status: "passed", reverify: { status: "none", reason: null } },
           acceptance: { status: "pending", decidedAt: null },
           settledAt: ago(3 * HOUR),
@@ -289,6 +290,7 @@ const EXPECTED_WORKERS = {
       runId: "run_live", project: ALPHA, title: "任务 run_live", subtitle: null, taskType: "code", laneKey: "glm-pro",
       roleId: "coder", state: "running", liveness: "progress", stage: "active", startedAt: ago(HOUR), terminalAt: null,
       lastEffectAt: ago(3 * HOUR), quietSince: ago(4 * HOUR), delivery: null, failure: null, attentionIds: [], consult: null,
+      round: { number: 1, complete: true },
     },
     {
       runId: "run_fail", project: ALPHA, title: "任务 run_fail", subtitle: null, taskType: "code", laneKey: "kimi",
@@ -296,18 +298,22 @@ const EXPECTED_WORKERS = {
       terminalAt: ago(HOUR), lastEffectAt: ago(3 * HOUR), quietSince: ago(4 * HOUR), delivery: null,
       failure: { category: "provider_capacity", code: "quota_exhausted" },
       attentionIds: ["capacity:kimi", "capacity_alert:kimi", "failed:run_fail"], consult: null,
+      round: { number: 1, complete: true },
     },
     {
       runId: "run_wait", project: ALPHA, title: "任务 run_wait", subtitle: null, taskType: "code", laneKey: "glm-pro",
       roleId: "coder", state: "completed", liveness: "terminal", stage: "terminal", startedAt: ago(4 * HOUR),
       terminalAt: ago(3 * HOUR), lastEffectAt: ago(3 * HOUR), quietSince: ago(4 * HOUR),
       delivery: {
+        commit: "c".repeat(40),
+        changedCount: 11,
         settlement: { status: "settled", reason: "delivery_settled" },
         verification: { status: "passed" },
         acceptance: { status: "pending" },
         branchPresent: true,
       },
       failure: null, attentionIds: ["awaiting_decision:run_wait"], consult: null,
+      round: { number: 1, complete: true },
     },
   ],
 };
@@ -747,11 +753,12 @@ test("WHITELIST: 行与事项只有页面要的字段；快照里的敌意附加
   assert.deepEqual(sortedKeys(overview.lanes[1].capacity), ["kind", "observedAt", "state"]);
   assert.deepEqual(sortedKeys(workers), ["generatedAt", "status", "truncated", "workers"]);
   assert.deepEqual(sortedKeys(workers.workers[0]), [
-    "attentionIds", "consult", "delivery", "failure", "laneKey", "lastEffectAt", "liveness", "project", "quietSince", "roleId",
+    "attentionIds", "consult", "delivery", "failure", "laneKey", "lastEffectAt", "liveness", "project", "quietSince", "roleId", "round",
     "runId", "stage", "startedAt", "state", "subtitle", "taskType", "terminalAt", "title",
   ]);
   assert.deepEqual(sortedKeys(workers.workers[0].project), ["name", "slug"]);
-  assert.deepEqual(sortedKeys(workers.workers[2].delivery), ["acceptance", "branchPresent", "settlement", "verification"]);
+  assert.deepEqual(sortedKeys(workers.workers[2].delivery), ["acceptance", "branchPresent", "changedCount", "commit", "settlement", "verification"]);
+  assert.deepEqual(sortedKeys(workers.workers[2].round), ["complete", "number"]);
   assert.deepEqual(sortedKeys(workers.workers[2].delivery.settlement), ["reason", "status"]);
   assert.deepEqual(sortedKeys(workers.workers[2].delivery.verification), ["status"]);
   assert.deepEqual(sortedKeys(workers.workers[2].delivery.acceptance), ["status"]);
@@ -768,8 +775,11 @@ test("WHITELIST: 行与事项只有页面要的字段；快照里的敌意附加
       assert.ok(!body.includes(marker), `${marker} 不透传（值也不行）`);
     }
   }
-  // 交付摘要不带提交号、收口时刻、复验链与裁决时间；行里没有 lastVitalAt / readOnly / 谱系等内部事实。
-  assert.ok(!JSON.stringify(workers).includes("c".repeat(40)));
+  // 交付摘要带当前交付提交（第 143a 批：规范提交号，页面缩短并按它搜索），不带收口时刻、复验链与裁决时间；
+  // 行里没有 lastVitalAt / readOnly / 谱系（只有一个轮次数字）等内部事实。
+  assert.equal(workers.workers[2].delivery.commit, "c".repeat(40));
+  assert.equal(workers.workers[2].delivery.changedCount, 11, "文件数只是个数（第 143a 修正一）：路径一个都不出口");
+  assert.ok(!JSON.stringify(workers).includes("wao-delivery"), "提交说明不出口");
   assert.ok(!JSON.stringify(workers).includes("settledAt"));
   assert.ok(!JSON.stringify(workers).includes("reverify"));
   assert.ok(!JSON.stringify(workers).includes("decidedAt"));
@@ -836,7 +846,7 @@ test("WORKERS: 默认范围与非默认范围——读不出的运行、太旧�
   assert.deepEqual(r.workers.map((row) => row.runId), ["run_live", "run_pkg", "run_recent"]);
   assert.equal(r.truncated, false);
   assert.deepEqual(r.workers[1].delivery, {
-    settlement: { status: "settled", reason: "packaging_failed" }, verification: null, acceptance: null, branchPresent: true,
+    commit: null, changedCount: null, settlement: { status: "settled", reason: "packaging_failed" }, verification: null, acceptance: null, branchPresent: true,
   });
 });
 
@@ -1666,16 +1676,22 @@ test("WIRE COMMIT + SEATS: 交付类事项带当前提交（读不出是 null）
     assert.equal("seatRunIds" in entry, false);
   }
   assert.equal("commit" in item(attention.decide, "capacity:kimi"), false);
-  // 提交只在事项里，不进 /api/workers 的交付摘要。
-  assert.ok(!JSON.stringify(await getJson(s, "/api/workers")).includes("c".repeat(40)));
+  // 第 143a 批：提交也在 /api/workers 的交付摘要里（只有当前交付提交这一项，没有路径、收口时刻与复验链）。
+  const rows = (await getJson(s, "/api/workers")).workers;
+  assert.equal(rows.find((row) => row.runId === "run_wait").delivery.commit, "c".repeat(40));
+  assert.equal(rows.find((row) => row.runId === "run_nocommit").delivery.commit, null, "读不出：null");
+  assert.equal(rows.find((row) => row.runId === "run_wait").delivery.changedCount, 11);
+  assert.equal(rows.find((row) => row.runId === "run_nocommit").delivery.changedCount, null, "读不出：null");
+  assert.equal(rows.filter((row) => row.delivery !== null).every((row) => Object.keys(row.delivery).sort().join() === "acceptance,branchPresent,changedCount,commit,settlement,verification"), true);
 });
 
-test("WIRE SEATS: /api/workers 的行给会审席位所在组的摘要 { groupId, seatsIn, seatsTotal }；不是席位 / 没有组记录是 null", async () => {
+test("WIRE SEATS: /api/workers 的行给会审席位所在组的摘要 { groupId, seatsIn, seatsTotal } 与本席已答复的结论 q1；不是席位 / 没有组记录是 null", async () => {
   const seats = [
     { agentId: "a", runId: "run_seat1", runState: "completed", q1: "PASS", replied: true },
     { agentId: "b", runId: "run_seat2", runState: "completed", q1: null, replied: false },
     { agentId: "c", runId: "run_seat3", runState: "running", q1: null, replied: false },
   ];
+  const verdictOf = { run_seat1: "PASS", run_seat2: null, run_seat3: null };
   const live = (runId) => runRow({ runId, state: "running", terminal: false, liveness: "progress", stage: "active", deliveryRequested: false, terminalAt: null });
   const { s } = await readyServer({
     snapshotFactory: snapshotWith((snap) => {
@@ -1686,8 +1702,8 @@ test("WIRE SEATS: /api/workers 的行给会审席位所在组的摘要 { groupId
   const workers = (await getJson(s, "/api/workers")).workers;
   const row = (id) => workers.find((entry) => entry.runId === id);
   for (const id of ["run_seat1", "run_seat2", "run_seat3"]) {
-    assert.deepEqual(row(id).consult, { groupId: "alpha:consult_9", seatsIn: 1, seatsTotal: 3 }, `${id}: 完成且答复的一席已到；完成没答复的、在跑的不算`);
-    assert.deepEqual(sortedKeys(row(id).consult), ["groupId", "seatsIn", "seatsTotal"]);
+    assert.deepEqual(row(id).consult, { groupId: "alpha:consult_9", seatsIn: 1, seatsTotal: 3, q1: verdictOf[id] }, `${id}: 完成且答复的一席已到；完成没答复的、在跑的不算；结论只给已答复的那一席自己的`);
+    assert.deepEqual(sortedKeys(row(id).consult), ["groupId", "q1", "seatsIn", "seatsTotal"]);
   }
   assert.equal(row("run_live").consult, null, "不是会审席位");
   assert.equal(row("run_wait").consult, null, "被审运行不是席位");

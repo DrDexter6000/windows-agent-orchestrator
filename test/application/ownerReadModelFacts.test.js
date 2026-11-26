@@ -391,6 +391,7 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
     assert.deepEqual(runOf(snap, "run_pack").delivery, {
       settlement: { status: "settled", reason: "packaging_failed" },
       commit: null,
+      changedCount: null,
       verification: null,
       acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: iso(T0 + 5000),
@@ -403,6 +404,7 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
     assert.deepEqual(runOf(snap, "run_iso").delivery, {
       settlement: { status: "settled", reason: "isolation_failed" },
       commit: null,
+      changedCount: null,
       verification: null,
       acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: iso(T0 + 5000),
@@ -415,6 +417,7 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
     assert.deepEqual(runOf(snap, "run_amb").delivery, {
       settlement: { status: "undeterminable", reason: "delivery_facts_malformed" },
       commit: null,
+      changedCount: null,
       verification: null,
       acceptance: { status: null, decidedAt: null, decidedSeq: null },
       settledAt: null,
@@ -431,6 +434,7 @@ test("交付事实：未请求交付为 null；打包失败、隔离失败、事
     const ambCommitRun = runOf(snap, "run_ambc").delivery;
     assert.equal(ambCommitRun.ambiguous, true, "验证结果引用的提交对不上 → 视图 ambiguous");
     assert.equal(ambCommitRun.commit, null, "视图认得创建时的提交，但事实矛盾：不给提交号");
+    assert.equal(ambCommitRun.changedCount, null, "事实矛盾：文件数与提交号一样不给");
     assert.equal(ambCommitRun.verification, null);
     assert.equal(ambCommitRun.settlement.status, "undeterminable");
     assert.equal(ambCommitRun.settlement.reason, "delivery_facts_malformed");
@@ -509,6 +513,10 @@ test("交付事实：验证 passed / failed / pending / unavailable；复验通�
       commit: DELIVERED,
     }, "复验还没结果：有效状态仍是原始的 failed");
     assert.deepEqual(runOf(snap, "run_pass").delivery.acceptance, { status: "pending", decidedAt: null, decidedSeq: null });
+    // 第 143a 修正一：列表卡片的"N 个文件"——与 commit 同一份绑定交付引用里 changedFiles 的个数，只有个数没有路径。
+    for (const id of ["run_pass", "run_fail", "run_unav", "run_pend", "run_rever", "run_revpend"]) {
+      assert.equal(runOf(snap, id).delivery.changedCount, 1, `${id}: 引用里列了一个文件`);
+    }
   } finally {
     s.cleanup();
   }
@@ -2689,7 +2697,7 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
       assert.deepEqual(Object.keys(run).sort(), RUN_KEYS, `${run.runId} 的运行行键集`);
       if (run.delivery !== null) {
         assert.deepEqual(Object.keys(run.delivery).sort(), [
-          "acceptance", "ambiguous", "branchPresent", "commit", "isolationFailure", "packagingFailure", "settledAt",
+          "acceptance", "ambiguous", "branchPresent", "changedCount", "commit", "isolationFailure", "packagingFailure", "settledAt",
           "settledSeq", "settlement", "verification",
         ], `${run.runId} 的 delivery 键集`);
         assert.deepEqual(Object.keys(run.delivery.settlement).sort(), ["reason", "status"]);

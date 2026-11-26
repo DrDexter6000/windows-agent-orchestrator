@@ -1454,7 +1454,7 @@ test("额度用尽与限流同时出现: Needs you 只数额度用尽；Alerts �
   assert.equal(new Set(OWNER_ATTENTION_KINDS).size, OWNER_ATTENTION_KINDS.length);
 });
 
-test("会审几席已到: 已到终态且收到答复才算；完成但没答复不算、失败但有答复算；Workers 行上给 { groupId, seatsIn, seatsTotal }", () => {
+test("会审几席已到: 已到终态且收到答复才算；完成但没答复不算、失败但有答复算；Workers 行上给 { groupId, seatsIn, seatsTotal, q1 }（q1 是本席已答复的闭集结论）", () => {
   const seats = [
     { agentId: "a", runId: "run_s1", runState: "completed", q1: "PASS", replied: true },
     { agentId: "b", runId: "run_s2", runState: "completed", q1: null, replied: false },
@@ -1472,9 +1472,20 @@ test("会审几席已到: 已到终态且收到答复才算；完成但没答复
   );
   const rows = selectOwnerWorkers(snap, derive(snap), { now: NOW });
   const consultOfRow = (runId) => rows.find((row) => row.run.runId === runId).consult;
-  assert.deepEqual(consultOfRow("run_s4"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5 });
-  assert.deepEqual(consultOfRow("run_s1"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5 }, "同组各席共用一个组摘要");
+  assert.deepEqual(consultOfRow("run_s4"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5, q1: null }, "还在跑、没有结论：q1 是 null");
+  assert.deepEqual(consultOfRow("run_s1"), { groupId: "alpha:consult_1", seatsIn: 2, seatsTotal: 5, q1: "PASS" }, "同组各席共用组摘要，各带本席自己的结论");
   assert.equal(consultOfRow("run_other"), null, "不是会审席位");
+  // q1：只有已答复的席位、且结论在闭集内才给；没答复就算 seat 上写着结论也不给，闭集外的值不透传。
+  const verdicts = [
+    { agentId: "a", runId: "run_v1", runState: "completed", q1: "FIX_FIRST", replied: true },
+    { agentId: "b", runId: "run_v2", runState: "completed", q1: "PASS_WITH_NOTES", replied: true },
+    { agentId: "c", runId: "run_v3", runState: "completed", q1: "PASS", replied: false },
+    { agentId: "d", runId: "run_v4", runState: "completed", q1: "MAYBE", replied: true },
+  ];
+  const vsnap = snapshot(verdicts.map((seat) => run({ runId: seat.runId, deliveryRequested: false })), [consult({ seats: verdicts })]);
+  const vrows = selectOwnerWorkers(vsnap, derive(vsnap), { now: NOW });
+  const q1Of = (runId) => vrows.find((row) => row.run.runId === runId).consult.q1;
+  assert.deepEqual(["run_v1", "run_v2", "run_v3", "run_v4"].map(q1Of), ["FIX_FIRST", "PASS_WITH_NOTES", null, null]);
   // 没有会审组记录（或记录里没有席位 / 没有 consultId）：没有这一项。
   const bare = snapshot([live({ runId: "run_s4" })], []);
   assert.equal(selectOwnerWorkers(bare, derive(bare), { now: NOW })[0].consult, null);

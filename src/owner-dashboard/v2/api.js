@@ -10,14 +10,18 @@
 //   - It is NEVER written to the page, a log or an error. It leaves this module
 //     only as the Authorization header of a request to /api/*.
 //
-// DATA PLANE: the page may read exactly these three read-only routes; request()
-// refuses any other path, and it holds the only direct network call in the v2
+// DATA PLANE: the page may read exactly these five read-only routes; the request
+// functions refuse any other path (and any query that is not the route's own closed,
+// shape-checked key set), and this module holds the only direct network call in the v2
 // code. Every request is a GET with the bearer, never cached, no referrer.
+//   /api/overview /api/workers[?project=] /api/attention   the three list pages
+//   /api/worker?runId=                                     one worker's detail (JSON)
+//   /api/artifact?runId=&commit=&fileIndex=                one delivered image (a blob)
 
 import { readStored, writeStored } from "./store.js";
 
 export const TOKEN_STORAGE_KEY = "wao_v2_token";
-export const API_PATHS = Object.freeze(["/api/overview", "/api/workers", "/api/attention"]);
+export const API_PATHS = Object.freeze(["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact"]);
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 const TOKEN_RE = /^[0-9a-f]{64}$/;
@@ -51,18 +55,77 @@ export function resolveToken({ hash, getStorage, clearFragment }) {
   return isValidToken(stored) ? stored : null;
 }
 
+// ===== the closed route table =====
+
+const SLUG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+const RUN_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
+const COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const FILE_INDEX_RE = /^(?:0|[1-9][0-9]{0,6})$/;
+
+/** Per route: the closed query keys, each with its shape and whether it is required. */
+const QUERY_SHAPES = Object.freeze({
+  "/api/overview": {},
+  "/api/workers": { project: { re: SLUG_RE, required: false } },
+  "/api/attention": { project: { re: SLUG_RE, required: false } },
+  "/api/worker": { runId: { re: RUN_ID_RE, required: true } },
+  "/api/artifact": {
+    runId: { re: RUN_ID_RE, required: true },
+    commit: { re: COMMIT_RE, required: true },
+    fileIndex: { re: FILE_INDEX_RE, required: true },
+  },
+});
+
+/** True when `path` is one of the routes with only its own closed, shape-checked query. */
+export function isDataPath(path) {
+  if (typeof path !== "string") return false;
+  const cut = path.indexOf("?");
+  const base = cut < 0 ? path : path.slice(0, cut);
+  const shapes = Object.hasOwn(QUERY_SHAPES, base) ? QUERY_SHAPES[base] : null;
+  if (shapes === null) return false;
+  const query = cut < 0 ? "" : path.slice(cut + 1);
+  if (cut >= 0 && query === "") return false;
+  const seen = new Set();
+  const params = new URLSearchParams(query);
+  // A query that does not survive a round trip (stray characters, bad escapes) is not ours.
+  if (params.toString() !== query) return false;
+  for (const [key, value] of params) {
+    if (seen.has(key) || !Object.hasOwn(shapes, key) || !shapes[key].re.test(value)) return false;
+    seen.add(key);
+  }
+  return Object.entries(shapes).every(([key, shape]) => !shape.required || seen.has(key));
+}
+
+function build(base, entries) {
+  const params = new URLSearchParams();
+  for (const [key, value] of entries) if (value !== null && value !== undefined) params.set(key, String(value));
+  const query = params.toString();
+  const path = query === "" ? base : `${base}?${query}`;
+  if (!isDataPath(path)) throw new Error("request: path is not one of the dashboard routes");
+  return path;
+}
+
+/** /api/workers, narrowed to one project (the server filters before its row cap) when given. */
+export const workersPath = (project = null) => build("/api/workers", [["project", project]]);
+/** One worker's detail. */
+export const workerPath = (runId) => build("/api/worker", [["runId", runId]]);
+/** One delivered image, bound to the delivery commit and the file's index in the changed list. */
+export const artifactPath = ({ runId, commit, fileIndex }) => build("/api/artifact", [["runId", runId], ["commit", commit], ["fileIndex", fileIndex]]);
+
+// ===== the one network call =====
+
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
 /**
- * GET one of the three read routes. Never throws and never reflects the server's
- * text: the result is { ok: true, body } or { ok: false, reason } with reason one
- * of "unauthorized" | "network" | "server".
+ * GET one route with the bearer. Never throws on a network problem and never reflects the server's text:
+ * { ok: true, response } or { ok: false, reason } with reason one of "unauthorized" | "notFound" |
+ * "network" | "server".
  */
-export async function request(path, token) {
-  if (!API_PATHS.includes(path)) throw new Error("request: path is not one of the dashboard routes");
+async function get(path, token, accept) {
   let response;
   try {
     response = await fetch(path, {
       method: "GET",
-      headers: { authorization: authorizationHeader(token), accept: "application/json" },
+      headers: { authorization: authorizationHeader(token), accept },
       cache: "no-store",
       credentials: "omit",
       referrerPolicy: "no-referrer",
@@ -72,9 +135,38 @@ export async function request(path, token) {
     return { ok: false, reason: "network" };
   }
   if (response.status === 401) return { ok: false, reason: "unauthorized" };
+  if (response.status === 404) return { ok: false, reason: "notFound" };
   if (!response.ok) return { ok: false, reason: "server" };
+  return { ok: true, response };
+}
+
+/**
+ * GET one of the JSON read routes. The result is { ok: true, body } or { ok: false, reason } with reason
+ * one of "unauthorized" | "notFound" | "network" | "server". A route outside the closed set, or the
+ * image route, is refused before anything leaves the page.
+ */
+export async function request(path, token) {
+  if (!isDataPath(path) || path.startsWith("/api/artifact")) throw new Error("request: path is not one of the dashboard routes");
+  const got = await get(path, token, "application/json");
+  if (!got.ok) return got;
   try {
-    return { ok: true, body: await response.json() };
+    return { ok: true, body: await got.response.json() };
+  } catch {
+    return { ok: false, reason: "server" };
+  }
+}
+
+/**
+ * GET one delivered image (the /api/artifact route only) as a Blob. Only png / jpeg / webp come back as
+ * data; anything else is a "server" failure. The caller turns the blob into an object URL and revokes it.
+ */
+export async function requestImage(path, token) {
+  if (!isDataPath(path) || !path.startsWith("/api/artifact")) throw new Error("request: path is not one of the dashboard routes");
+  const got = await get(path, token, "image/png, image/jpeg, image/webp");
+  if (!got.ok) return got;
+  try {
+    const blob = await got.response.blob();
+    return IMAGE_TYPES.has(blob.type) ? { ok: true, blob } : { ok: false, reason: "server" };
   } catch {
     return { ok: false, reason: "server" };
   }

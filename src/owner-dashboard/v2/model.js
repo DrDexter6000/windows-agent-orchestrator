@@ -13,6 +13,8 @@
 // pick the words (i18n.js). That is also why a language switch cannot change a
 // filter, a selection or an expansion.
 
+import { workersPath } from "./api.js";
+
 export const POLL_MS = 5000;
 export const PAGES = Object.freeze(["overview", "workers", "attention"]);
 export const DEFAULT_PAGE = "overview";
@@ -81,12 +83,14 @@ export function isValidProject(value) {
  * "#attention?project=shop-api&section=decide" -> { page, project, section }.
  * An unknown or missing page is the Overview. A project filter counts on the Workers and
  * Attention pages (and only with the slug shape); a landing section (decide | anomalies,
- * the red / amber part of Attention) only on Attention.
+ * the red / amber part of Attention) only on Attention. The query starts at the first "?" or
+ * "&" ("#workers&project=x" reads like "#workers?project=x"); the rest of the Workers state
+ * (lane, type, status, health, search, the open run) is workers.js's parseWorkersHash.
  */
 export function parseHash(hash) {
   let raw = typeof hash === "string" ? hash : "";
   if (raw.startsWith("#")) raw = raw.slice(1);
-  const cut = raw.indexOf("?");
+  const cut = raw.search(/[?&]/);
   const name = cut < 0 ? raw : raw.slice(0, cut);
   const query = cut < 0 ? "" : raw.slice(cut + 1);
   const page = PAGES.includes(name) ? name : DEFAULT_PAGE;
@@ -114,12 +118,19 @@ export function formatHash(page, project = null, section = null) {
 
 const PATHS_BY_PAGE = Object.freeze({
   overview: Object.freeze(["/api/overview", "/api/workers"]),
-  workers: Object.freeze(["/api/overview"]),
   attention: Object.freeze(["/api/overview", "/api/attention", "/api/workers"]),
 });
 
-/** The read routes a page polls. Every page includes /api/overview: the top bar counts come from it. */
-export const endpointsFor = (page) => PATHS_BY_PAGE[PAGES.includes(page) ? page : DEFAULT_PAGE];
+/**
+ * The read routes a page polls. Every page includes /api/overview: the top bar counts come from it.
+ * The Workers page reads the rows (narrowed to one project by the server when the project filter is set,
+ * so the row cap applies to that project alone) and the attention items its rows point at. The path IS
+ * the key of the retained body: data fetched for another project is never mistaken for this one's.
+ */
+export function endpointsFor(page, project = null) {
+  if (page === "workers") return ["/api/overview", workersPath(isValidProject(project) ? project : null), "/api/attention"];
+  return PATHS_BY_PAGE[PAGES.includes(page) ? page : DEFAULT_PAGE];
+}
 
 // ===== counts =====
 
@@ -160,11 +171,12 @@ export const INITIAL_NET = Object.freeze({
 function shapeOk(path, body) {
   if (body === null || typeof body !== "object" || !STATUSES.has(body.status)) return false;
   if (body.status === "loading" || body.status === "unavailable") return true;
-  if (path === "/api/overview") {
+  const route = path.split("?")[0];
+  if (route === "/api/overview") {
     return body.counts !== null && typeof body.counts === "object" && Array.isArray(body.projects) && Array.isArray(body.lanes);
   }
-  if (path === "/api/workers") return Array.isArray(body.workers);
-  if (path === "/api/attention") return Array.isArray(body.decide) && Array.isArray(body.anomalies) && Array.isArray(body.resolved);
+  if (route === "/api/workers") return Array.isArray(body.workers);
+  if (route === "/api/attention") return Array.isArray(body.decide) && Array.isArray(body.anomalies) && Array.isArray(body.resolved);
   return false;
 }
 
@@ -570,7 +582,7 @@ function itemOf(raw, section, rowsById, projectNames, refMs) {
 }
 
 /** The first COMMIT_SHORT_LENGTH hex digits of a commit id; anything else is unknown (null). */
-const shortCommit = (value) => (typeof value === "string" && /^[0-9a-f]{40,64}$/.test(value) ? value.slice(0, COMMIT_SHORT_LENGTH) : null);
+export const shortCommit = (value) => (typeof value === "string" && /^[0-9a-f]{40,64}$/.test(value) ? value.slice(0, COMMIT_SHORT_LENGTH) : null);
 
 /** Split a sorted section into the recent items and the ones older than seven days. */
 function foldLegacy(items) {
@@ -640,7 +652,7 @@ export function buildTopbar(net, page, nowMs) {
  * routes) it is a message: the problem when there is one, otherwise "loading".
  */
 export function buildMain({ net, page, project, visit, nowMs }) {
-  const paths = endpointsFor(page);
+  const paths = endpointsFor(page, project);
   const generation = net.pages[page] ?? null;
   if (generation === null || !paths.every((path) => generation.bodies[path] !== undefined)) {
     return { page: "message", kind: net.problem ?? "loading" };
@@ -658,5 +670,13 @@ export function buildMain({ net, page, project, visit, nowMs }) {
       ...buildAttention({ attention: bodies["/api/attention"], workers: bodies["/api/workers"], projectNames }, { refMs, project }),
     };
   }
-  return { page: "workers", project, projectName };
+  // The list itself is workers.js's workersPage(): it needs the view state (filters, the open run), which
+  // lives in the URL fragment next to the page, not in the polled data.
+  return {
+    page: "workers",
+    project,
+    projectName,
+    refMs,
+    bodies: { overview: bodies[paths[0]], workers: bodies[paths[1]], attention: bodies[paths[2]] },
+  };
 }
