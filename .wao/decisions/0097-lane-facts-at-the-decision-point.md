@@ -41,4 +41,4 @@
 - 服务商高峰时段从 `cost` 原文移到车道上的 `peak` 字段（北京时间、工作日、`HH:MM-HH:MM` 时段；法定节假日不识别、按工作日算，Owner 定）。`wao lanes`、`lead_preflight`（行内 `peakNow`、顶层 `now`）与派发回显据此显示"此刻高峰／非高峰，至几点"。这是世界现状的事实，不是推荐：WAO 不算"此刻该派谁"，不排序、不隐藏、不拦截。上文"成本档是静态的、高峰倍率只在 `cost` 与 `ownerRules` 里"作废；`ownerRules` 不再写钟点。
 - 对照表的分数单元格去掉百分比，只留星级与 n：不同维度的分数口径不同（谱系一次落地、隐藏测试通过），并排的百分比会误导；具体分数留在逐车道细节。
 - `ownerRules` 按场景重写为六条（Owner 2026-11-26：日常写代码 glm-flash；较难的非高峰派 glm-pro 或 deepseek-flash，高峰或拿不下时派 sonnet，opus 最后兜底；sonnet、opus、fable 共用一份 Claude 额度）。SKILL 的选车道句改为"照 `ownerRules`，其余由 Lead 判断"，不再另列一套平手顺序。
-- 本批同样新增了 `lane-traits.json` 的键 `peak`：没重启的宿主 MCP 进程用旧代码读新文件时，旧校验器把带 `peak` 的四条车道（glm-flash、glm-pro、deepseek-flash、deepseek-pro）判为无效、悄悄省略，其余车道与新规则照常显示（两席会审实测）。重启加载新代码后恢复完整画像。
+- 本批同样新增了 `lane-traits.json` 的键 `peak`：没重启的宿主 MCP 进程用旧代码读新文件时，旧校验器把带 `peak` 的四条车道（glm-flash、glm-pro、deepseek-flash、deepseek-pro）判为无效：`lanes` 的行与派发回显里没有它们，只有 `wao lanes` 的"形状错误"和 `lead_preflight` 的 observations 提示；其余车道与新规则照常显示（会审与复核实测）。重启加载新代码后恢复完整画像。
