@@ -104,29 +104,15 @@ wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 r
 
 行为契约：
 
-- 目标目录默认是当前目录（`process.cwd()`）；`--cwd` 显式指定目标项目。目标必须在某个 Git 仓库内——命令解析出 canonical Git root 作为看板 workspace（嵌套子目录也自动解析到仓库根）；不在 Git 仓库内时，在监听之前就失败，并给出可操作提示（在 Git 项目内运行，或用 `--cwd`）。
-- 经全局 `wao` 调用时，看板读取的 run 目录与 agent registry 从受信安装根解析（见[安装与配置](install.md)「安装本工具」一节的受信安装根段），不会静默落到当前目录的 `runs/` 或 `config/`；当前目录仅作默认 target workspace（`--cwd` 可覆盖），显式 `--run-dir` 覆盖照原样使用、不被重定位。
-- 默认在 Windows 默认浏览器打开生成的 fragment-token URL 恰好一次（无 shell 拼接，URL 只作为结构化 argv 传给系统默认处理器）；`--no-open` 不做任何打开尝试。打开是 spawn 型的：处理器子进程在 spawn 后即被 unref，即使默认处理器进程滞留也不会阻塞本命令的 Ctrl-C 关闭。
-- 浏览器打开失败只是提示：URL 已打印，打印一行简短警告后服务器继续运行，按 `Ctrl-C` 停止。
-- 已接受的瞬时本机暴露（如实披露）：生成的 fragment-token URL 会打印给人类 Owner，并会短暂出现在本地 `rundll32` 子进程的命令行中（Windows 上本机其它进程/工具可瞬时读到该命令行）——这是让默认浏览器打开该 URL 的必要传递方式。服务边界未因此改变：服务器仍只监听 `127.0.0.1`，token 生命周期随服务器关闭（Ctrl-C/进程退出）结束，看板 API 只接受带该 bearer 的只读 GET。
+- 目标目录默认是当前目录（`process.cwd()`）；`--cwd` 显式指定。目标必须在某个 Git 仓库内，否则在监听之前失败，并给出可操作提示。看板本身覆盖运行目录里的全部项目（决定 0131）。
+- 经全局 `wao` 调用时，看板读取的 run 目录从受信安装根解析（见[安装与配置](install.md)「安装本工具」一节的受信安装根段），不会静默落到当前目录的 `runs/`；显式 `--run-dir` 照原样使用。
+- 默认在 Windows 默认浏览器打开一次 `http://127.0.0.1:<port>/v2/#token=<64hex>`（URL 只作为结构化 argv 交给系统默认处理器，不经 shell）；`--no-open` 不打开。打开失败只提示，URL 已打印。按 `Ctrl-C` 停止；省略 `--port` 时用临时端口。
+- 已接受的瞬时本机暴露：这个 URL 会打印给 Owner，也会短暂出现在 `rundll32` 子进程的命令行里。服务器只监听 `127.0.0.1`，令牌随进程退出失效，接口只接受带它的只读 GET。
+- `/` 与 `/index.html` 302 到 `/v2/`，旧书签 `/#token=…` 的片段由浏览器带过去。`runs dashboard --web` 已退役（第 145a 批）：带 `--web` 时报固定文案并指向 `wao dashboard`；不带 `--web` 的文本仪表盘不变。
 
-旧式嵌套命令仍支持（不会自动打开浏览器，非 Git 目录 fail-soft 启动）：
+看板三页：Overview、Workers、Attention，中英文。Workers 的侧栏有 Activity、Deliverable、Brief 三个页签，Activity 经 `/api/worker/stream` 实时接收新事件，连不上时退回 5 秒轮询（决定 0132）。页面只读 `/api/overview|workers|attention|worker|worker/activity|worker/event|worker/stream|artifact`，都是只读事实，不是语义进度判断。
 
-```powershell
-npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cwd GIT_ROOT]
-```
-
-命令打印一次 `http://127.0.0.1:<port>/#token=<64hex>` 和停止提示；在浏览器打开该 URL，按 `Ctrl-C` 关闭（首轮普查中关闭会等它跑完）。省略 `--port` 时使用临时端口。新界面在 `/v2#token=…`，读 `/api/overview|workers|attention|worker*|artifact`（决定 0131、0132）。`--web` 不与 `--watch` 或 `--format json` 共用。
-
-看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询。选中 run 的详情面板给出后端、阶段、终态、事件总量、写域观察、活性与有界活动时间线，都是只读事实，不是语义进度判断。
-
-浏览器终态通知需人类显式 opt-in：只有 Owner 点击启用且浏览器授予 Notification permission 后，页面才在观察到同一选中 run 从非终态变为终态时通知恰好一次。首次加载/刷新时已终态的 run 不补发，重复 polling 不重复发送，拒绝权限会明确显示 `notifications blocked`。通知只含固定安全字段。所有异步 activity 请求同时绑定选中 `runId` 与 selection epoch，A→B→A 快速切换时旧响应不得覆盖当前 run 的详情。
-
-看板默认打开 Active 模式：只列出当前有新鲜 owner 心跳、经证明 active 的 run，每 5s 自动刷新。历史 run 仅在 Owner 显式选择 `1h`/`24h`/`7d` 预设或有界自定义 from/to（上限 7d；含未来、倒序、越界或未知参数时固定返回 HTTP 400）后按需加载一次；历史模式不自动轮询。Active 响应标注 `scanScope=active`，不带 `unresolvedCount`（不做全库存 unresolved 分类，恒缺失而非 0）；范围按 transcript 派生的 `updatedAt` 过滤（非文件系统 mtime）。模式切换绑定 runs-mode epoch：迟到的 Active 或 History 响应不得覆盖当前模式或更新的查询；run 从 active 集或有界历史窗口消失绝不构成终态迁移，也不触发通知。HTTP `/api/runs` 的 `scope` 为闭集 `{active,history}`、缺省即 active；MCP 运行清单与 CLI 文本看板不变（全库存扫描 + `unresolvedCount`）。
-
-席位看板（board）视图是 mode-bar 上 `list ⇄ board` 的纯呈现切换：消费同一份当前 scope 的 `/api/runs` 数据（不重发请求、不重置已选窗口、不动选中 run）。board 按运行身份分组为泳道：显式 lane/role 派发的 run 进自己的 `车道/角色` 泳道（标注 not a seat），别名派发的 run 随席位泳道；席位名 + 身份色轨（同席位同色）+ run 卡片（点击复用详情面板）；非终态 run 靠前、终态弱化；泳道按最新活动排序（平局按名排）。board 顶部常驻当前 scope 标签与窗口截断提示（matched vs returned），并提醒窗口内无 run 不代表该席位空闲；agentId 未过 registry 校验的 run 归入置底的 unknown 泳道（不占调色板槽位）；registry 损坏时软降级为 unknown，不崩。无障碍：身份/状态不只靠颜色、卡片是可键盘操作的按钮且有可见焦点、正文对比度 ≥4.5:1；窄视口下泳道区内部滚动。
-
-安全边界：loopback + 每进程随机 bearer + GET-only、固定静态资源与 no-store/nosniff/no-referrer/严格 CSP/无 CORS opt-in、页面无 mutation 控件（不会 stop/retry/continue/repackage/decide，也不写 transcript、worktree 或配置）；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。Owner 视图仍会隐藏 credential/secret、raw command/tool payload、PID/session/绝对路径；其余 worker 消息按 Owner 观察用途提供较丰富但有界的脱敏文本。分层合同见[架构](../02-architecture.md) §1 的可观测性条。
+安全边界：loopback + 每进程随机 bearer + GET-only、固定静态资源与 no-store/nosniff/no-referrer/严格 CSP/无 CORS opt-in、页面无 mutation 控件（不会 stop/retry/continue/repackage/decide，也不写 transcript、worktree 或配置）；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。动态文本先脱敏、清控制字符、限长；工作树外的路径不显示（决定 0131 第 3 条）。分层合同见[架构](../02-architecture.md) §1 的可观测性条。
 
 ## worktree 清理失败（Permission denied）
 
