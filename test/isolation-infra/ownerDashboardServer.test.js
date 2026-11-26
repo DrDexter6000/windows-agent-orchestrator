@@ -500,9 +500,11 @@ test("ownerDashboardServer.js imports exactly the pinned set (node builtins + ap
   // clause span lines, and require the from-path to close the line.
   const sources = [...src.matchAll(/^import\s+(?:[\s\S]*?)\s+from\s+"([^"]+)";$/gm)].map((m) => m[1]).sort();
   assert.deepEqual(sources, [
+    "./application/ownerArtifact.js", // 141a: Git object reads (numstat, image bytes) for /api/worker + /api/artifact
     "./application/ownerAttention.js", // 140c: the attention derivation
     "./application/ownerDashboard.js", // the composition service (legacy /api/runs + /api/activity)
     "./application/ownerReadModel.js", // 140c: the Owner read model
+    "./application/ownerWorkerDetail.js", // 141a: the single-worker detail DTO
     "./application/runSummaryCache.js",
     "./projectBuckets.js", // 140c: the project slug shape
     "node:crypto",

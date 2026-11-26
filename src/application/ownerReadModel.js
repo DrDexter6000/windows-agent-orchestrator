@@ -832,7 +832,10 @@ const STAGE_DISPLAY = Object.freeze({
  *   `listArchiveFiles(runDir)` → 归档面 `{ files, skipped }`（缺省
  *   listArchiveTranscriptFiles）、`listDir(dir)` → 文件名数组（会审组记录目录）、
  *   `execGit(args, cwd)` → stdout（只读分支枚举，同步或异步返回值都行）
- * @returns {{refresh: Function, snapshot: Function, resolveRun: Function}}
+ * @returns {{refresh: Function, snapshot: Function, resolveRun: Function,
+ *   readRunEvents: Function, projectRepoRoot: Function}} readRunEvents / projectRepoRoot
+ *   是第 141 批给服务端的两个只读入口（单 worker 详情与产物接口）：前者按 resolveRun 的
+ *   授权读一个运行当下的转录事件，后者给项目仓库根——都不进快照。
  */
 export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {} } = {}) {
   if (typeof runDir !== "string" || runDir.length === 0) {
@@ -870,6 +873,9 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   // 席位转录 path → { signature, q1Key, q1 }：按"席位转录身份 + 记录声明的 Q1 候选"
   // 缓存的 Q1 值（只缓存算出来的值，不缓存回答原文；读失败不缓存）。
   let seatQ1 = new Map();
+  // slug → 项目仓库的主工作树根（null = 多个 key 指向同一个 slug）。只给服务端读 Git 对象
+  // 用（projectRepoRoot），不进快照。
+  let projectKeys = new Map();
   // slug → "available" | "unknown"：这一轮该项目会审目录有没有列出来。
   let consultProjectStatus = new Map();
   // slug → { key, repo, observedAtMs, branches: Set<runId>|null }（分支观测，至多每
@@ -1052,6 +1058,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     fileIndex = nextFiles;
     runIndex = nextRuns;
     projectNames = nextProjectNames;
+    projectKeys = nextKeys;
     archiveLineage = lineage.archiveCache;
     lineageDerived = lineage.derived;
     consultIndex = consults.index;
@@ -1762,6 +1769,38 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     return locateIn(runIndex, runId);
   }
 
+  /**
+   * 单个运行的转录事件（第 141 批：单 worker 详情与产物接口用）。授权走 resolveRun
+   * 同一份定位；读取与解析口径同刷新（只到最后一个换行为止，坏行或非对象行就是读不到）。
+   * 定位不到、读不出、解析失败一律 null——不回显原因。事件是这一刻读到的，可能比最近
+   * 一次发布的快照新。
+   *
+   * @param {unknown} runId
+   * @returns {Promise<object[]|null>}
+   */
+  async function readRunEvents(runId) {
+    const located = resolveRun(runId);
+    if (located === null) return null;
+    try {
+      return eventsOf(toBytes(await readFile(located.transcriptPath)));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 项目仓库的主工作树根（.project.json 的 key），只给服务端读 Git 对象用，从不进快照。
+   * slug 不认识、或多个 key 指向同一个 slug（说不清是哪个仓库）→ null。首次 refresh()
+   * 完成前一律 null。
+   *
+   * @param {unknown} slug
+   * @returns {string|null}
+   */
+  function projectRepoRoot(slug) {
+    const key = typeof slug === "string" ? projectKeys.get(slug) : undefined;
+    return typeof key === "string" && key.length > 0 ? key : null;
+  }
+
   /** resolveRun 的定位逻辑，对任意一份运行索引求值（刷新中途的会审席位定位用新索引）。 */
   function locateIn(index, runId) {
     if (!isValidRunId(runId)) return null;
@@ -1772,5 +1811,5 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     return { runId, availability: run.availability, transcriptPath: run.primaryPath, bucket: run.primaryBucket };
   }
 
-  return { refresh, snapshot, resolveRun };
+  return { refresh, snapshot, resolveRun, readRunEvents, projectRepoRoot };
 }

@@ -510,6 +510,25 @@ export function tailOfRedactedText(text, redactor, maxChars) {
   return { tail: safe.slice(start), truncated: true };
 }
 
+/**
+ * 同一条安全管道的取头形态（第 141 批：Owner 看板的任务书、调研答复与诊断文本）：
+ * exact-secret 脱敏 → 形状脱敏 → 控制字符清洗（LF/TAB 保留）→ 取开头限长（不切开
+ * 代理对）。顺序与 tailOfRedactedText 相同，只有取窗方向不同：脱敏作用在完整原文上，
+ * 然后才取头。totalChars = 清洗后的全文长度（UTF-16 码元），truncated 时调用方据此写明
+ * "截在哪里"。
+ *
+ * @param {string} text 完整原始文本
+ * @param {object} redactor createSecretRedactor() 实例
+ * @param {number} maxChars 开头字符上限
+ * @returns {{text: string, truncated: boolean, totalChars: number}}
+ */
+export function headOfRedactedText(text, redactor, maxChars) {
+  if (typeof text !== "string" || text.length === 0) return { text: "", truncated: false, totalChars: 0 };
+  const safe = sanitizeControls(redactSecretShapes(redactor.redactString(text)));
+  if (safe.length <= maxChars) return { text: safe, truncated: false, totalChars: safe.length };
+  return { text: safeSliceUtf16(safe, 0, maxChars), truncated: true, totalChars: safe.length };
+}
+
 // 工具输出里可展示的文本（决定 0073）：字符串原样；文本块数组按序拼接——平铺的
 // {type:"text", text} 与 ACP 的嵌套块 {type:"content", content:{type:"text", text}}
 // 都认；其它形状（图片、引用等）没有可展示的文本。此前只认字符串：deepseek-acp 的

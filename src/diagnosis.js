@@ -303,7 +303,7 @@ function factForIsolationViolation(reason, errorCode, event = {}) {
     fact = `${fact} (filesystem error code: ${errorCode})`;
   }
   if (knownReason && (reason.endsWith("_lexical_outside") || reason.endsWith("_physical_outside"))) {
-    const detail = isolationOutsideDetail(event, { physical: reason.endsWith("_physical_outside") });
+    const detail = isolationOutsideDetail(event);
     if (detail.length > 0) fact = `${fact} (${detail.join("; ")})`;
   }
   return fact;
@@ -318,19 +318,62 @@ function isolationDisplayText(value) {
   return safeSliceUtf16(escapeControlChars(value), 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
 }
 
-function isolationOutsideDetail(event, { physical = false } = {}) {
-  if (!event || typeof event !== "object" || Array.isArray(event)) return [];
+/**
+ * 一条隔离违规事件的展示字段（第 141 批：诊断事实措辞与 Owner 看板详情共用这一份读侧
+ * 处理）。每个值都是转录里的不可信文本：reason 与 destination 只认闭集成员（其余
+ * null），reportedPath / resolvedPath / escapedAt 再清一次控制字符、再限一次长（非字符串
+ * 与空串 null，畸形值不回显）；escapedAt 只在 reason 是 `*_physical_outside` 时给。
+ * @param {unknown} event — run.isolation_violation 事件
+ * @returns {{reason: string|null, destination: string|null, reportedPath: string|null,
+ *   resolvedPath: string|null, escapedAt: string|null}}
+ */
+export function projectIsolationViolationFields(event) {
+  const source = event !== null && typeof event === "object" && !Array.isArray(event) ? event : {};
+  const reason = typeof source.reason === "string" && ISOLATION_VIOLATION_REASONS.includes(source.reason)
+    ? source.reason
+    : null;
+  return {
+    reason,
+    destination: typeof source.destination === "string" && ISOLATION_DESTINATIONS.includes(source.destination)
+      ? source.destination
+      : null,
+    reportedPath: isolationDisplayText(source.reportedPath),
+    resolvedPath: isolationDisplayText(source.resolvedPath),
+    escapedAt: reason !== null && reason.endsWith("_physical_outside") ? isolationDisplayText(source.escapedAt) : null,
+  };
+}
+
+function isolationOutsideDetail(event) {
+  const fields = projectIsolationViolationFields(event);
   const out = [];
-  if (typeof event.destination === "string" && ISOLATION_DESTINATIONS.includes(event.destination)) {
-    out.push(`destination: ${event.destination}`);
-  }
-  const reportedPath = isolationDisplayText(event.reportedPath);
-  if (reportedPath !== null) out.push(`worker-reported path: ${reportedPath}`);
-  const resolvedPath = isolationDisplayText(event.resolvedPath);
-  if (resolvedPath !== null) out.push(`resolved path: ${resolvedPath}`);
-  const escapedAt = physical ? isolationDisplayText(event.escapedAt) : null;
-  if (escapedAt !== null) out.push(`escaped at: ${escapedAt}`);
+  if (fields.destination !== null) out.push(`destination: ${fields.destination}`);
+  if (fields.reportedPath !== null) out.push(`worker-reported path: ${fields.reportedPath}`);
+  if (fields.resolvedPath !== null) out.push(`resolved path: ${fields.resolvedPath}`);
+  if (fields.escapedAt !== null) out.push(`escaped at: ${fields.escapedAt}`);
   return out;
+}
+
+/** 绑定本 runId、带安全码 workdir_escape 的隔离违规事件（取第一条）；没有 → undefined。 */
+function findWorkdirEscapeEvent(evs, expectedRunId) {
+  return evs.find(
+    (e) => e?.type === "run.isolation_violation"
+      && e.runId === expectedRunId
+      && e.code === "workdir_escape",
+  );
+}
+
+/**
+ * workdir_escape 诊断所依据的隔离违规事件的展示字段（与 diagnoseFailure 选同一条事件、
+ * 同一个绑定作用域）；没有这样的事件 → null。只读、不抛错。
+ * @param {Array} events
+ * @param {string} expectedRunId
+ * @returns {ReturnType<typeof projectIsolationViolationFields>|null}
+ */
+export function projectWorkdirEscapeFields(events, expectedRunId) {
+  if (!Array.isArray(events) || typeof expectedRunId !== "string" || expectedRunId.length === 0) return null;
+  const evs = boundReportScope(events, expectedRunId) ?? events;
+  const event = findWorkdirEscapeEvent(evs, expectedRunId);
+  return event === undefined ? null : projectIsolationViolationFields(event);
 }
 
 // Provider access denial facts that classify as provider_auth even when they
@@ -761,11 +804,7 @@ function diagnoseFailureInner(events, expectedRunId) {
   // unknown value is NOT this diagnosis — the safe-code check keeps the signal
   // type-bound, matching the readiness projection's safe closed set.
   const isolationViolation = hasValidExpectedRunId
-    ? evs.find(
-      (e) => e.type === "run.isolation_violation"
-        && e.runId === expectedRunId
-        && e.code === "workdir_escape",
-    )
+    ? findWorkdirEscapeEvent(evs, expectedRunId)
     : undefined;
   if (isolationViolation) {
     // M12-14: the fact wording is reason-aware. Only an exact closed-set

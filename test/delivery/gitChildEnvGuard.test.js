@@ -38,6 +38,8 @@ const GUARD_SCOPE = [
   // 两者同样只问那个目录自己的仓库，继承的 GIT_DIR 会让它们答错。
   "src/application/runBranches.js",
   "src/application/leadOpenItems.js",
+  // 第 141a 批：Owner 看板读 Git 对象（逐文件增删行、图片字节）——同样只问项目仓库自己的对象库。
+  "src/application/ownerArtifact.js",
 ];
 
 // gitProbeEnv（delivery.js）是 gitChildEnv 去掉 git 的定位变量，注入照旧在场；
@@ -55,7 +57,11 @@ const FORCE_LAST = /env:\s*\{\s*\.\.\.[^{}]*GIT_NO_REPLACE_OBJECTS:\s*"1"/;
 
 // 只问"那个目录自己的仓库"的模块必须用 gitProbeEnv（去定位变量），不许只用
 // gitChildEnv（保留 GIT_DIR 等，会回答别处仓库）。
-const PROBE_ONLY_FILES = ["src/application/runBranches.js", "src/application/leadOpenItems.js"];
+const PROBE_ONLY_FILES = [
+  "src/application/runBranches.js",
+  "src/application/leadOpenItems.js",
+  "src/application/ownerArtifact.js",
+];
 
 /** env 是否经 SSOT 构造、且展开 helper 之后没有第二个 ... 展开。 */
 function envViaHelper(site) {

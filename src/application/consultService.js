@@ -391,6 +391,13 @@ function prepareDispatchError(error, env) {
 }
 
 /**
+ * 会审席 prompt 里固定合同的起点（任务书与视角片段之后；该席 prompt.sent 原样落盘，
+ * 它是转录里唯一的控制面固定包装）。写入处与读侧（Owner 看板任务书跳过固定包装）共用
+ * 这一份。
+ */
+export const CONSULT_SEAT_CONTRACT_MARKER = "\n\n---\n【会审席边界（固定合同，席位级）】";
+
+/**
  * 从 transcript 事件快照提取最终 assistant 文本（只读、脱敏、不截断）。
  * @param {Array<object>} events transcript 事件序列
  * @param {object} [opts]
@@ -728,7 +735,7 @@ export async function runConsult({
       : text;
     // 决定 0128 第 2 条"声明即合同"：fields 有值时，固定会审合同之后机械追加
     // 结论字段格式段（每席同一份；无 fields 时追加空串——prompt 逐字节不变）。
-    const prompt = `${seatBody}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。${buildDeclaredFieldsContract(declaredFields)}`;
+    const prompt = `${seatBody}${CONSULT_SEAT_CONTRACT_MARKER}你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。${buildDeclaredFieldsContract(declaredFields)}`;
     try {
       // 派发目标取扇出前的那次解析（seatTargets），与身份事实同源。
       const { dispatchAgentId, policy } = seatTargets.get(seat.agentId);
