@@ -145,6 +145,8 @@ import {
   runtimeActivityEvent,
   toolResultEvent,
   toolUseEvent,
+  writeIntentEvent,
+  WRITE_INTENT_CORRELATION_STATUS,
 } from "../runEvent.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
@@ -776,7 +778,11 @@ function zcodeToolCallKey(part, tool) {
 // **只在 status==="completed" 且 path 在场**（RunEvent 契约：file_written = 已
 // 确认成功的写入——pending/running 的写意图不冒充成功；此前由"终态才投影"隐式
 // 保证，增量时序下显式化）；其余 → toolUseEvent(tool, input)。
-function zcodeToolIdentityEvents(part) {
+// TD-361：file_written 报完成帧自己的路径（zcodeWritePart(part)，原样不改写）；写类 part 在
+// pending/running 帧见过意图（entry.intent）时，file_written 另带意图的 toolCallId 收口它。
+// 意图时刻的输入可能不完整或与完成时不同，所以不替换成记下的路径；放不放宽由控制面按
+// "意图路径与 file_written 路径逐字节相同"判定，backend 不比较路径。
+function zcodeToolIdentityEvents(part, entry) {
   const tool = String(part?.tool ?? "unknown");
   const toolKey = tool.toLowerCase();
   const state = part?.state;
@@ -792,13 +798,89 @@ function zcodeToolIdentityEvents(part) {
     return [];
   }
   if (isFileWriteToolKey(toolKey)) {
-    const filePath = input.filePath ?? input.file_path ?? input.path;
-    if (state?.status === "completed" && typeof filePath === "string") {
-      return [fileWrittenEvent(filePath)];
-    }
-    return [];
+    if (state?.status !== "completed") return [];
+    const filePath = zcodeWritePath(part);
+    if (filePath === null) return [];
+    return [entry?.intent
+      ? fileWrittenEvent(filePath, { toolCallId: entry.intent.toolCallId })
+      : fileWrittenEvent(filePath)];
   }
   return [toolUseEvent(tool, input)];
+}
+
+function zcodeWritePath(part) {
+  const input = part?.state?.input ?? {};
+  const filePath = input.filePath ?? input.file_path ?? input.path;
+  return typeof filePath === "string" ? filePath : null;
+}
+
+// ===== TD-361：写意图（write_intent）=====
+// 控制面的隔离门在"意图时刻"判界内，文件写了又删之后的 file_written 凭同一 toolCallId、同一
+// 原文路径放行（runManager 的 TD-372）。意图只从完成之前的帧发（pending/running 且路径在场）：
+// 绝不在 completed 那一刻补发——那等于按分类时刻的磁盘放宽；首见即终态的写入照旧只发无
+// toolCallId 的 file_written。toolCallId = part.callId（缺席/空白/unknown 不发——控制面对无法
+// 关联的意图一律判失败）；同一 id 只发一次；未收口意图到 128 条不再发新意图（控制面上限 256）。
+// 收口：completed 的 file_written（报完成帧自己的路径、带同 id），或 error 状态的 tool_result
+// （tool = callId，isError）；completed 帧没有路径时不发 file_written，立即补一条 isError 的
+// tool_result；收口轮次结束时仍停在 pending/running 的，在 done(completed) 之前补一条 isError
+// 的 tool_result（不冒充写成功）。台账条目 entry.intent = { toolCallId, path, closed }；
+// path 只是发意图时的路径（意图事件用），确认不用它。
+const MAX_OPEN_WRITE_INTENTS = 128;
+const STALE_WRITE_INTENT_TEXT = "write did not complete before the turn finished";
+const NO_PATH_WRITE_INTENT_TEXT = "write completed without a reported path";
+
+function isStableToolCallId(value) {
+  return typeof value === "string" && value.trim().length > 0 && value !== "unknown";
+}
+
+// 台账里已发过的意图 id（含已收口：同 id 不再发）与未收口个数。
+function scanWriteIntents(ledger) {
+  const state = { used: new Set(), open: 0 };
+  for (const entry of ledger.values()) {
+    if (!entry.intent) continue;
+    state.used.add(entry.intent.toolCallId);
+    if (!entry.intent.closed) state.open += 1;
+  }
+  return state;
+}
+
+function zcodeWriteIntentEvent(part, intents) {
+  if (!isFileWriteToolKey(String(part?.tool ?? "").toLowerCase())) return null;
+  const status = part?.state?.status;
+  if (status !== "pending" && status !== "running") return null;
+  const toolCallId = part?.callId;
+  if (!isStableToolCallId(toolCallId) || intents.used.has(toolCallId) || intents.open >= MAX_OPEN_WRITE_INTENTS) {
+    return null;
+  }
+  const path = zcodeWritePath(part);
+  // 空串/纯空白路径当作没有路径：控制面把它判 lexical_outside，会在工具的错误结果收口之前
+  // 直接让 run 失败。file_written 的行为不动。
+  return path === null || path.trim().length === 0
+    ? null
+    : writeIntentEvent(path, toolCallId, WRITE_INTENT_CORRELATION_STATUS.TRACKED);
+}
+
+// 收口判据与控制面同形：同 id 的 file_written，或 tool=id 的 isError tool_result。
+function settleWriteIntent(entry, intents, emitted) {
+  const intent = entry.intent;
+  if (!intent || intent.closed) return;
+  const settled = emitted.some((ev) => (ev.kind === "file_written" && ev.toolCallId === intent.toolCallId)
+    || (ev.kind === "tool_result" && ev.isError === true && ev.tool === intent.toolCallId));
+  if (settled) {
+    intent.closed = true;
+    intents.open -= 1;
+  }
+}
+
+// 轮次收口时仍未收口的意图（写 part 停在 pending/running，或 callId 在帧间变了）。
+function closeStaleWriteIntents(ledger) {
+  const events = [];
+  for (const entry of ledger.values()) {
+    if (!entry.intent || entry.intent.closed) continue;
+    entry.intent.closed = true;
+    events.push(toolResultEvent(entry.intent.toolCallId, STALE_WRITE_INTENT_TEXT, true));
+  }
+  return events;
 }
 
 // 终态结果：status ∈ {completed, error} 恰一次——output/error 按 state 臂取，
@@ -824,6 +906,7 @@ function zcodeToolResultEvents(part) {
 // tool part 保守跳过（证据缺失好过错位归属）；callId 仍作事件内 toolCallId。
 function projectTurnToolEvents(newMsgs, ledger) {
   const events = [];
+  const intents = scanWriteIntents(ledger);
   for (const { message } of newMsgs) {
     for (const part of Array.isArray(message?.parts) ? message.parts : []) {
       if (part?.type !== "tool") continue;
@@ -831,18 +914,36 @@ function projectTurnToolEvents(newMsgs, ledger) {
       if (partKey === null) continue;
       let entry = ledger.get(partKey);
       if (!entry) {
-        entry = { identitySent: false, resultSent: false };
+        entry = { identitySent: false, resultSent: false, intent: null };
         ledger.set(partKey, entry);
       }
+      // TD-361：完成之前的帧（pending/running）见到写路径就发一次意图。
+      if (entry.intent === null) {
+        const intentEvent = zcodeWriteIntentEvent(part, intents);
+        if (intentEvent) {
+          entry.intent = { toolCallId: intentEvent.toolCallId, path: intentEvent.path, closed: false };
+          intents.used.add(intentEvent.toolCallId);
+          intents.open += 1;
+          events.push(intentEvent);
+        }
+      }
       if (!entry.identitySent) {
-        const identity = zcodeToolIdentityEvents(part);
+        const identity = zcodeToolIdentityEvents(part, entry);
         if (identity.length > 0) {
           events.push(...identity);
           entry.identitySent = true;
+          settleWriteIntent(entry, intents, identity);
         } else if (isTerminalZcodeToolStatus(part?.state?.status)) {
           // 终态仍无主事件（如 write 缺 path / 未 completed）——不会再有，标记收口
           // 免重复求值（pending write 的空主事件保持未标记，completed 时补发）。
           entry.identitySent = true;
+          // TD-361：发过意图的 write 在 completed 帧里没有路径——不虚构 file_written，
+          // 用 isError 的 tool_result 收口（error 状态由随后的错误 tool_result 收口）。
+          if (part.state.status === "completed" && entry.intent && !entry.intent.closed) {
+            const closer = [toolResultEvent(entry.intent.toolCallId, NO_PATH_WRITE_INTENT_TEXT, true)];
+            events.push(...closer);
+            settleWriteIntent(entry, intents, closer);
+          }
         }
       }
       if (!entry.resultSent) {
@@ -850,6 +951,7 @@ function projectTurnToolEvents(newMsgs, ledger) {
         if (result.length > 0) {
           events.push(...result);
           entry.resultSent = true;
+          settleWriteIntent(entry, intents, result);
         }
       }
     }
@@ -2201,6 +2303,10 @@ export class ZcodeBackend {
     // 路径下，已发生的工具事实必须保留（原实现空文本会压掉全部证据，已记录的
     // 真实工具活动随失败丢失）；轮询期已增量发过的事件由台账天然去重。
     for (const event of projectTurnToolEvents(newMsgs, toolLedger)) {
+      yield event;
+    }
+    // TD-361：轮次收口时仍停在 pending/running 的写入，其意图在这里（done 之前）收口。
+    for (const event of closeStaleWriteIntents(toolLedger)) {
       yield event;
     }
     if (speeches.length === 0) {

@@ -4612,7 +4612,7 @@ test("zcode ⑫d: 快照缩短（parts.length 回退）→ fail-closed done(fail
   child.kill();
 });
 
-test("zcode ⑫e: pending write（path 在场）零 file_written——completed 收口才发（写意图不冒充成功，RunEvent 契约）", async () => {
+test("zcode ⑫e: running write（path 在场）只发 write_intent、零 file_written——completed 收口才发 file_written（写意图不冒充成功，RunEvent 契约；TD-361 起在途拍发意图）", async () => {
   const writePending = toolPart({ callId: "call_w", tool: "Write", status: "running", input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "x" } });
   const writeDone = toolPart({ callId: "call_w", tool: "Write", status: "completed", input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "x" }, output: "Created" });
   // 两个阶段数组各构造一次：同一阶段内跨拍 id 不变；翻转后是一条新的 assistant
@@ -4634,17 +4634,17 @@ test("zcode ⑫e: pending write（path 在场）零 file_written——completed 
     },
   });
   // 验证会审补强（auditor）：只看终序列抓不住"running 拍提前发 file_written"。
-  // 确定性首事件次序证明（⑫a 的镜像）：首事件到达的那一刻，peer 已在供 completed
-  // 快照——pending 拍（n < FLIP_POLL）若发过任何事件，它就会先于翻转到达（事件
-  // 流按拍序发射，届时 maxPoll < FLIP_POLL）。
+  // 确定性次序证明（⑫a 的镜像）：TD-361 起 running 拍发 write_intent（首事件，此刻
+  // peer 还没翻转：maxPoll < FLIP_POLL）；file_written 必须是紧随其后的下一个事件，
+  // 且到达时 peer 已在供 completed 快照（提前 file_written 会让 maxPoll 断言立刻红）。
   const gen = handle.events(new AbortController().signal, { pollInterval: 2 });
   const first = await gen.next();
-  assert.equal(
-    first.value.kind, "file_written",
-    "首事件即 file_written 且此刻 peer 已送达 completed 快照（pending 期零事件——提前 file_written 会以更早的首事件立刻红）",
-  );
+  assert.equal(first.value.kind, "write_intent", "running 拍发写意图（首事件）");
+  assert.ok(maxPoll < FLIP_POLL, `写意图在翻转之前到达（实得 maxPoll=${maxPoll}）`);
+  const second = await gen.next();
+  assert.equal(second.value.kind, "file_written", "写意图之后的下一个事件即 file_written，期间没有别的事件");
   assert.ok(maxPoll >= FLIP_POLL, `file_written 只在翻转拍及之后到达（实得 maxPoll=${maxPoll}）`);
-  const collected = [first.value];
+  const collected = [first.value, second.value];
   for (;;) {
     const r = await gen.next();
     if (r.done) break;
@@ -4652,10 +4652,242 @@ test("zcode ⑫e: pending write（path 在场）零 file_written——completed 
   }
   assert.deepEqual(
     collected.map((e) => e.kind),
-    ["file_written", "tool_result", "message", "message", "metrics", "done"],
-    "completed 收口才 file_written + tool_result",
+    ["write_intent", "file_written", "tool_result", "message", "message", "metrics", "done"],
+    "running 拍意图、completed 收口才 file_written + tool_result；意图只发一次",
   );
+  assert.deepEqual(collected[0], { kind: "write_intent", path: "D:/wao-test/zcode-ws/out.txt", toolCallId: "call_w", correlationStatus: "tracked" });
+  assert.deepEqual(collected[1], { kind: "file_written", path: "D:/wao-test/zcode-ws/out.txt", toolCallId: "call_w" });
   child.kill();
+});
+
+// ===== TD-361：写文件类 tool part 在途（pending/running）发 write_intent，completed 同 id 同路径确认 =====
+// 控制面（runManager 的隔离门）在意图时刻判界内、完成时刻按同 toolCallId + 同原文路径放行
+// "写了又删"的文件（TD-372）。意图只从完成之前的帧发——绝不在 completed 那一刻补发；
+// 每条意图都要收口（file_written 或 tool.=toolCallId 的 isError tool_result）。
+
+const WRITE_TD361_PATH = "D:/wao-test/zcode-ws/out/td361.txt";
+
+/** 把"各拍的快照"写成阶段数组：每个阶段只构造一次（同阶段内跨拍消息 id 不变）。 */
+function td361Phases(partsByPhase) {
+  const echo = userMsg("do the task");
+  return partsByPhase.map((parts) => [echo, assistantPartsMsg(parts)]);
+}
+const FINISH = [{ type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }];
+async function runTd361(phases, { holdPolls = 3 } = {}) {
+  // n=1 基线；之后每个阶段保持 holdPolls 拍（多拍重复帧 = 去重面），最后一个阶段保持到收口。
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        return phases[Math.min(phases.length - 1, Math.floor((n - 2) / holdPolls))];
+      },
+    },
+  });
+  const events = await collect(handle);
+  child.kill();
+  return events;
+}
+const writePartFor = (callId, status, extra = {}) => toolPart({
+  callId, tool: "Write", status,
+  input: { file_path: WRITE_TD361_PATH, content: "x" },
+  output: status === "completed" ? "Created" : undefined,
+  error: status === "error" ? "disk full" : undefined,
+  ...extra,
+});
+
+test("zcode TD-361①: pending→running→completed 跨多拍——意图只发一次（TRACKED、callId 为 id、路径原样），completed 发同 id 同路径的 file_written", async () => {
+  const events = await runTd361(td361Phases([
+    [writePartFor("call_a", "pending")],
+    [writePartFor("call_a", "running")],
+    [writePartFor("call_a", "completed"), ...FINISH],
+  ]));
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["write_intent", "file_written", "tool_result", "message", "message", "metrics", "done"],
+  );
+  assert.deepEqual(events[0], { kind: "write_intent", path: WRITE_TD361_PATH, toolCallId: "call_a", correlationStatus: "tracked" });
+  assert.deepEqual(events[1], { kind: "file_written", path: WRITE_TD361_PATH, toolCallId: "call_a" });
+  assert.deepEqual(events[2], { kind: "tool_result", tool: "call_a", output: "Created", isError: false });
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1);
+});
+
+test("zcode TD-361②: 完成帧之前没见过的写入（首见即 completed）——只发不带 toolCallId 的 file_written，零意图（绝不在确认那一刻补发）", async () => {
+  for (const tool of ["Write", "Edit", "MultiEdit"]) {
+    const events = await runTd361(td361Phases([[
+      toolPart({ callId: "call_b", tool, status: "completed", input: { file_path: WRITE_TD361_PATH }, output: "ok" }),
+      ...FINISH,
+    ]]));
+    assert.ok(!events.some((e) => e.kind === "write_intent"), `${tool}: 零意图`);
+    const written = events.find((e) => e.kind === "file_written");
+    assert.deepEqual(written, { kind: "file_written", path: WRITE_TD361_PATH }, `${tool}: 无 toolCallId`);
+    assert.ok(!Object.hasOwn(written, "toolCallId"));
+  }
+});
+
+test("zcode TD-361③: 失败的写入（error 状态）——意图由 tool=callId、isError:true 的 tool_result 收口，零 file_written", async () => {
+  const events = await runTd361(td361Phases([
+    [writePartFor("call_c", "running")],
+    [writePartFor("call_c", "error"), ...FINISH],
+  ]));
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["write_intent", "tool_result", "message", "message", "metrics", "done"],
+  );
+  assert.equal(events[0].toolCallId, "call_c");
+  assert.deepEqual(events[1], { kind: "tool_result", tool: "call_c", output: "disk full", isError: true });
+  assert.ok(!events.some((e) => e.kind === "file_written"));
+});
+
+test("zcode TD-361④: 没有稳定 id 不发意图——callId 缺席（回落工具名）/ 空串 / 纯空白 / unknown", async () => {
+  for (const callId of [undefined, "", "   ", "unknown"]) {
+    const running = { ...writePartFor("call_d", "running"), callId, id: "part_d" };
+    const done = { ...writePartFor("call_d", "completed"), callId, id: "part_d" };
+    const events = await runTd361(td361Phases([[running], [done, ...FINISH]]));
+    assert.ok(!events.some((e) => e.kind === "write_intent"), `callId=${JSON.stringify(callId)}: 零意图`);
+    assert.deepEqual(events.find((e) => e.kind === "file_written"), { kind: "file_written", path: WRITE_TD361_PATH }, `callId=${JSON.stringify(callId)}`);
+  }
+});
+
+test("zcode TD-361⑤: 两个不同 part 共用同一 callId——同一 id 只发一次意图（台账去重）", async () => {
+  const p1 = { ...writePartFor("call_e", "running"), id: "part_e1" };
+  const p2 = { ...writePartFor("call_e", "running"), id: "part_e2" };
+  const p1Done = { ...writePartFor("call_e", "completed"), id: "part_e1" };
+  const p2Done = { ...writePartFor("call_e", "completed"), id: "part_e2" };
+  const events = await runTd361(td361Phases([[p1, p2], [p1Done, p2Done, ...FINISH]]));
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1);
+  const written = events.filter((e) => e.kind === "file_written");
+  assert.equal(written.length, 2);
+  assert.equal(written.filter((e) => e.toolCallId === "call_e").length, 1, "id 只被确认一次");
+  assert.equal(written.filter((e) => !Object.hasOwn(e, "toolCallId")).length, 1, "另一条退回无 id 的 file_written");
+});
+
+test("zcode TD-361⑥: 尚未收口的意图到 128 条就不再发新意图——第 129 条在途写入只发 file_written（无 toolCallId）；收口后额度回来", async () => {
+  const mk = (i, status) => toolPart({
+    callId: `call_cap_${i}`,
+    tool: "Write",
+    status,
+    input: { file_path: `D:/wao-test/zcode-ws/out/cap_${i}.txt`, content: "x" },
+    output: status === "completed" ? "Created" : undefined,
+  });
+  const indexes = Array.from({ length: 129 }, (_, i) => i);
+  const events = await runTd361(td361Phases([
+    indexes.map((i) => mk(i, "running")),
+    [...indexes.map((i) => mk(i, "completed")), ...FINISH],
+  ]));
+  const intents = events.filter((e) => e.kind === "write_intent");
+  assert.equal(intents.length, 128);
+  assert.ok(!intents.some((e) => e.toolCallId === "call_cap_128"), "第 129 条没有意图");
+  const written = events.filter((e) => e.kind === "file_written");
+  assert.equal(written.length, 129);
+  assert.equal(written.filter((e) => Object.hasOwn(e, "toolCallId")).length, 128);
+  assert.deepEqual(written.at(-1), { kind: "file_written", path: "D:/wao-test/zcode-ws/out/cap_128.txt" });
+
+  // 收口后额度回来：前 128 条完成（收口）之后才出现的第 129 条在途写入仍可发意图。
+  const events2 = await runTd361(td361Phases([
+    indexes.slice(0, 128).map((i) => mk(i, "running")),
+    [...indexes.slice(0, 128).map((i) => mk(i, "completed")), mk(128, "running")],
+    [...indexes.map((i) => mk(i, "completed")), ...FINISH],
+  ]));
+  assert.equal(events2.filter((e) => e.kind === "write_intent").length, 129, "额度回来后第 129 条发意图");
+  assert.equal(events2.filter((e) => e.kind === "file_written" && Object.hasOwn(e, "toolCallId")).length, 129);
+});
+
+test("zcode TD-361⑦: 收口时 write part 仍在 running——意图在 done(completed) 之前用 isError tool_result 收口（今天能过的运行不因这条新意图失败）", async () => {
+  const events = await runTd361(td361Phases([
+    [writePartFor("call_f", "running"), ...FINISH],
+  ]));
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["write_intent", "tool_result", "message", "message", "metrics", "done"],
+  );
+  assert.equal(events[1].tool, "call_f");
+  assert.equal(events[1].isError, true);
+  assert.ok(!events.some((e) => e.kind === "file_written"), "没完成的写入不冒充确认");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("zcode TD-361⑧: file_written 报完成帧自己的路径（意图时的输入与完成时不同，不替换），并带意图的 toolCallId 收口；放不放宽由控制面按逐字节比较决定", async () => {
+  const running = writePartFor("call_g", "running");
+  const OTHER_PATH = "D:/wao-test/zcode-ws/out/other-at-completion.txt";
+  const doneOtherPath = {
+    ...writePartFor("call_g", "completed"),
+    state: { ...writePartFor("call_g", "completed").state, input: { file_path: OTHER_PATH } },
+  };
+  const events = await runTd361(td361Phases([[running], [doneOtherPath, ...FINISH]]));
+  assert.deepEqual(events.find((e) => e.kind === "write_intent"), {
+    kind: "write_intent", path: WRITE_TD361_PATH, toolCallId: "call_g", correlationStatus: "tracked",
+  }, "意图仍是意图时刻的路径");
+  assert.deepEqual(
+    events.find((e) => e.kind === "file_written"),
+    { kind: "file_written", path: OTHER_PATH, toolCallId: "call_g" },
+    "确认报完成帧里的路径，不是记下的意图路径",
+  );
+  // 同一路径只是写法不同（反斜杠）：同样原样报完成帧的写法，不改写。
+  const SAME_FILE_BACKSLASHES = "D:\\wao-test\\zcode-ws\\out\\td361.txt";
+  const doneBackslashes = {
+    ...writePartFor("call_g2", "completed"),
+    state: { ...writePartFor("call_g2", "completed").state, input: { file_path: SAME_FILE_BACKSLASHES } },
+  };
+  const events2 = await runTd361(td361Phases([[writePartFor("call_g2", "running")], [doneBackslashes, ...FINISH]]));
+  assert.deepEqual(events2.find((e) => e.kind === "file_written"), { kind: "file_written", path: SAME_FILE_BACKSLASHES, toolCallId: "call_g2" });
+});
+
+test("zcode TD-361⑧b: 完成帧里没有路径、但发过意图——不发 file_written，意图由 tool=toolCallId、isError:true 的 tool_result 收口", async () => {
+  const doneNoPath = {
+    ...writePartFor("call_h", "completed"),
+    state: { ...writePartFor("call_h", "completed").state, input: { content: "x" } },
+  };
+  const events = await runTd361(td361Phases([[writePartFor("call_h", "running")], [doneNoPath, ...FINISH]]));
+  assert.ok(!events.some((e) => e.kind === "file_written"), "没有路径不虚构 file_written");
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1);
+  const closers = events.filter((e) => e.kind === "tool_result" && e.tool === "call_h" && e.isError === true);
+  assert.equal(closers.length, 1, "意图恰被一条错误 tool_result 收口");
+  assert.ok(!String(closers[0].output).includes("td361.txt"), "不回显路径");
+  // 收口是在完成帧上立即发的（不等到收口兜底）：意图之后的第一条 tool_result 就是那条
+  // isError 的收口，随后才是完成帧自己的 isError:false 结果。收口兜底发的错误结果排在
+  // 完成帧结果之后，这条断言对立即收口的代码才会变红。
+  assert.deepEqual(events.map((e) => e.kind).slice(0, 3), ["write_intent", "tool_result", "tool_result"]);
+  assert.deepEqual([events[1].tool, events[1].isError], ["call_h", true], "第一条 tool_result 就是 isError 的立即收口");
+  assert.deepEqual([events[2].tool, events[2].isError], ["call_h", false], "随后才是完成帧自己的结果");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("zcode TD-361⑩: 空串/纯空白的在途路径不发意图（控制面会把空白路径直接判 lexical_outside）；file_written 与错误收口照旧", async () => {
+  for (const blank of ["", "   ", "\t "]) {
+    const blankRunning = (callId) => writePartFor(callId, "running", { input: { file_path: blank, content: "x" } });
+    // completed 帧带真实路径：没有意图可依，只发无 toolCallId 的 file_written。
+    const done = await runTd361(td361Phases([[blankRunning("call_blank")], [writePartFor("call_blank", "completed"), ...FINISH]]));
+    assert.ok(!done.some((e) => e.kind === "write_intent"), `path=${JSON.stringify(blank)}: 零意图`);
+    assert.deepEqual(done.find((e) => e.kind === "file_written"), { kind: "file_written", path: WRITE_TD361_PATH }, `path=${JSON.stringify(blank)}: 无 toolCallId`);
+    assert.equal(done.at(-1).reason, "completed");
+    // 写入本来就失败（error 状态）：零意图，错误结果照旧，run 照常 completed。
+    const failed = await runTd361(td361Phases([[blankRunning("call_blank_err")], [writePartFor("call_blank_err", "error"), ...FINISH]]));
+    assert.ok(!failed.some((e) => e.kind === "write_intent"), `path=${JSON.stringify(blank)}: 失败写入也零意图`);
+    assert.deepEqual(failed.filter((e) => e.kind === "tool_result").map((e) => [e.tool, e.isError]), [["call_blank_err", true]]);
+    assert.equal(failed.at(-1).reason, "completed");
+  }
+  // 先空白、后来路径到了：路径到了才发意图。
+  const later = await runTd361(td361Phases([
+    [writePartFor("call_later", "pending", { input: { file_path: "  ", content: "x" } })],
+    [writePartFor("call_later", "running")],
+    [writePartFor("call_later", "completed"), ...FINISH],
+  ]));
+  assert.deepEqual(later.filter((e) => e.kind === "write_intent").map((e) => [e.toolCallId, e.path]), [["call_later", WRITE_TD361_PATH]]);
+});
+
+test("zcode TD-361⑨: 在途但还没有路径的写入不发意图（路径到了才发）；Bash 等非写类工具不受影响", async () => {
+  const noPathYet = toolPart({ callId: "call_i", tool: "Write", status: "pending", input: {}, raw: "{" });
+  const bash = toolPart({ callId: "call_bash", tool: "Bash", status: "running", input: { command: "node x.mjs" } });
+  const events = await runTd361(td361Phases([
+    [noPathYet, bash],
+    [writePartFor("call_i", "running"), bash],
+    [writePartFor("call_i", "completed"), { ...bash, state: { ...bash.state, status: "completed", output: "ok" } }, ...FINISH],
+  ]));
+  assert.deepEqual(
+    events.filter((e) => e.kind === "write_intent" || e.kind === "file_written").map((e) => [e.kind, e.toolCallId]),
+    [["write_intent", "call_i"], ["file_written", "call_i"]],
+  );
+  assert.equal(events.filter((e) => e.kind === "command").length, 1);
 });
 
 test("zcode ⑫f: 证据已落后进程死（通信失败）→ done(failed) 且已发证据保留、零双发", async () => {
