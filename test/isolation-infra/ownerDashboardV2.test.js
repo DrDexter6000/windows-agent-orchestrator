@@ -1128,7 +1128,7 @@ test("P27 Needs you order (real chain): involved workers first, then longest las
   assert.equal(vm.decide.total, 5);
 });
 
-test("P28 Alerts order (real chain): no confirmed follow-up first, then severity (quota first), then longest lasting", async () => {
+test("P28 Alerts order (real chain): no follow-up running first, then severity (quota first), then longest lasting", async () => {
   const failed = (id, at, over = {}) => snapRun(`run_${id}`, { state: "failed", terminalAt: ago(at), failure: { category: "provider_error", code: "backend_error" }, ...over });
   const snap = snapshotOf({ runs: [
     failed("a", 3 * HOUR, { lineageRootRunId: "run_a" }),
