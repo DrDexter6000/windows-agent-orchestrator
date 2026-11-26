@@ -19,6 +19,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createOwnerDashboardServer } from "../../src/ownerDashboardServer.js";
 import { projectWorkerActivity, projectWorkerEvent } from "../../src/application/ownerWorkerActivity.js";
 import { projectWorkerDetail } from "../../src/application/ownerWorkerDetail.js";
+import { encodeStreamFrame } from "../../src/application/ownerWorkerStream.js";
 import * as model from "../../src/owner-dashboard/v2/model.js";
 import * as api from "../../src/owner-dashboard/v2/api.js";
 import * as activity from "../../src/owner-dashboard/v2/activity.js";
@@ -745,7 +747,7 @@ test("A10 the event code copies runId#seq and carries the same text for the clip
   assert.ok(evilRoot.textContent.includes(evil), "the characters are shown, not interpreted");
 });
 
-test("A12 the stream status: Polling 5s while the 5 s poll is healthy, Stale since HH:MM after a failed poll, never Live; a command's exit code appears when its result arrives", async () => {
+test("A12 the stream status: Polling 5s while the 5 s poll is healthy, Stale since HH:MM after a failed poll, and never Live for a feed that has no stream (Live is the stream's, S1); a command's exit code appears when its result arrives", async () => {
   // Status labels: the Activity stream has its own status line (Live is batch 144's, not this one).
   const events = liveTranscript().events;
   let fail = false;
@@ -765,7 +767,7 @@ test("A12 the stream status: Polling 5s while the 5 s poll is healthy, Stale sin
   assert.deepEqual(vm.freshness, { kind: "polling", sinceMs: null });
   let { root } = renderActivity(vm);
   assert.equal(byClass(root, "act-status")[0].textContent, "Polling 5s");
-  assert.ok(!root.textContent.includes("Live"), "Live is not claimed before the push batch");
+  assert.ok(!root.textContent.includes("Live"), "a feed without a stream never claims Live");
   fail = true;
   await feed.poll();
   vm = activity.buildActivityView(feed.get());
@@ -1072,6 +1074,637 @@ test("A21 hidden events are covered by the page range, not by the displayed rows
 });
 
 
+// =====================================================================
+// S) THE EVENT STREAM (batch 144, decision 0131 section 4)
+// =====================================================================
+//
+// The feed reads the stream through an injected fetchStream (the app wires api.js's readStream to
+// it; S13 does that through the app, S14 tests readStream itself). The frames are what the server
+// sends: the page of projectWorkerActivity after the cursor (ownerDashboardV2Stream.test.js pins
+// the server to that), so the rows that arrive here are the server's real ones.
+
+/** A fake event stream: fetchStream answers from here; the test pushes frames into an open stream or ends it. */
+function streamHub({ failWith = null } = {}) {
+  const calls = [];
+  const open = [];
+  const hub = {
+    calls,
+    open,
+    failure: failWith,
+    fetchStream(query) {
+      calls.push(query);
+      if (hub.failure !== null) return Promise.resolve({ ok: false, reason: hub.failure });
+      return new Promise((resolve) => {
+        const attempt = { query, resolve, ended: false };
+        open.push(attempt);
+        query.signal.addEventListener("abort", () => {
+          attempt.ended = true;
+          resolve({ ok: false, reason: "aborted" });
+        }, { once: true });
+      });
+    },
+    /** One frame from the server into open stream number `at`. */
+    frame(at, event, data, id = `k${at}`) { open[at].query.onFrame({ id, event, data }); },
+    end(at, result = { ok: true, done: true }) {
+      const attempt = open[at];
+      if (attempt.ended) return;
+      attempt.ended = true;
+      attempt.resolve(result);
+    },
+  };
+  return hub;
+}
+
+/** A feed over one run whose transcript `eventsOf()` may grow, reading the stream through `hub`. */
+function streamFeed(hub, runId, eventsOf) {
+  const pages = [];
+  const feed = activity.createActivityFeed({
+    fetchPage: async (query) => { pages.push(query); return { ok: true, body: pageOf(runId, eventsOf(), query) }; },
+    fetchFull: async () => ({ ok: false, reason: "notFound" }),
+    fetchStream: hub.fetchStream,
+  });
+  return { feed, pages };
+}
+const statusText = (vm, lang = "en") => byClass(renderActivity(vm, lang, recorder(), SUI(), region()).root, "act-status")[0].textContent;
+
+test("S1 the stream goes Live on its first frame: the first page starts it with runId, filter, afterSeq = the last seq received and a cancellable signal; frames take the same merge path; nothing is polled while Live; both languages say Live", async () => {
+  const b = liveTranscript();
+  let events = b.events;
+  const hub = streamHub();
+  const { feed, pages } = streamFeed(hub, "run_live", () => events);
+  feed.open("run_live");
+  await settle();
+  assert.equal(hub.calls.length, 1, "the first page starts the stream");
+  const query = hub.calls[0];
+  const lastSeq = feed.get().lastSeq;
+  assert.deepEqual([query.runId, query.filter, query.afterSeq, "cursor" in query, typeof query.onFrame], ["run_live", "all", lastSeq, false, "function"]);
+  assert.equal(query.signal.aborted, false, "the feed hands out a signal it can cancel");
+  let vm = activity.buildActivityView(feed.get());
+  assert.deepEqual(vm.freshness, { kind: "polling", sinceMs: null }, "not Live before the first frame");
+
+  // The server's first frame: the page after the position it was asked for (no new row here).
+  hub.frame(0, "rows", pageOf("run_live", events, { afterSeq: lastSeq }));
+  vm = activity.buildActivityView(feed.get());
+  assert.deepEqual(vm.freshness, { kind: "live", sinceMs: null });
+  assert.equal(statusText(vm), "Live");
+  assert.equal(statusText(vm, "zh"), "实时");
+
+  // A new event arrives through the stream: appended by the same merge path, and no poll is made.
+  const before = vm.rows.map((row) => row.key);
+  say(b, T0 + 3000, "second line");
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_live", events, { afterSeq: lastSeq }));
+  vm = activity.buildActivityView(feed.get());
+  assert.deepEqual(vm.rows.map((row) => row.key), [...before, "event:4"], "exactly one new row, after the ones already shown");
+  assert.equal(vm.newCount, 0, "following applies it at once");
+  assert.equal(feed.get().lastSeq, 4, "the seq cursor moved with the frame");
+  const asked = pages.length;
+  assert.equal(await feed.poll(), false, "a tick while Live polls nothing");
+  assert.equal(pages.length, asked);
+  assert.deepEqual(activity.buildActivityView(feed.get()).freshness, { kind: "live", sinceMs: null });
+  assert.equal(hub.calls.length, 1, "and does not open a second stream");
+});
+
+test("S2 an update frame swaps the row already shown (a command gains its exit code): it adds no row and moves no cursor", async () => {
+  const b = transcript("run_cmd");
+  b.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+  b.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-9" });
+  b.clock(T0 + 2000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "working" }] });
+  let events = b.events;
+  const hub = streamHub();
+  const { feed } = streamFeed(hub, "run_cmd", () => events);
+  feed.open("run_cmd");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_cmd", events, { afterSeq: feed.get().lastSeq }));
+  let vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.freshness.kind, "live");
+  assert.equal(vm.rows.find((row) => row.code === "CMD").exitCode, null, "no result yet: no exit code is invented");
+  const shown = vm.rows.length;
+  const cursor = feed.get().lastSeq;
+
+  b.clock(T0 + 3000).add("run.event", { kind: "tool_result", tool: "call-9", output: "1 failing test", isError: true });
+  events = b.events;
+  const page = projectWorkerActivity({ runId: "run_cmd", events, env: {}, afterSeq: cursor });
+  assert.equal(page.updates.length, 1, "the server's page carries the changed command as an update");
+  hub.frame(0, "rows", { ...page, updates: [] }, "k1"); // the server's rows frame carries no updates
+  hub.frame(0, "update", { runId: "run_cmd", updates: page.updates }, "k1"); // they are their own frame, same cursor
+  vm = activity.buildActivityView(feed.get());
+  const command = vm.rows.find((row) => row.code === "CMD");
+  assert.deepEqual([command.exitCode, command.exitSource], [1, "inferred"], "the same command row, completed in place");
+  assert.equal(vm.rows.filter((row) => row.code === "CMD").length, 1, "no second copy of the command");
+  assert.equal(vm.rows.length, shown + 1, "only the output row was added");
+  assert.equal(feed.get().lastSeq, cursor + 1);
+  assert.equal(vm.freshness.kind, "live");
+});
+
+test("S3 three stream failures in a row turn the tab back to polling: each poll is followed by one more try, the third failure ends the tries; the 5 s poll keeps asking after its cursor the whole time; coming back to the tab tries again", async () => {
+  const b = liveTranscript();
+  let events = b.events;
+  const hub = streamHub({ failWith: "network" });
+  const { feed, pages } = streamFeed(hub, "run_live", () => events);
+  feed.open("run_live");
+  await settle();
+  assert.equal(hub.calls.length, 1, "the first try follows the first page");
+  say(b, T0 + 3000, "second line");
+  events = b.events;
+  assert.equal(await feed.poll(), true);
+  assert.equal(hub.calls.length, 2, "the second try follows that poll");
+  assert.equal(pages.at(-1).afterSeq, 3, "the poll asks after its own cursor");
+  assert.deepEqual(activity.buildActivityView(feed.get()).rows.map((row) => row.key).slice(-1), ["event:4"], "and the event arrived by polling");
+  await feed.poll();
+  assert.equal(hub.calls.length, 3, "the third try");
+  await feed.poll();
+  await feed.poll();
+  assert.equal(hub.calls.length, 3, "three in a row: no more tries");
+  assert.equal(pages.filter((query) => Number.isInteger(query.afterSeq)).length, 4, "the 5 s poll went on the whole time, once per tick");
+  let vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.freshness.kind, "polling");
+  assert.equal(statusText(vm), "Polling 5s");
+
+  feed.setVisible(false);
+  assert.equal(feed.setVisible(true), true, "coming back to the tab restarts the stream");
+  await settle();
+  assert.equal(hub.calls.length, 4, "a fresh try, with no cursor");
+  assert.equal("cursor" in hub.calls[3], false);
+
+  // Giving up is per worker too: another worker opens, and its stream is tried again.
+  const hub2 = streamHub({ failWith: "network" });
+  const second = activity.createActivityFeed({
+    fetchPage: async (query) => ({ ok: true, body: pageOf(query.runId, liveTranscript(query.runId).events, query) }),
+    fetchFull: async () => ({ ok: false, reason: "notFound" }),
+    fetchStream: hub2.fetchStream,
+  });
+  second.open("run_other");
+  await settle();
+  for (let i = 0; i < 4; i += 1) await second.poll();
+  assert.deepEqual([hub2.calls.length, hub2.calls.every((call) => call.runId === "run_other")], [3, true], "run_other: three tries, then polling only");
+  second.open("run_live");
+  await settle();
+  assert.deepEqual([hub2.calls.length, hub2.calls[3].runId, "cursor" in hub2.calls[3]], [4, "run_live", false], "switching the worker tries the stream again, for the new one and with no cursor");
+});
+
+test("S4 a read timeout is a failed try like any other; a rejected token (401) is not counted and is not retried until the tab comes back", async () => {
+  for (const reason of ["timeout", "server", "notFound"]) {
+    const hub = streamHub({ failWith: reason });
+    const { feed } = streamFeed(hub, "run_live", () => liveTranscript().events);
+    feed.open("run_live");
+    await settle();
+    for (let i = 0; i < 4; i += 1) await feed.poll();
+    assert.equal(hub.calls.length, 3, `${reason} counts: three tries, then polling only`);
+  }
+  const hub = streamHub({ failWith: "unauthorized" });
+  const { feed } = streamFeed(hub, "run_live", () => liveTranscript().events);
+  feed.open("run_live");
+  await settle();
+  for (let i = 0; i < 4; i += 1) await feed.poll();
+  assert.equal(hub.calls.length, 1, "401 is not a dropped stream: it is not retried on every tick");
+  feed.setVisible(false);
+  feed.setVisible(true);
+  await settle();
+  assert.equal(hub.calls.length, 2, "but the tab coming back tries once more");
+});
+
+test("S6 A -> B -> A: switching the worker cancels the old stream; a late frame of the old A, of B, or of another run never lands on the current one", async () => {
+  const hub = streamHub();
+  const a = liveTranscript("run_a").events;
+  // The same run A, one message later: what a late or a current frame of A could carry.
+  const aLater = [...a, { type: "run.event", runId: "run_a", agentId: "glm-pro", seq: 4, ts: iso(T0 + 20_000), kind: "message", role: "assistant", parts: [{ type: "text", text: "late A row" }] }];
+  const bEvents = liveTranscript("run_b").events;
+  const bLater = [...bEvents, { type: "run.event", runId: "run_b", agentId: "glm-pro", seq: 4, ts: iso(T0 + 20_000), kind: "message", role: "assistant", parts: [{ type: "text", text: "late B row" }] }];
+  const feed = activity.createActivityFeed({
+    fetchPage: async (query) => ({ ok: true, body: pageOf(query.runId, query.runId === "run_a" ? a : bEvents, query) }),
+    fetchFull: async () => ({ ok: false, reason: "notFound" }),
+    fetchStream: hub.fetchStream,
+  });
+  feed.open("run_a");
+  await settle();
+  assert.equal(hub.calls[0].runId, "run_a");
+  hub.frame(0, "rows", pageOf("run_a", a, { afterSeq: feed.get().lastSeq }));
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "live");
+
+  feed.open("run_b");
+  await settle();
+  assert.equal(hub.calls[0].signal.aborted, true, "A's stream was cancelled when B opened");
+  assert.equal(hub.calls[1].runId, "run_b");
+  hub.frame(1, "rows", pageOf("run_b", bEvents, { afterSeq: feed.get().lastSeq }));
+
+  feed.open("run_a");
+  await settle();
+  assert.equal(hub.calls[1].signal.aborted, true, "B's stream was cancelled when A opened again");
+  assert.equal(hub.calls[2].runId, "run_a", "a third selection opens a third stream");
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "polling", "not Live until the new stream's first frame");
+  assert.equal(activity.buildActivityView(feed.get()).rows.find((row) => row.code === "MSG").summary, "first line", "the fresh A page, not B's");
+
+  // Late frames: the FIRST A stream (its own run, but a past attempt), B's stream, and a frame of another run on the current stream.
+  const shown = activity.buildActivityView(feed.get()).rows.map((row) => row.key);
+  hub.frame(0, "rows", pageOf("run_a", aLater, { afterSeq: 3 })); // the first A stream: its own run, but a past attempt
+  hub.frame(1, "rows", pageOf("run_b", bLater, { afterSeq: 3 })); // B's stream
+  hub.frame(2, "rows", pageOf("run_b", bLater, { afterSeq: 3 })); // the current A stream, but a frame of another run
+  let vm = activity.buildActivityView(feed.get());
+  assert.deepEqual(vm.rows.map((row) => row.key), shown, "none of them lands on A");
+  assert.equal(vm.freshness.kind, "polling");
+
+  hub.frame(2, "rows", pageOf("run_a", aLater, { afterSeq: 3 }));
+  vm = activity.buildActivityView(feed.get());
+  assert.deepEqual(vm.rows.map((row) => row.key).slice(-1), ["event:4"], "the current A stream's own frame does");
+  assert.equal(vm.freshness.kind, "live");
+});
+
+test("S7 paused: the stream keeps arriving, but nothing is drawn and the count of new events grows; resume applies what waited", async () => {
+  const b = liveTranscript();
+  let events = b.events;
+  const hub = streamHub();
+  const { feed } = streamFeed(hub, "run_live", () => events);
+  feed.open("run_live");
+  await settle();
+  const lastSeq = feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_live", events, { afterSeq: lastSeq }));
+  const shown = activity.buildActivityView(feed.get()).rows.length;
+  assert.equal(feed.pause("selection"), true);
+  say(b, T0 + 3000, "held back 1");
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_live", events, { afterSeq: lastSeq }));
+  say(b, T0 + 4000, "held back 2");
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_live", events, { afterSeq: 4 }));
+  let vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.rows.length, shown, "while paused the stream does not move");
+  assert.equal(vm.newCount, 2, "both events are counted");
+  assert.equal(feed.get().lastSeq, 5, "and the cursor still moves on");
+  assert.equal(vm.freshness.kind, "live");
+  assert.equal(feed.follow(), true);
+  vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.rows.length, shown + 2, "resume applies everything that waited");
+  assert.equal(vm.newCount, 0);
+});
+
+test("S8 end: the run's last rows arrive, then the end frame ends the stream for good — the tab stays with how many events the run has and never reconnects", async () => {
+  const b = liveTranscript("run_done");
+  let events = b.events;
+  const hub = streamHub();
+  const { feed } = streamFeed(hub, "run_done", () => events);
+  feed.open("run_done");
+  await settle();
+  const lastSeq = feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_done", events, { afterSeq: lastSeq }));
+  b.clock(T0 + 3000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "last words" }] });
+  b.clock(T0 + 4000).add("run.completed", {});
+  b.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_done", events, { afterSeq: lastSeq }), "k9");
+  hub.frame(0, "end", { runId: "run_done", state: "completed", terminal: true, total: events.length }, "k9");
+  let vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.terminal, true);
+  assert.deepEqual(vm.freshness, { kind: "ended", sinceMs: null });
+  assert.equal(vm.total, events.length, "the count is the run's own event total, as the end frame gives it");
+  assert.equal(statusText(vm), `Ended · ${events.length} events`);
+  assert.equal(statusText(vm, "zh"), `已结束，共 ${events.length} 条`);
+  assert.equal(hub.calls[0].signal.aborted, true, "the stream is let go");
+  assert.equal(await feed.poll(), false, "no more polling");
+  feed.setVisible(false);
+  feed.setVisible(true);
+  await settle();
+  assert.equal(hub.calls.length, 1, "and no reconnect");
+});
+
+test("S9 reset: the cursor is no good any more — the feed takes a fresh newest page in its place, then reconnects without a cursor; paused, only the held-back copy is replaced", async () => {
+  const b = liveTranscript("run_reset");
+  let events = b.events;
+  const hub = streamHub();
+  const { feed, pages } = streamFeed(hub, "run_reset", () => events);
+  feed.open("run_reset");
+  await settle();
+  const lastSeq = feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_reset", events, { afterSeq: lastSeq }), "k5");
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "live");
+  // The transcript is replaced by a different, longer one.
+  const fresh = transcript("run_reset");
+  fresh.clock(T0 + 1000);
+  say(fresh, T0 + 1000, "the replacement file, row one");
+  say(fresh, T0 + 2000, "the replacement file, row two");
+  events = fresh.events;
+  const asked = pages.length;
+  hub.frame(0, "reset", { runId: "run_reset", reason: "changed" });
+  await settle();
+  assert.equal(pages.length, asked + 1, "a new newest page was asked for");
+  assert.equal("afterSeq" in pages.at(-1), false, "a snapshot, not a page after a cursor");
+  let vm = activity.buildActivityView(feed.get());
+  assert.deepEqual(vm.rows.map((row) => row.summary), ["the replacement file, row one", "the replacement file, row two"], "the shown table is the fresh page");
+  assert.equal(vm.freshness.kind, "polling");
+  await feed.poll();
+  assert.equal(hub.calls.length, 2, "the stream is opened again");
+  assert.deepEqual(["cursor" in hub.calls[1], hub.calls[1].afterSeq], [false, feed.get().lastSeq], "from the new page, with no cursor");
+
+  // Paused: what is on screen stays; what resume will show is the fresh page.
+  const second = streamHub();
+  let shown = liveTranscript("run_paused_reset").events;
+  const other = streamFeed(second, "run_paused_reset", () => shown);
+  other.feed.open("run_paused_reset");
+  await settle();
+  second.frame(0, "rows", pageOf("run_paused_reset", shown, { afterSeq: other.feed.get().lastSeq }));
+  other.feed.pause("scroll");
+  const visible = activity.buildActivityView(other.feed.get()).rows.map((row) => row.key);
+  shown = everyType("run_paused_reset");
+  second.frame(0, "reset", { runId: "run_paused_reset", reason: "cursor" });
+  await settle();
+  vm = activity.buildActivityView(other.feed.get());
+  assert.deepEqual(vm.rows.map((row) => row.key), visible, "paused: the visible rows do not move");
+  assert.equal(other.feed.get().pendingRows.length, 10, "the held-back copy is the fresh page");
+});
+
+test("S10 leaving the Activity tab cancels the stream and coming back reconnects from the last frame's cursor; a hidden tab opens no stream at all", async () => {
+  const hub = streamHub();
+  const { feed } = streamFeed(hub, "run_live", () => liveTranscript().events);
+  feed.setVisible(false);
+  feed.open("run_live");
+  await settle();
+  assert.equal(hub.calls.length, 0, "a hidden tab opens no stream");
+  assert.equal(feed.setVisible(true), true);
+  await settle();
+  assert.equal(hub.calls.length, 1);
+  const lastSeq = feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_live", liveTranscript().events, { afterSeq: lastSeq }), "k7");
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "live");
+  assert.equal(feed.setVisible(false), true);
+  assert.equal(hub.calls[0].signal.aborted, true, "the stream is cancelled with an AbortController");
+  let vm = activity.buildActivityView(feed.get());
+  assert.equal(vm.freshness.kind, "polling");
+  // A frame of the cancelled stream that was already on the wire: dropped — that try is over, even though
+  // the run and the epoch are still the same.
+  const shown = vm.rows.map((row) => row.key);
+  const later = [...liveTranscript("run_live").events, { type: "run.event", runId: "run_live", agentId: "glm-pro", seq: 4, ts: iso(T0 + 4000), kind: "message", role: "assistant", parts: [{ type: "text", text: "too late" }] }];
+  hub.frame(0, "rows", pageOf("run_live", later, { afterSeq: 3 }), "k8");
+  vm = activity.buildActivityView(feed.get());
+  assert.deepEqual([vm.rows.map((row) => row.key), vm.freshness.kind, feed.get().lastSeq], [shown, "polling", 3], "the cancelled stream's late frame never lands");
+  assert.equal(feed.setVisible(false), false, "already hidden");
+  assert.equal(feed.setVisible(true), true);
+  await settle();
+  assert.equal(hub.calls.length, 2);
+  assert.deepEqual([hub.calls[1].cursor, hub.calls[1].afterSeq], ["k7", lastSeq], "reconnects from the last frame's cursor");
+  assert.equal(hub.calls[1].signal.aborted, false);
+});
+
+test("S11 a stream that drops hands its last cursor to the next try", async () => {
+  const hub = streamHub();
+  const { feed } = streamFeed(hub, "run_live", () => liveTranscript().events);
+  feed.open("run_live");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_live", liveTranscript().events, { afterSeq: feed.get().lastSeq }), "k3");
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "live");
+  hub.end(0, { ok: false, reason: "network" });
+  await settle();
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "polling", "no longer Live");
+  await feed.poll();
+  assert.equal(hub.calls.length, 2, "the next try follows the poll");
+  assert.equal(hub.calls[1].cursor, "k3", "and carries the cursor of the last frame it received");
+});
+
+test("S12 reconcile: every twelfth tick re-reads the newest page and swaps the event rows the table already shows (a command whose exit code never arrived), in polling mode and in Live mode alike; it adds no row and never moves the seq cursor past a row the table does not have yet", async () => {
+  assert.equal(activity.ACTIVITY_RECONCILE_EVERY_POLLS, 12, "once a minute at the 5 s tick");
+  const withResult = () => {
+    const b = transcript("run_rec");
+    b.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+    b.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-9" });
+    b.clock(T0 + 2000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "working" }] });
+    const before = [...b.events];
+    b.clock(T0 + 3000).add("run.event", { kind: "tool_result", tool: "call-9", output: "1 failing test", isError: true });
+    return { before, after: b.events };
+  };
+  /**
+   * A feed whose pages after a cursor bring their rows but never an update (as if the update were dropped by
+   * a full page); only a newest page — served from whatever `transcriptOf()` holds at that moment — carries
+   * the exit code.
+   */
+  const wired = (hub, transcriptOf) => {
+    const snapshots = [];
+    const increments = [];
+    const feed = activity.createActivityFeed({
+      fetchPage: async (query) => {
+        (Number.isInteger(query.afterSeq) ? increments : snapshots).push(query);
+        const full = pageOf("run_rec", transcriptOf(), query);
+        return { ok: true, body: Number.isInteger(query.afterSeq) ? { ...full, updates: [] } : full };
+      },
+      fetchFull: async () => ({ ok: false, reason: "notFound" }),
+      fetchStream: hub.fetchStream,
+    });
+    return { feed, snapshots, increments };
+  };
+  const commandOf = (feed) => activity.buildActivityView(feed.get()).rows.find((row) => row.code === "CMD");
+  const codesOf = (feed) => feed.get().rows.map((row) => row.code);
+  const events = withResult();
+
+  // Shape 1 — the result row already arrived (its update was dropped): the reconcile swaps the exit code in.
+  let servedEarly = events.before;
+  const polling = wired(streamHub({ failWith: "network" }), () => servedEarly);
+  polling.feed.open("run_rec");
+  await settle();
+  assert.equal(commandOf(polling.feed).exitCode, null, "the first page was read before the result existed");
+  servedEarly = events.after; // the result lands after the first page was read
+  await polling.feed.poll(); // the result row arrives, but its update was dropped
+  const shown = activity.buildActivityView(polling.feed.get()).rows.length;
+  const lastSeq = polling.feed.get().lastSeq;
+  assert.deepEqual([shown, commandOf(polling.feed).exitCode], [3, null]);
+  for (let tick = 2; tick <= 11; tick += 1) await polling.feed.poll();
+  assert.deepEqual([polling.snapshots.length, commandOf(polling.feed).exitCode], [1, null], "eleven ticks: no snapshot yet, the row still lacks its exit code");
+  await polling.feed.poll();
+  assert.deepEqual([polling.snapshots.length, polling.increments.length, commandOf(polling.feed).exitCode], [2, 11, 1], "the twelfth tick re-read the newest page (instead of a page after the cursor) and the row caught up");
+  assert.equal(polling.increments.filter((query) => "beforeSeq" in query).length, 0, "no catch-up paging: the transcript did not grow");
+  assert.deepEqual(
+    [activity.buildActivityView(polling.feed.get()).rows.length, polling.feed.get().lastSeq],
+    [shown, lastSeq],
+    "the reconcile adds no row and moves no cursor",
+  );
+
+  // Shape 2 (polling) — the transcript grows right before the reconcile tick, so the newest page holds a row the
+  // table does not have yet. The reconcile still only swaps what the table shows: that row is not added, and
+  // the cursor is not moved past it (it would never arrive then). The next page after the cursor brings it.
+  let served = events.before;
+  const late = wired(streamHub({ failWith: "network" }), () => served);
+  late.feed.open("run_rec");
+  await settle();
+  for (let tick = 1; tick <= 11; tick += 1) await late.feed.poll();
+  assert.deepEqual([codesOf(late.feed), late.feed.get().lastSeq, commandOf(late.feed).exitCode], [["CMD", "MSG"], 4, null]);
+  served = events.after; // the result lands between the eleventh tick and the twelfth
+  await late.feed.poll(); // the twelfth tick: the reconcile
+  assert.deepEqual(
+    [late.snapshots.length, codesOf(late.feed), late.feed.get().lastSeq, commandOf(late.feed).exitCode],
+    [2, ["CMD", "MSG"], 4, 1],
+    "the newest page had the result row and the exit code: only the shown command row was swapped, no row was added and the cursor stayed",
+  );
+  await late.feed.poll(); // the thirteenth tick: a page after the cursor
+  assert.deepEqual([codesOf(late.feed), late.feed.get().lastSeq], [["CMD", "MSG", "OUT"], 5], "the result row arrives the normal way, after a cursor that was left alone");
+
+  // Live mode — the same tick and the same reconcile for both shapes; the other ticks read nothing at all.
+  let servedLive = events.before;
+  const liveHub = streamHub();
+  const live = wired(liveHub, () => servedLive);
+  live.feed.open("run_rec");
+  await settle();
+  servedLive = events.after; // the result lands after the first page was read
+  liveHub.frame(0, "rows", { ...projectWorkerActivity({ runId: "run_rec", events: servedLive, env: {}, afterSeq: live.feed.get().lastSeq }), updates: [] });
+  assert.equal(commandOf(live.feed).exitCode, null, "the stream brought the result row without its update");
+  for (let tick = 1; tick <= 11; tick += 1) await live.feed.poll();
+  assert.deepEqual([live.snapshots.length, live.increments.length, commandOf(live.feed).exitCode], [1, 0, null], "while Live the other ticks read nothing at all (the one newest page is the first page)");
+  await live.feed.poll();
+  assert.deepEqual([live.snapshots.length, live.increments.length, commandOf(live.feed).exitCode], [2, 0, 1]);
+  assert.equal(activity.buildActivityView(live.feed.get()).freshness.kind, "live", "still Live");
+
+  let servedLive2 = events.before;
+  const liveHub2 = streamHub();
+  const live2 = wired(liveHub2, () => servedLive2);
+  live2.feed.open("run_rec");
+  await settle();
+  liveHub2.frame(0, "rows", { ...projectWorkerActivity({ runId: "run_rec", events: servedLive2, env: {}, afterSeq: live2.feed.get().lastSeq }), updates: [] });
+  assert.equal(activity.buildActivityView(live2.feed.get()).freshness.kind, "live");
+  for (let tick = 1; tick <= 11; tick += 1) await live2.feed.poll();
+  servedLive2 = events.after;
+  await live2.feed.poll(); // the twelfth tick: the reconcile
+  assert.deepEqual(
+    [live2.snapshots.length, codesOf(live2.feed), live2.feed.get().lastSeq, commandOf(live2.feed).exitCode],
+    [2, ["CMD", "MSG"], 4, 1],
+    "Live: the newest page had the result row — nothing added, the cursor stayed, the shown command row caught up",
+  );
+  // The stream's own page after the cursor then brings the result row.
+  liveHub2.frame(0, "rows", { ...projectWorkerActivity({ runId: "run_rec", events: servedLive2, env: {}, afterSeq: 4 }), updates: [] });
+  assert.deepEqual(
+    [codesOf(live2.feed), live2.feed.get().lastSeq, activity.buildActivityView(live2.feed.get()).freshness.kind],
+    [["CMD", "MSG", "OUT"], 5, "live"],
+  );
+});
+// ===== api.js: the stream route in the closed set, and the one reader of server-sent events =====
+
+const TOKEN_S = "c".repeat(64);
+
+/** A server-sent-event response whose body yields the given chunks, one read at a time. */
+function sseResponse(chunks, { type = "text/event-stream", status = 200 } = {}) {
+  const encoder = new TextEncoder();
+  const queue = [...chunks];
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (name) => (String(name).toLowerCase() === "content-type" ? type : null) },
+    body: { getReader: () => ({ read: async () => (queue.length > 0 ? { value: encoder.encode(queue.shift()), done: false } : { value: undefined, done: true }), releaseLock() {} }) },
+  };
+}
+
+test("S14 api.js: the stream route is in the closed set with its own query shapes, the JSON request refuses it, and readStream reports what happened and hands the frames over in order", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const cursor = "1.0123456789abcdef.fedcba9876543210.1799.3t.0f1e2d3c4b5a6978";
+  assert.equal(api.streamPath({ runId: "run_1" }), "/api/worker/stream?runId=run_1");
+  assert.equal(api.streamPath({ runId: "run_1", afterSeq: 42, cursor, filter: "commands" }), `/api/worker/stream?runId=run_1&afterSeq=42&cursor=${cursor}&filter=commands`);
+  assert.equal(api.streamPath({ runId: "run_1", afterSeq: 0 }), "/api/worker/stream?runId=run_1&afterSeq=0");
+  for (const path of [
+    "/api/worker/stream?runId=run_1", `/api/worker/stream?runId=run_1&afterSeq=999999999&cursor=${cursor}&filter=errors`,
+    `/api/worker/stream?runId=run-1_B&cursor=${cursor}`,
+  ]) assert.equal(api.isDataPath(path), true, path);
+  for (const path of [
+    "/api/worker/stream", "/api/worker/stream?runId=", "/api/worker/stream?runId=run_1&x=1", "/api/worker/stream?runId=run_1&runId=run_2",
+    "/api/worker/stream?runId=run_1&beforeSeq=3", "/api/worker/stream?runId=run_1&limit=5", "/api/worker/stream?runId=run_1&afterSeq=-1",
+    "/api/worker/stream?runId=run_1&afterSeq=01", `/api/worker/stream?runId=run_1&cursor=${encodeURIComponent("a b")}`,
+    `/api/worker/stream?runId=run_1&cursor=${"a".repeat(200)}`, `/api/worker/stream?runId=run_1&cursor=${cursor}&cursor=${cursor}`,
+    "/api/worker/stream?runId=run_1&filter=nope", "/api/worker/stream?runId=run_1&filter=ALL", "/api/worker/streams?runId=run_1", "/api/worker/Stream?runId=run_1",
+  ]) assert.equal(api.isDataPath(path), false, path);
+  for (const bad of [{ runId: "run_1", cursor: "a b" }, { runId: "run_1", filter: "nope" }, { runId: "run_1", afterSeq: -1 }, { runId: "run_1", afterSeq: 1_000_000_000 }, {}]) {
+    assert.throws(() => api.streamPath(bad), /not one of the dashboard routes/, JSON.stringify(bad));
+  }
+  assert.ok([...api.API_PATHS].includes("/api/worker/stream"), "the route is one of the page's closed set");
+  await assert.rejects(() => api.request("/api/worker/stream?runId=run_1", TOKEN_S), /not one of the dashboard routes/, "the JSON request refuses the stream route");
+  await assert.rejects(() => api.requestImage("/api/worker/stream?runId=run_1", TOKEN_S), /not one of the dashboard routes/);
+  await assert.rejects(() => api.readStream("/api/overview", TOKEN_S, { onFrame() {} }), /not one of the dashboard routes/);
+
+  // What readStream reports: the server's text never shows up in a reason.
+  const seen = [];
+  const frames = [];
+  const read = async (response) => {
+    globalThis.fetch = async (url, init) => { seen.push({ url, init }); return typeof response === "function" ? response(init) : response; };
+    return api.readStream(api.streamPath({ runId: "run_1", cursor }), TOKEN_S, { onFrame: (frame) => frames.push(frame) });
+  };
+  assert.deepEqual(await read({ status: 401, ok: false, headers: { get: () => "application/json" } }), { ok: false, reason: "unauthorized" });
+  assert.deepEqual(await read({ status: 404, ok: false, headers: { get: () => "application/json" } }), { ok: false, reason: "notFound" });
+  assert.deepEqual(await read({ status: 503, ok: false, headers: { get: () => "application/json" } }), { ok: false, reason: "server" });
+  assert.deepEqual(await read({ status: 500, ok: false }), { ok: false, reason: "server" });
+  assert.deepEqual(await read(sseResponse(["data: {}\n\n"], { type: "application/json" })), { ok: false, reason: "server" }, "not an event stream");
+  assert.deepEqual(await read({ status: 200, ok: true, headers: { get: () => "text/event-stream" } }), { ok: false, reason: "server" }, "no body to read");
+  assert.deepEqual(await read(async () => { throw new TypeError("Failed to fetch: http://x/?token=leak"); }), { ok: false, reason: "network" });
+  // A body that dies in the middle of the read is a network failure too, never a throw; the half frame is not handed over.
+  frames.length = 0;
+  let reads = 0;
+  globalThis.fetch = async () => ({
+    status: 200, ok: true, headers: { get: () => "text/event-stream" },
+    body: { getReader: () => ({ read: async () => { reads += 1; if (reads === 1) return { value: new TextEncoder().encode("event: rows\ndata: {"), done: false }; throw new TypeError("terminated"); }, releaseLock() {} }) },
+  });
+  assert.deepEqual(await api.readStream(api.streamPath({ runId: "run_1" }), TOKEN_S, { onFrame: (frame) => frames.push(frame) }), { ok: false, reason: "network" });
+  assert.deepEqual(frames, []);
+  assert.ok(!seen.some(({ init }) => JSON.stringify(init).includes("leak")), "the error text of a request never reaches a reason");
+  assert.ok(seen.every(({ init }) => init.headers.authorization === `Bearer ${TOKEN_S}` && init.headers.accept === "text/event-stream" && init.cache === "no-store"), "every try carries the bearer and is never cached");
+  assert.ok(seen.every(({ init }) => init.signal instanceof AbortSignal), "and can be cancelled");
+
+  // The frames, in order, across arbitrary chunking; the heartbeat comment is not a frame.
+  const text = `${encodeStreamFrame("rows", { runId: "run_1", rows: [] }, cursor)}: hb\n\n${encodeStreamFrame("update", { runId: "run_1", updates: [{ seq: 4 }] }, cursor)}${encodeStreamFrame("end", { runId: "run_1", terminal: true }, cursor)}`;
+  frames.length = 0;
+  seen.length = 0;
+  const result = await read(sseResponse([...text].map((char) => char)));
+  assert.deepEqual(result, { ok: true, done: true }, "the server closed the stream");
+  assert.deepEqual(frames.map((frame) => frame.event), ["rows", "update", "end"], "one character per chunk still gives the frames in order");
+  assert.deepEqual(frames[1], { id: cursor, event: "update", data: { runId: "run_1", updates: [{ seq: 4 }] } }, "the cursor of the frame, and its parsed data");
+  assert.deepEqual(frames.map((frame) => frame.id), [cursor, cursor, cursor], "each frame names the transport cursor it leaves the stream at");
+  // Data that is not JSON is handed over as null; the caller drops it.
+  frames.length = 0;
+  await read(sseResponse(["event: rows\ndata: <html>\n\n"]));
+  assert.deepEqual(frames, [{ id: null, event: "rows", data: null }]);
+
+  // The caller's cancel ends a pending read.
+  frames.length = 0;
+  const controller = new AbortController();
+  globalThis.fetch = async (url, init) => ({
+    status: 200, ok: true, headers: { get: () => "text/event-stream" },
+    body: { getReader: () => ({ read: () => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })), releaseLock() {} }) },
+  });
+  const cancelled = api.readStream(api.streamPath({ runId: "run_1" }), TOKEN_S, { signal: controller.signal, onFrame: (frame) => frames.push(frame) });
+  await settle();
+  controller.abort();
+  assert.deepEqual(await cancelled, { ok: false, reason: "aborted" });
+
+  // A silent stream is a failed try: the head must come within the request timeout, each gap within the idle
+  // timeout. (A real fetch and a real body reject when their signal fires; the fakes below do the same.)
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    globalThis.fetch = (url, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+    const slowSignal = new AbortController();
+    const slowHead = api.readStream(api.streamPath({ runId: "run_1" }), TOKEN_S, { signal: slowSignal.signal, onFrame() {} });
+    t.mock.timers.tick(api.REQUEST_TIMEOUT_MS - 1);
+    await settle();
+    let settled = false;
+    slowHead.then(() => { settled = true; });
+    await settle();
+    assert.equal(settled, false, "still waiting one ms before the request timeout");
+    t.mock.timers.tick(1);
+    assert.deepEqual(await slowHead, { ok: false, reason: "timeout" }, "no response head within the request timeout");
+    // Every way out lets go of the caller's signal: nothing stays registered on it.
+    assert.equal(getEventListeners(slowSignal.signal, "abort").length, 0, "the caller's signal is released after a failed head");
+    const silentSignal = new AbortController();
+    globalThis.fetch = async (url, init) => ({
+      status: 200, ok: true, headers: { get: () => "text/event-stream" },
+      body: { getReader: () => ({ read: () => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })), releaseLock() {} }) },
+    });
+    const silent = api.readStream(api.streamPath({ runId: "run_1" }), TOKEN_S, { signal: silentSignal.signal, onFrame() {} });
+    await settle();
+    assert.equal(getEventListeners(silentSignal.signal, "abort").length, 1, "while the stream is being read the caller's cancel is wired up");
+    t.mock.timers.tick(api.STREAM_IDLE_TIMEOUT_MS - 1);
+    await settle();
+    settled = false;
+    silent.then(() => { settled = true; });
+    await settle();
+    assert.equal(settled, false, "one ms before the idle timeout it is still reading");
+    t.mock.timers.tick(1);
+    assert.deepEqual(await silent, { ok: false, reason: "timeout" }, "no bytes for the whole idle timeout");
+    assert.equal(getEventListeners(silentSignal.signal, "abort").length, 0, "and released after the idle timeout");
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
 const APP_TOKEN = "b".repeat(64);
 const BASE_GLOBALS = {
   document: globalThis.document,
@@ -1081,10 +1714,12 @@ const BASE_GLOBALS = {
 };
 let appSerial = 0;
 
-function installAppBrowser({ hash, listBodies, detail, activityEvents, holdOlder = false }) {
+function installAppBrowser({ hash, listBodies, detail, activityEvents, holdOlder = false, stream = null }) {
   const calls = [];
   const copied = [];
   const held = [];
+  /** The event streams the page opened (only with stream: "open"): the test pushes frames or ends them. */
+  const streams = [];
   const topbar = new FakeNode("header");
   topbar.setAttribute("id", "topbar");
   const main = new FakeNode("main");
@@ -1156,6 +1791,32 @@ function installAppBrowser({ hash, listBodies, detail, activityEvents, holdOlder
       });
       return body === null ? reply(404, { error: "not_found" }) : reply(200, { status: "ready", generatedAt: GEN, ...body });
     }
+    if (bare === "/api/worker/stream" && stream === "open") {
+      // A real event-stream body the test can push frames into; cancelling works through the request's signal.
+      const entry = { url: String(url), queued: [], waiting: [], ended: false, aborted: false };
+      streams.push(entry);
+      const abort = () => {
+        entry.aborted = true;
+        entry.ended = true;
+        for (const waiter of entry.waiting.splice(0)) waiter.reject(init.signal.reason);
+      };
+      if (init.signal.aborted) abort();
+      else init.signal.addEventListener("abort", abort, { once: true });
+      return {
+        status: 200, ok: true,
+        headers: { get: (name) => (String(name).toLowerCase() === "content-type" ? "text/event-stream" : null) },
+        body: {
+          getReader: () => ({
+            read: () => {
+              if (entry.queued.length > 0) return Promise.resolve({ value: entry.queued.shift(), done: false });
+              if (entry.ended) return Promise.resolve({ value: undefined, done: true });
+              return new Promise((resolve, reject) => entry.waiting.push({ resolve, reject }));
+            },
+            releaseLock() {},
+          }),
+        },
+      };
+    }
     return reply(404, { error: "not_found" });
   };
   const restore = () => {
@@ -1166,7 +1827,17 @@ function installAppBrowser({ hash, listBodies, detail, activityEvents, holdOlder
     else delete globalThis.navigator;
   };
   return {
-    calls, copied, elements, restore,
+    calls, copied, elements, restore, streams,
+    /** Server frames into an open stream, in the server's own wire format. */
+    pushFrames: (entry, frames) => {
+      entry.queued.push(new TextEncoder().encode(frames.map((frame) => encodeStreamFrame(frame.event, frame.data, frame.id ?? null)).join("")));
+      for (const waiter of entry.waiting.splice(0)) waiter.resolve({ value: entry.queued.shift(), done: false });
+    },
+    /** The server closes the stream. */
+    endStream: (entry) => {
+      entry.ended = true;
+      for (const waiter of entry.waiting.splice(0)) waiter.resolve({ value: undefined, done: true });
+    },
     releaseOlder: () => { while (held.length > 0) held.shift()(); },
     clickOn: (node) => { node.click(); fire(listeners.document, "click", { target: node }); },
     scroll: () => { for (const fn of sidebar.listeners.get("scroll") ?? []) fn({ type: "scroll" }); },
@@ -1182,10 +1853,10 @@ function installAppBrowser({ hash, listBodies, detail, activityEvents, holdOlder
   };
 }
 
-async function bootActivityApp(t, { runId = "run_live", snapshot, listBodies, detail, activityEvents, holdOlder = false }) {
+async function bootActivityApp(t, { runId = "run_live", snapshot, listBodies, detail, activityEvents, holdOlder = false, stream = null }) {
   t.mock.timers.reset();
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: GEN_MS });
-  const browser = installAppBrowser({ hash: `#workers?run=${runId}`, listBodies, detail, activityEvents, holdOlder });
+  const browser = installAppBrowser({ hash: `#workers?run=${runId}`, listBodies, detail, activityEvents, holdOlder, stream });
   t.after(() => browser.restore());
   appSerial += 1;
   await import(`../../src/owner-dashboard/v2/app.js?activity=${appSerial}`);
@@ -1461,6 +2132,75 @@ test("A20 tab switching in any order always shows the selected tab's body: Brief
   await b.tick();
   assert.equal(pressed(), "Brief");
   assert.equal(briefShown(), true, "Deliverable -> Activity -> Brief shows the Brief body again");
+});
+
+/** A transport cursor of the server's shape (opaque to the page: it only hands it back on a reconnect). */
+const cursorFor = (offset) => `1.0123456789abcdef.fedcba9876543210.${BigInt(offset).toString(36)}.3.0f1e2d3c4b5a6978`;
+
+test("S13 the app wiring: the Activity tab is Live while its stream is up and a pushed frame shows without a tick; leaving the tab cancels the stream and coming back reconnects from the cursor; end keeps the tab on Activity with the run's own count", async (t) => {
+  const run = snapRun("run_live", {
+    state: "running", terminal: false, liveness: "progress", stage: "active",
+    startedAt: ago(10 * MIN), terminalAt: null, lastEffectAt: ago(MIN),
+  });
+  const snapshot = snapshotOf({ runs: [run] });
+  const bodies = await chain(snapshot);
+  const listBodies = new Map([["/api/overview", bodies.overview], ["/api/workers", bodies.workers], ["/api/attention", bodies.attention]]);
+  const detailEvents = liveTranscript().events;
+  const detail = { status: "ready", generatedAt: GEN, ...(await projectWorkerDetail({ run, snapshot, runsById: new Map([[run.runId, run]]), events: detailEvents, now: GEN_MS, env: {} })) };
+  const activityEvents = liveTranscript().events;
+  const b = await bootActivityApp(t, { snapshot, listBodies, detail, activityEvents, stream: "open" });
+  const sidebar = b.elements.sidebar;
+  const status = () => byClass(sidebar, "act-status")[0].textContent;
+  const tab = (name) => find(sidebar, (node) => node.className === "sb-tab" && node.textContent === name)[0];
+  const pressed = () => find(sidebar, (node) => node.className === "sb-tab" && node.getAttribute("aria-pressed") === "true")[0].textContent;
+  const push = (entry, seq, text) => {
+    activityEvents.push({ type: "run.event", runId: "run_live", agentId: "glm-pro", seq, ts: iso(T0 + seq * 1000), kind: "message", role: "assistant", parts: [{ type: "text", text }] });
+    b.pushFrames(entry, [{ id: cursorFor(seq), event: "rows", data: { ...pageOf("run_live", activityEvents, { afterSeq: seq - 1 }), updates: [] } }]);
+  };
+
+  assert.equal(b.streams.length, 1, "the Activity tab opened one stream");
+  const first = b.streams[0];
+  assert.match(first.url, /^\/api\/worker\/stream\?runId=run_live&afterSeq=\d+&filter=all$/, "through the closed builder, after the first page's cursor");
+  const call = b.calls.find((c) => c.url === first.url);
+  assert.equal(call.init.headers.authorization, `Bearer ${APP_TOKEN}`, "with the bearer in the header");
+  assert.doesNotMatch(status(), /^Live/, "not Live before the first frame");
+  b.pushFrames(first, [{ id: cursorFor(3), event: "rows", data: pageOf("run_live", activityEvents, { afterSeq: 3 }) }]);
+  await settle();
+  assert.equal(status(), "Live");
+
+  // A new event arrives through the stream: it shows at once, with no 5 s tick.
+  push(first, 4, "pushed by the stream");
+  await settle();
+  assert.match(sidebar.textContent, /pushed by the stream/);
+  assert.equal(status(), "Live");
+  const polls = b.calls.filter((c) => String(c.url).startsWith("/api/worker/activity")).length;
+  await b.tick(5000);
+  assert.equal(b.calls.filter((c) => String(c.url).startsWith("/api/worker/activity")).length, polls, "while Live the 5 s tick does not poll the timeline");
+
+  // Leaving the tab cancels the stream; coming back reconnects from the last frame's cursor.
+  b.clickOn(tab("Deliverable"));
+  await b.tick();
+  assert.equal(pressed(), "Deliverable");
+  assert.equal(first.aborted, true, "the old stream was cancelled");
+  b.clickOn(tab("Activity"));
+  await b.tick();
+  assert.equal(pressed(), "Activity");
+  assert.equal(b.streams.length, 2, "a new stream");
+  assert.ok(b.streams[1].url.includes(`&cursor=${cursorFor(4)}&`), `from the cursor of the last frame it received: ${b.streams[1].url}`);
+  assert.doesNotMatch(status(), /^Live/, "not Live until the new stream's first frame");
+
+  // The run ends: the last rows, then end. The tab stays on Activity and says how many events the run has.
+  const second = b.streams[1];
+  push(second, 5, "last words");
+  await settle();
+  assert.equal(status(), "Live");
+  b.pushFrames(second, [{ id: cursorFor(6), event: "end", data: { runId: "run_live", state: "completed", terminal: true, total: 7 } }]);
+  await settle();
+  assert.equal(status(), "Ended · 7 events");
+  assert.equal(pressed(), "Activity", "the ended run finishes on Activity");
+  await b.tick(5000);
+  await b.tick(5000);
+  assert.equal(b.streams.length, 2, "no reconnect after end");
 });
 
 

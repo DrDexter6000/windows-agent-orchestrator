@@ -506,6 +506,7 @@ test("ownerDashboardServer.js imports exactly the pinned set (node builtins + ap
     "./application/ownerReadModel.js", // 140c: the Owner read model
     "./application/ownerWorkerActivity.js", // 141c: the Owner activity projection (/api/worker/activity + /api/worker/event)
     "./application/ownerWorkerDetail.js", // 141a: the single-worker detail DTO
+    "./application/ownerWorkerStream.js", // 144: the Activity event stream (/api/worker/stream)
     "./application/runSummaryCache.js",
     "./projectBuckets.js", // 140c: the project slug shape
     "node:crypto",

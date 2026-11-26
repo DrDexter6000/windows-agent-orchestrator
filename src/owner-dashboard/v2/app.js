@@ -12,16 +12,17 @@
 // cut-off from localStorage, then polling.
 //
 // Read-only: the page only reads the /api routes (the three list routes every 5 seconds, the open
-// worker's detail with them, the Activity tab's page after its cursor on the same tick while that tab is
-// open and the run has not ended, and a delivered image when its tab is open) and shows them. There is
-// no control that changes anything on the server.
+// worker's detail with them, a delivered image when its tab is open, and the Activity tab's event
+// stream while that tab is open — its rows arrive as they happen, with the page after the cursor
+// polled again whenever the stream is not up) and shows them. There is no control that changes
+// anything on the server.
 
 import {
   INITIAL_NET, POLL_MS, applyCycle, buildMain, buildTopbar, endpointsFor, formatHash, parseHash, parseStoredVisit, visitWindow,
 } from "./model.js";
 import { LANG_STORAGE_KEY, isLang, resolveLang } from "./i18n.js";
 import { readStored, writeStored } from "./store.js";
-import { activityPath, artifactPath, eventPath, request, requestImage, resolveToken, workerPath } from "./api.js";
+import { activityPath, artifactPath, eventPath, readStream, request, requestImage, resolveToken, streamPath, workerPath } from "./api.js";
 import { activeTab, buildSidebar, createDetailFeed, imagesWanted } from "./detail.js";
 import { activityRef, buildActivityView, createActivityFeed } from "./activity.js";
 import { createImageStore } from "./artifacts.js";
@@ -97,6 +98,10 @@ function boot() {
   const activity = createActivityFeed({
     fetchPage: (query) => (token === null ? Promise.resolve({ ok: false, reason: "unauthorized" }) : request(activityPath(query), token, activitySignal())),
     fetchFull: (query) => (token === null ? Promise.resolve({ ok: false, reason: "unauthorized" }) : request(eventPath(query), token, activitySignal())),
+    // The event stream goes through the same reader with the bearer; the feed owns the signal that ends it.
+    fetchStream: (query) => (token === null
+      ? Promise.resolve({ ok: false, reason: "unauthorized" })
+      : readStream(streamPath(query), token, { signal: query.signal, onFrame: query.onFrame })),
     onEpoch: () => {
       activityController.abort();
       activityController = new AbortController();
@@ -236,6 +241,10 @@ function boot() {
     const sidebarWasLoading = state.sidebarLoading === true;
     state.sidebarLoading = sidebar !== null && sidebar.kind === "message" && sidebar.message === "loading";
     renderSidebar(sidebarEl, sidebar, state.lang, state.sui, wanted, images.view(), actions, activityView);
+    // The tab's event stream is held only while the tab is on screen: leaving the tab cancels it
+    // right after this draw (a hidden tab shows no status, so nothing stale is ever drawn), and
+    // coming back tries the stream again.
+    activity.setVisible(state.activityShowing === true);
     if (sidebarWasLoading && sidebar !== null && sidebar.kind === "detail") addContentIn(sidebarEl);
     if (state.activityShowing) {
       // The tab just became visible (or the worker just opened): load its first page.
@@ -274,7 +283,8 @@ function boot() {
       const paths = endpointsFor(page, state.project);
       // The open worker's detail is refreshed with the lists (its own request, its own answer); the
       // Activity tab's own poll starts on the same tick (its answer renders itself) and stops itself
-      // once the run has ended — the list cycle never waits for it.
+      // once the run has ended — the list cycle never waits for it. While the tab's event stream is up
+      // that poll reads nothing (once a minute it re-reads the newest page).
       detail.refresh();
       pollActivity();
       const results = await Promise.all(paths.map((path) => request(path, token)));

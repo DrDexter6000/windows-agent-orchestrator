@@ -782,6 +782,18 @@ function isInsideDir(root, child) {
 }
 
 /**
+ * 一段只含完整行的文本 → 事件：空行跳过，坏 JSON 抛出，非对象行抛出（调用方按读不到处理）。
+ * 事件流增量读追加的整行也走这一条：一段只有空行的追加没有事件，但不算读不到。
+ */
+export function eventsOfCompleteLines(text) {
+  const events = parseTranscriptText(text);
+  if (events.some((e) => e === null || typeof e !== "object" || Array.isArray(e))) {
+    throw new Error("ownerReadModel: transcript has no readable events");
+  }
+  return events;
+}
+
+/**
  * 一份转录的原始字节 → 事件。只解析到最后一个换行为止（保留那个 LF）：其后没有
  * 换行结尾的尾部片段是还没写完的半行，忽略（写完后文件身份变化，下一轮会重读）。
  * LF 必须保留——CRLF 转录里把最后的 LF 切掉会留下一个孤立的 \r，完整的前缀
@@ -791,10 +803,8 @@ function isInsideDir(root, child) {
 function eventsOf(bytes) {
   const end = bytes.lastIndexOf(0x0a);
   if (end < 0) throw new Error("ownerReadModel: transcript has no complete line");
-  const events = parseTranscriptText(bytes.subarray(0, end + 1).toString("utf8"));
-  if (events.length === 0 || events.some((e) => e === null || typeof e !== "object" || Array.isArray(e))) {
-    throw new Error("ownerReadModel: transcript has no readable events");
-  }
+  const events = eventsOfCompleteLines(bytes.subarray(0, end + 1).toString("utf8"));
+  if (events.length === 0) throw new Error("ownerReadModel: transcript has no readable events");
   return events;
 }
 
@@ -978,11 +988,12 @@ const STAGE_DISPLAY = Object.freeze({
  * @param {object} [input.env] — 精确脱敏用的环境（缺省 process.env）：标题与项目名进快照前先
  *   把环境里的秘密值整段替换（形状脱敏之前、截断之前）
  * @returns {{refresh: Function, snapshot: Function, resolveRun: Function,
- *   readRunEvents: Function, readRunTranscript: Function, projectRepoRoot: Function}}
+ *   readRunEvents: Function, readRunTranscript: Function, locateRunTranscript: Function, projectRepoRoot: Function}}
  *   readRunEvents / projectRepoRoot 是第 141 批给服务端的两个只读入口（单 worker 详情与产物接口）：
  *   前者按 resolveRun 的授权读一个运行当下的转录事件，后者给项目仓库根——都不进快照。
  *   readRunTranscript（第 141c 批）是 readRunEvents 的同一次读取外加转录身份（字节的 sha256），
- *   给全文接口的缓存做键。
+ *   给全文接口的缓存做键。locateRunTranscript（第 144 批）是同一次授权读取，交出被证明那份副本的
+ *   路径与原始字节，给事件流自己 watch 与增量读。
  */
 export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {}, env } = {}) {
   if (typeof runDir !== "string" || runDir.length === 0) {
@@ -1940,6 +1951,40 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   }
 
   /**
+   * resolveRun 的授权 + 请求当刻的副本复核（第 141c 批 readRunTranscript 的那一份，原样抽出来共用）：
+   *   - 重新枚举这个运行目录里该 runId 的全部副本（严格枚举，枚举不全就拒绝）；
+   *   - 每个副本都用 realpath 证明确实位于运行目录之内；
+   *   - 所有副本都读得出、字节逐一相同。
+   * 返回被证明的那一份（第一个副本）的路径、原始字节与内容哈希；定位不到、复核不过、读不出一律 null。
+   */
+  async function provenRunCopy(runId) {
+    if (resolveRun(runId) === null) return null;
+    try {
+      // 与刷新同一个文件名口径（isRunTranscriptName + 去掉 .jsonl 得 runId），不另拼文件名。
+      const copies = listFiles(runDir, { strict: true })
+        .filter((entry) => isRunTranscriptName(entry.name) && entry.name.slice(0, -".jsonl".length) === runId);
+      if (copies.length === 0) return null;
+      const root = await realpath(runDir);
+      let first = null;
+      let firstHash = null;
+      for (const { path } of copies) {
+        if (!isInsideDir(root, await realpath(path))) return null;
+        const bytes = toBytes(await readFile(path));
+        const hash = createHash("sha256").update(bytes).digest("hex");
+        if (first === null) {
+          first = { path, bytes };
+          firstHash = hash;
+        } else if (hash !== firstHash) {
+          return null;
+        }
+      }
+      return { ...first, identity: firstHash };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 单个运行的转录事件（第 141 批：单 worker 详情与产物接口用）。授权先走 resolveRun
    * 同一份定位，再在**请求当刻**对盘上的实际文件复核（刷新之间盘上可能变了）：
    *   - 重新枚举这个运行目录里该 runId 的全部副本（严格枚举，枚举不全就拒绝）；
@@ -1967,30 +2012,24 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
    * @returns {Promise<{events: object[], identity: string}|null>}
    */
   async function readRunTranscript(runId) {
-    if (resolveRun(runId) === null) return null;
     try {
-      // 与刷新同一个文件名口径（isRunTranscriptName + 去掉 .jsonl 得 runId），不另拼文件名。
-      const copies = listFiles(runDir, { strict: true })
-        .filter((entry) => isRunTranscriptName(entry.name) && entry.name.slice(0, -".jsonl".length) === runId);
-      if (copies.length === 0) return null;
-      const root = await realpath(runDir);
-      let first = null;
-      let firstHash = null;
-      for (const { path } of copies) {
-        if (!isInsideDir(root, await realpath(path))) return null;
-        const bytes = toBytes(await readFile(path));
-        const hash = createHash("sha256").update(bytes).digest("hex");
-        if (first === null) {
-          first = bytes;
-          firstHash = hash;
-        } else if (hash !== firstHash) {
-          return null;
-        }
-      }
-      return { events: eventsOf(first), identity: firstHash };
+      const proven = await provenRunCopy(runId);
+      return proven === null ? null : { events: eventsOf(proven.bytes), identity: proven.identity };
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 事件流用（第 144 批，决定 0131 §4）：readRunTranscript 的同一次授权读取，交出被证明的那一份
+   * 副本的**路径与原始字节**——服务端据此 watch、按字节偏移增量读、定位整行边界。路径与字节只在
+   * 服务端内部使用，从不进任何响应。授权、读取与失败口径与 readRunTranscript 完全相同。
+   *
+   * @param {unknown} runId
+   * @returns {Promise<{path: string, bytes: Buffer, identity: string}|null>}
+   */
+  async function locateRunTranscript(runId) {
+    return provenRunCopy(runId);
   }
 
   /**
@@ -2016,5 +2055,5 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     return { runId, availability: run.availability, transcriptPath: run.primaryPath, bucket: run.primaryBucket };
   }
 
-  return { refresh, snapshot, resolveRun, readRunEvents, readRunTranscript, projectRepoRoot };
+  return { refresh, snapshot, resolveRun, readRunEvents, readRunTranscript, locateRunTranscript, projectRepoRoot };
 }

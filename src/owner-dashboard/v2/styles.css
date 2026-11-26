@@ -886,6 +886,7 @@ button:focus-visible {
 }
 
 .act-status { margin-left: auto; color: var(--ink-2); }
+.act-status-live { color: var(--ink); font-weight: 600; }
 .act-status-stale { color: var(--amber); font-weight: 600; }
 .act-older { margin: 8px 0 0; font: 400 14px/20px var(--sans); }
 

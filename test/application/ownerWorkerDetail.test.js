@@ -1421,17 +1421,18 @@ test("闭集：交付物的 kind / state / reason 都落在导出的闭集里（
   }
 });
 
-test("路由是闭集：服务源码里的 /api/ 路由恰好是这 9 个（第 141c 批起含 worker/activity 与 worker/event 两条二级路径）；其余 /api/* 固定 404", async () => {
+test("路由是闭集：服务源码里的 /api/ 路由恰好是这 10 个（第 141c 批起含 worker/activity 与 worker/event，第 144 批起含 worker/stream 三条二级路径）；其余 /api/* 固定 404", async () => {
   const src = readFileSync(join(fileURLToPath(new URL(".", import.meta.url)), "../..", "src", "ownerDashboardServer.js"), "utf8");
   // 第 141c 批：路径允许一级或两级（`/api/worker/activity`）。旧正则只认一级，会让新路由悄悄漏出守卫。
   const declared = new Set([...src.matchAll(/"\/api\/([a-z]+(?:\/[a-z]+)?)"/g)].map((m) => m[1]));
   assert.deepEqual(
     [...declared].sort(),
-    ["activity", "artifact", "attention", "overview", "runs", "worker", "worker/activity", "worker/event", "workers"],
+    ["activity", "artifact", "attention", "overview", "runs", "worker", "worker/activity", "worker/event", "worker/stream", "workers"],
   );
   for (const url of [
     "/api/worker/extra", "/api/artifacts", "/api/Worker", "/api/", "/api/worker/", "/api/worker/activity/x", "/api/worker/Activity",
     "/api/worker/events", "/api/worker/activity/", "/api/workers/activity", "/api/activity/event",
+    "/api/worker/stream/", "/api/worker/streams", "/api/worker/Stream",
   ]) {
     assert.equal((await W.get(url)).status, 404, url);
   }

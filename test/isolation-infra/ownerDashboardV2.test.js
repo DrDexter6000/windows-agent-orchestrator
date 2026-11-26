@@ -460,11 +460,11 @@ test("P9 request(): closed route set, bearer header only, outcomes without any s
   globalThis.fetch = async () => { throw new TypeError("Failed to fetch: http://x/?token=leak"); };
   assert.deepEqual(await api.request("/api/overview", TOKEN), { ok: false, reason: "network" });
   const before = calls.length;
-  for (const path of ["/api/runs", "/api/activity", "/api/worker", "/api/artifact", "/api/overview?x=1", "/api/session", "/", "https://example.com/api/overview"]) {
+  for (const path of ["/api/runs", "/api/activity", "/api/worker", "/api/artifact", "/api/overview?x=1", "/api/session", "/", "https://example.com/api/overview", "/api/worker/stream?runId=run_1"]) {
     await assert.rejects(() => api.request(path, TOKEN), /not one of the dashboard routes/, path);
   }
   assert.equal(calls.length, before, "a refused path never reaches the network");
-  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact", "/api/worker/activity", "/api/worker/event"]);
+  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact", "/api/worker/activity", "/api/worker/event", "/api/worker/stream"]);
   // Batch 143b: the two Activity routes are now part of the set and go through the same request function.
   globalThis.fetch = reply(200, { status: "ready" });
   assert.deepEqual(await api.request(api.activityPath({ runId: "run_1", filter: "messages" }), TOKEN), { ok: true, body: { status: "ready" } });
@@ -2093,14 +2093,16 @@ const codeOf = (name) => sourceOf(name).replace(/\/\*[\s\S]*?\*\//g, "").replace
 
 // Decision 0131 A3 (batch 143b): the closed endpoint set grew by the Activity tab's two routes. They are
 // read-only pages of the same worker transcript and go through the same single request function.
-test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact, /api/worker/activity, /api/worker/event", () => {
+// Batch 144 (decision 0131 section 4) adds the Activity tab's event stream: read through that same single
+// fetch call too (its reading and the feed's use of the frames are in ownerDashboardV2Activity.test.js).
+test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact, /api/worker/activity, /api/worker/event, /api/worker/stream", () => {
   const found = new Set();
   for (const [, text] of allJs()) for (const m of text.matchAll(/\/api\/([A-Za-z0-9_-]+)(\/[A-Za-z0-9_-]+)?/g)) found.add(m[1] + (m[2] ?? ""));
-  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "worker", "worker/activity", "worker/event", "workers"], "no other endpoint anywhere in the v2 code");
+  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "worker", "worker/activity", "worker/event", "worker/stream", "workers"], "no other endpoint anywhere in the v2 code");
   // No query string is spelled out in code: the only queries are the ones api.js builds for its own closed key sets.
   assert.ok(!/\/api\/[A-Za-z]+\?/.test(allJs().map(([name]) => codeOf(name)).join("\n")), "no query string literal on a data route");
   assert.doesNotMatch(readV2("index.html"), /\/api\//);
-  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/worker", "/api/worker/activity", "/api/worker/event", "/api/workers"]);
+  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/worker", "/api/worker/activity", "/api/worker/event", "/api/worker/stream", "/api/workers"]);
   // The pages ask for no route outside the set.
   for (const page of model.PAGES) for (const path of [...model.endpointsFor(page), ...model.endpointsFor(page, "shop-api")]) assert.ok(api.isDataPath(path), `${page}: ${path}`);
 });

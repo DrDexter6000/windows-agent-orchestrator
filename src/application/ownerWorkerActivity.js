@@ -662,10 +662,12 @@ function newFold(item, view) {
 
 const canExtendFold = (fold, item) => fold.seqState === item.seqState && item.seqState !== "conflict";
 
-function extendFold(fold, item) {
+function extendFold(fold, item, view) {
   fold.count += 1;
   fold.status = rtStatus(item.event);
   if (item.seqState === "ok") fold.toSeq = item.seq;
+  // 收尾时刻跟着最后吸收的那条事件走（没有时间戳的事件不改动它）：折叠行的区间两端才是同一批事件的两端。
+  if (typeof item.event.ts === "string") fold.toTs = view.label(item.event.ts);
 }
 
 // ===== 页的起点 =====
@@ -821,7 +823,7 @@ export function projectWorkerActivity({
     } else if (item.cls.code === "RT") {
       hidden.folded += 1;
       const last = rows[rows.length - 1];
-      if (last !== undefined && last.row === "fold" && canExtendFold(last, item)) extendFold(last, item);
+      if (last !== undefined && last.row === "fold" && canExtendFold(last, item)) extendFold(last, item, view);
       else rows.push(newFold(item, view));
     } else {
       rows.push(eventRow(item, view));

@@ -125,14 +125,32 @@
 //     available after the attention item itself has left the 24-hour window; with no such fact it is
 //     null and the page falls back to the bare run number. No new text, no path.
 //
+// Batch 144 (decision 0131 section 4): the Activity tab's event stream.
+//   - GET /api/worker/stream?runId=&afterSeq=&cursor=&filter=   server-sent events over a long
+//     response: text/event-stream, the safe headers with no-store. runId is required; afterSeq
+//     (0 .. OWNER_SEQ_MAX), filter (the activity closed set) and cursor (an opaque transport
+//     cursor of a fixed shape and length) are optional; anything else, a repeated key or a bad
+//     shape is the fixed 400. Same bearer / GET-only / no-CORS rules as every /api route.
+//     Authorization is the same as /api/worker/activity: the run is in the published snapshot as
+//     "ok", and the transcript is located through the read model's request-time copy check
+//     (locateRunTranscript) — anything else answers the fixed 404. Before the first publication
+//     it answers the fixed 404 (like /api/worker/event). The frames and their content come from
+//     src/application/ownerWorkerStream.js (projectWorkerActivity pages); this file only writes
+//     the head and the fixed errors. A 503 says the service already holds its maximum number of
+//     streams (the page falls back to polling).
+//   - close() first cuts every open stream (each one closes its watcher and timers), and only
+//     then shuts the socket: the streams are long-lived responses that would otherwise hold
+//     server.close() open.
+//
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
 // node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
 // service, the run-summary cache, the Owner read model (createOwnerReadModel +
 // OWNER_LIVENESS_VALUES), the Owner attention derivation (ownerAttention), the
 // Owner worker detail (ownerWorkerDetail), activity projection
-// (ownerWorkerActivity) and artifact reader (ownerArtifact) and
-// the project slug shape (projectBuckets.SAFE_BUCKET_SLUG_RE). No second copy of
-// any closed set lives here.
+// (ownerWorkerActivity), the Activity event stream (ownerWorkerStream), artifact
+// reader (ownerArtifact) and the project slug shape
+// (projectBuckets.SAFE_BUCKET_SLUG_RE). No second copy of any closed set lives
+// here.
 
 import http from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -168,6 +186,7 @@ import {
   projectWorkerActivity,
   projectWorkerEvent,
 } from "./application/ownerWorkerActivity.js";
+import { OWNER_STREAM_CURSOR_RE, createWorkerStreams } from "./application/ownerWorkerStream.js";
 import { SAFE_BUCKET_SLUG_RE } from "./projectBuckets.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -223,11 +242,14 @@ function issueToken(randomBytesFn) {
 }
 
 // Fixed safe response bodies. Never raw text, never token, never path.
+// `unavailable` (batch 144) is the 503 of the event stream: the service already holds its
+// maximum number of streams.
 const ERR = Object.freeze({
   unauthorized: { error: "unauthorized" },
   method_not_allowed: { error: "method_not_allowed" },
   not_found: { error: "not_found" },
   bad_request: { error: "bad_request" },
+  unavailable: { error: "unavailable" },
   internal: { error: "internal" },
 });
 
@@ -244,6 +266,10 @@ const SAFE_HEADERS = Object.freeze({
   "referrer-policy": "no-referrer",
   "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
 });
+
+// Batch 144: the head of an event stream — the same safe headers, with the content type of
+// server-sent events (never cached).
+const STREAM_HEADERS = Object.freeze({ ...SAFE_HEADERS, "content-type": "text/event-stream" });
 
 // Batch 143a (decision 0131 A3): the /v2 files — and only they — carry ONE more image source:
 // img-src also allows blob:, because the side panel reads a delivered image with the bearer
@@ -868,6 +894,74 @@ async function serveWorkerEvent(ctx, req, res, sp) {
   }
 }
 
+// ===== Batch 144: /api/worker/stream =====
+
+/**
+ * GET /api/worker/stream?runId=&afterSeq=&cursor=&filter= — the Activity tab's event stream.
+ * runId (required) and afterSeq / filter as on /api/worker/activity (beforeSeq and limit are not
+ * here: a frame is always the route's default page); cursor is an opaque transport cursor of a
+ * fixed shape (never parsed here). Anything else, a repeated key or a bad shape is the fixed 400.
+ */
+function parseWorkerStreamQuery(sp) {
+  assertStrictKeys(sp, new Set(["runId", "afterSeq", "cursor", "filter"]));
+  const runId = sp.get("runId");
+  if (!isValidRunId(runId)) throw new BadRequest();
+  const query = { runId };
+  if (sp.has("afterSeq")) {
+    const raw = sp.get("afterSeq");
+    if (!BEFORE_SEQ_RE.test(raw) || Number(raw) > OWNER_SEQ_MAX) throw new BadRequest();
+    query.afterSeq = Number(raw);
+  }
+  if (sp.has("cursor")) {
+    const raw = sp.get("cursor");
+    if (!OWNER_STREAM_CURSOR_RE.test(raw)) throw new BadRequest();
+    query.cursor = raw;
+  }
+  if (sp.has("filter")) {
+    const raw = sp.get("filter");
+    if (!OWNER_ACTIVITY_FILTERS.includes(raw)) throw new BadRequest();
+    query.filter = raw;
+  }
+  return query;
+}
+
+async function serveWorkerStream(ctx, req, res, sp) {
+  const query = authorizeAndParse(ctx, req, res, sp, parseWorkerStreamQuery);
+  if (query === null) return;
+  const pub = ctx.published();
+  // Nothing published yet: the fixed 404, like /api/worker/event and /api/artifact.
+  if (pub === null) return sendJson(res, 404, ERR.not_found);
+  // The run must be usable exactly as for /api/worker/activity: in the published snapshot as "ok",
+  // then located through the read model's request-time copy check (inside open()).
+  const run = ctx.runsById(pub).get(query.runId);
+  if (run === undefined || run.availability !== "ok") return sendJson(res, 404, ERR.not_found);
+  if (ctx.streams.full()) return sendJson(res, 503, ERR.unavailable);
+  try {
+    const opened = await ctx.streams.open({
+      runId: query.runId,
+      res,
+      headers: STREAM_HEADERS,
+      ...(query.afterSeq !== undefined ? { afterSeq: query.afterSeq } : {}),
+      ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+      ...(query.filter !== undefined ? { filter: query.filter } : {}),
+    });
+    // ok: the 200 head is written and the frames are the stream's own. not_found: the transcript
+    // could not be located or read (nothing about why crosses the boundary). gone: the client left
+    // while the transcript was being read — there is nobody to answer. Anything else (the hub
+    // filled up or closed meanwhile, the service shut down): retry later.
+    if (opened.ok) return;
+    if (opened.reason === "gone") return;
+    if (opened.reason === "not_found") return sendJson(res, 404, ERR.not_found);
+    return sendJson(res, 503, ERR.unavailable);
+  } catch {
+    // The head is already on the wire when the stream fails after it: open() has cut the
+    // connection, and the page reconnects or falls back to polling. Only a failure before the
+    // head is the fixed 500.
+    if (res.headersSent !== true) return sendJson(res, 500, ERR.internal);
+    return undefined;
+  }
+}
+
 // An image response: the safe headers, with the content type the MAGIC NUMBER
 // decided (nosniff keeps the browser from second-guessing it).
 function sendImage(res, contentType, bytes) {
@@ -1032,6 +1126,8 @@ function createHandler(ctx) {
     // Batch 141c: the Activity tab's timeline page and one event's full text.
     if (u.pathname === "/api/worker/activity") return serveWorkerActivity(ctx, req, res, sp);
     if (u.pathname === "/api/worker/event") return serveWorkerEvent(ctx, req, res, sp);
+    // Batch 144: the Activity tab's event stream.
+    if (u.pathname === "/api/worker/stream") return serveWorkerStream(ctx, req, res, sp);
 
     // Batch 141a: one worker's detail and one image of its current delivery.
     if (u.pathname === "/api/worker") return serveWorker(ctx, req, res, sp);
@@ -1077,6 +1173,9 @@ function createHandler(ctx) {
  * @param {Function} [config.createReadModelFn] — injectable (testing) Owner
  *   read-model factory `() => {refresh, snapshot}`; default
  *   `createOwnerReadModel({ runDir, nowFn })` (same runDir, same clock).
+ * @param {Function} [config.createWorkerStreamsFn] — injectable (testing) factory of
+ *   the Activity event-stream hub `({ readModel, env }) => hub`; default
+ *   `createWorkerStreams({ readModel, env })`.
  * @param {number} [config.refreshIntervalMs=5000] — interval of the read-model
  *   refresh chain; must be a positive integer (rejected BEFORE listen).
  * @returns {{token: string, handler: Function, server: http.Server,
@@ -1089,9 +1188,10 @@ function createHandler(ctx) {
  *   not start it.
  *   listen() — one attempt per server; rejects after close() without opening a
  *   socket, and rejects on bind errors (e.g. EADDRINUSE).
- *   close() — idempotent; every call returns the SAME promise. It waits for an
- *   in-flight round and for a pending listen() to settle, resolves immediately
- *   after a failed listen(), and shuts the socket after a successful one.
+ *   close() — idempotent; every call returns the SAME promise. It cuts every open
+ *   event stream at once, waits for an in-flight round and for a pending listen()
+ *   to settle, resolves immediately after a failed listen(), and shuts the socket
+ *   after a successful one.
  */
 export function createOwnerDashboardServer(config) {
   const {
@@ -1099,7 +1199,7 @@ export function createOwnerDashboardServer(config) {
     host = LOOPBACK_HOST, port,
     getOwnerRunsFn, getOwnerActivityFn,
     randomBytesFn, nowFn, loadAssetFn,
-    createReadModelFn, refreshIntervalMs,
+    createReadModelFn, createWorkerStreamsFn, refreshIntervalMs,
   } = config;
 
   // Reject any non-loopback host BEFORE listen.
@@ -1123,6 +1223,9 @@ export function createOwnerDashboardServer(config) {
   // not as whatever the next step happens to trip over).
   if (createReadModelFn !== undefined && typeof createReadModelFn !== "function") {
     throw new TypeError("invalid createReadModelFn: must be a function");
+  }
+  if (createWorkerStreamsFn !== undefined && typeof createWorkerStreamsFn !== "function") {
+    throw new TypeError("invalid createWorkerStreamsFn: must be a function");
   }
   const intervalMs = refreshIntervalMs === undefined ? DEFAULT_REFRESH_INTERVAL_MS : refreshIntervalMs;
   if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
@@ -1213,6 +1316,10 @@ export function createOwnerDashboardServer(config) {
     runDir, nowFn: ctx.now, ...(env !== undefined ? { env } : {}),
   });
   ctx.readModel = readModel; // 141a: /api/worker and /api/artifact read through it
+  // Batch 144: the Activity event streams of this service (the connection cap and closeAll live there).
+  ctx.streams = (createWorkerStreamsFn ?? createWorkerStreams)({
+    readModel, ...(env !== undefined ? { env } : {}),
+  });
 
   let published = null;
   let failing = false; // the latest round failed
@@ -1358,6 +1465,10 @@ export function createOwnerDashboardServer(config) {
         clearTimeout(timer);
         timer = null;
       }
+      // Batch 144: cut every open event stream NOW (each one closes its watcher and timers).
+      // They are long-lived responses: left open they would hold server.close() below forever,
+      // and their watchers and timers would keep working while the socket is still up.
+      ctx.streams.closeAll();
       closePromise = (async () => {
         if (inflight !== null) await inflight; // never rejects; publishes nothing after close
         // Let a pending listen() settle first: on failure there is no socket and

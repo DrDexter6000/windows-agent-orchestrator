@@ -484,6 +484,7 @@ function streamNode(vm, lang, sui, actions) {
 function statusText(vm, lang) {
   if (vm.freshness.kind === "ended") return t(lang, "sb.a.ended", { n: vm.total });
   if (vm.freshness.kind === "stale") return vm.freshness.sinceMs === null ? t(lang, "fresh.staleNoTime") : t(lang, "fresh.stale", { time: formatClock(vm.freshness.sinceMs) });
+  if (vm.freshness.kind === "live") return t(lang, "fresh.live");
   if (vm.freshness.kind === "polling") return t(lang, "fresh.polling");
   return t(lang, vm.problem === "unauthorized" ? "state.unauthorized" : "fresh.loading");
 }

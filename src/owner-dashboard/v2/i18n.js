@@ -28,6 +28,7 @@ const EN = {
   "fresh.polling": "Polling 5s",
   "fresh.stale": "Stale since {time}",
   "fresh.staleNoTime": "Stale",
+  "fresh.live": "Live",
   "lang.label": "Language",
 
   "state.loading": "Loading…",
@@ -376,6 +377,7 @@ const ZH = {
   "fresh.polling": "轮询 5 秒",
   "fresh.stale": "过期自 {time}",
   "fresh.staleNoTime": "数据过期",
+  "fresh.live": "实时",
   "lang.label": "语言",
 
   "state.loading": "载入中…",

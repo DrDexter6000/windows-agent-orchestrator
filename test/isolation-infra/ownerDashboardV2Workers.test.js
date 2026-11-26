@@ -2153,15 +2153,16 @@ test("G2 reading the brief (the migrated 'no .prompt' guard): /v2 may show the b
   assert.notEqual(readFileSync(join(V2, "..", "app.js"), "utf8"), readV2("app.js"));
 });
 
-test("G3 the closed request set and the single network call, with the panel's routes: detail, image, Activity page and full text", () => {
+test("G3 the closed request set and the single network call, with the panel's routes: detail, image, Activity page, full text and the event stream", () => {
   const app = codeOf("app.js");
   assert.match(app, /request\(workerPath\(runId\), token\)/, "the detail goes through the closed builder");
   assert.match(app, /requestImage\(artifactPath\(\{ runId: spec\.runId, commit: spec\.commit, fileIndex: spec\.fileIndex \}\), token\)/, "an image is bound to commit and index");
   assert.match(app, /request\(activityPath\(query\), token, activitySignal\(\)\)/, "the Activity page goes through the closed builder");
   assert.match(app, /request\(eventPath\(query\), token, activitySignal\(\)\)/, "the full text goes through the closed builder");
+  assert.match(app, /readStream\(streamPath\(query\), token, \{ signal: query\.signal, onFrame: query\.onFrame \}\)/, "the event stream goes through the closed builder too, with the feed's own cancel signal");
   assert.match(app, /request\(path, token\)/, "the list routes come from endpointsFor");
-  assert.deepEqual([...codeOf("api.js").matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)].length, 1, "ONE direct network call in api.js, shared by the JSON, image and Activity requests");
-  assert.equal([...codeOf("api.js").matchAll(/await get\(/g)].length, 2, "...used by exactly those two request functions");
+  assert.deepEqual([...codeOf("api.js").matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)].length, 1, "ONE direct network call in api.js, shared by the JSON, image, Activity and stream requests");
+  assert.equal([...codeOf("api.js").matchAll(/await get\(/g)].length, 3, "...used by exactly those three request functions");
   const all = ["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "i18n.js"].map((n) => [n, codeOf(n)]);
   for (const [name, code] of all) {
     if (name !== "api.js") assert.doesNotMatch(code, /(?<![A-Za-z0-9_$.])fetch\s*\(/, `${name}: no network call`);

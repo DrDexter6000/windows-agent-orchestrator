@@ -26,11 +26,27 @@
 //                       cleared by an empty poll); "N+" belongs only to the pause that hit the catch-up cap.
 //   buildActivityView   the rows in display order (events, folded runtime activity, gap / not-loaded
 //                       lines), what is expanded, the full-text page, and the stream status
-//                       (Polling 5s / Stale since / ended with the run's own event total).
+//                       (Live while the event stream is up / Polling 5s / Stale since / ended with the
+//                       run's own event total).
 //
 // Nothing is made up. seq numbers, ranges, gaps and counts are the server's; a missing or conflicting seq
 // keeps its mark and is never renumbered. A folded run that overlaps or touches an already shown one is
 // merged by range (never added end to end), so a sliding page window cannot inflate its count.
+//
+// The event stream (batch 144, decision 0131 section 4). When a fetchStream is injected the feed opens the
+// server's event stream right after its first page, and again after every poll while it is not up:
+//   - a rows frame IS a page after the cursor and an update frame a set of changed rows, so both go through
+//     the same merge the poll uses (same keys, folds joined, updates swapped in) — the stream only changes
+//     how a page arrives;
+//   - Live means: a frame of the stream currently open has arrived. While Live nothing is polled except the
+//     reconcile tick; when the stream drops, the 5 s poll carries the rows again;
+//   - three tries in a row that come to nothing give the stream up until the Activity tab is left and shown
+//     again or another worker is opened (a rejected token is not counted: it is not retried either);
+//   - the stream is cancelled whenever its run, filter or tab changes, and a frame is applied only by the
+//     attempt and the epoch it belongs to, so a late frame never lands on another worker (A -> B -> A);
+//   - reset: the cursor is no good, the table is replaced by a fresh newest page; end: the run is over.
+// Every twelfth tick (ACTIVITY_RECONCILE_EVERY_POLLS) the newest page is re-read: the event rows it covers
+// are swapped in (a command whose exit code never arrived), whether the stream is up or not.
 
 import { evidenceCode } from "./model.js";
 
@@ -40,6 +56,10 @@ export const ACTIVITY_FILTERS = Object.freeze(["all", "messages", "commands", "e
 export const ACTIVITY_PAGE_LIMIT = 200;
 /** How many pages one catch-up may fetch before it stops and marks the unloaded hole. */
 export const ACTIVITY_CATCHUP_PAGE_MAX = 8;
+/** How many stream tries in a row may come to nothing before the tab stays with the poll. */
+export const ACTIVITY_STREAM_FAILURES_MAX = 3;
+/** Every twelfth tick (one minute at the 5 s tick) the newest page is re-read as the truth for the rows it covers. */
+export const ACTIVITY_RECONCILE_EVERY_POLLS = 12;
 
 const isObject = (value) => value !== null && typeof value === "object";
 const validSeq = (value) => Number.isInteger(value) && value > 0;
@@ -156,7 +176,7 @@ const IDLE = Object.freeze({
   rows: [], oldestOlder: null, tailHidden: 0, olderHidden: 0,
   total: 0, terminal: false, following: true, pausedBy: null,
   pendingRows: null, newCount: 0, newCountExact: true, problem: null, staleSinceMs: null,
-  lastSeq: null, replaceWhole: false, toggled: new Map(), full: new Map(),
+  lastSeq: null, replaceWhole: false, live: false, toggled: new Map(), full: new Map(),
 });
 
 /** A missing-severity timeline row means this session cannot use the seq cursor (old / mixed archive). */
@@ -171,14 +191,22 @@ const hiddenOf = (body) => (Number.isInteger(body?.hidden?.filtered) ? body.hidd
  * @param {object} io
  * @param {(query: {runId: string, filter: string, limit: number, afterSeq?: number, beforeSeq?: number}) => Promise<{ok: boolean, body?: object, reason?: string}>} io.fetchPage
  * @param {(query: {runId: string, seq: number, part: string, page: number}) => Promise<{ok: boolean, body?: object, reason?: string}>} io.fetchFull
+ * @param {Function} [io.fetchStream] — the event stream (api.js's readStream). Without it the feed only
+ *   polls. `({ runId, filter, afterSeq, cursor?, signal, onFrame })` → `{ ok, reason? }` when the stream is
+ *   over; each frame arrives through onFrame({ id, event, data }) and `signal` ends the stream.
  * @param {() => void} [io.onChange] — called after an answer was applied (or a poll failed); not called by
  *   the synchronous operations (open / filter / expand / page requests start), so the app can render once.
  * @param {() => number} [io.now] — the clock a failed poll's "stale since" starts from
  * @param {(epoch: number) => void} [io.onEpoch] — a new epoch started: the app cancels the requests of the
  *   previous one (the answers would be dropped here anyway; this stops them on the wire too)
+ * @param {() => AbortController} [io.abortController] — a fresh AbortController for each stream try
  */
-export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, now = () => Date.now(), onEpoch = () => {} }) {
+export function createActivityFeed({
+  fetchPage, fetchFull, fetchStream = null, onChange = () => {}, now = () => Date.now(), onEpoch = () => {},
+  abortController = () => new AbortController(),
+}) {
   if (typeof fetchPage !== "function" || typeof fetchFull !== "function") throw new TypeError("createActivityFeed: fetchPage and fetchFull are required");
+  if (fetchStream !== null && typeof fetchStream !== "function") throw new TypeError("createActivityFeed: fetchStream must be a function when given");
   let state = { ...IDLE, toggled: new Map(), full: new Map() };
   let epoch = 0;
   let loadingPage = false;
@@ -186,8 +214,17 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
   let polling = false;
   let scrollRequest = false;
   let prependAnchor = null;
+  // The stream: the open try, the last frame's transport cursor, how many tries came to nothing, whether
+  // the tab is on screen (a hidden tab holds no stream).
+  let attempt = null;
+  let streamCursor = null;
+  let failures = 0;
+  let givenUp = false;
+  let visible = true;
+  let ticks = 0;
 
   const set = (patch) => { state = { ...state, ...patch }; };
+  const goLive = (live) => { if (state.live !== live) set({ live }); };
 
   /** Pause following (scrolled up / a selection / an expanded row). False when already paused. */
   function pause(reason) {
@@ -363,19 +400,203 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
     });
   }
 
+  // ===== the reconcile tick and the stream =====
+
+  /**
+   * A newest page taken as the truth. When it does not join the loaded table — another file, a shorter one, a
+   * transcript without event numbers — it replaces the table. When it joins, only the event rows it already
+   * shows are swapped (a command whose exit code arrived late); folded runs, holes, the cursor and anything
+   * newer than the cursor are left alone: rows the table does not have yet arrive by the stream or the poll,
+   * and moving the cursor here would skip them. After a reset the page always replaces the table: whatever
+   * was shown came from a stream position the server no longer stands behind. While paused the visible rows
+   * do not move: only the copy that resume will show is replaced.
+   */
+  function applySnapshot(latest, { replace = false } = {}) {
+    const units = applyUpdates(unitsOf(latest), updatesOf(latest));
+    const from = pageFrom(latest);
+    const joins = replace !== true && state.replaceWhole !== true && state.lastSeq !== null && from !== null && from <= state.lastSeq + 1;
+    if (joins) {
+      const cursor = state.lastSeq;
+      const fresh = new Map(units.filter((unit) => unit.row === "event" && unit.seqState === "ok" && unit.seq <= cursor).map((unit) => [unit.key, unit]));
+      const swap = (rows) => rows.map((unit) => fresh.get(unit.key) ?? unit);
+      if (state.pendingRows === null) set({ rows: swap(state.rows), ...statusOf(latest) });
+      else set({ pendingRows: swap(state.pendingRows), ...statusOf(latest) });
+      return;
+    }
+    const replaceWhole = hasUnnumbered(units);
+    const common = { replaceWhole, lastSeq: replaceWhole ? null : lastSeqOf(latest, units), ...statusOf(latest) };
+    if (state.following) {
+      set({
+        phase: "ready", rows: mergeUnits(units), ...common,
+        oldestOlder: isObject(latest.older) ? latest.older : null, olderHidden: 0,
+        tailHidden: hiddenOf(latest), pendingRows: null, newCount: 0, newCountExact: true,
+      });
+      scrollRequest = true;
+    } else {
+      const pendingRows = mergeUnits(units);
+      set({
+        ...common,
+        oldestOlder: isObject(latest.older) ? latest.older : null, olderHidden: 0,
+        tailHidden: hiddenOf(latest), pendingRows,
+        newCount: Math.max(0, totalWeight(pendingRows) - totalWeight(state.rows)), newCountExact: true,
+      });
+    }
+  }
+
+  /** The reconcile tick's read: the newest page, no cursor. */
+  async function collectSnapshot(mine) {
+    const first = await fetchPage(pageQuery());
+    if (mine !== epoch) return null;
+    if (first.ok !== true || !pageOk(first.body) || !hasData(first.body)) throw new Error("newest page");
+    return { snapshot: true, latest: first.body };
+  }
+
+  /** Let go of the open stream (it ended, the tab was left, the worker changed). */
+  function stopStream() {
+    if (attempt !== null) {
+      const old = attempt;
+      attempt = null;
+      old.controller.abort();
+    }
+    goLive(false);
+  }
+
+  /** A new epoch: nothing of the old stream survives — not its cursor, not its count of failed tries. */
+  function dropStream() {
+    stopStream();
+    streamCursor = null;
+    failures = 0;
+    givenUp = false;
+  }
+
+  /** Open the stream for the open worker, from the seq cursor or from the last frame's cursor. */
+  function tryStream() {
+    if (fetchStream === null || attempt !== null || state.live || givenUp || !visible) return false;
+    // No cursor, no stream: an old transcript without event numbers is read page by page.
+    if (state.runId === null || state.phase !== "ready" || state.terminal || state.replaceWhole || state.lastSeq === null) return false;
+    const mine = epoch;
+    const current = { controller: abortController() };
+    attempt = current;
+    // Only the current try of the current epoch applies a frame: anything older is dropped where it stands.
+    const alive = () => attempt === current && mine === epoch;
+    Promise.resolve()
+      .then(() => fetchStream({
+        runId: state.runId,
+        filter: state.filter,
+        afterSeq: state.lastSeq,
+        ...(streamCursor === null ? {} : { cursor: streamCursor }),
+        signal: current.controller.signal,
+        onFrame: (frame) => { if (alive()) onStreamFrame(frame); },
+      }))
+      .then((result) => { if (alive()) streamOver(result); }, () => { if (alive()) streamOver({ ok: false, reason: "network" }); });
+    return true;
+  }
+
+  /** The stream ended without a reset or an end frame: dropped, refused, unreadable, or silent for too long. */
+  function streamOver(result) {
+    attempt = null;
+    goLive(false);
+    const reason = isObject(result) && result.ok !== true && typeof result.reason === "string" ? result.reason : "network";
+    if (reason === "aborted") return; // the feed itself ended it
+    if (reason === "unauthorized") {
+      givenUp = true; // a rejected token is not a dropped stream: nothing to count, and nothing to retry
+    } else if (++failures >= ACTIVITY_STREAM_FAILURES_MAX) {
+      givenUp = true; // three in a row: stay with the poll until the tab is shown again or another worker opens
+    }
+    onChange();
+  }
+
+  /** A rows frame is a page after the cursor: it goes through the same merge a poll goes through. */
+  function applyStreamPage(body) {
+    const units = unitsOf(body);
+    if (hasUnnumbered(units)) {
+      // An old / mixed archive grew an unnumbered tail: there is no cursor to continue from any more.
+      stopStream();
+      set({ replaceWhole: true });
+      poll();
+      return;
+    }
+    const from = pageFrom(body);
+    const hole = from !== null && state.lastSeq !== null && from > state.lastSeq + 1;
+    const page = {
+      units: hole ? [unloadedUnit(state.lastSeq + 1, from - 1), ...units] : units,
+      latest: body,
+      updates: updatesOf(body),
+      hiddenFiltered: hiddenOf(body),
+    };
+    if (state.following) applyFollowing(page);
+    else applyPaused(page);
+  }
+
+  /** The cursor is no good any more: the table is replaced by a fresh newest page; the next tick reconnects without a cursor. */
+  function resync() {
+    stopStream();
+    streamCursor = null;
+    const mine = epoch;
+    Promise.resolve()
+      .then(() => fetchPage(pageQuery()))
+      .then((result) => result, () => ({ ok: false, reason: "network" }))
+      .then((result) => {
+        if (mine !== epoch) return;
+        if (result.ok === true && pageOk(result.body) && hasData(result.body)) applySnapshot(result.body, { replace: true });
+        else set({ problem: result.ok === false ? result.reason : "server", staleSinceMs: state.staleSinceMs ?? now() });
+        onChange();
+      });
+  }
+
+  function onStreamFrame(frame) {
+    // Another run's frame, or a frame whose data is not JSON, is dropped: it is not this stream's.
+    if (!isObject(frame) || typeof frame.event !== "string" || !isObject(frame.data) || frame.data.runId !== state.runId) return;
+    const body = frame.data;
+    if (frame.event === "rows") {
+      if (!pageOk(body)) return;
+      goLive(true);
+      failures = 0;
+      streamCursor = typeof frame.id === "string" ? frame.id : null;
+      applyStreamPage(body);
+    } else if (frame.event === "update") {
+      if (!Array.isArray(body.updates)) return;
+      goLive(true);
+      failures = 0;
+      const updates = unitsFromRows(body.updates);
+      set({
+        rows: applyUpdates(state.rows, updates),
+        ...(state.pendingRows === null ? {} : { pendingRows: applyUpdates(state.pendingRows, updates) }),
+      });
+    } else if (frame.event === "reset") {
+      resync();
+      return;
+    } else if (frame.event === "end") {
+      set({ terminal: true, total: Number.isInteger(body.total) ? body.total : state.total, problem: null, staleSinceMs: null });
+      stopStream(); // the run is over: the last rows came before this frame, and nothing reconnects
+    } else {
+      return; // a frame of a kind this page does not know
+    }
+    onChange();
+  }
+
   /** One poll: the newest page after the cursor, then as many older pages as it takes to cover it. */
   function poll() {
     if (state.runId === null || state.phase === "idle" || loadingPage || loadingOlder || polling) return Promise.resolve(false);
     if (state.terminal) return Promise.resolve(false);
     polling = true;
     const mine = epoch;
+    ticks += 1;
+    const reconcile = ticks % ACTIVITY_RECONCILE_EVERY_POLLS === 0;
     return Promise.resolve()
-      .then(() => collectAfter(mine))
+      .then(() => (state.live && !reconcile ? null : reconcile ? collectSnapshot(mine) : collectAfter(mine)))
       .then((collected) => {
-        if (collected === null) return false;
+        if (collected === null) return false; // an older epoch, or Live with nothing to do this tick
+        if (collected.snapshot === true) {
+          applySnapshot(collected.latest);
+          if (state.terminal) stopStream();
+          onChange();
+          return true;
+        }
         if (state.phase !== "ready") applyInitial(collected.latest);
         else if (state.following) applyFollowing(collected);
         else applyPaused(collected);
+        if (state.terminal) stopStream(); // the poll saw the end first: the stream is let go, it will not say it twice
         onChange();
         return true;
       })
@@ -386,7 +607,11 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
         }
         return false;
       })
-      .finally(() => { polling = false; });
+      .finally(() => {
+        polling = false;
+        // The poll carried the rows; now is the time for the next try of the stream.
+        if (mine === epoch && !state.terminal) tryStream();
+      });
   }
 
   /** Start a fresh initial load of the current run / filter (open, filter change, reload). */
@@ -398,8 +623,12 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
       .then((result) => result, () => ({ ok: false, reason: "network" }))
       .then((result) => {
         if (mine !== epoch) return;
-        if (result.ok === true && pageOk(result.body) && hasData(result.body)) applyInitial(result.body);
-        else set({ phase: "error", problem: result.ok === false ? result.reason : "server", staleSinceMs: state.staleSinceMs ?? now() });
+        if (result.ok === true && pageOk(result.body) && hasData(result.body)) {
+          applyInitial(result.body);
+          tryStream(); // the first page is in hand: open the stream from its cursor
+        } else {
+          set({ phase: "error", problem: result.ok === false ? result.reason : "server", staleSinceMs: state.staleSinceMs ?? now() });
+        }
         onChange();
       })
       .finally(() => { if (mine === epoch) loadingPage = false; });
@@ -411,6 +640,7 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
       if (state.runId === runId && state.phase !== "idle") return false;
       epoch += 1;
       onEpoch(epoch);
+      dropStream(); // the old worker's stream is cancelled here; a late frame of it has no epoch to land in
       const mine = epoch;
       state = { ...IDLE, runId, epoch: mine, phase: "loading", toggled: new Map(), full: new Map() };
       loadInitial(mine);
@@ -422,6 +652,7 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
       if (state.runId === null) return false;
       epoch += 1;
       onEpoch(epoch);
+      dropStream();
       state = { ...IDLE, epoch, toggled: new Map(), full: new Map() };
       loadingPage = false;
       loadingOlder = false;
@@ -437,6 +668,7 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
       if (state.runId === null) return false;
       epoch += 1;
       onEpoch(epoch);
+      dropStream(); // the stream was read with the old filter
       const mine = epoch;
       state = { ...IDLE, runId: state.runId, filter, epoch: mine, phase: "loading", toggled: new Map(), full: new Map() };
       loadInitial(mine);
@@ -448,10 +680,29 @@ export function createActivityFeed({ fetchPage, fetchFull, onChange = () => {}, 
       if (state.runId === null) return false;
       epoch += 1;
       onEpoch(epoch);
+      dropStream();
       const mine = epoch;
       state = { ...IDLE, runId: state.runId, filter: state.filter, epoch: mine, phase: "loading", toggled: new Map(), full: new Map() };
       scrollRequest = false;
       loadInitial(mine);
+      return true;
+    },
+
+    /**
+     * The Activity tab was shown again or left. Left: the stream is cancelled at once (a hidden tab holds
+     * no connection) and the rows wait for the tab. Shown again: the count of failed tries starts over, so
+     * the stream is tried again. Returns true when the visibility changed.
+     */
+    setVisible(shown) {
+      if (shown === visible) return false;
+      visible = shown;
+      if (shown) {
+        failures = 0;
+        givenUp = false;
+        tryStream();
+      } else {
+        stopStream();
+      }
       return true;
     },
 
@@ -628,13 +879,17 @@ export function buildActivityView(state) {
       full: state.full.get(unit.key) ?? null,
     };
   });
+  // The stream status: Stale since a failed read, Ended with the run's own total, Loading, Live while a
+  // stream is up, else Polling 5s.
   const freshness = state.problem !== null
     ? { kind: "stale", sinceMs: state.staleSinceMs }
     : state.terminal
       ? { kind: "ended", sinceMs: null }
       : state.phase === "loading" || state.phase === "idle"
         ? { kind: "loading", sinceMs: null }
-        : { kind: "polling", sinceMs: null };
+        : state.live === true
+          ? { kind: "live", sinceMs: null }
+          : { kind: "polling", sinceMs: null };
   return {
     runId: state.runId,
     phase: state.phase,

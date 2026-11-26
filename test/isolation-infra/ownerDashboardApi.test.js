@@ -37,6 +37,9 @@
 //     只许 GET、多余 / 重复 / 缺失 / 形状不对 400、不可用 404（含 seq 不存在、part 不适用、页号越界）、
 //     首次发布前 activity 200 loading / event 404、内部失败固定 500，以及响应里没有仓库 / 工作树路径
 //     与未脱敏的秘密（注入已知秘密值验证）；内容投影的用例在 test/application/ownerWorkerActivity.test.js
+//   - 第 144 批：/api/worker/stream 的路由守卫（SW 开头的用例）——逐请求验 bearer、只许 GET、参数闭集
+//     （runId 必填 + afterSeq / cursor / filter）、判定顺序、不可用 404、连接总数到上限 503、内部失败固定
+//     500；流本身（帧、游标、读转录、断流）在 test/isolation-infra/ownerDashboardV2Stream.test.js
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -1557,6 +1560,287 @@ test("AW 与 /api/worker 同一套：401 / 405 / 400 / 404 的错误体逐字相
   assert.equal((await drive(s.handler, { url: "/api/runs?limit=1", headers: auth(s) })).status, 200);
   assert.ok(AW_ROUTES.length === 2);
   await s.close();
+});
+
+// =====================================================================
+// 第 144 批（决定 0131 §4）：/api/worker/stream 的路由守卫
+//   流本身——帧、传输游标、读转录、对账、积压上限、close() 先断流——在
+//   test/isolation-infra/ownerDashboardV2Stream.test.js（真实连接）。这里只测路由这一层：
+//   鉴权、方法、参数闭集、判定顺序、不可用 404、连接总数到上限 503、内部失败固定 500、固定错误体。
+//   假 req/res 走得到的是 JSON 应答那几条路；进流那一头的响应头由路由交给流，这里用桩接住来核对。
+// =====================================================================
+const STREAM = "/api/worker/stream";
+const GOOD_STREAM = `${STREAM}?runId=${GUARD_RUN}`;
+/** 一个形状合法的传输游标（六段：版本、代际、文件标签、偏移、事件位置、哈希链）。 */
+const GOOD_CURSOR = "1.0123456789abcdef.fedcba9876543210.1799.3t.0f1e2d3c4b5a6978";
+
+/** 能定位转录的读模型：locateRunTranscript 只认 run_live（throws 让它抛错；locate 为 null / 不给就是定位不到）。 */
+function streamModel({ events = guardEvents(), locate = "bytes", throws = null } = {}) {
+  const model = { ...fakeReadModel().model };
+  if (throws !== null) {
+    model.locateRunTranscript = async () => { throw throws; };
+  } else if (locate === "bytes") {
+    const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+    model.locateRunTranscript = async (runId) => (runId === GUARD_RUN ? { path: `${RUN_DIR}\\projects\\alpha\\${runId}.jsonl`, bytes, identity: "f".repeat(64) } : null);
+  } else if (locate === null) {
+    model.locateRunTranscript = async () => null;
+  }
+  return model;
+}
+/**
+ * 事件的桩：记下路由交进来的东西。full = 连接总数到上限；throws = 开流时抛错（响应头还没发）。
+ */
+function streamStub({ full = false, throws = null, opened = { ok: false, reason: "not_found" } } = {}) {
+  const calls = [];
+  let closed = 0;
+  return {
+    calls,
+    get closed() { return closed; },
+    hub: {
+      size: () => 0,
+      full: () => full,
+      closeAll() { closed += 1; },
+      open: async (input) => {
+        calls.push(input);
+        if (throws !== null) throw throws;
+        return opened;
+      },
+    },
+  };
+}
+async function streamServer(t, { model, stub, refresh = true } = {}) {
+  const s = createOwnerDashboardServer({
+    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: GUARD_ENV,
+    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn,
+    nowFn: () => NOW,
+    createReadModelFn: () => model,
+    ...(stub === undefined ? {} : { createWorkerStreamsFn: () => stub.hub }),
+  });
+  if (refresh) assert.equal(await s.refreshNow(), "ready");
+  t.after(() => s.close());
+  return s;
+}
+
+test("SW AUTH: 流逐请求验 bearer——无令牌 / 错令牌 401，固定错误体，先于参数与 loading；令牌不出现在应答里", async (t) => {
+  const s = await streamServer(t, { model: streamModel(), refresh: false }); // 还没发布：loading 也不能被无令牌的调用看到
+  for (const url of [GOOD_STREAM, STREAM, `${STREAM}?x=1`]) {
+    const bare = await drive(s.handler, { url });
+    assert.equal(bare.status, 401, `${url} 无令牌 → 401`);
+    assert.deepEqual(jsonOf(bare), { error: "unauthorized" });
+    assertSafeHeaders(bare);
+    for (const headers of [
+      { authorization: "Bearer " + "0".repeat(64) }, { authorization: s.token }, { authorization: "bearer " + s.token }, { authorization: "Bearer" },
+    ]) {
+      const wrong = await drive(s.handler, { url, headers });
+      assert.equal(wrong.status, 401, `${url} 错令牌 → 401`);
+      assert.deepEqual(jsonOf(wrong), { error: "unauthorized" });
+      assert.ok(!wrong.body.includes(s.token));
+    }
+  }
+  // 鉴权先于参数：无令牌时坏参数也是 401，不是 400。
+  const badFirst = await drive(s.handler, { url: `${GOOD_STREAM}&x=1` });
+  assert.equal(badFirst.status, 401);
+});
+
+test("SW METHOD: 流只许 GET——其余方法 405 + Allow: GET，OPTIONS 不开 CORS", async (t) => {
+  const s = await streamServer(t, { model: streamModel() });
+  for (const method of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+    const r = await drive(s.handler, { method, url: GOOD_STREAM, headers: auth(s) });
+    assert.equal(r.status, 405, `${method} → 405`);
+    assert.equal(r.headers.allow, "GET");
+    assert.deepEqual(jsonOf(r), { error: "method_not_allowed" });
+    assertSafeHeaders(r);
+  }
+});
+
+test("SW QUERY: /api/worker/stream 只认 runId（必填）+ afterSeq + cursor + filter——多余键、重复键、缺失、形状不对都 400，固定错误体，不回显输入", async (t) => {
+  const s = await streamServer(t, { model: streamModel() });
+  const bad = [
+    // 缺 runId / 形状不对
+    STREAM, `${STREAM}?runId=`, `${STREAM}?runId=bad/path`, `${STREAM}?runId=-dash`, `${STREAM}?runId=../x`, `${STREAM}?runId=a%00b`,
+    // 多余的键：翻页与页大小的键是 /api/worker/activity 的，流不收；路径、项目、别的游标也一律不收
+    `${GOOD_STREAM}&x=1`, `${GOOD_STREAM}&beforeSeq=3`, `${GOOD_STREAM}&limit=5`, `${GOOD_STREAM}&runDir=${encodeURIComponent(RUN_DIR)}`,
+    `${GOOD_STREAM}&path=x`, `${GOOD_STREAM}&project=alpha`, `${GOOD_STREAM}&seq=2`, `${GOOD_STREAM}&page=1`,
+    // 重复的键
+    `${GOOD_STREAM}&runId=${GUARD_RUN}`, `${GOOD_STREAM}&afterSeq=5&afterSeq=5`, `${GOOD_STREAM}&cursor=${GOOD_CURSOR}&cursor=${GOOD_CURSOR}`,
+    `${GOOD_STREAM}&filter=all&filter=all`,
+    // afterSeq / filter 形状不对
+    ...["-1", "01", "1.5", "abc", "", "1e2", "+1", "0x1", " 1", "1234567890", "1000000000"].map((v) => `${GOOD_STREAM}&afterSeq=${encodeURIComponent(v)}`),
+    ...["ALL", "All", "all,messages", "tool", "", "command", " all", "messages ", "nope"].map((v) => `${GOOD_STREAM}&filter=${encodeURIComponent(v)}`),
+    // cursor 形状不对：字符、段数、版本、大小写、长度、空
+    ...[
+      "", "abc", "a b", "a/b", "a+b", "a=b", `${GOOD_CURSOR}.x`, `${GOOD_CURSOR.slice(0, -1)}`,
+      `2.${GOOD_CURSOR.slice(2)}`, `1.${GOOD_CURSOR.slice(2).toUpperCase()}`, "1..fedcba9876543210.1799.3t.0f1e2d3c4b5a6978",
+      `1.0123456789abcdef.fedcba9876543210.1799.3t.0f1e2d3c4b5a69`, `1.0123456789abcdef.fedcba9876543210.179${"9".repeat(12)}.3t.0f1e2d3c4b5a6978`,
+      "1.0123456789abcdef.fedcba9876543210.1799.3t.0f1e2d3c4b5a6978\n", ` ${GOOD_CURSOR}`,
+    ].map((v) => `${GOOD_STREAM}&cursor=${encodeURIComponent(v)}`),
+  ];
+  for (const url of bad) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.equal(r.status, 400, `${url} → 400`);
+    assert.deepEqual(jsonOf(r), { error: "bad_request" });
+    assertSafeHeaders(r);
+  }
+  // 形状合法的请求过了参数这一层：这里读模型定位不到（没有 run_live 的定位入口之外的情形）或定位得到，
+  // 都不再是 400——由后面几层决定。
+  const ok = [
+    GOOD_STREAM, `${GOOD_STREAM}&afterSeq=0`, `${GOOD_STREAM}&afterSeq=999999999`, `${GOOD_STREAM}&afterSeq=3`,
+    `${GOOD_STREAM}&cursor=${GOOD_CURSOR}`, `${GOOD_STREAM}&cursor=${GOOD_CURSOR}&afterSeq=3`,
+    ...["all", "messages", "commands", "errors"].map((f) => `${GOOD_STREAM}&filter=${f}`),
+    `${GOOD_STREAM}&afterSeq=3&cursor=${GOOD_CURSOR}&filter=errors`,
+  ];
+  for (const url of ok) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.notEqual(r.status, 400, `${url} 形状合法`);
+    assertSafeHeaders(r);
+  }
+});
+
+test("SW QUERY 顺序：鉴权 → 参数 → 首次发布 → 运行可用——未发布时坏参数仍是 400，形状合法的是固定 404", async (t) => {
+  const s = await streamServer(t, { model: streamModel(), refresh: false });
+  const bad = await drive(s.handler, { url: `${GOOD_STREAM}&x=1`, headers: auth(s) });
+  assert.deepEqual([bad.status, jsonOf(bad)], [400, { error: "bad_request" }], "参数校验先于首次发布");
+  const good = await drive(s.handler, { url: GOOD_STREAM, headers: auth(s) });
+  assert.deepEqual([good.status, jsonOf(good)], [404, { error: "not_found" }], "还没发布：与 /api/worker/event 一样是固定 404，不是一条流");
+});
+
+test("SW 不可用 → 固定 404，不回显 runId：未知运行、不在快照里的运行、定位不到、定位时抛错、读模型没有定位入口", async (t) => {
+  // 读模型根本没有 locateRunTranscript（141c 批的假读模型）：定位不到的运行。
+  const bare = await streamServer(t, { model: guardModel() });
+  for (const url of [GOOD_STREAM, `${STREAM}?runId=run_nobody`, `${STREAM}?runId=run_fail`]) {
+    const r = await drive(bare.handler, { url, headers: auth(bare) });
+    assert.deepEqual([r.status, jsonOf(r)], [404, { error: "not_found" }], url);
+    assertSafeHeaders(r);
+    assert.ok(!r.body.includes("run_"), "404 体里没有 runId");
+  }
+  // 不在快照里的运行：有定位入口也是 404，而且不会去定位（先看快照）；在快照里、可用的运行才去定位。
+  const spy = streamModel();
+  let located = 0;
+  spy.locateRunTranscript = async (runId) => { located += 1; return null; };
+  const s = await streamServer(t, { model: spy });
+  for (const url of [`${STREAM}?runId=run_nobody`, `${STREAM}?runId=run_never_seen`]) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.deepEqual([r.status, jsonOf(r)], [404, { error: "not_found" }], url);
+    assertSafeHeaders(r);
+  }
+  assert.equal(located, 0, "不在快照里的运行不去定位");
+  // 在快照里、可用（run_fail、run_wait）：去定位，定位不到 → 固定 404。
+  for (const url of [`${STREAM}?runId=run_fail`, `${STREAM}?runId=run_wait`]) {
+    const r = await drive(s.handler, { url, headers: auth(s) });
+    assert.deepEqual([r.status, jsonOf(r)], [404, { error: "not_found" }], url);
+  }
+  assert.equal(located, 2, "快照里可用的运行才去定位");
+  // 定位得到 null：交给流去答固定 404。
+  const none = await streamServer(t, { model: streamModel({ locate: null }) });
+  const r = await drive(none.handler, { url: GOOD_STREAM, headers: auth(none) });
+  assert.deepEqual([r.status, jsonOf(r)], [404, { error: "not_found" }]);
+
+  // 在快照里、但读不出（上一轮刷新就没读出来）：不交给流去定位，先按快照回固定 404——与
+  // /api/worker/activity 同一个口径（那边等下一轮刷新把它标成可用才应答）。
+  const withUnreadable = () => {
+    const base = fixtureSnapshot();
+    return { ...base, runs: [...base.runs, runRow({ runId: "run_unreadable", availability: "unreadable" })] };
+  };
+  const stub = streamStub({ opened: { ok: false, reason: "not_found" } });
+  const cautious = await streamServer(t, { model: fakeReadModel({ snapshotFactory: withUnreadable }).model, stub });
+  const refused = await drive(cautious.handler, { url: `${STREAM}?runId=run_unreadable`, headers: auth(cautious) });
+  assert.deepEqual([refused.status, jsonOf(refused)], [404, { error: "not_found" }]);
+  assertSafeHeaders(refused);
+  assert.equal(stub.calls.length, 0, "快照里读不出的运行不交给流");
+  // 同一个快照里可用的运行照常交给流（这里由流来答）。
+  const usable = await drive(cautious.handler, { url: GOOD_STREAM, headers: auth(cautious) });
+  assert.deepEqual([usable.status, jsonOf(usable), stub.calls.map((call) => call.runId)], [404, { error: "not_found" }, ["run_live"]]);
+});
+
+test("SW 连接总数到上限 → 503 + 固定错误体（在定位之前就挡）；路由把响应头与解析后的参数原样交给流", async (t) => {
+  const full = streamStub({ full: true });
+  const s = await streamServer(t, { model: streamModel(), stub: full });
+  const refused = await drive(s.handler, { url: `${GOOD_STREAM}&afterSeq=3&cursor=${GOOD_CURSOR}&filter=errors`, headers: auth(s) });
+  assert.deepEqual([refused.status, jsonOf(refused)], [503, { error: "unavailable" }]);
+  assertSafeHeaders(refused);
+  assert.equal(full.calls.length, 0, "满了就不去开流");
+
+  // 没满：鉴权、参数、快照都过了，定位交给流；路由把自己不写的响应头一并交过去。
+  const open = streamStub({ opened: { ok: false, reason: "not_found" } });
+  const s2 = await streamServer(t, { model: streamModel(), stub: open });
+  const r = await drive(s2.handler, { url: `${GOOD_STREAM}&afterSeq=3&cursor=${GOOD_CURSOR}&filter=errors`, headers: auth(s2) });
+  assert.deepEqual([r.status, jsonOf(r)], [404, { error: "not_found" }], "流说定位不到：路由答固定 404");
+  assert.equal(open.calls.length, 1);
+  const handed = open.calls[0];
+  assert.deepEqual(
+    Object.keys(handed).sort(),
+    ["afterSeq", "cursor", "filter", "headers", "res", "runId"],
+    "路由只交这几样：没有令牌、没有读模型、没有服务端路径",
+  );
+  assert.deepEqual([handed.runId, handed.afterSeq, handed.cursor, handed.filter], [GUARD_RUN, 3, GOOD_CURSOR, "errors"], "参数原样（afterSeq 已是数）");
+  const { res: _res, headers, ...rest } = handed;
+  assert.ok(!JSON.stringify(rest).includes(s2.token), "令牌不进流的参数");
+  assert.equal(headers["content-type"], "text/event-stream");
+  assert.equal(headers["cache-control"], "no-store");
+  assert.equal(headers["x-content-type-options"], "nosniff");
+  assert.equal(headers["referrer-policy"], "no-referrer");
+  assert.match(headers["content-security-policy"], /default-src 'self'/);
+  assert.ok(!("access-control-allow-origin" in headers), "不开 CORS");
+
+  // 流说客户端在读转录的当口走了：没有人可应答，路由什么都不写。
+  const gone = streamStub({ opened: { ok: false, reason: "gone" } });
+  const s3 = await streamServer(t, { model: streamModel(), stub: gone });
+  const silent = await drive(s3.handler, { url: GOOD_STREAM, headers: auth(s3) });
+  assert.deepEqual([silent.status, silent.body], [200, ""], "nothing is written");
+  // 流已经接手（ok）：响应头是它写的，路由不再写任何东西。
+  const took = streamStub({ opened: { ok: true } });
+  const s4 = await streamServer(t, { model: streamModel(), stub: took });
+  const taken = await drive(s4.handler, { url: GOOD_STREAM, headers: auth(s4) });
+  assert.deepEqual([taken.status, taken.body, took.calls.length], [200, "", 1]);
+});
+
+test("SW 内部失败 → 固定 500，错误原文（含路径与秘密）不出接口", async (t) => {
+  const boom = new Error(`EACCES: permission denied, open '${RUN_DIR}\\projects\\alpha\\run_live.jsonl' ${GUARD_SECRET}`);
+  const s = await streamServer(t, { model: streamModel(), stub: streamStub({ throws: boom }) });
+  const r = await drive(s.handler, { url: GOOD_STREAM, headers: auth(s) });
+  assert.deepEqual([r.status, jsonOf(r)], [500, { error: "internal" }]);
+  assert.ok(!r.body.includes("EACCES") && !r.body.includes(RUN_DIR) && !r.body.includes(GUARD_SECRET));
+  assertSafeHeaders(r);
+  // 定位的时候抛错：读模型自己吞成 null（不是 500，是固定 404）。
+  const swallow = await streamServer(t, { model: streamModel({ throws: boom }) });
+  const r2 = await drive(swallow.handler, { url: GOOD_STREAM, headers: auth(swallow) });
+  assert.deepEqual([r2.status, jsonOf(r2)], [404, { error: "not_found" }]);
+});
+
+test("SW close() 先断流：关服务时路由交出去的流被全断开；createWorkerStreamsFn 不是函数时构造就拒绝", async (t) => {
+  const stub = streamStub();
+  const s = await streamServer(t, { model: streamModel(), stub: stub });
+  assert.equal(stub.closed, 0);
+  await s.close();
+  assert.equal(stub.closed, 1, "close() 断开全部流连接（先于关 server）");
+  // 不注入工厂：用真的流（真实连接下的断流见 ownerDashboardV2Stream.test.js E6）。
+  assert.throws(() => createOwnerDashboardServer({
+    runDir: RUN_DIR, workspaceRoot: WORKSPACE_ROOT, knownAgentIds: [], env: {},
+    getOwnerRunsFn: unusedRunsFn, getOwnerActivityFn: unusedActivityFn, nowFn: () => NOW,
+    createReadModelFn: () => fakeReadModel().model, createWorkerStreamsFn: "not a function",
+  }), TypeError);
+});
+
+test("SW 与别的接口同一套错误体；紧邻的路径是固定 404；别的接口不受影响", async (t) => {
+  const s = await streamServer(t, {
+    model: { ...streamModel(), readRunEvents: async (runId) => (runId === GUARD_RUN ? guardEvents() : null) },
+  });
+  const bodies = {
+    401: (await drive(s.handler, { url: GOOD_STREAM })).body,
+    405: (await drive(s.handler, { method: "POST", url: GOOD_STREAM, headers: auth(s) })).body,
+    400: (await drive(s.handler, { url: `${GOOD_STREAM}&x=1`, headers: auth(s) })).body,
+    404: (await drive(s.handler, { url: `${STREAM}?runId=run_nobody`, headers: auth(s) })).body,
+  };
+  assert.deepEqual(bodies, {
+    401: '{"error":"unauthorized"}', 405: '{"error":"method_not_allowed"}', 400: '{"error":"bad_request"}', 404: '{"error":"not_found"}',
+  });
+  const worker404 = (await drive(s.handler, { url: "/api/worker?runId=run_nobody", headers: auth(s) })).body;
+  assert.equal(bodies[404], worker404, "与 /api/worker 的 404 逐字相同");
+  for (const url of [`${STREAM}/`, `${STREAM}/x`, `${STREAM}s`, "/api/Worker/stream", "/api/worker/Stream", "/api/worker/streaming"]) {
+    assert.equal((await drive(s.handler, { url, headers: auth(s) })).status, 404, url);
+  }
+  assert.equal((await drive(s.handler, { url: GOOD_ACTIVITY, headers: auth(s) })).status, 200, "紧邻的 activity 照常");
+  assert.equal((await drive(s.handler, { url: "/api/workers", headers: auth(s) })).status, 200);
 });
 
 test("TOKEN: 令牌不出现在三个接口任何状态的响应体或响应头里", async () => {

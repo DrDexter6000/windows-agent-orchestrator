@@ -82,6 +82,7 @@
       "isolation-infra/ownerDashboardServer.test.js",
       "isolation-infra/ownerDashboardV2.test.js",
       "isolation-infra/ownerDashboardV2Activity.test.js",
+      "isolation-infra/ownerDashboardV2Stream.test.js",
       "isolation-infra/ownerDashboardV2Workers.test.js",
       "isolation-infra/ownerDashboardWeb.test.js",
       "isolation-infra/panelReadiness.test.js",
