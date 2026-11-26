@@ -1671,6 +1671,90 @@ test("路径折叠：普通文字不被误折（目录名、A/B、分数、and/o
     assert.equal(foldAbsolutePaths(title), title, `foldAbsolutePaths 原样不动：${title}`);
   }
 });
+test("路径折叠（第 141c 批修正一）：JSON 值、数组元素里的绝对路径（长命令也折），小写变量赋值里的 MSYS 盘符路径都折成 …/末段", () => {
+  const fold = foldAbsolutePaths;
+  // JSON 值：`:"` 后面的路径。短的本来就折；命令很长、收尾引号在 1000 字符之外时，旧规则找不到收尾引号，也不认 `:"` 前导。
+  assert.equal(fold('{"command":"/c/Users/x/bin/node.exe -e foo","cwd":"/d/projects/x"}'), '{"command":"…/node.exe -e foo","cwd":"…/x"}');
+  const tail = "a ".repeat(700);
+  assert.equal(fold(`{"command":"/c/Users/x/bin/node.exe ${tail}"}`), `{"command":"…/node.exe ${tail}"}`, "收尾引号在 1000 字符之外：折路径本身，命令其余部分原样");
+  assert.equal(fold(`{"command":"/home/x/bin/node ${tail}","k":"v"}`), `{"command":"…/node ${tail}","k":"v"}`, "POSIX 路径同理");
+  // 数组元素与 `=[`、`:`、`,` 后面紧跟的引号。
+  assert.equal(fold('["a","/home/x/y"]'), '["a","…/y"]');
+  assert.equal(fold('{"argv":["--out=","/opt/tool/run.sh"]}'), '{"argv":["--out=","…/run.sh"]}');
+  assert.equal(fold('x=["/opt/data/a.txt"]'), 'x=["…/a.txt"]');
+  assert.equal(fold('a:"/b/c.js"'), 'a:"…/c.js"', "MSYS 盘符形状 /b/… 也是文件系统根");
+  assert.equal(fold("p=\"/var/data/a.txt\""), 'p="…/a.txt"');
+  // 小写（任意大小写）变量赋值里的 MSYS 盘符路径：名字前面是行首、空白、`;`、`&`、`(`。
+  assert.equal(fold("d=/c/Users/x/AppData/Local/Temp/a"), "d=…/a");
+  assert.equal(fold("cd /tmp; d=/c/Users/x/AppData/Local/Temp/a && run"), "cd …/tmp; d=…/a && run");
+  assert.equal(fold("make&out=/d/build/x/y.o"), "make&out=…/y.o");
+  assert.equal(fold("(src=/d/proj/x/y)"), "(src=…/y)");
+  assert.equal(fold("Dir_1=/e/data/z"), "Dir_1=…/z", "名字大小写不限");
+  assert.equal(fold("CWD=/d/projects/x --cwd=/d/p/y"), "CWD=…/x --cwd=…/y", "原有的全大写与旗标写法不变");
+});
+
+test("路径折叠（第 141c 批修正二）：完整 URL 里的任何部分、JSON 里的路由字符串都不折；:\" ,\" =\" [\" 前导只认文件系统根形状", () => {
+  const fold = foldAbsolutePaths;
+  // 完整 URL（scheme:// 起、到空白或收尾引号为止）：查询串里的 next=/d/x 不是路径。
+  const urls = [
+    "https://x/y?mode=1&next=/d/x",
+    "https://x/y?a=1;next=/d/x",
+    "see https://a.b/c;next=/d/x/y now",
+    '{"u":"https://h/p?next=/d/x&k=/c/y","k":1}',
+    "ftp://h/a?x=/home/u/f 与 http://h/p?p=/c/Users/x",
+    "(https://x/y?next=/d/x)",
+  ];
+  for (const text of urls) assert.equal(fold(text), text, `URL 原样不动：${text}`);
+  // 路由字符串：不是文件系统根形状，在 :" ," =[" [" 这些前导后面原样保留。
+  const routes = [
+    '{"route":"/api/worker"}',
+    '["a","/api/worker"]',
+    '["/api/worker"]',
+    '{"routes":["/api/a","/api/b"]}',
+    'x:"/api/worker/activity"',
+    'a=["/api/x"]',
+    '{"health":"/health","ui":"/v2/index"}',
+  ];
+  for (const text of routes) assert.equal(fold(text), text, `路由原样不动：${text}`);
+  // 回归：同样的前导后面跟真实的文件系统路径（MSYS 盘符与常见根目录）照样折。
+  const lead = (prefix, path, suffix) => `${prefix}"${path}"${suffix}`;
+  for (const root of ["Users", "home", "tmp", "mnt", "var", "opt", "root", "etc", "usr", "private"]) {
+    const path = `/${root}/x/y.txt`;
+    assert.equal(fold(lead('{"k":', path, "}")), lead('{"k":', "…/y.txt", "}"), `:" 前导 + /${root}/`);
+    assert.equal(fold(lead('["a",', path, "]")), lead('["a",', "…/y.txt", "]"), `," 前导 + /${root}/`);
+    assert.equal(fold(lead("x=[", path, "]")), lead("x=[", "…/y.txt", "]"), `=[" 前导 + /${root}/`);
+    assert.equal(fold(lead("p=", path, "")), lead("p=", "…/y.txt", ""), `=" 前导 + /${root}/`);
+  }
+  assert.equal(fold('{"c":"/c/Users/x/bin/node.exe"}'), '{"c":"…/node.exe"}', "MSYS 盘符形状");
+  assert.equal(fold('["a","/d/proj/x/y"]'), '["a","…/y"]');
+  // 空白、开括号前导的旧规则不变；file:// 不算要保护的 URL（盘符路径照旧折）。
+  assert.equal(fold("run /api/worker now"), "run …/worker now");
+  assert.equal(fold("(/home/u/a.txt)"), "(…/a.txt)");
+  assert.equal(fold("file:///C:/Users/x/a.txt"), "file:///…/a.txt");
+});
+
+test("路径折叠（第 141c 批修正一）：十二条普通文字（URL、A/B、1/2、and/or、src/a.js、?next=/d/x、普通 JSON……）原样不动，标题也不误折", () => {
+  const plain = [
+    "参考 https://example.com/a/b 的说明",
+    "A/B 对比实验",
+    "完成 1/2 的迁移",
+    "and/or 逻辑",
+    "修复 src/a.js 与 test/b.js",
+    "跳转 ?next=/d/x 与 a?next=/d/x/y",
+    "看 https://x/y?next=/d/x/y 与 https://h:8080/p",
+    '{"k":"v/w","n":"1/2"}',
+    '["a","b/c","d/e"]',
+    "foo=bar/baz 与 x:\"1/2\"",
+    "re:/api 不算，key=value/other",
+    "k=v;a/b 与 x=y&z/w",
+  ];
+  assert.equal(plain.length, 12);
+  for (const text of plain) {
+    assert.equal(foldAbsolutePaths(text), text, `foldAbsolutePaths 原样不动：${text}`);
+    assert.equal(deriveOwnerTitle(text), text, `标题原样不动：${text}`);
+  }
+});
+
 test("标题：控制字符清掉、制表符折成一个空格；限 80 字且超长加 …，不切开代理对", () => {
   const dirty = "# 标题\u0000带\u001b[31m颜色\u0007与\u007f制表\t符";
   const cleaned = deriveOwnerTitle(dirty);

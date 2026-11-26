@@ -504,6 +504,7 @@ test("ownerDashboardServer.js imports exactly the pinned set (node builtins + ap
     "./application/ownerAttention.js", // 140c: the attention derivation
     "./application/ownerDashboard.js", // the composition service (legacy /api/runs + /api/activity)
     "./application/ownerReadModel.js", // 140c: the Owner read model
+    "./application/ownerWorkerActivity.js", // 141c: the Owner activity projection (/api/worker/activity + /api/worker/event)
     "./application/ownerWorkerDetail.js", // 141a: the single-worker detail DTO
     "./application/runSummaryCache.js",
     "./projectBuckets.js", // 140c: the project slug shape
