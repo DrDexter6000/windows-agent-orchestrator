@@ -11,6 +11,7 @@
       "application/lanesView.test.js",
       "application/laneProfile.test.js",
       "application/laneFactsLine.test.js",
+      "application/lanePeak.test.js",
       "application/lineageSupersession.test.js",
       "application/panelDerivation.test.js",
       "application/serveMaintenance.test.js",

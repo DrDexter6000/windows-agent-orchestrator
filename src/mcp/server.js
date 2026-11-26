@@ -3092,6 +3092,15 @@ const LANES_PROJECTION_OUTPUT = z.object({
     id: z.string().max(64),
     family: z.string().max(32),
     costTier: z.number().positive().max(COST_TIER_MAX).nullable(),
+    // 152 批（车道高峰）：声明了合法 peak 的行带"此刻"（北京时间）状态与下一
+    // 边界——WAO 只报世界现状，不算"该派谁"。untilLocal 同一天不带星期、跨天
+    // 带星期（显示规则单一归宿 laneProfile.peakNowAt）；长度是宽裕的 wire 上限
+    //（值由该函数生成，非磁盘自由文本）。无 peak 的行不带该键。
+    peakNow: z.object({
+      state: z.enum(["peak", "off_peak"]),
+      until: z.string().min(1).max(32),
+      untilLocal: z.string().min(1).max(16),
+    }).strict().optional(),
     ratings: z.object(Object.fromEntries(RATING_DIMENSIONS.map((d) => [
       d,
       (SCORED_DIMENSIONS.includes(d) ? LANE_RATING_CELL_WITH_SCORE : LANE_RATING_CELL_OUTPUT).optional(),
@@ -3184,6 +3193,13 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   // sub-schema validation below failed — advisory reference data only, never
   // part of checkStatus/complete. Bounds = the LANES_PROJECTION_OUTPUT SSOT.
   lanes: LANES_PROJECTION_OUTPUT.nullable(),
+  // 152 批（车道高峰）：北京"此刻"标签，与 lanes 同一次时钟读数（行内 peakNow
+  // 与它同源）；lanes 不可用（worker 上下文/画像读不出）时同样 null。
+  // holidaysRecognized 恒 false——法定节假日不识别、按工作日算（Owner 2026-11-26 定）。
+  now: z.object({
+    beijing: z.string().min(1).max(16),
+    holidaysRecognized: z.literal(false),
+  }).strict().nullable(),
   observations: z.array(z.string().max(512)).max(64),
   warnings: z.array(z.string().max(512)).max(64),
   manualChecks: z.array(z.string().max(512)).max(32),
@@ -4459,6 +4475,8 @@ export function createWaoMcpServer({
           unresolvedRunCount: null,
           // 0087: no lane profiles derivable on aggregate failure.
           lanes: null,
+          // 152 批：now 与 lanes 同源——聚合失败同样 null（不单独读时钟）。
+          now: null,
           observations: [],
           warnings: ["lead_preflight could not aggregate — retry this call; sections settle independently"],
           manualChecks: [

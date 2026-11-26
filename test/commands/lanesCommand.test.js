@@ -138,9 +138,10 @@ const baseEntry = (over = {}) => ({
   ...over,
 });
 
-/** 夹具车道表：声明序 t1(实测三格带 score)、t2(全未评)、t3(带 dispatchHold)、
- *  t4(无画像)、t5(写了 reviewPending)。t1 与 registry 四轴一致（current）；
- *  t2 全未评（unrated→未评，不是待复核）；t5 待复核（review）。 */
+/** 夹具车道表：声明序 t1(实测三格带 score，声明了 peak)、t2(全未评)、
+ *  t3(带 dispatchHold)、t4(无画像)、t5(写了 reviewPending)。t1 与 registry
+ *  四轴一致（current）；t2 全未评（unrated→未评，不是待复核）；t5 待复核
+ *  （review）。 */
 function makeTableEnv() {
   const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-tbl-"));
   mkdirSync(join(dir, "runs"), { recursive: true });
@@ -171,6 +172,7 @@ function makeTableEnv() {
     traits: {
       t1: baseEntry({
         costTier: 0.5,
+        peak: { days: "weekdays", hours: ["14:00-18:00"], effect: "非高峰消耗减半" },
         ratings: {
           research: { stars: 3, basis: "measured", n: 99, evidence: "e", score: { hits: 68, total: 99, label: "与终裁一致" } },
           code: { stars: 3, basis: "measured", n: 2, evidence: "e", score: { hits: 27, total: 28, label: "隐藏测试通过" } },
@@ -197,14 +199,23 @@ function makeTableEnv() {
   return { dir, traitsResult };
 }
 
-async function runLanesCapture(dir, traitsResult, args = []) {
+// 152 批：对照表"此刻"的时钟缝注入（生产缺省 Date.now）。夹具钉在
+// 2026-11-26（周四）12:30 北京时间——GLM 高峰外、DeepSeek 两段之间。
+const TBL_NOW = (Date.UTC(2026, 10, 26, 12, 30) - 8 * 60 * 60 * 1000);
+
+async function runLanesCapture(dir, traitsResult, args = [], over = {}) {
   const chunks = [];
   const origLog = console.log;
   console.log = (...a) => { chunks.push(a.join(" ")); };
   try {
     await lanesCommand(
       ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs"), ...args],
-      { registry: "config/agents.json", runDir: join(dir, "runs"), readLaneTraitsFn: () => traitsResult },
+      {
+        registry: "config/agents.json", runDir: join(dir, "runs"),
+        readLaneTraitsFn: () => traitsResult,
+        nowMsFn: () => TBL_NOW,
+        ...over,
+      },
     );
   } finally { console.log = origLog; }
   // 人读面是单次 console.log(join("\n"))——按换行拆回逐行。
@@ -221,24 +232,35 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
     assert.ok(headerIdx > 0, "对照表在场");
     assert.ok(headerIdx < lines.findIndex((l) => /^lane t1 — /.test(l)), "对照表在细节之前");
     assert.ok(lines[headerIdx].includes("只列三个实测维度"), "表头注明只列三个实测维度");
-    // 表头七列。
-    assert.match(lines[headerIdx + 1], /车道\s+族系\s+写代码\s+把关\s+调研\s+成本档\s+状态/);
+    // 表头上方的"此刻"行（152 批，注入时钟=周四 12:30）。
+    assert.match(lines[headerIdx + 1], /^  此刻：北京时间 周四 12:30（法定节假日不识别，按工作日算）$/,
+      "表头上方的此刻行（北京时间 + 节假日口径）");
+    // 表头八列（152 批起含"此刻"）。
+    assert.match(lines[headerIdx + 2], /车道\s+族系\s+写代码\s+把关\s+调研\s+成本档\s+此刻\s+状态/);
     // 声明序：t1 行在 t2 行之前，以此类推。
     const rowIdx = (id) => lines.findIndex((l) => new RegExp(`^\\s*${id}\\s`).test(l));
     assert.ok(rowIdx("t1") < rowIdx("t2") && rowIdx("t2") < rowIdx("t3") && rowIdx("t3") < rowIdx("t4"),
       "表行序=声明序");
-    // 四种格写法：实测有分数（3★ 96% n=2；27/28=96%）、实测无分数（3★ n=19）、
-    // Owner 评（5★ 主观）、未评（—）。
+    // 格写法（152 批起不折算百分比）：实测（3★ n=…）、Owner 评（5★ 主观）、未评（—）。
     const t1Row = lines[rowIdx("t1")];
-    assert.match(t1Row, /3★ 96% n=2/, "实测有分数：写代码 27/28 → 96%");
-    assert.match(t1Row, /3★ 69% n=99/, "调研 68/99 → 69%");
+    assert.match(t1Row, /3★ n=2/, "实测格只带星级与 n（27/28 不折算百分比）");
+    assert.match(t1Row, /3★ n=99/, "调研格只带 n");
     assert.match(t1Row, /3★ n=19/, "实测无分数只带 n");
+    assert.ok(!/\d+%/.test(lines.slice(headerIdx, rowIdx("t5") + 1).join("\n")),
+      "对照表块内不再出现百分比");
     const t3Row = lines[rowIdx("t3")];
     assert.match(t3Row, /5★ 主观/, "Owner 评写主观");
     assert.match(t3Row, /—/, "未评格写 —");
     // 成本档列。
     assert.match(t1Row, /0\.5/, "t1 成本档 0.5");
     assert.match(t3Row, / 4\s/, "t3 成本档 4");
+    // "此刻"列（152 批）：t1 声明了 peak（周四 12:30 → 高峰外，至 14:00）；
+    // 其余车道未声明 → —（整表恰一格带"高峰/非高峰，至"字样）。
+    assert.match(t1Row, /非高峰，至 14:00/, "t1 此刻=非高峰，至 14:00（同一天不带星期）");
+    assert.equal(
+      lines.slice(headerIdx, rowIdx("t5") + 1).filter((l) => /(高峰|非高峰)，至/.test(l)).length,
+      1, "只有声明了 peak 的车道带此刻状态格，其余都是 —",
+    );
     // 状态列：t3 暂停（dispatchHold）、t2 未评（unrated 不写成待复核）、t4 无画像、
     // t5 待复核（reviewPending）、t1 空。
     assert.match(t3Row, /暂停/, "dispatchHold → 暂停");
@@ -249,9 +271,9 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
     for (const word of ["暂停", "待复核", "未评", "无画像"]) {
       assert.ok(!lines[rowIdx("t1")].includes(word), `current 且无暂停 → 状态空（不含 ${word}）`);
     }
-    // 表尾图例：百分比的分母不一定是 n。
+    // 表尾图例（152 批：无百分比句；此刻列 — 注明=未声明高峰）。
     const legendIdx = rowIdx("t5") + 1;
-    assert.match(lines[legendIdx], /^\s+格：星级、实测分数百分比（计数单位见下方细节，不一定是 n）/, "表尾图例");
+    assert.match(lines[legendIdx], /^\s+格：星级、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）；此刻列 —=车道未声明高峰时段$/, "表尾图例");
     // 宽度：对照表块内每行（含图例）≤120 显示列（中文字符按 2 列计）。
     for (let i = headerIdx; i <= legendIdx; i++) {
       assert.ok(displayWidth(lines[i]) <= 120, `对照表行宽 ≤120（超宽行：${lines[i].slice(0, 30)}…）`);
@@ -265,6 +287,27 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
     assert.ok(lines.some((l) => l.includes("- 规则二（后）")), "第二条规则");
     // 细节里的评分格显示 score（68/99 与 label）。
     assert.ok(text.includes("调研整理: 3 星（measured，n=99，68/99 与终裁一致）"), "细节格带 score");
+  } finally { cleanupDir(dir); }
+});
+
+test("152 wao lanes：此刻列——高峰内写「高峰，至 HH:MM」；周五晚写到下周一（跨天带星期）", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    // 周四 15:00：t1 在声明高峰内。
+    const inPeak = await runLanesCapture(dir, traitsResult, [], {
+      nowMsFn: () => (Date.UTC(2026, 10, 26, 15, 0) - 8 * 60 * 60 * 1000),
+    });
+    const rowIdxIn = inPeak.findIndex((l) => /^\s*t1\s/.test(l));
+    assert.match(inPeak[rowIdxIn], /高峰，至 18:00/, "高峰内：至当日结束钟点");
+    assert.ok(inPeak.some((l) => l.includes("此刻：北京时间 周四 15:00（法定节假日不识别，按工作日算）")));
+
+    // 周五 20:00（高峰已过，下一边界=周一 14:00，跨天带星期）。
+    const friday = await runLanesCapture(dir, traitsResult, [], {
+      nowMsFn: () => (Date.UTC(2026, 10, 27, 20, 0) - 8 * 60 * 60 * 1000),
+    });
+    const rowIdxFri = friday.findIndex((l) => /^\s*t1\s/.test(l));
+    assert.match(friday[rowIdxFri], /非高峰，至 周一 14:00/, "跨天带星期");
+    assert.ok(friday.some((l) => l.includes("此刻：北京时间 周五 20:00（法定节假日不识别，按工作日算）")));
   } finally { cleanupDir(dir); }
 });
 

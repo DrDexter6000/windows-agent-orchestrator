@@ -29,11 +29,14 @@ import {
   buildScaleLine,
   laneFamilyLabel,
   DIMENSION_LABELS,
+  // 152 批：对照表的"此刻"列与表头行共用的计算（WAO 只算现状，不算"该派谁"）。
+  peakNowAt,
+  beijingNowLabel,
 } from "./laneProfile.js";
 
-// 命令层（src/commands/lanes.js）经本模块取画像加载器——它不准直接引用
-// laneProfile.js（0087 §5 守卫边）。
-export { readLaneTraits };
+// 命令层（src/commands/lanes.js）经本模块取画像加载器与"此刻"计算——它不准
+// 直接引用 laneProfile.js（0087 §5 守卫边）。
+export { readLaneTraits, peakNowAt, beijingNowLabel };
 
 /** 画布常量：derived issues 上限（诚实截断标志，防 registry 异常膨胀刷屏）。 */
 const DERIVED_ISSUE_CAP = 16;

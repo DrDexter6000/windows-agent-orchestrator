@@ -34,6 +34,7 @@ const SOURCE_TOKENS = ["official", "owner", "wire"];
 const LANE_KEYS = new Set([
   "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
+  "peak", // 152 批：服务商高峰时段（可选；北京时间、工作日、法定节假日不识别）
 ]);
 const CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence", "score"]);
 

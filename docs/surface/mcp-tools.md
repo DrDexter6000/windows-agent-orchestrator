@@ -34,6 +34,7 @@ Output:
 | unresolvedRunCount | integer\|null | yes |  |
 | recentRuns | object\|null | no |  |
 | lanes | object\|null | yes |  |
+| now | object\|null | yes |  |
 | observations | array<string> | yes |  |
 | warnings | array<string> | yes |  |
 | manualChecks | array<string> | yes |  |

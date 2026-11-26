@@ -26,7 +26,7 @@ import { readRegistry } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
 import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
-import { buildLanesView, readLaneTraits } from "../application/lanesView.js";
+import { buildLanesView, readLaneTraits, peakNowAt, beijingNowLabel } from "../application/lanesView.js";
 import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
 // TD-318（三）：车道表/画像/registry/台账值是磁盘上的不可信文本——join 前逐行
 // 转义，值里的换行不能再伪造一行（core 顶层叶子，commands 下向 import）。
@@ -48,20 +48,28 @@ function parseOptions(args) {
 const axesLabel = (a) => `${a.backend ?? "?"}/${a.modelId ?? "?"}/${a.providerID ?? "-"}/${a.effort ?? "null"}`;
 
 // ── 0097 §5：开头对照表（声明序，不排序）────────────────────────────────────
-// 只列三个实测维度（research/code/review）；格写法：实测有分数 `3★ 96% n=8`、
-// 实测无分数 `3★ n=19`、Owner 评 `4★ 主观`、未评/无画像 `—`。状态列：暂停
-// （dispatchHold）优先，其次画像缺失或无效，再按 ratingsState 写待复核/未评/
-// 无法判定，current 为空。事实陈列，不排序不推荐——对照只是并排，判断归 Lead。
+// 只列三个实测维度（research/code/review）；格写法：实测 `3★ n=8`（152 批起
+// 不再折算百分比——计数单位不同不能并排，具体分数见下方逐车道细节）、Owner 评
+// `4★ 主观`、未评/无画像 `—`。状态列：暂停（dispatchHold）优先，其次画像缺失
+// 或无效，再按 ratingsState 写待复核/未评/无法判定，current 为空。"此刻"列
+// （152 批）：只报"世界现在是什么样"（此刻是否在该车道声明的高峰内、到几点，
+// 北京时间），不排序不推荐——判断归 Lead（不变量 4/6）。
 
 /** 单格写法（输入视图行里已归一的画像格；无画像给 null → "—"）。 */
 function summaryCell(cell) {
   if (cell == null || cell.stars == null) return "—";
-  if (cell.basis === "measured") {
-    const pct = cell.score ? ` ${Math.round((cell.score.hits / cell.score.total) * 100)}%` : "";
-    return `${cell.stars}★${pct} n=${cell.n ?? "?"}`;
-  }
+  if (cell.basis === "measured") return `${cell.stars}★ n=${cell.n ?? "?"}`;
   if (cell.basis === "owner") return `${cell.stars}★ 主观`;
   return `${cell.stars}★ official`;
+}
+
+/** "此刻"列的一格（152 批）：有声明 peak 的写状态与下一边界（显示规则共用
+ *  peakNowAt 的 untilLocal：同一天不带星期、跨天带星期），没声明的写 —。 */
+function peakCell(traits, nowMs) {
+  if (!traits || traits.peak === undefined) return "—";
+  const now = peakNowAt(traits.peak, nowMs);
+  if (now == null) return "—";
+  return `${now.state === "peak" ? "高峰" : "非高峰"}，至 ${now.untilLocal}`;
 }
 
 /** 状态列的一词事实：画像状态（traitsState 不是 present）与评分状态
@@ -82,9 +90,9 @@ function padDisplayEnd(text, width) {
   return w >= width ? text : text + " ".repeat(width - w);
 }
 
-/** 对照表（含表头）：每行 = 车道 | 族系 | 写代码 | 把关 | 调研 | 成本档 | 状态。 */
-function renderSummaryTable(rows) {
-  const header = ["车道", "族系", "写代码", "把关", "调研", "成本档", "状态"];
+/** 对照表（含表头）：每行 = 车道 | 族系 | 写代码 | 把关 | 调研 | 成本档 | 此刻 | 状态。 */
+function renderSummaryTable(rows, nowMs) {
+  const header = ["车道", "族系", "写代码", "把关", "调研", "成本档", "此刻", "状态"];
   const table = rows.map((row) => {
     const t = row.traits;
     return [
@@ -94,6 +102,7 @@ function renderSummaryTable(rows) {
       summaryCell(t ? t.ratings.review : null),
       summaryCell(t ? t.ratings.research : null),
       t && t.costTier != null ? String(t.costTier) : "—",
+      peakCell(t, nowMs),
       summaryStatus(row),
     ];
   });
@@ -104,10 +113,11 @@ function renderSummaryTable(rows) {
   const fmt = (cells) => "  " + cells.map((c, i) => padDisplayEnd(c, widths[i])).join("  ").trimEnd();
   return [
     "车道对照表（只列三个实测维度，其余见下方；行序=声明序，非推荐）:",
+    // 152 批：表头上方的"此刻"行——读表用的当前北京时间（法定节假日不识别）。
+    `  此刻：北京时间 ${beijingNowLabel(nowMs)}（法定节假日不识别，按工作日算）`,
     fmt(header),
     ...table.map(fmt),
-    // 百分比的分母是 score.total（如 2 题里的 28 个隐藏测试），不一定是 n。
-    "  格：星级、实测分数百分比（计数单位见下方细节，不一定是 n）、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）",
+    "  格：星级、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）；此刻列 —=车道未声明高峰时段",
   ];
 }
 
@@ -227,8 +237,10 @@ export async function lanesCommand(args, config) {
     ? loadLanesConfig(resolve(options.lanesFile))
     : loadLanesConfig();
   // readLaneTraitsFn：测试缝（夹具画像注入；生产路径缺省真实画像）。与
-  // loadLanesConfigFn/readRegistry 同一注入纪律。
+  // loadLanesConfigFn/readRegistry 同一注入纪律。nowMsFn（152 批）：对照表
+  // "此刻"的时钟缝；生产缺省 Date.now()。
   const traitsResult = (config?.readLaneTraitsFn ?? readLaneTraits)();
+  const nowMs = (config?.nowMsFn ?? Date.now)();
 
   // 就绪轴：探测权威只吃 registry 有效条目 ∩ 车道键（wired+drift 均探测——
   // drift 条目本身合法，就绪事实属于 registry 侧；未接线/无效无行）。
@@ -259,7 +271,7 @@ export async function lanesCommand(args, config) {
     // 规则，再接原有细节。车道表不可用时不渲染（对照无从对照）。
     if (view.state === "ok") {
       out.push("");
-      out.push(...renderSummaryTable(view.lanes));
+      out.push(...renderSummaryTable(view.lanes, nowMs));
       if (view.costTierScale) {
         // 说明串自带"成本档：…"前缀——直接列出，不加第二个标签。
         for (const seg of wrapLines(view.costTierScale, width - 2)) out.push(`  ${seg}`);
