@@ -137,7 +137,10 @@
 //     it answers the fixed 404 (like /api/worker/event). The frames and their content come from
 //     src/application/ownerWorkerStream.js (projectWorkerActivity pages); this file only writes
 //     the head and the fixed errors. A 503 says the service already holds its maximum number of
-//     streams (the page falls back to polling).
+//     streams (the page falls back to polling). The authorization does not stop at the head: an
+//     open stream asks again every read-model refresh (OWNER_STREAM_AUTH_MS) — the run still in the
+//     published snapshot as "ok" (the check handed to the stream below) and its copies still
+//     proving out — and a stream that fails it is told to reset and closed.
 //   - close() first cuts every open stream (each one closes its watcher and timers), and only
 //     then shuts the socket: the streams are long-lived responses that would otherwise hold
 //     server.close() open.
@@ -1174,7 +1177,7 @@ function createHandler(ctx) {
  *   read-model factory `() => {refresh, snapshot}`; default
  *   `createOwnerReadModel({ runDir, nowFn })` (same runDir, same clock).
  * @param {Function} [config.createWorkerStreamsFn] — injectable (testing) factory of
- *   the Activity event-stream hub `({ readModel, env }) => hub`; default
+ *   the Activity event-stream hub `({ readModel, env, authorize }) => hub`; default
  *   `createWorkerStreams({ readModel, env })`.
  * @param {number} [config.refreshIntervalMs=5000] — interval of the read-model
  *   refresh chain; must be a positive integer (rejected BEFORE listen).
@@ -1319,6 +1322,13 @@ export function createOwnerDashboardServer(config) {
   // Batch 144: the Activity event streams of this service (the connection cap and closeAll live there).
   ctx.streams = (createWorkerStreamsFn ?? createWorkerStreams)({
     readModel, ...(env !== undefined ? { env } : {}),
+    // The stream's re-authorization (every refresh while it is open): the run is still in the published
+    // snapshot and still "ok", exactly the check serveWorkerStream makes at the head. The copy check is
+    // the stream's own (readModel.locateRunTranscript).
+    authorize: (runId) => {
+      const pub = ctx.published();
+      return pub !== null && ctx.runsById(pub).get(runId)?.availability === "ok";
+    },
   });
 
   let published = null;

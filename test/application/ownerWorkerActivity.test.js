@@ -941,6 +941,27 @@ test("连续的运行时活动折叠成一行：原始 seq 区间、条数、最
   assert.ok(order.indexOf(`fold@${S.rt1}`) > order.indexOf(S.writeRel) && order.indexOf(`fold@${S.rt1}`) < order.indexOf(S.msgMid));
 });
 
+test("折叠行的 toTs 是最后吸收的那条带时间戳事件的时间（不停在第一条）；最后吸收的事件没有时间戳时不改动它；分页拼起来与一页取完的 toTs 一致", () => {
+  const b = builder("run_fold_ts");
+  b.add("run.started", { backend: "claude-code" });
+  runtime(b, "initialized"); // #2，T0+1s
+  runtime(b, "streaming"); // #3，T0+2s
+  runtime(b, "process_active"); // #4，T0+3s
+  runtime(b, "files_changed"); // #5：没有时间戳
+  delete b.events.at(-1).ts;
+  const page = projectWorkerActivity({ runId: "run_fold_ts", events: b.events, env: {} });
+  const [fold] = page.rows;
+  assert.deepEqual([fold.row, fold.fromSeq, fold.toSeq, fold.count, fold.status], ["fold", 2, 5, 4, "files_changed"]);
+  assert.equal(fold.fromTs, iso(T0 + 1000), "起点是第一条的时间");
+  assert.equal(fold.toTs, iso(T0 + 3000), "终点是最后一条带时间戳的事件的时间；#5 没有时间戳，不改动它，也不清掉它");
+  // 一页取完与分页拼起来给出同一个折叠行（页面把相邻的两段折叠合并时取后一段的 toTs）。
+  const sameFold = (a, c) => [a.fromSeq, a.toSeq, a.count, a.fromTs, a.toTs].join("|") === [c.fromSeq, c.toSeq, c.count, c.fromTs, c.toTs].join("|");
+  const early = projectWorkerActivity({ runId: "run_fold_ts", events: b.events.slice(0, 3), env: {} }).rows[0];
+  const late = projectWorkerActivity({ runId: "run_fold_ts", events: b.events, afterSeq: 3, env: {} }).rows[0];
+  assert.deepEqual([early.toSeq, early.toTs, late.fromSeq, late.toTs], [3, iso(T0 + 2000), 4, iso(T0 + 3000)], "每一段的 toTs 都是它自己最后一条的时间");
+  assert.equal(sameFold({ ...early, toSeq: late.toSeq, count: early.count + late.count, toTs: late.toTs }, fold), true);
+});
+
 test("seq 缺口如实标出；缺口打断折叠；筛选掉的与时间线之外的条目不被当作缺失", async () => {
   const all = await W.activity("run_gap");
   assert.deepEqual(gapsOf(all), [

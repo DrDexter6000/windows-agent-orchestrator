@@ -36,17 +36,45 @@
 // The event stream (batch 144, decision 0131 section 4). When a fetchStream is injected the feed opens the
 // server's event stream right after its first page, and again after every poll while it is not up:
 //   - a rows frame IS a page after the cursor and an update frame a set of changed rows, so both go through
-//     the same merge the poll uses (same keys, folds joined, updates swapped in) — the stream only changes
-//     how a page arrives;
-//   - Live means: a frame of the stream currently open has arrived. While Live nothing is polled except the
-//     reconcile tick; when the stream drops, the 5 s poll carries the rows again;
+//     the same merge the poll uses (same keys, folds joined, updates swapped in; paused, only the copy that
+//     resume will show changes) — the stream only changes how a page arrives;
+//   - the rows reach the table by ONE path at a time. Live means: a frame of the stream currently open has
+//     arrived. While Live — and while the stream request is out and its first frame has not come — nothing is
+//     asked after the cursor except the reconcile tick; a first load, a poll or a reset's snapshot in flight
+//     opens no stream (each tries again when it is done). A stream frame whose range does not start after the
+//     cursor is never merged: the stream is let go for the poll (it counts as a failed try);
 //   - three tries in a row that come to nothing give the stream up until the Activity tab is left and shown
 //     again or another worker is opened (a rejected token is not counted: it is not retried either);
 //   - the stream is cancelled whenever its run, filter or tab changes, and a frame is applied only by the
 //     attempt and the epoch it belongs to, so a late frame never lands on another worker (A -> B -> A);
-//   - reset: the cursor is no good, the table is replaced by a fresh newest page; end: the run is over.
+//   - reset: the cursor is no good. The table is replaced by a fresh newest page, and the reset is a new table
+//     generation: every answer asked before it (poll pages, older pages, full texts, reconcile pages, an older
+//     stream's frames, an earlier snapshot) is void, and until the snapshot is back there is no poll and no
+//     stream. The table shown until the replacement is in front of the Owner (the snapshot back while
+//     following; resume while paused) belongs to a transcript that is gone: it is read-only (`stale`) — no
+//     older page, no full text — and the replacement brings its own paging boundary. The poll's occupation is
+//     owned by the poll that took it (a token), so a poll of a closed worker or a replaced table frees nothing
+//     of a newer one;
+//   - end: the run is over. A rows frame with terminal: true only says so — the stream still owes its end
+//     frame; when it drops first, one more read after the cursor (never the reconcile read, even on the twelfth
+//     tick) takes the rows written behind the terminal event, and only then the tab stops.
 // Every twelfth tick (ACTIVITY_RECONCILE_EVERY_POLLS) the newest page is re-read: the event rows it covers
-// are swapped in (a command whose exit code never arrived), whether the stream is up or not.
+// are swapped in (a command whose exit code never arrived), whether the stream is up or not. A reconcile page
+// asked before the table learned something (a frame, an update, the end) is older than the table: it is
+// dropped — checked again in the very segment that would apply it — and the next tick asks again, every tick
+// until one lands, after which the twelve-tick rhythm starts over. A reconcile page that says the run is over
+// while the cursor has not reached its end (rows came after the last poll: a result, the terminal event) does
+// not settle the status: with the stream down, the rows after the cursor are read first (updates included) and
+// only that page ends the run; with the stream up it carries them. While the stream is Live and still
+// delivering, a failed reconcile read only voids that one check (no "Stale since").
+// Paused, a reset that replaced the transcript shows the status bar's "Transcript updated — click to view"
+// (the resume): a table of the same length, or a page that never scrolls, has no other way in.
+//
+// Known gaps, on purpose (the poll has the same ones at the terminal state):
+//   - a row written behind the terminal event AFTER the catch-up read already came back empty is not picked up;
+//   - a terminal rows frame, then a reset whose first snapshot read fails: the terminal state keeps the poll
+//     from asking again;
+//   - a reconcile read that FAILS (network) is not owed: only a page dropped as older than the table is.
 
 import { evidenceCode } from "./model.js";
 
@@ -177,6 +205,10 @@ const IDLE = Object.freeze({
   total: 0, terminal: false, following: true, pausedBy: null,
   pendingRows: null, newCount: 0, newCountExact: true, problem: null, staleSinceMs: null,
   lastSeq: null, replaceWhole: false, live: false, toggled: new Map(), full: new Map(),
+  // stale: the shown table belongs to a transcript that a reset replaced (or is replacing): nothing may be asked
+  // about its rows any more (older pages, full texts). replacement: paused, the new table waits aside in
+  // pendingRows and this holds its own "older" answer until resume puts it in front of the Owner.
+  stale: false, replacement: null,
 });
 
 /** A missing-severity timeline row means this session cannot use the seq cursor (old / mixed archive). */
@@ -211,7 +243,6 @@ export function createActivityFeed({
   let epoch = 0;
   let loadingPage = false;
   let loadingOlder = false;
-  let polling = false;
   let scrollRequest = false;
   let prependAnchor = null;
   // The stream: the open try, the last frame's transport cursor, how many tries came to nothing, whether
@@ -222,8 +253,28 @@ export function createActivityFeed({
   let givenUp = false;
   let visible = true;
   let ticks = 0;
+  // A reset voids everything asked before it: tableGen counts the resets and `current(mine, gen)` says "this is
+  // still the table I was asked for". resyncing = the reset's snapshot is on its way (no poll, no stream);
+  // needSnapshot = it has to be asked again (it failed) before anything else may be asked after a cursor.
+  // endPending = a rows frame said the run is over and the stream still owes its end frame.
+  let tableGen = 0;
+  let resyncing = false;
+  let needSnapshot = false;
+  let endPending = false;
+  // `moved` counts what the table learned from the stream and the poll (rows, updates, the end): a reconcile page
+  // that was asked before any of it is older than the table and is never applied (it could take back a terminal
+  // state or a row's exit code the table already has); the next tick reads again.
+  let moved = 0;
+  // A reconcile page that was dropped as older than the table is owed: the next tick asks again (every tick until
+  // one lands), then the twelve-tick rhythm starts over. Otherwise a stream that keeps delivering could make the
+  // minute-check fail every time.
+  let reconcileOwed = false;
+  // The poll in flight, as an owner token (not a flag): a poll that belongs to a closed worker or a replaced table
+  // cannot free the occupation of the one that came after it.
+  let activePoll = null;
 
   const set = (patch) => { state = { ...state, ...patch }; };
+  const current = (mine, gen) => mine === epoch && gen === tableGen;
   const goLive = (live) => { if (state.live !== live) set({ live }); };
 
   /** Pause following (scrolled up / a selection / an expanded row). False when already paused. */
@@ -244,6 +295,11 @@ export function createActivityFeed({
       pendingRows: null,
       newCount: 0,
       newCountExact: true,
+      // A reset replaced the transcript while paused: the new table is in front of the Owner now, so its own
+      // paging boundary opens and nothing of the old table's expansions or full texts is carried over.
+      ...(state.replacement === null ? {} : {
+        stale: false, oldestOlder: state.replacement.older, replacement: null, full: new Map(), toggled: new Map(),
+      }),
     });
     if (pending !== null) scrollRequest = true;
     return true;
@@ -308,11 +364,11 @@ export function createActivityFeed({
    * No event number on the transcript (old archive): there is no cursor to page with, so the newest page
    * is returned with replace=true; the caller swaps it in whole instead of merging.
    */
-  async function collectAfter(mine) {
+  async function collectAfter(mine, gen) {
     const replace = state.replaceWhole || state.lastSeq === null;
     const firstQuery = replace ? pageQuery() : pageQuery({ afterSeq: state.lastSeq });
     const first = await fetchPage(firstQuery);
-    if (mine !== epoch) return null;
+    if (!current(mine, gen)) return null;
     if (first.ok !== true || !pageOk(first.body) || !hasData(first.body)) throw new Error("latest page");
     const latest = first.body;
     if (replace) {
@@ -328,7 +384,7 @@ export function createActivityFeed({
     let connected = earliest !== null && earliest <= state.lastSeq + 1;
     while (!connected && Number.isInteger(earliest) && pages.length < ACTIVITY_CATCHUP_PAGE_MAX) {
       const result = await fetchPage(pageQuery({ afterSeq: state.lastSeq, beforeSeq: earliest }));
-      if (mine !== epoch) return null;
+      if (!current(mine, gen)) return null;
       if (result.ok !== true || !pageOk(result.body) || !hasData(result.body)) throw new Error("catch-up page");
       pages.unshift(result.body);
       for (const update of updatesOf(result.body)) updates.set(update.key, update);
@@ -353,7 +409,10 @@ export function createActivityFeed({
     };
   }
 
-  function statusOf(latest) {
+  function statusOf(latest, settled = true) {
+    // A reconcile page that says the run is over while the cursor has not reached its end only swaps rows in:
+    // "ended" and the total wait for the rows after the cursor (see landSnapshot).
+    if (!settled) return { problem: null, staleSinceMs: null };
     return {
       total: Number.isInteger(latest.total) ? latest.total : state.total,
       terminal: latest.terminal === true,
@@ -363,6 +422,7 @@ export function createActivityFeed({
   }
 
   function applyFollowing({ units, latest, replace = false, updates = [], hiddenFiltered = 0, replaceWhole = false }) {
+    moved += 1;
     const rows = applyUpdates(replace ? mergeUnits(units) : mergeUnits([...state.rows, ...units]), updates);
     const added = totalWeight(rows) - totalWeight(state.rows);
     set({
@@ -380,12 +440,37 @@ export function createActivityFeed({
     if (replace || added > 0) scrollRequest = true;
   }
 
+  /**
+   * Changed rows swapped into the copy the Owner will see at resume: the held-back copy, or — when nothing is
+   * held yet — a copy of the shown rows (kept only if some shown row actually changed). The shown table itself
+   * is never touched while paused.
+   */
+  function withUpdates(pendingRows, updates) {
+    if (updates.length === 0) return pendingRows;
+    const base = pendingRows ?? state.rows;
+    const swapped = applyUpdates(base, updates);
+    if (pendingRows !== null) return swapped;
+    return swapped.some((unit, i) => unit !== base[i]) ? swapped : null;
+  }
+
+  /** Changed rows from an update frame: the same merge a poll's `updates` go through. */
+  function applyUpdateFrame(updates) {
+    moved += 1;
+    if (state.following) {
+      set({ rows: applyUpdates(state.rows, updates) });
+      return;
+    }
+    const held = withUpdates(state.pendingRows, updates);
+    if (held !== state.pendingRows) set({ pendingRows: held });
+  }
+
   function applyPaused({ units, latest, replace = false, hole = false, updates = [], hiddenFiltered = 0, replaceWhole = false }) {
+    moved += 1;
     let pendingRows;
     if (replace) pendingRows = mergeUnits(units);
     else if (units.length === 0) pendingRows = state.pendingRows;
     else pendingRows = mergeUnits([...(state.pendingRows ?? state.rows), ...units]);
-    if (pendingRows !== null) pendingRows = applyUpdates(pendingRows, updates);
+    pendingRows = withUpdates(pendingRows, updates);
     const nextCount = pendingRows === null ? state.newCount : Math.max(0, totalWeight(pendingRows) - totalWeight(state.rows));
     // "N+" belongs only to the pause that actually hit the cap. A marker already in the visible rows from
     // an earlier pause does not make a later, fully caught-up pause inexact.
@@ -411,16 +496,20 @@ export function createActivityFeed({
    * was shown came from a stream position the server no longer stands behind. While paused the visible rows
    * do not move: only the copy that resume will show is replaced.
    */
-  function applySnapshot(latest, { replace = false } = {}) {
-    const units = applyUpdates(unitsOf(latest), updatesOf(latest));
+  /** Does this newest page join the loaded table (so that only its rows up to the cursor are swapped in)? */
+  const snapshotJoins = (latest, replace) => {
     const from = pageFrom(latest);
-    const joins = replace !== true && state.replaceWhole !== true && state.lastSeq !== null && from !== null && from <= state.lastSeq + 1;
-    if (joins) {
+    return replace !== true && state.replaceWhole !== true && state.lastSeq !== null && from !== null && from <= state.lastSeq + 1;
+  };
+
+  function applySnapshot(latest, { replace = false, settled = true } = {}) {
+    const units = applyUpdates(unitsOf(latest), updatesOf(latest));
+    if (snapshotJoins(latest, replace)) {
       const cursor = state.lastSeq;
       const fresh = new Map(units.filter((unit) => unit.row === "event" && unit.seqState === "ok" && unit.seq <= cursor).map((unit) => [unit.key, unit]));
       const swap = (rows) => rows.map((unit) => fresh.get(unit.key) ?? unit);
-      if (state.pendingRows === null) set({ rows: swap(state.rows), ...statusOf(latest) });
-      else set({ pendingRows: swap(state.pendingRows), ...statusOf(latest) });
+      if (state.pendingRows === null) set({ rows: swap(state.rows), ...statusOf(latest, settled) });
+      else set({ pendingRows: swap(state.pendingRows), ...statusOf(latest, settled) });
       return;
     }
     const replaceWhole = hasUnnumbered(units);
@@ -430,25 +519,69 @@ export function createActivityFeed({
         phase: "ready", rows: mergeUnits(units), ...common,
         oldestOlder: isObject(latest.older) ? latest.older : null, olderHidden: 0,
         tailHidden: hiddenOf(latest), pendingRows: null, newCount: 0, newCountExact: true,
+        stale: false, replacement: null, full: new Map(), toggled: new Map(), // a new table: nothing of the old one's
       });
       scrollRequest = true;
     } else {
       const pendingRows = mergeUnits(units);
+      // Paused: the shown table stays the old transcript's — dead, nothing may be asked about its rows — and the
+      // new table waits aside with its own paging boundary until resume puts it in front of the Owner.
       set({
         ...common,
-        oldestOlder: isObject(latest.older) ? latest.older : null, olderHidden: 0,
+        olderHidden: 0,
         tailHidden: hiddenOf(latest), pendingRows,
         newCount: Math.max(0, totalWeight(pendingRows) - totalWeight(state.rows)), newCountExact: true,
+        stale: true, replacement: { older: isObject(latest.older) ? latest.older : null },
       });
     }
   }
 
   /** The reconcile tick's read: the newest page, no cursor. */
-  async function collectSnapshot(mine) {
+  async function collectSnapshot(mine, gen) {
+    const stamp = moved;
     const first = await fetchPage(pageQuery());
-    if (mine !== epoch) return null;
+    if (!current(mine, gen)) return null;
+    // Asked before the table learned something (a frame, an update, the end): older than the table, never applied.
+    if (stamp !== moved) {
+      reconcileOwed = true;
+      return null;
+    }
     if (first.ok !== true || !pageOk(first.body) || !hasData(first.body)) throw new Error("newest page");
-    return { snapshot: true, latest: first.body };
+    return { snapshot: true, latest: first.body, stamp }; // the apply site checks the stamp again, in its own segment
+  }
+
+  /**
+   * A reconcile page arrives at the table. The version check and the apply are ONE synchronous segment: between
+   * collectSnapshot's check and this call a frame could have landed (a microtask apart), and the page would take
+   * back what the frame brought. When the page says the run is over but the cursor has not reached its end
+   * (rows came after the poll's last page: a result, the terminal event), "ended" is not taken from it — the rows
+   * after the cursor are read first, updates included, and only that page settles the status. While the stream is
+   * up it carries those rows, so nothing is asked here.
+   */
+  function landSnapshot(collected, mine, gen) {
+    if (collected.stamp !== moved) {
+      reconcileOwed = true;
+      return false;
+    }
+    const latest = collected.latest;
+    const behind = latest.terminal === true && snapshotJoins(latest, false) && (pageTo(latest) ?? 0) > state.lastSeq;
+    applySnapshot(latest, { settled: !behind });
+    reconcileOwed = false;
+    ticks = 0; // back to one reconcile per twelve ticks
+    if (state.terminal) stopStream();
+    onChange();
+    if (!behind || state.live || attempt !== null) return true;
+    return collectAfter(mine, gen).then((more) => {
+      if (more === null || !current(mine, gen)) return true;
+      if (state.following) applyFollowing(more);
+      else applyPaused(more);
+      if (state.terminal) {
+        endPending = false;
+        stopStream();
+      }
+      onChange();
+      return true;
+    });
   }
 
   /** Let go of the open stream (it ended, the tab was left, the worker changed). */
@@ -467,11 +600,19 @@ export function createActivityFeed({
     streamCursor = null;
     failures = 0;
     givenUp = false;
+    resyncing = false;
+    needSnapshot = false;
+    endPending = false;
+    reconcileOwed = false;
+    activePoll = null; // the poll of the worker that is left asks for nothing that is still wanted
   }
 
   /** Open the stream for the open worker, from the seq cursor or from the last frame's cursor. */
   function tryStream() {
     if (fetchStream === null || attempt !== null || state.live || givenUp || !visible) return false;
+    // A first load, a poll or a reset's snapshot in flight asks for rows of its own: a stream opened beside it
+    // would bring the same rows a second time. Each of them tries the stream again when it is done.
+    if (loadingPage || activePoll !== null || resyncing || needSnapshot) return false;
     // No cursor, no stream: an old transcript without event numbers is read page by page.
     if (state.runId === null || state.phase !== "ready" || state.terminal || state.replaceWhole || state.lastSeq === null) return false;
     const mine = epoch;
@@ -504,6 +645,26 @@ export function createActivityFeed({
       givenUp = true; // three in a row: stay with the poll until the tab is shown again or another worker opens
     }
     onChange();
+    // The run is over (a rows frame said so) and the stream died before its end frame: the rows written behind
+    // the terminal event may not have come. Ask once more after the cursor, then stop.
+    if (state.terminal && endPending) poll();
+  }
+
+  /** A stream page joins the table when it starts after the cursor (an empty page has no start). */
+  function joinsTable(body) {
+    const from = pageFrom(body);
+    return from === null || state.lastSeq === null || from > state.lastSeq;
+  }
+
+  /**
+   * A frame that does not join the table (its range starts at or before the cursor: it would add rows the
+   * table already has): it is not merged. The stream is let go for the poll and the next try starts from the
+   * new cursor. It counts as a failed try, so a stream that keeps doing this ends up with the poll.
+   */
+  function abandonStream() {
+    stopStream();
+    if (++failures >= ACTIVITY_STREAM_FAILURES_MAX) givenUp = true;
+    onChange();
   }
 
   /** A rows frame is a page after the cursor: it goes through the same merge a poll goes through. */
@@ -528,19 +689,58 @@ export function createActivityFeed({
     else applyPaused(page);
   }
 
-  /** The cursor is no good any more: the table is replaced by a fresh newest page; the next tick reconnects without a cursor. */
+  /**
+   * The cursor is no good any more (reset): a new table generation. Every answer asked before this moment —
+   * a poll's pages, an older page, a reconcile page, an older stream's frames, an earlier snapshot — was worked
+   * out from a table or a cursor that is gone and never lands (`current`). The table is replaced by a fresh
+   * newest page; until it is back there is no poll and no stream, and a snapshot that failed is asked again by
+   * the next tick before anything is asked after a cursor. Paused, only the copy resume will show is replaced.
+   */
   function resync() {
     stopStream();
     streamCursor = null;
+    tableGen += 1;
+    loadingOlder = false;
+    endPending = false;
+    needSnapshot = true;
+    reconcileOwed = false;
+    activePoll = null; // a poll in flight asks about the old table: its answer is void, and it does not hold the new one back
+    // The shown table is the old transcript's: nothing may be asked about its rows (older pages, full texts) until
+    // the replacement is in front of the Owner. Full texts asked or shown so far belong to it too. A replacement
+    // that an EARLIER reset brought (its table waiting aside and its paging boundary) is a transcript that is gone
+    // as well: it goes, so that resume can never put it in front of the Owner or page with its boundary.
+    const heldReplacement = state.replacement !== null;
+    set({
+      stale: true, full: new Map(), replacement: null,
+      ...(heldReplacement ? { pendingRows: null, newCount: 0, newCountExact: true } : {}),
+    });
+    askSnapshot();
+  }
+
+  /** The reset's snapshot: the newest page, taken as the new table. Returns whether it came. */
+  function askSnapshot() {
     const mine = epoch;
-    Promise.resolve()
+    const gen = tableGen;
+    resyncing = true;
+    return Promise.resolve()
       .then(() => fetchPage(pageQuery()))
       .then((result) => result, () => ({ ok: false, reason: "network" }))
       .then((result) => {
-        if (mine !== epoch) return;
-        if (result.ok === true && pageOk(result.body) && hasData(result.body)) applySnapshot(result.body, { replace: true });
-        else set({ problem: result.ok === false ? result.reason : "server", staleSinceMs: state.staleSinceMs ?? now() });
+        if (!current(mine, gen)) return false;
+        if (result.ok === true && pageOk(result.body) && hasData(result.body)) {
+          applySnapshot(result.body, { replace: true });
+          needSnapshot = false;
+          onChange();
+          return true;
+        }
+        set({ problem: result.ok === false ? result.reason : "server", staleSinceMs: state.staleSinceMs ?? now() });
         onChange();
+        return false;
+      })
+      .finally(() => {
+        if (!current(mine, gen)) return;
+        resyncing = false;
+        tryStream(); // the table is the new file's now; a failed snapshot leaves needSnapshot set and no stream opens
       });
   }
 
@@ -550,23 +750,27 @@ export function createActivityFeed({
     const body = frame.data;
     if (frame.event === "rows") {
       if (!pageOk(body)) return;
+      if (!joinsTable(body)) {
+        abandonStream();
+        return;
+      }
       goLive(true);
       failures = 0;
       streamCursor = typeof frame.id === "string" ? frame.id : null;
       applyStreamPage(body);
+      // terminal: true only says the run is over; the stream still owes its end frame (see streamOver).
+      if (state.terminal && attempt !== null) endPending = true;
     } else if (frame.event === "update") {
       if (!Array.isArray(body.updates)) return;
       goLive(true);
       failures = 0;
-      const updates = unitsFromRows(body.updates);
-      set({
-        rows: applyUpdates(state.rows, updates),
-        ...(state.pendingRows === null ? {} : { pendingRows: applyUpdates(state.pendingRows, updates) }),
-      });
+      applyUpdateFrame(unitsFromRows(body.updates)); // the same merge a poll's updates go through
     } else if (frame.event === "reset") {
       resync();
       return;
     } else if (frame.event === "end") {
+      moved += 1;
+      endPending = false;
       set({ terminal: true, total: Number.isInteger(body.total) ? body.total : state.total, problem: null, staleSinceMs: null });
       stopStream(); // the run is over: the last rows came before this frame, and nothing reconnects
     } else {
@@ -577,40 +781,55 @@ export function createActivityFeed({
 
   /** One poll: the newest page after the cursor, then as many older pages as it takes to cover it. */
   function poll() {
-    if (state.runId === null || state.phase === "idle" || loadingPage || loadingOlder || polling) return Promise.resolve(false);
-    if (state.terminal) return Promise.resolve(false);
-    polling = true;
+    if (state.runId === null || state.phase === "idle" || loadingPage || loadingOlder || activePoll !== null || resyncing) return Promise.resolve(false);
+    // The run is over and the stream said so: nothing more to ask — unless the stream died before its end frame
+    // (endPending), in which case one more read after the cursor takes the rows written behind the terminal event.
+    if (state.terminal && !endPending) return Promise.resolve(false);
+    // The reset's snapshot failed: the old cursor is no good, so a snapshot is asked again before anything else.
+    if (needSnapshot) return askSnapshot();
+    const token = {};
+    activePoll = token;
     const mine = epoch;
+    const gen = tableGen;
     ticks += 1;
-    const reconcile = ticks % ACTIVITY_RECONCILE_EVERY_POLLS === 0;
+    // The read after a stream that died before its end frame is always a page after the cursor: the twelfth tick's
+    // reconcile (a newest page, no cursor) would not bring the rows written behind the terminal event.
+    const finalRead = state.terminal && endPending;
+    const reconcile = !finalRead && (reconcileOwed || ticks % ACTIVITY_RECONCILE_EVERY_POLLS === 0);
+    // The stream carries the rows while it is up — and while its request is out and its first frame has not
+    // come: a page after the cursor asked now would bring the same rows a second time.
+    const quiet = (state.live || attempt !== null) && !reconcile;
     return Promise.resolve()
-      .then(() => (state.live && !reconcile ? null : reconcile ? collectSnapshot(mine) : collectAfter(mine)))
+      .then(() => (quiet ? null : reconcile ? collectSnapshot(mine, gen) : collectAfter(mine, gen)))
       .then((collected) => {
-        if (collected === null) return false; // an older epoch, or Live with nothing to do this tick
-        if (collected.snapshot === true) {
-          applySnapshot(collected.latest);
-          if (state.terminal) stopStream();
-          onChange();
-          return true;
-        }
+        if (collected === null || !current(mine, gen)) return false; // an older epoch or table, or the stream has the rows this tick
+        if (collected.snapshot === true) return landSnapshot(collected, mine, gen);
         if (state.phase !== "ready") applyInitial(collected.latest);
         else if (state.following) applyFollowing(collected);
         else applyPaused(collected);
-        if (state.terminal) stopStream(); // the poll saw the end first: the stream is let go, it will not say it twice
+        if (state.terminal) {
+          endPending = false; // a page after the cursor came after the end: the last rows are in
+          stopStream(); // the poll saw the end first: the stream is let go, it will not say it twice
+        }
         onChange();
         return true;
       })
       .catch(() => {
-        if (mine === epoch) {
-          set({ problem: "network", staleSinceMs: state.staleSinceMs ?? now() });
+        if (current(mine, gen)) {
+          // The reconcile read of a stream that is up and still delivering: only that one check is void — the
+          // stream is as healthy as it was, so the status bar does not say Stale since.
+          if (!(reconcile && state.live)) set({ problem: "network", staleSinceMs: state.staleSinceMs ?? now() });
           onChange();
         }
         return false;
       })
       .finally(() => {
-        polling = false;
-        // The poll carried the rows; now is the time for the next try of the stream.
-        if (mine === epoch && !state.terminal) tryStream();
+        // Only the owner of the occupation, still of the table it asked about, frees it and tries the stream: a poll
+        // of a closed worker or of a table a reset replaced must not open a stream for the one that came after it.
+        const owner = activePoll === token;
+        if (owner) activePoll = null;
+        // The poll carried the rows; now is the time for the next try of the stream (its own guards decide).
+        if (owner && current(mine, gen) && !state.terminal) tryStream();
       });
   }
 
@@ -625,13 +844,16 @@ export function createActivityFeed({
         if (mine !== epoch) return;
         if (result.ok === true && pageOk(result.body) && hasData(result.body)) {
           applyInitial(result.body);
-          tryStream(); // the first page is in hand: open the stream from its cursor
         } else {
           set({ phase: "error", problem: result.ok === false ? result.reason : "server", staleSinceMs: state.staleSinceMs ?? now() });
         }
         onChange();
       })
-      .finally(() => { if (mine === epoch) loadingPage = false; });
+      .finally(() => {
+        if (mine !== epoch) return;
+        loadingPage = false;
+        tryStream(); // the first page is in hand and no longer loading: open the stream from its cursor
+      });
   }
 
   return {
@@ -656,7 +878,7 @@ export function createActivityFeed({
       state = { ...IDLE, epoch, toggled: new Map(), full: new Map() };
       loadingPage = false;
       loadingOlder = false;
-      polling = false;
+      activePoll = null;
       scrollRequest = false;
       prependAnchor = null;
       return true;
@@ -712,17 +934,18 @@ export function createActivityFeed({
      * its return value comes back from takePrependAnchor().
      */
     loadOlder(anchor = null) {
-      if (state.phase !== "ready" || loadingOlder || loadingPage) return false;
+      if (state.phase !== "ready" || loadingOlder || loadingPage || state.stale) return false; // a dead table has no older pages
       const older = state.oldestOlder;
       if (!isObject(older) || older.available !== true || !Number.isInteger(older.beforeSeq)) return false;
       loadingOlder = true;
       const mine = epoch;
+      const gen = tableGen;
       const beforeSeq = older.beforeSeq;
       Promise.resolve()
         .then(() => fetchPage(pageQuery({ beforeSeq })))
         .then((result) => result, () => ({ ok: false, reason: "network" }))
         .then((result) => {
-          if (mine !== epoch) return;
+          if (!current(mine, gen)) return; // another worker, or the table was replaced since: this page belongs to the old one
           if (result.ok === true && pageOk(result.body) && hasData(result.body)) {
             const olderUnits = unitsOf(result.body);
             // The anchor is taken NOW, before the old page is inserted: the Owner may have scrolled
@@ -748,7 +971,7 @@ export function createActivityFeed({
           }
           onChange();
         })
-        .finally(() => { if (mine === epoch) loadingOlder = false; });
+        .finally(() => { if (current(mine, gen)) loadingOlder = false; });
       return true;
     },
 
@@ -756,7 +979,7 @@ export function createActivityFeed({
     get: () => state,
 
     /** True when there is an older page the route can address. */
-    canLoadOlder: () => state.phase === "ready" && isObject(state.oldestOlder) && state.oldestOlder.available === true && Number.isInteger(state.oldestOlder.beforeSeq),
+    canLoadOlder: () => state.phase === "ready" && !state.stale && isObject(state.oldestOlder) && state.oldestOlder.available === true && Number.isInteger(state.oldestOlder.beforeSeq),
 
     pause,
     follow,
@@ -788,6 +1011,7 @@ export function createActivityFeed({
 
     /** Fetch page 1 of one row's full text ("Open full", the long-output route). */
     openFull(key) {
+      if (state.stale) return false; // the shown row's seq now names a row of another transcript
       const row = state.rows.find((unit) => unit.key === key);
       if (row === undefined || row.row !== "event" || row.seqState !== "ok" || !Number.isInteger(row.seq) || typeof row.part !== "string") return false;
       const mine = epoch;
@@ -795,12 +1019,13 @@ export function createActivityFeed({
       full.set(key, { state: "loading", page: 1, totalPages: null, text: "", totalBytes: null, part: row.part, seq: row.seq });
       set({ full });
       pause("expand");
-      loadFull(mine, key, row.seq, row.part, 1);
+      loadFull(mine, tableGen, key, row.seq, row.part, 1);
       return true;
     },
 
     /** Turn the page of an already opened full text. */
     fullPage(key, delta) {
+      if (state.stale) return false;
       const entry = state.full.get(key);
       if (entry === undefined || entry.state === "loading") return false;
       const target = entry.page + delta;
@@ -808,7 +1033,7 @@ export function createActivityFeed({
       const full = new Map(state.full);
       full.set(key, { ...entry, state: "loading", page: target });
       set({ full });
-      loadFull(epoch, key, entry.seq, entry.part, target);
+      loadFull(epoch, tableGen, key, entry.seq, entry.part, target);
       return true;
     },
 
@@ -835,12 +1060,12 @@ export function createActivityFeed({
     },
   };
 
-  function loadFull(mine, key, seq, part, page) {
+  function loadFull(mine, gen, key, seq, part, page) {
     Promise.resolve()
       .then(() => fetchFull({ runId: state.runId, seq, part, page }))
       .then((result) => result, () => ({ ok: false, reason: "network" }))
       .then((result) => {
-        if (mine !== epoch) return;
+        if (!current(mine, gen)) return; // another worker, or the table was replaced since: this text is of a row that is gone
         // The Owner may have closed this full text while the request was in flight: do not bring it back.
         if (!state.full.has(key)) return;
         const full = new Map(state.full);
@@ -903,7 +1128,9 @@ export function buildActivityView(state) {
     total: state.total,
     freshness,
     // The server's own "older" answer for the OLDEST page shown (why paging stops, when it does).
-    older: state.oldestOlder,
+    older: state.stale ? null : state.oldestOlder, // a dead table offers no older page
+    // Paused, a reset replaced the transcript and the new table waits aside: the status bar offers the way in.
+    replaced: state.replacement !== null,
     hiddenFiltered: state.olderHidden + state.tailHidden,
     problem: state.problem,
     lastSeq: state.lastSeq,
