@@ -42,3 +42,9 @@
 - 对照表的分数单元格去掉百分比，只留星级与 n：不同维度的分数口径不同（谱系一次落地、隐藏测试通过），并排的百分比会误导；具体分数留在逐车道细节。
 - `ownerRules` 按场景重写为六条（Owner 2026-11-26：日常写代码 glm-flash；较难的非高峰派 glm-pro 或 deepseek-flash，高峰或拿不下时派 sonnet，opus 最后兜底；sonnet、opus、fable 共用一份 Claude 额度）。SKILL 的选车道句改为"照 `ownerRules`，其余由 Lead 判断"，不再另列一套平手顺序。
 - 本批同样新增了 `lane-traits.json` 的键 `peak`：没重启的宿主 MCP 进程用旧代码读新文件时，旧校验器把带 `peak` 的四条车道（glm-flash、glm-pro、deepseek-flash、deepseek-pro）判为无效：`lanes` 的行与派发回显里没有它们，只有 `wao lanes` 的"形状错误"和 `lead_preflight` 的 observations 提示；其余车道与新规则照常显示（会审与复核实测）。重启加载新代码后恢复完整画像。
+
+## 修订（第 153 批，2026-11-26）
+
+- 车道加 `quotaPool`（额度池名，同名车道共用一份额度）。`wao lanes` 在成本档说明后列一行"共用额度"（只列两条及以上的池），逐车道成本行带池名；`lead_preflight` 行内带 `quotaPool`。"与某车道共用额度"不再写在 `cost` 原文里。
+- `wao lanes` 默认只报例外：接线一致、评分当前、无注意事项不占行，没评的维度合成一行；evidence、source、sha256 收进 `--evidence`。"只陈列、不推荐"只在标题行说一次。
+- 没重启的宿主：旧校验器不认 `quotaPool`，十条车道都判无效，`lanes` 行全部消失，重启后恢复。
