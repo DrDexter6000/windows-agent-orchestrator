@@ -492,7 +492,17 @@ const RED_23_WIRE = 75492;
 // run_activity 出参 envelope enum 增固定标签 isolation_violation（服务端
 // ENVELOPE_TYPE_TO_LABEL 增 run.isolation_violation 映射的镜像）：76535→77446（实测；
 // 改动前同口径实测 76529；Owner 硬顶 94532 内）。
-const FROZEN_17_WIRE_CEILING = 77446;
+// 第 152 批（车道高峰结构化，本批任务书授权重冻；additive）：lead_preflight 出参
+// lanes 每行增可选 peakNow（state/until/untilLocal——此刻是否在该车道声明的
+// 高峰内，北京时间；无声明 peak 的行不带该键）、顶层增 now（beijing 标签 +
+// holidaysRecognized 恒 false）：77446→77985（实测；Owner 硬顶 94532 内）。
+// 描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
+// 第 153 批（wao lanes 只报例外 + 额度池结构化，本批任务书授权重冻；additive）：
+// lead_preflight 出参 lanes 每行增 quotaPool（string 1–40 或 null——额度池名）：
+// 77985→78084（实测；scripts/measure-mcp-surface.mjs 同口径 fullWire=78118，
+// 差 34B 为 JSON-RPC 响应整行 vs JSON.stringify({tools}) 的封套差；Owner 硬顶
+// 94532 内）。描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
+const FROZEN_17_WIRE_CEILING = 78084;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -770,8 +780,18 @@ test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", asyn
 // 载荷内，SHA 如实翻新；描述只有 run_dispatch 增一句 taskType 说明（不进 stripped 载荷）。
 // （历史值：e3de9cbb1ba6720b0d6e750b267d841727fcbbafa31749c4aecc1f75ea8e7295
 // 为第 135 批续修后的冻结值。）
+// 第 152 批（车道高峰结构化，本批任务书授权重冻；additive）：lead_preflight 出参
+// lanes 每行增可选 peakNow、顶层增 now——schema 在 stripped 载荷内，SHA 如实
+// 翻新；描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
+// （历史值：e2db4509d342a49eb33866c19b134ba0af5c411cc48b268e7c927bb7f222927a
+// 为第 141b 批后的冻结值。）
+// 第 153 批（额度池结构化，本批任务书授权重冻；additive）：lead_preflight 出参
+// lanes 每行增 quotaPool——outputSchema 在 stripped 载荷内，SHA 如实翻新；
+// 描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
+// （历史值：0ecb54632165e40712ef4f9c8c4c21b2f92cd97f7ff00b0a2a893dabaaca0723
+// 为第 152 批后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "e2db4509d342a49eb33866c19b134ba0af5c411cc48b268e7c927bb7f222927a";
+  "9517c289518d2fb44e93a98855d8e59f72a5b2638a1edd58c8f903a097d0d496";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。

@@ -4,6 +4,9 @@
 // "暴露面"落地：接线轴 + Owner 画像 + 认证简表 + 就绪探测一屏，各栏带来源；
 // 事实陈列、零排序零推荐——语义判断归 Lead，不变量 4/6）。
 // 0065（0045 §1.2 终局）：seatRole 声明列删除（席位角色维退役）。
+// 153 批：默认一屏只报例外（接线一致/评分当前/无注意事项/常态行不占行），
+// 审计出处（evidence/source/sha256）收进 --evidence；额度池结构化（quotaPool
+// ——共用额度一行、成本行带池名）；"只陈列、不推荐"只在标题行说一次。
 //
 // 会审裁定（consult_202610121021490657ur8lp 双席 P1 全采纳）：
 //   - 探测复用 commands/onboarding.js 导出的同一份 probeCliOnPath/probeKeyEnvSource
@@ -26,21 +29,22 @@ import { readRegistry } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
 import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
-import { buildLanesView, readLaneTraits } from "../application/lanesView.js";
+import { buildLanesView, readLaneTraits, peakNowAt, beijingNowLabel } from "../application/lanesView.js";
 import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
 // TD-318（三）：车道表/画像/registry/台账值是磁盘上的不可信文本——join 前逐行
 // 转义，值里的换行不能再伪造一行（core 顶层叶子，commands 下向 import）。
 import { escapeControlChars } from "../safeText.js";
 
 function parseOptions(args) {
-  const options = { json: false, registry: undefined, lanesFile: undefined, runDir: undefined };
+  const options = { json: false, evidence: false, registry: undefined, lanesFile: undefined, runDir: undefined };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--json") options.json = true;
+    else if (a === "--evidence") options.evidence = true;
     else if (a === "--registry") options.registry = args[++i];
     else if (a === "--lanes-file") options.lanesFile = args[++i];
     else if (a === "--run-dir") options.runDir = args[++i];
-    else throw new Error(`wao lanes: unknown option "${a}"（支持：--json / --registry FILE / --lanes-file FILE / --run-dir DIR）`);
+    else throw new Error(`wao lanes: unknown option "${a}"（支持：--json / --evidence / --registry FILE / --lanes-file FILE / --run-dir DIR）`);
   }
   return options;
 }
@@ -48,20 +52,28 @@ function parseOptions(args) {
 const axesLabel = (a) => `${a.backend ?? "?"}/${a.modelId ?? "?"}/${a.providerID ?? "-"}/${a.effort ?? "null"}`;
 
 // ── 0097 §5：开头对照表（声明序，不排序）────────────────────────────────────
-// 只列三个实测维度（research/code/review）；格写法：实测有分数 `3★ 96% n=8`、
-// 实测无分数 `3★ n=19`、Owner 评 `4★ 主观`、未评/无画像 `—`。状态列：暂停
-// （dispatchHold）优先，其次画像缺失或无效，再按 ratingsState 写待复核/未评/
-// 无法判定，current 为空。事实陈列，不排序不推荐——对照只是并排，判断归 Lead。
+// 只列三个实测维度（research/code/review）；格写法：实测 `3★ n=8`（152 批起
+// 不再折算百分比——计数单位不同不能并排，具体分数见下方逐车道细节）、Owner 评
+// `4★ 主观`、未评/无画像 `—`。状态列：暂停（dispatchHold）优先，其次画像缺失
+// 或无效，再按 ratingsState 写待复核/未评/无法判定，current 为空。"此刻"列
+// （152 批）：只报"世界现在是什么样"（此刻是否在该车道声明的高峰内、到几点，
+// 北京时间），不排序不推荐——判断归 Lead（不变量 4/6）。
 
 /** 单格写法（输入视图行里已归一的画像格；无画像给 null → "—"）。 */
 function summaryCell(cell) {
   if (cell == null || cell.stars == null) return "—";
-  if (cell.basis === "measured") {
-    const pct = cell.score ? ` ${Math.round((cell.score.hits / cell.score.total) * 100)}%` : "";
-    return `${cell.stars}★${pct} n=${cell.n ?? "?"}`;
-  }
+  if (cell.basis === "measured") return `${cell.stars}★ n=${cell.n ?? "?"}`;
   if (cell.basis === "owner") return `${cell.stars}★ 主观`;
   return `${cell.stars}★ official`;
+}
+
+/** "此刻"列的一格（152 批）：有声明 peak 的写状态与下一边界（显示规则共用
+ *  peakNowAt 的 untilLocal：同一天不带星期、跨天带星期），没声明的写 —。 */
+function peakCell(traits, nowMs) {
+  if (!traits || traits.peak === undefined) return "—";
+  const now = peakNowAt(traits.peak, nowMs);
+  if (now == null) return "—";
+  return `${now.state === "peak" ? "高峰" : "非高峰"}，至 ${now.untilLocal}`;
 }
 
 /** 状态列的一词事实：画像状态（traitsState 不是 present）与评分状态
@@ -82,9 +94,9 @@ function padDisplayEnd(text, width) {
   return w >= width ? text : text + " ".repeat(width - w);
 }
 
-/** 对照表（含表头）：每行 = 车道 | 族系 | 写代码 | 把关 | 调研 | 成本档 | 状态。 */
-function renderSummaryTable(rows) {
-  const header = ["车道", "族系", "写代码", "把关", "调研", "成本档", "状态"];
+/** 对照表（含表头）：每行 = 车道 | 族系 | 写代码 | 把关 | 调研 | 成本档 | 此刻 | 状态。 */
+function renderSummaryTable(rows, nowMs) {
+  const header = ["车道", "族系", "写代码", "把关", "调研", "成本档", "此刻", "状态"];
   const table = rows.map((row) => {
     const t = row.traits;
     return [
@@ -94,6 +106,7 @@ function renderSummaryTable(rows) {
       summaryCell(t ? t.ratings.review : null),
       summaryCell(t ? t.ratings.research : null),
       t && t.costTier != null ? String(t.costTier) : "—",
+      peakCell(t, nowMs),
       summaryStatus(row),
     ];
   });
@@ -103,11 +116,12 @@ function renderSummaryTable(rows) {
   ));
   const fmt = (cells) => "  " + cells.map((c, i) => padDisplayEnd(c, widths[i])).join("  ").trimEnd();
   return [
-    "车道对照表（只列三个实测维度，其余见下方；行序=声明序，非推荐）:",
+    "车道对照表（只列三个实测维度，其余见下方；行序=声明序）:",
+    // 152 批：表头上方的"此刻"行——读表用的当前北京时间（法定节假日不识别）。
+    `  此刻：北京时间 ${beijingNowLabel(nowMs)}（法定节假日不识别，按工作日算）`,
     fmt(header),
     ...table.map(fmt),
-    // 百分比的分母是 score.total（如 2 题里的 28 个隐藏测试），不一定是 n。
-    "  格：星级、实测分数百分比（计数单位见下方细节，不一定是 n）、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）",
+    "  格：星级、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）；此刻列 —=车道未声明高峰时段",
   ];
 }
 
@@ -117,7 +131,32 @@ const RATINGS_STATE_LINES = {
   unknown: "评分状态: 无法判定（车道侧事实不可得）",
 };
 
-function renderLane(row, width, dimensionLabels) {
+/** 153 修正一：共用额度块——一池一行（不按 120 列硬折，车道名不再被劈开）。
+ *  只列两条及以上车道共用的池；池序=池内第一条车道的声明序，池内车道按声明
+ *  序。没有共用池返回 null（整块不写）。 */
+function sharedQuotaPoolsBlock(rows) {
+  const poolOrder = [];
+  const byPool = new Map();
+  for (const row of rows) {
+    const pool = row.traits?.quotaPool;
+    if (typeof pool !== "string") continue;
+    if (!byPool.has(pool)) {
+      byPool.set(pool, []);
+      poolOrder.push(pool);
+    }
+    byPool.get(pool).push(row.id);
+  }
+  const shared = poolOrder.filter((p) => byPool.get(p).length >= 2);
+  if (shared.length === 0) return null;
+  return [
+    "共用额度:",
+    ...shared.map((p) => `${p}：${byPool.get(p).join("、")}`),
+  ];
+}
+
+// 153 批：细节只列例外（常态不占行）；evidence/source/sha256 是审计出处，
+// 收进 --evidence。行序与各行内容不变，只少掉"人人一样"的行。
+function renderLane(row, width, dimensionLabels, evidence) {
   const body = width - 4; // 缩进 4 后的可用宽
   const lines = [];
   const emit = (label, value) => {
@@ -130,51 +169,66 @@ function renderLane(row, width, dimensionLabels) {
     for (const seg of wrapLines(value, body - 2)) lines.push(`    ${seg}`);
   };
   lines.push(`lane ${row.id} — ${row.backend ?? "?"} · ${row.modelId ?? "?"} · effort ${row.effort ?? "null"} · 推断族系 ${row.family}`);
-  // TD-283：Owner 的暂停派发说明（车道表自带，与接线状态无关）——只告知不拦截。
-  if (row.dispatchHold) emit("dispatchHold", `${row.dispatchHold}（Owner 暂停说明，仅提示不拦截——派发决定权在 Lead）`);
-  if (row.wiring === "wired") lines.push("  接线: 一致（lanes.json 声明与 registry 接线四轴相符）");
-  else if (row.wiring === "drift") {
+  // TD-283：Owner 的暂停派发说明（车道表自带，与接线状态无关）——只写原话；
+  // "只告知不拦截"这层意思由 sourceNotes.dispatchHold 说一次（153 批）。
+  if (row.dispatchHold) emit("dispatchHold", row.dispatchHold);
+  // 153 批：接线一致是常态不占行；漂移、条目无效、未接线照旧写。
+  if (row.wiring === "drift") {
     emit("接线", `漂移——explicit 派发将拒绝：declared(${axesLabel(row.wiringDetail.declared)}) ≠ registry(${axesLabel(row.wiringDetail.registry)})`);
   } else if (row.wiring === "invalid") lines.push("  接线: 条目无效（registry 条目无法解析——认证/就绪跳过；见尾部 issues）");
-  else lines.push(`  接线: 未接线（registry 无键 ${row.id}——认证/就绪跳过）`);
+  else if (row.wiring === "unwired") lines.push(`  接线: 未接线（registry 无键 ${row.id}——认证/就绪跳过）`);
 
   if (row.traitsState === "present") {
     const t = row.traits;
-    // 0087：七项分项星级（星数/依据/measured 附 n；note 与 evidence 折行）。
-    lines.push("  评分（刻度见表头）:");
+    // 153 批：没评的维度不各占一行，合成一行"未评: …"；七格全没评时不铺评分
+    // 块（评分状态行已说"未评"）。已评维度照原格式按维度序列出。
+    const rated = [];
+    const unratedDims = [];
     for (const dim of Object.keys(dimensionLabels)) {
-      const cell = t.ratings[dim];
-      if (cell.stars === null) {
-        lines.push(`    ${dimensionLabels[dim]}: 未评`);
-        continue;
-      }
-      lines.push(`    ${dimensionLabels[dim]}: ${cell.stars} 星（${cell.basis}${cell.basis === "measured" ? `，n=${cell.n}` : ""}${cell.score ? `，${cell.score.hits}/${cell.score.total} ${cell.score.label}` : ""}）`);
-      if (cell.note !== undefined) {
-        for (const seg of wrapLines(`note: ${cell.note}`, body - 6)) lines.push(`      ${seg}`);
-      }
-      if (cell.evidence !== undefined) {
-        for (const seg of wrapLines(`evidence: ${cell.evidence}`, body - 6)) lines.push(`      ${seg}`);
+      (t.ratings[dim].stars === null ? unratedDims : rated).push(dim);
+    }
+    if (rated.length > 0) {
+      // 0087：七项分项星级（星数/依据/measured 附 n；note 折行）。
+      lines.push("  评分（刻度见表头）:");
+      for (const dim of rated) {
+        const cell = t.ratings[dim];
+        lines.push(`    ${dimensionLabels[dim]}: ${cell.stars} 星（${cell.basis}${cell.basis === "measured" ? `，n=${cell.n}` : ""}${cell.score ? `，${cell.score.hits}/${cell.score.total} ${cell.score.label}` : ""}）`);
+        if (cell.note !== undefined) {
+          for (const seg of wrapLines(`note: ${cell.note}`, body - 6)) lines.push(`      ${seg}`);
+        }
+        // 153 批：evidence 是审计出处——默认一屏不印，--evidence 时照旧。
+        if (evidence && cell.evidence !== undefined) {
+          for (const seg of wrapLines(`evidence: ${cell.evidence}`, body - 6)) lines.push(`      ${seg}`);
+        }
       }
     }
+    // 153 修正一（会审 FIX_FIRST）：只要有没评的维度就写一行"未评: …"——唯一
+    // 例外是评分状态本身就是"未评"（那一行已写明七格全未评）。七格全没评且写了
+    // reviewPending 时，待复核与全未评两条事实都要在场，不能只剩待复核。
+    if (unratedDims.length > 0 && row.ratingsState !== "unrated") {
+      emit("未评", unratedDims.map((d) => dimensionLabels[d]).join("、"));
+    }
+    // 153 批：评分状态"当前"是常态不占行；待复核、未评、无法判定照旧写。
     if (row.ratingsState === "review") {
       lines.push("  评分状态: 待复核——");
       for (const r of row.reviewReasons) {
         for (const seg of wrapLines(r, body - 4)) lines.push(`    ${seg}`);
       }
-    } else {
+    } else if (row.ratingsState !== "current") {
       lines.push(`  ${RATINGS_STATE_LINES[row.ratingsState] ?? `评分状态: ${row.ratingsState}`}`);
     }
-    emit("成本", t.cost ?? "未提供");
+    // 153 批：成本行带额度池名（同池车道共用一份额度）。
+    emit(t.quotaPool !== undefined ? `成本（${t.quotaPool}）` : "成本", t.cost ?? "未提供");
+    // 153 批：没有注意事项不写"注意事项: 无"（只报例外）。
     if (t.caveats.length > 0) {
       lines.push("  注意事项:");
       for (const c of t.caveats) {
         for (const seg of wrapLines(`- ${c}`, body - 4)) lines.push(`    ${seg}`);
       }
-    } else {
-      lines.push("  注意事项: 无");
     }
-    emit("context", `${t.contextWindow.tokens} tokens${t.contextWindow.shape ? `（${t.contextWindow.shape}）` : ""} [source: ${t.contextWindow.source}]`);
-    emit("multimodal", `image=${t.multimodal.image ? "是" : "否"} video=${t.multimodal.video ? "是" : "否"} [source: ${t.multimodal.source}]`);
+    // 153 批：context 与 multimodal 合一行；--evidence 时 source 跟在各自后面。
+    emit("上下文", `${t.contextWindow.tokens} tokens${t.contextWindow.shape ? `（${t.contextWindow.shape}）` : ""}${evidence ? ` [source: ${t.contextWindow.source}]` : ""}`
+      + ` · 图片 ${t.multimodal.image ? "是" : "否"} · 视频 ${t.multimodal.video ? "是" : "否"}${evidence ? ` [source: ${t.multimodal.source}]` : ""}`);
     if (t.effortNote) emit("effortNote", t.effortNote);
     if (t.concurrencyNote) emit("concurrency", t.concurrencyNote);
   } else if (row.traitsState === "absent") lines.push("  画像: 未提供（画像文件无该车道键）");
@@ -182,12 +236,12 @@ function renderLane(row, width, dimensionLabels) {
   else lines.push("  画像: 文件不可读");
 
   if (row.wiring === "wired" || row.wiring === "drift") {
-    if (row.certification === null) {
-      lines.push("  certification: 未取得匹配认证（原因未区分：无记录/身份不匹配/台账缺失或不可读）");
-    } else {
-      lines.push(`  certification: ${row.certification}${row.certificationLastHealthyAt ? `（lastHealthy ${row.certificationLastHealthyAt}）` : ""}`);
-    }
-    lines.push(`  readyState: ${row.readyState ?? "—（无探测行）"}`);
+    // 153 批：认证与就绪合一行；null 的文案收成"无匹配记录"，原因未区分的
+    // 解释只在表头 sourceNotes.certification 里说一次。
+    const certValue = row.certification === null
+      ? "无匹配记录"
+      : `${row.certification}${row.certificationLastHealthyAt ? `（lastHealthy ${row.certificationLastHealthyAt}）` : ""}`;
+    emit("认证", `${certValue}；就绪: ${row.readyState ?? "—（无探测行）"}`);
     // 决定 0074：kimiHome 车道就绪按 token 文件推导——人读面点名路径（去哪看）。
     if (row.readyTokenFile) {
       lines.push(`  credential: token 文件 ${row.readyTokenFile}（kimiHome 车道凭据=server.token；缺失或为空=未就绪；doctor 同查此文件）`);
@@ -227,8 +281,10 @@ export async function lanesCommand(args, config) {
     ? loadLanesConfig(resolve(options.lanesFile))
     : loadLanesConfig();
   // readLaneTraitsFn：测试缝（夹具画像注入；生产路径缺省真实画像）。与
-  // loadLanesConfigFn/readRegistry 同一注入纪律。
+  // loadLanesConfigFn/readRegistry 同一注入纪律。nowMsFn（152 批）：对照表
+  // "此刻"的时钟缝；生产缺省 Date.now()。
   const traitsResult = (config?.readLaneTraitsFn ?? readLaneTraits)();
+  const nowMs = (config?.nowMsFn ?? Date.now)();
 
   // 就绪轴：探测权威只吃 registry 有效条目 ∩ 车道键（wired+drift 均探测——
   // drift 条目本身合法，就绪事实属于 registry 侧；未接线/无效无行）。
@@ -253,16 +309,25 @@ export async function lanesCommand(args, config) {
   } else {
     const width = 120;
     const out = [];
-    out.push("wao lanes — 车道一屏参考（只读；事实陈列，非推荐）");
+    // 153 批：标题行说一次"只陈列、非推荐"与细节口径（细节只列例外、出处收进
+    // --evidence）——表头各注记不再重复这层意思。
+    out.push("wao lanes — 车道一屏参考（只读；事实陈列，非推荐；细节只列例外，出处加 --evidence）");
     if (explicitPairing) out.push("  注记: 显式拼接面——非默认 registry 与显式车道表成对给出（防跨绑规则的放行形）");
-    // 0097 §5：开头先打一屏对照表（声明序，不排序），表后列成本档说明与 Owner
-    // 规则，再接原有细节。车道表不可用时不渲染（对照无从对照）。
+    // 0097 §5：开头先打一屏对照表（声明序，不排序），表后列成本档说明、共用
+    // 额度与 Owner 规则，再接原有细节。车道表不可用时不渲染（对照无从对照）。
     if (view.state === "ok") {
       out.push("");
-      out.push(...renderSummaryTable(view.lanes));
+      out.push(...renderSummaryTable(view.lanes, nowMs));
       if (view.costTierScale) {
         // 说明串自带"成本档：…"前缀——直接列出，不加第二个标签。
         for (const seg of wrapLines(view.costTierScale, width - 2)) out.push(`  ${seg}`);
+      }
+      // 153 批：额度池结构化——共用额度块（一池一行，只列两条及以上的池），
+      // 在成本档说明之后、Owner 规则之前；没有共用池时整块不写。
+      const poolsBlock = sharedQuotaPoolsBlock(view.lanes);
+      if (poolsBlock) {
+        out.push(`  ${poolsBlock[0]}`);
+        for (const line of poolsBlock.slice(1)) out.push(`    ${line}`);
       }
       if (Array.isArray(view.ownerRules)) {
         out.push("  Owner 规则（排在前面的优先）:");
@@ -276,7 +341,10 @@ export async function lanesCommand(args, config) {
     for (const [k, v] of Object.entries(view.sourceNotes)) {
       for (const seg of wrapLines(`${k}: ${v}`, width - 2)) out.push(`  ${seg}`);
     }
-    out.push(`  lanes.json sha256=${view.lanesSha256 ?? "null"}；画像文件 ${view.traitsPath ?? "(路径未知)"} sha256=${view.traitsSha256 ?? "null"}`);
+    // 153 批：出处（sha256 与画像路径）收进 --evidence，默认一屏不印。
+    if (options.evidence) {
+      out.push(`  lanes.json sha256=${view.lanesSha256 ?? "null"}；画像文件 ${view.traitsPath ?? "(路径未知)"} sha256=${view.traitsSha256 ?? "null"}`);
+    }
     // 0087：表头显示一次刻度（各车道的星级都对着它读）。
     if (view.traitsScale) {
       for (const seg of wrapLines(`刻度: ${view.traitsScale}`, width - 2)) out.push(`  ${seg}`);
@@ -291,7 +359,7 @@ export async function lanesCommand(args, config) {
     } else {
       for (const row of view.lanes) {
         out.push("");
-        out.push(...renderLane(row, width, view.dimensionLabels));
+        out.push(...renderLane(row, width, view.dimensionLabels, options.evidence));
       }
       if (view.issues.length > 0) {
         out.push("");

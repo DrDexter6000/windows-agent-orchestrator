@@ -3,7 +3,9 @@
 // 车道画像（schemaVersion 2，决定 0087；costTier/score/ownerRules 见 0097）的
 // 加载、校验、待复核判定与 lead_preflight 紧凑投影。每格带星级与依据
 // （measured/official/owner）；打分身份与车道表不一致，或写了 reviewPending，
-// 即待复核。
+// 即待复核。152 批：车道可声明 peak（服务商高峰时段的结构化事实，北京时间，
+// 固定 UTC+8）；"此刻"计算（validPeak/peakNowAt/beijingNowLabel）也在本模块
+// ——WAO 只算"世界现在是什么样"（此刻是否高峰、到几点），不算"该派谁"。
 //
 // 定位与边界（0087 §5；0097 修订）：
 //   - 画像文件名字面量只出现在本模块（隔离守卫 test/registry-roles/laneTraits.test.js
@@ -74,6 +76,8 @@ export const REVIEW_REASON_MAX_CHARS = 160;
 export const REVIEW_REASONS_CAP = 4;
 /** cost 的字符数。 */
 export const COST_MAX_CHARS = 200;
+/** quotaPool（额度池名：同名车道共用一份额度）的字符数。 */
+export const QUOTA_POOL_MAX_CHARS = 40;
 /** 投影时每格备注截到的字符数（文件里的备注上限另见 validateRatingCell）。 */
 export const PROJECTED_NOTE_MAX_CHARS = 80;
 /** 投影里刻度行的字符数。 */
@@ -94,11 +98,23 @@ export const SCORE_LABEL_MAX_CHARS = 16;
 export const PROJECTION_NOTICES_CAP = 8;
 /** 每条投影观察的字符数。 */
 export const PROJECTION_NOTICE_MAX_CHARS = 160;
+// 152 批（车道高峰结构化）：peak 字段的上限与时区口径只写在这里。
+/** peak.effect 的字符数。 */
+export const PEAK_EFFECT_MAX_CHARS = 40;
+/** peak.hours 的段数上限。 */
+export const PEAK_HOURS_CAP = 4;
+/** peak 的时区口径：北京时间（固定 UTC+8，无夏令时；不依赖宿主时区）。 */
+export const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+/** 星期中文名（下标=Date.getUTCDay()，0=周日）。 */
+export const WEEKDAY_LABELS = Object.freeze([
+  "周日", "周一", "周二", "周三", "周四", "周五", "周六",
+]);
 
 /** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid。 */
 const LANE_ENTRY_KEYS = new Set([
-  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
+  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier", "quotaPool",
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
+  "peak",
 ]);
 
 /** 每格键闭集。 */
@@ -118,6 +134,117 @@ const hasControlChars = (v) => typeof v === "string" && /[\u0000-\u001f\u007f-\u
 export function validCostTier(v) {
   return v === null
     || (Number.isFinite(v) && v > 0 && v <= COST_TIER_MAX && Number.isInteger(v * 2));
+}
+
+// 152 批（车道高峰结构化）：peak 的校验与"此刻"计算。口径（Owner 2026-11-26
+// 定）：北京时间（固定 UTC+8，无夏令时）、工作日=周一至周五、法定节假日不
+// 识别按工作日算；WAO 只算"世界现在是什么样"（此刻是否高峰、到几点），不算
+// "所以该派谁"（不变量 4/6）。
+
+/** "HH:MM" → 当日分钟数；形状不符返回 null。 */
+function minutesOfHHMM(s) {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(s);
+  return m == null ? null : Number(m[1]) * 60 + Number(m[2]);
+}
+
+/** peak.hours 合法形：1–4 段 "HH:MM-HH:MM"，同一天内（start<end，不跨午夜）、
+ *  不重叠、按时间先后排列（相邻段恰好相接不算重叠）。 */
+export function validPeakHours(hours) {
+  if (!Array.isArray(hours) || hours.length < 1 || hours.length > PEAK_HOURS_CAP) return false;
+  let prevEnd = -1;
+  for (const seg of hours) {
+    if (typeof seg !== "string") return false;
+    const m = /^(\d{2}:\d{2})-(\d{2}:\d{2})$/.exec(seg);
+    if (m == null) return false;
+    const start = minutesOfHHMM(m[1]);
+    const end = minutesOfHHMM(m[2]);
+    if (start == null || end == null || start >= end || start < prevEnd) return false;
+    prevEnd = end;
+  }
+  return true;
+}
+
+/** peak 合法形（152 批）：恰好 {days,hours,effect} 三键；days 只取 "weekdays"；
+ *  hours 见 validPeakHours；effect 是一句短文字（无控制字符）。 */
+export function validPeak(peak) {
+  return isPlainObject(peak)
+    && Object.keys(peak).length === 3
+    && peak.days === "weekdays"
+    && validPeakHours(peak.hours)
+    && isStr(peak.effect, 1, PEAK_EFFECT_MAX_CHARS)
+    && !hasControlChars(peak.effect);
+}
+
+/** 北京墙钟标签："周四 22:15"（固定偏移计算，宿主时区不参与）。 */
+export function beijingNowLabel(nowMs) {
+  const b = new Date(nowMs + BEIJING_OFFSET_MS);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${WEEKDAY_LABELS[b.getUTCDay()]} ${p(b.getUTCHours())}:${p(b.getUTCMinutes())}`;
+}
+
+/** 边界时刻的北京 ISO 串（固定 +08:00 偏移，分钟对齐）。 */
+function beijingIsoInstant(epochMs) {
+  const b = new Date(epochMs + BEIJING_OFFSET_MS);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${b.getUTCFullYear()}-${p(b.getUTCMonth() + 1)}-${p(b.getUTCDate())}`
+    + `T${p(b.getUTCHours())}:${p(b.getUTCMinutes())}:00+08:00`;
+}
+
+/**
+ * "此刻"（152 批）：已校验的声明高峰相对 nowMs 的状态与下一个边界。纯函数；
+ * 只用 UTC 读数 + 固定偏移，宿主时区不参与。days=weekdays 按周一至周五算，
+ * 法定节假日不识别。首尾相接的段在计算面合并成一段连续高峰（152 批修正一；
+ * 校验仍按不重叠收）。返回 {state:"peak"|"off_peak", until:"<ISO 时刻>",
+ * untilLocal:"18:00"|"周一 14:00"}——untilLocal 同一天不带星期、跨天带星期
+ * （wao lanes 对照表、lead_preflight、派发回显共用这一份显示规则）；
+ * peak 形状不合法或 nowMs 非有限数返回 null。
+ */
+export function peakNowAt(peak, nowMs) {
+  if (!validPeak(peak) || !Number.isFinite(nowMs)) return null;
+  const parsed = peak.hours.map((seg) => {
+    const m = /^(\d{2}:\d{2})-(\d{2}:\d{2})$/.exec(seg);
+    return { start: minutesOfHHMM(m[1]), end: minutesOfHHMM(m[2]) };
+  });
+  // 修正一（152 批续）：首尾相接的段在计算面合并成一段连续高峰——否则 11:59
+  // 报"高峰，至 12:00"、12:00 又是高峰。校验仍按"不重叠"收（相接合法），这里
+  // 只合并；不相接的段原样（DeepSeek 09:00–12:00、14:00–18:00 照旧）。
+  const segs = [];
+  for (const s of parsed) {
+    const last = segs[segs.length - 1];
+    if (last != null && s.start <= last.end) last.end = Math.max(last.end, s.end);
+    else segs.push({ start: s.start, end: s.end });
+  }
+  const bj = new Date(nowMs + BEIJING_OFFSET_MS);
+  const dayMin = bj.getUTCHours() * 60 + bj.getUTCMinutes();
+  const dow = bj.getUTCDay(); // 0=周日
+  // 今日（北京历日）北京零点的 epoch ms：Date.UTC 给的是同一历日的 UTC 零点，
+  // 减固定偏移即北京零点。
+  const todayStartEpoch = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate())
+    - BEIJING_OFFSET_MS;
+  const boundary = (epochMs, state) => {
+    const ub = new Date(epochMs + BEIJING_OFFSET_MS);
+    const sameDay = ub.getUTCFullYear() === bj.getUTCFullYear()
+      && ub.getUTCMonth() === bj.getUTCMonth()
+      && ub.getUTCDate() === bj.getUTCDate();
+    const p = (n) => String(n).padStart(2, "0");
+    const time = `${p(ub.getUTCHours())}:${p(ub.getUTCMinutes())}`;
+    return {
+      state,
+      until: beijingIsoInstant(epochMs),
+      untilLocal: sameDay ? time : `${WEEKDAY_LABELS[ub.getUTCDay()]} ${time}`,
+    };
+  };
+  if (dow >= 1 && dow <= 5) {
+    for (const s of segs) {
+      if (dayMin < s.start) return boundary(todayStartEpoch + s.start * 60000, "off_peak");
+      if (dayMin < s.end) return boundary(todayStartEpoch + s.end * 60000, "peak");
+    }
+  }
+  // 非工作日，或工作日已过当日最后一段：下一边界=下一个工作日第一段（合并后）
+  // 高峰的开始。
+  let step = 1;
+  while (!((dow + step) % 7 >= 1 && (dow + step) % 7 <= 5)) step += 1;
+  return boundary(todayStartEpoch + step * 86400000 + segs[0].start * 60000, "off_peak");
 }
 
 /** score 合法形（0097）：恰好 {hits,total,label} 三键，只许出现在 measured 格。 */
@@ -187,8 +314,8 @@ function validateRatingCell(cell) {
 }
 
 /** traits 单车道形状校验（schemaVersion 2）。任一项不合规即整条车道降级
- *  invalid——不造默认值（与 v1 同纪律）。唯一例外（0097）：costTier 不合法
- *  只把该格当 null 并记一条观察，车道照常投影。纯函数：
+ *  invalid——不造默认值（与 v1 同纪律）。例外（0097/152 批）：costTier 与
+ *  peak 不合法只把该格降级（null / 缺席）并各记一条观察，车道照常投影。纯函数：
  *  返回 {ok:true, entry, observations:[...]} 或 {ok:false, fields:[...]}。 */
 export function validateTraitEntry(id, entry) {
   void id; // 键名只在 issue 文案里用（调用方拼），校验本身与 id 无关
@@ -243,6 +370,9 @@ export function validateTraitEntry(id, entry) {
   if (entry.reviewPending !== undefined && !isStr(entry.reviewPending, 1, REVIEW_REASON_MAX_CHARS)) bad.push("reviewPending");
   if (entry.cost !== null && entry.cost !== undefined && !isStr(entry.cost, 1, COST_MAX_CHARS)) bad.push("cost");
   if (entry.cost === undefined) bad.push("cost");
+  // quotaPool（153 批）：可选；给了就必须是 1–40 字的字符串——不合法按现有
+  // 纪律整条车道 invalid（与 cost 同级，不像 costTier/peak 那样只降级自身）。
+  if (entry.quotaPool !== undefined && !isStr(entry.quotaPool, 1, QUOTA_POOL_MAX_CHARS)) bad.push("quotaPool");
   if (!Array.isArray(entry.caveats) || entry.caveats.length > CAVEATS_CAP
     || entry.caveats.some((c) => !isStr(c, 1, CAVEAT_MAX_CHARS))) bad.push("caveats");
   // contextWindow / multimodal / effortNote / concurrencyNote：沿用 v1 规则。
@@ -259,6 +389,10 @@ export function validateTraitEntry(id, entry) {
   const costTierOk = entry.costTier === undefined || validCostTier(entry.costTier);
   const costTier = costTierOk ? (entry.costTier ?? null) : null;
   if (!costTierOk) observations.push("costTier 不合法，按未给（null）处理");
+  // peak（152 批）：不合法只降级为缺席（无高峰）+ 一条观察，车道不消失
+  //（与 costTier 同纪律）。
+  const peakOk = entry.peak === undefined || validPeak(entry.peak);
+  if (!peakOk) observations.push("peak 不合法，按未给（无高峰）处理");
   const ratings = {};
   for (const d of RATING_DIMENSIONS) ratings[d] = validateRatingCell(entry.ratings[d]).cell;
   const ra = anyRated
@@ -277,6 +411,10 @@ export function validateTraitEntry(id, entry) {
       ...(entry.reviewPending !== undefined ? { reviewPending: entry.reviewPending } : {}),
       cost: entry.cost,
       costTier,
+      ...(entry.quotaPool !== undefined ? { quotaPool: entry.quotaPool } : {}),
+      ...(peakOk && entry.peak !== undefined
+        ? { peak: { days: entry.peak.days, hours: [...entry.peak.hours], effect: entry.peak.effect } }
+        : {}),
       caveats: [...entry.caveats],
       contextWindow: {
         tokens: cw.tokens,
@@ -420,17 +558,20 @@ function clip(text, max) {
 /**
  * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
  * 每行带暂停说明、上下文窗口与能否看图/看视频，见 0089；推断族系见 0090；行带
- * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097）。行序=
+ * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097；行带
+ * peakNow、顶层带 now（"此刻"，北京时间），见 152 批；行带 quotaPool（额度池
+ * 名），见 153 批）。行序=
  * lanes.json 声明序；只含车道表里有画像的车道；不排序、不加推荐字段。所有
  * 字符串在应用层截到 MCP schema 上限，保证投影总能通过校验。
+ * @param {number} [input.nowMs] "此刻"的时钟参数（测试注入）；生产缺省 Date.now()。
  * @returns {{scale:string, dimensionLabels:Object, costTierScale:(string|null),
- *   ownerRules:(string[]|null), rows:object[], omittedLaneIds:string[],
- *   notices:string[]}|null}
+ *   ownerRules:(string[]|null), now:{beijing:string, holidaysRecognized:boolean},
+ *   rows:object[], omittedLaneIds:string[], notices:string[]}|null}
  *   单车道 invalid 时省略该行并把 id 放进 omittedLaneIds（供调用方写观察）；
  *   notices 携带降级观察（0097：costTier/ownerRules/costTierScale 一类，有界）；
  *   画像文件不可读/不合法或车道表不可用时返回 null。
  */
-export function projectLaneProfiles({ lanesDoc, traitsResult }) {
+export function projectLaneProfiles({ lanesDoc, traitsResult, nowMs = Date.now() }) {
   if (!traitsResult || traitsResult.state !== "ok" || traitsResult.scale == null) return null;
   if (!lanesDoc || lanesDoc.ok !== true || lanesDoc.sha256 == null || !Array.isArray(lanesDoc.lanes)) return null;
   const scaleLine = buildScaleLine(traitsResult.scale, "未列出的维度＝未评");
@@ -466,11 +607,18 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
       id,
       family: laneFamilyLabel(lane),
       costTier: entry.costTier ?? null,
+      // 152 批：声明了合法 peak 的行带"此刻"状态与下一边界（WAO 只报世界现状，
+      // 不算"该派谁"）；没声明的行不带该键。
+      ...(entry.peak !== undefined ? { peakNow: peakNowAt(entry.peak, nowMs) } : {}),
       ratings,
       ratingsState: rs.state,
       reviewReasons: rs.reasons.slice(0, REVIEW_REASONS_CAP).map((s) => clip(s, REVIEW_REASON_MAX_CHARS)),
       caveats: [...entry.caveats],
       cost: entry.cost,
+      // 153 批：额度池名（同名车道共用一份额度）；没给为 null，不造默认值。
+      // 修正一（deepseek-flash 会审 Q3）：与其他字符串一样过一次 clip——生产
+      // 路径先过校验不会超长，注入型调用也要截到上限，投影总能过 schema。
+      quotaPool: entry.quotaPool == null ? null : clip(entry.quotaPool, QUOTA_POOL_MAX_CHARS),
       dispatchHold: validDispatchHold(lane.dispatchHold),
       contextWindowTokens: entry.contextWindow.tokens,
       imageInput: entry.multimodal.image,
@@ -492,6 +640,8 @@ export function projectLaneProfiles({ lanesDoc, traitsResult }) {
     ownerRules: traitsResult.ownerRules == null
       ? null
       : [...traitsResult.ownerRules].map((r) => clip(r, OWNER_RULE_MAX_CHARS)),
+    // 152 批："此刻"（北京时间标签；同一时钟读数——行内 peakNow 与它同源）。
+    now: { beijing: beijingNowLabel(nowMs), holidaysRecognized: false },
     rows,
     omittedLaneIds,
     notices,

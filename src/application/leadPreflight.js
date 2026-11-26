@@ -62,6 +62,7 @@ import {
   OWNER_RULE_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
+  QUOTA_POOL_MAX_CHARS,
   RATING_BASES,
   RATING_DIMENSIONS,
   RATINGS_STATES,
@@ -99,6 +100,7 @@ export {
   OWNER_RULE_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
+  QUOTA_POOL_MAX_CHARS,
   RATING_BASES,
   RATING_DIMENSIONS,
   RATINGS_STATES,
@@ -881,6 +883,10 @@ export async function aggregateLeadPreflight({
   // Profiles are NEVER projected to workers (0087 §5): a worker-context MCP
   // session gets lanes=null, full stop.
   let lanes = null;
+  // 152 批：顶层 now（"此刻"，北京时间标签）与 lanes 同源（投影内同一时钟读数
+  // ——行内 peakNow 与它同一次计算）；lanes 不可用（worker 上下文/画像读不出）
+  // 时 now 同样 null——不单独再读一次时钟。
+  let now = null;
   const observeLaneOmission = (line) => {
     if (observations.length < 64) observations.push(line);
   };
@@ -893,7 +899,8 @@ export async function aggregateLeadPreflight({
       const projection = await fn();
       if (projection != null && typeof projection === "object") {
         // 0097：顶层新增 costTierScale/ownerRules 原样透传（null=缺失或降级），
-        // notices（降级观察）各记一条 preflight 观察。
+        // notices（降级观察）各记一条 preflight 观察。152 批：now 提到 preflight
+        // 顶层（lanes 子对象不带）。
         lanes = {
           scale: projection.scale,
           dimensionLabels: projection.dimensionLabels,
@@ -901,6 +908,7 @@ export async function aggregateLeadPreflight({
           ownerRules: projection.ownerRules ?? null,
           rows: projection.rows,
         };
+        now = projection.now ?? null;
         for (const id of (projection.omittedLaneIds ?? [])) {
           observeLaneOmission(`lane ${id} profile is invalid — row omitted from lanes; see wao lanes`);
         }
@@ -946,6 +954,8 @@ export async function aggregateLeadPreflight({
     // (at the MCP boundary) when the sub-schema validation fails. Advisory
     // reference data only — not part of checkStatus/complete.
     lanes,
+    // 152 批：北京"此刻"标签（与 lanes 同一次时钟读数；lanes 不可用=null）。
+    now,
     observations,
     warnings,
     manualChecks,

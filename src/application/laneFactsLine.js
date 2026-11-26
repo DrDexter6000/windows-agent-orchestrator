@@ -4,11 +4,13 @@
 // 回显给 Lead——CLI `wao run` 打到 stderr（带 `[wao] ` 前缀），MCP run_dispatch
 // 受理回执带可选字段 laneFacts（同一行文字，不带前缀）。
 //
-// 契约（决定 0097）：
+// 契约（决定 0097；152 批增补高峰段）：
 //   - 只陈列，不是推荐：不出现其他车道名，不出现"更便宜""建议""应该"一类词；
 //     WAO 不排序、不路由（不变量 4/6）。只列这条车道已评的维度（Owner 评的写
 //     "（Owner）"，未评的不列）；成本档 null 写"成本档未给"；评分待复核写
-//     "评分待复核"。
+//     "评分待复核"。所选车道声明了 peak 时，成本档后带一段"此刻"（北京时间
+//     是否在该车道声明的高峰内、到几点；显示规则共用 peakNowAt 的 untilLocal），
+//     没有 peak 的车道不带这段。
 //   - 一行、无换行，长度上限 LANE_FACTS_LINE_MAX_CHARS（≤480 字）。动态内容
 //     （车道键等磁盘上的不可信文本）经 escapeControlChars 转义（TD-318/319）。
 //   - fail-open：画像读失败或车道不在画像里返回 null，派发照常——本模块的
@@ -49,17 +51,19 @@ function clip(text, max) {
  * @param {object} [opts.lanesDoc] 车道表（缺省 loadLanesConfig()；派发面传入
  *   本次调用实际使用的表——非默认 --registry 时表停用，回显随之缺省）
  * @param {object} [opts.traitsResult] readLaneTraits 结果（缺省真实读取；测试缝）
+ * @param {Function} [opts.nowMsFn] "此刻"的时钟缝（152 批；缺省 Date.now）
  * @returns {string|null} 一行文字；画像不可用、车道不在画像里、任何读取失败
  *   → null（fail-open，派发照常）
  */
 export function laneFactsLine(laneId, opts = {}) {
   // opts 在 try 内取——连调用方传入的异常 getter 也吞掉（fail-open 的兜底）。
   try {
-    const { lanesDoc, traitsResult } = opts;
+    const { lanesDoc, traitsResult, nowMsFn } = opts;
     if (typeof laneId !== "string" || laneId.length === 0) return null;
     const lanes = lanesDoc ?? loadLanesConfig();
     const traits = traitsResult ?? readLaneTraits();
-    const projection = projectLaneProfiles({ lanesDoc: lanes, traitsResult: traits });
+    const nowMs = (typeof nowMsFn === "function" ? nowMsFn : Date.now)();
+    const projection = projectLaneProfiles({ lanesDoc: lanes, traitsResult: traits, nowMs });
     if (projection == null) return null;
     const row = projection.rows.find((r) => r && r.id === laneId);
     if (row == null) return null;
@@ -67,6 +71,14 @@ export function laneFactsLine(laneId, opts = {}) {
     parts.push(row.costTier == null
       ? "成本档未给"
       : `成本档 ${row.costTier}（Owner 相对档 0.5–5，非价格倍数）`);
+    // 152 批：声明了 peak 的车道带"此刻"段（紧随成本档；peakNow 与 effect 来自
+    // 同一条已校验画像条目——有 peakNow 必有 effect）。
+    if (row.peakNow != null) {
+      const effect = traits.traits[laneId].peak.effect;
+      parts.push(row.peakNow.state === "peak"
+        ? `此刻高峰（至 ${row.peakNow.untilLocal}，${effect}）`
+        : `此刻非高峰（至 ${row.peakNow.untilLocal}）`);
+    }
     for (const d of RATING_DIMENSIONS) {
       const cell = row.ratings[d];
       if (cell == null) continue; // 未评的维度不列

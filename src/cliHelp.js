@@ -102,7 +102,7 @@ Project state (.wao/) — wao-namespace subcommands; write them bare (wao doctor
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json] [--registry FILE]  # 从入库模板生成最小私有 registry；--host 给该宿主的注册指引；不带 --agent = 预览出口
   wao accept --run <runId> (--show | --decision <accepted|rejected> --reason <text>) [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # 验收落盘（只对终态 run）；--show 只读列出既有记录
   wao sweep-claude-config [--apply]  # 清扫 claude-code OAuth 临时配置目录（默认 dry-run，--apply 才删）
-  wao lanes [--json] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读）：接线轴+画像+认证简表+就绪探测
+  wao lanes [--json] [--evidence] [--run-dir DIR] | [--registry FILE --lanes-file FILE]  # 车道一屏参考（只读）：接线轴+画像+认证简表+就绪探测；--evidence 附出处
 
 Notes:
   - 完整用法与场景说明见使用手册（wao manual 列各页；wao manual <页> <节> 按节读；没有全局 wao 时在安装根 npm run cli -- manual）。

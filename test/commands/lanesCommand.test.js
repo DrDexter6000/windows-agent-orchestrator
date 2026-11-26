@@ -72,8 +72,11 @@ test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 
     assert.match(text, /^lane l1 — .+ · 推断族系 \S+$/m, "车道行带推断族系（决定 0090）");
     assert.ok(/接线: 漂移——explicit 派发将拒绝/.test(text), "l2 drift 判定与拒绝语义");
     assert.ok(!text.includes("seatRole:"), "seatRole 列已退役（0065）");
-    assert.ok(text.includes("certification: certified"), "台账匹配记录显示");
-    assert.ok(text.includes("未取得匹配认证"), "l2 身份不匹配→null 语义文案");
+    // 153 批：认证与就绪合一行；null 语义收成「无匹配记录」（原因未区分的解释
+    // 移到表头 sourceNotes.certification）——原断言测旧的逐行英文标签与解释句。
+    assert.match(text, /认证: certified（lastHealthy 2026-10-06T00:00:00\.000Z）；就绪: \S+/,
+      "台账匹配记录并入认证/就绪一行");
+    assert.ok(text.includes("认证: 无匹配记录"), "l2 身份不匹配→null 的收敛文案");
     assert.equal(process.exitCode, undefined, "正常面不改退出码");
   } finally { cleanupDir(dir); }
 });
@@ -138,10 +141,12 @@ const baseEntry = (over = {}) => ({
   ...over,
 });
 
-/** 夹具车道表：声明序 t1(实测三格带 score)、t2(全未评)、t3(带 dispatchHold)、
- *  t4(无画像)、t5(写了 reviewPending)。t1 与 registry 四轴一致（current）；
- *  t2 全未评（unrated→未评，不是待复核）；t5 待复核（review）。 */
-function makeTableEnv() {
+/** 夹具车道表：声明序 t1(实测三格带 score，声明了 peak)、t2(全未评)、
+ *  t3(带 dispatchHold)、t4(无画像)、t5(写了 reviewPending)。t1 与 registry
+ *  四轴一致（current）；t2 全未评（unrated→未评，不是待复核）；t5 待复核
+ *  （review）。quotaPools（153 批）：lane id → quotaPool，给了才带该键。 */
+function makeTableEnv(quotaPools = {}) {
+  const pool = (id) => (quotaPools[id] !== undefined ? { quotaPool: quotaPools[id] } : {});
   const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-tbl-"));
   mkdirSync(join(dir, "runs"), { recursive: true });
   writeFileSync(join(dir, "lanes.json"), JSON.stringify({
@@ -170,7 +175,9 @@ function makeTableEnv() {
     observations: [],
     traits: {
       t1: baseEntry({
+        ...pool("t1"),
         costTier: 0.5,
+        peak: { days: "weekdays", hours: ["14:00-18:00"], effect: "非高峰消耗减半" },
         ratings: {
           research: { stars: 3, basis: "measured", n: 99, evidence: "e", score: { hits: 68, total: 99, label: "与终裁一致" } },
           code: { stars: 3, basis: "measured", n: 2, evidence: "e", score: { hits: 27, total: 28, label: "隐藏测试通过" } },
@@ -180,8 +187,9 @@ function makeTableEnv() {
         },
         ratedAgainst: { backend: "zcode", modelId: "p1/m1", providerID: null, effort: "max" },
       }),
-      t2: baseEntry({}),
+      t2: baseEntry({ ...pool("t2") }),
       t3: baseEntry({
+        ...pool("t3"),
         costTier: 4,
         ratings: {
           code: { stars: 5, basis: "owner", note: "后端强" },
@@ -190,21 +198,30 @@ function makeTableEnv() {
         },
         ratedAgainst: { backend: "codex", modelId: "m3", providerID: null, effort: "high" },
       }),
-      t5: baseEntry({ reviewPending: "夹具：换代待复核" }),
+      t5: baseEntry({ ...pool("t5"), reviewPending: "夹具：换代待复核" }),
     },
     invalidIds: [], issues: [],
   };
   return { dir, traitsResult };
 }
 
-async function runLanesCapture(dir, traitsResult, args = []) {
+// 152 批：对照表"此刻"的时钟缝注入（生产缺省 Date.now）。夹具钉在
+// 2026-11-26（周四）12:30 北京时间——GLM 高峰外、DeepSeek 两段之间。
+const TBL_NOW = (Date.UTC(2026, 10, 26, 12, 30) - 8 * 60 * 60 * 1000);
+
+async function runLanesCapture(dir, traitsResult, args = [], over = {}) {
   const chunks = [];
   const origLog = console.log;
   console.log = (...a) => { chunks.push(a.join(" ")); };
   try {
     await lanesCommand(
       ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs"), ...args],
-      { registry: "config/agents.json", runDir: join(dir, "runs"), readLaneTraitsFn: () => traitsResult },
+      {
+        registry: "config/agents.json", runDir: join(dir, "runs"),
+        readLaneTraitsFn: () => traitsResult,
+        nowMsFn: () => TBL_NOW,
+        ...over,
+      },
     );
   } finally { console.log = origLog; }
   // 人读面是单次 console.log(join("\n"))——按换行拆回逐行。
@@ -221,24 +238,35 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
     assert.ok(headerIdx > 0, "对照表在场");
     assert.ok(headerIdx < lines.findIndex((l) => /^lane t1 — /.test(l)), "对照表在细节之前");
     assert.ok(lines[headerIdx].includes("只列三个实测维度"), "表头注明只列三个实测维度");
-    // 表头七列。
-    assert.match(lines[headerIdx + 1], /车道\s+族系\s+写代码\s+把关\s+调研\s+成本档\s+状态/);
+    // 表头上方的"此刻"行（152 批，注入时钟=周四 12:30）。
+    assert.match(lines[headerIdx + 1], /^  此刻：北京时间 周四 12:30（法定节假日不识别，按工作日算）$/,
+      "表头上方的此刻行（北京时间 + 节假日口径）");
+    // 表头八列（152 批起含"此刻"）。
+    assert.match(lines[headerIdx + 2], /车道\s+族系\s+写代码\s+把关\s+调研\s+成本档\s+此刻\s+状态/);
     // 声明序：t1 行在 t2 行之前，以此类推。
     const rowIdx = (id) => lines.findIndex((l) => new RegExp(`^\\s*${id}\\s`).test(l));
     assert.ok(rowIdx("t1") < rowIdx("t2") && rowIdx("t2") < rowIdx("t3") && rowIdx("t3") < rowIdx("t4"),
       "表行序=声明序");
-    // 四种格写法：实测有分数（3★ 96% n=2；27/28=96%）、实测无分数（3★ n=19）、
-    // Owner 评（5★ 主观）、未评（—）。
+    // 格写法（152 批起不折算百分比）：实测（3★ n=…）、Owner 评（5★ 主观）、未评（—）。
     const t1Row = lines[rowIdx("t1")];
-    assert.match(t1Row, /3★ 96% n=2/, "实测有分数：写代码 27/28 → 96%");
-    assert.match(t1Row, /3★ 69% n=99/, "调研 68/99 → 69%");
+    assert.match(t1Row, /3★ n=2/, "实测格只带星级与 n（27/28 不折算百分比）");
+    assert.match(t1Row, /3★ n=99/, "调研格只带 n");
     assert.match(t1Row, /3★ n=19/, "实测无分数只带 n");
+    assert.ok(!/\d+%/.test(lines.slice(headerIdx, rowIdx("t5") + 1).join("\n")),
+      "对照表块内不再出现百分比");
     const t3Row = lines[rowIdx("t3")];
     assert.match(t3Row, /5★ 主观/, "Owner 评写主观");
     assert.match(t3Row, /—/, "未评格写 —");
     // 成本档列。
     assert.match(t1Row, /0\.5/, "t1 成本档 0.5");
     assert.match(t3Row, / 4\s/, "t3 成本档 4");
+    // "此刻"列（152 批）：t1 声明了 peak（周四 12:30 → 高峰外，至 14:00）；
+    // 其余车道未声明 → —（整表恰一格带"高峰/非高峰，至"字样）。
+    assert.match(t1Row, /非高峰，至 14:00/, "t1 此刻=非高峰，至 14:00（同一天不带星期）");
+    assert.equal(
+      lines.slice(headerIdx, rowIdx("t5") + 1).filter((l) => /(高峰|非高峰)，至/.test(l)).length,
+      1, "只有声明了 peak 的车道带此刻状态格，其余都是 —",
+    );
     // 状态列：t3 暂停（dispatchHold）、t2 未评（unrated 不写成待复核）、t4 无画像、
     // t5 待复核（reviewPending）、t1 空。
     assert.match(t3Row, /暂停/, "dispatchHold → 暂停");
@@ -249,9 +277,9 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
     for (const word of ["暂停", "待复核", "未评", "无画像"]) {
       assert.ok(!lines[rowIdx("t1")].includes(word), `current 且无暂停 → 状态空（不含 ${word}）`);
     }
-    // 表尾图例：百分比的分母不一定是 n。
+    // 表尾图例（152 批：无百分比句；此刻列 — 注明=未声明高峰）。
     const legendIdx = rowIdx("t5") + 1;
-    assert.match(lines[legendIdx], /^\s+格：星级、实测分数百分比（计数单位见下方细节，不一定是 n）/, "表尾图例");
+    assert.match(lines[legendIdx], /^\s+格：星级、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）；此刻列 —=车道未声明高峰时段$/, "表尾图例");
     // 宽度：对照表块内每行（含图例）≤120 显示列（中文字符按 2 列计）。
     for (let i = headerIdx; i <= legendIdx; i++) {
       assert.ok(displayWidth(lines[i]) <= 120, `对照表行宽 ≤120（超宽行：${lines[i].slice(0, 30)}…）`);
@@ -265,6 +293,27 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
     assert.ok(lines.some((l) => l.includes("- 规则二（后）")), "第二条规则");
     // 细节里的评分格显示 score（68/99 与 label）。
     assert.ok(text.includes("调研整理: 3 星（measured，n=99，68/99 与终裁一致）"), "细节格带 score");
+  } finally { cleanupDir(dir); }
+});
+
+test("152 wao lanes：此刻列——高峰内写「高峰，至 HH:MM」；周五晚写到下周一（跨天带星期）", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    // 周四 15:00：t1 在声明高峰内。
+    const inPeak = await runLanesCapture(dir, traitsResult, [], {
+      nowMsFn: () => (Date.UTC(2026, 10, 26, 15, 0) - 8 * 60 * 60 * 1000),
+    });
+    const rowIdxIn = inPeak.findIndex((l) => /^\s*t1\s/.test(l));
+    assert.match(inPeak[rowIdxIn], /高峰，至 18:00/, "高峰内：至当日结束钟点");
+    assert.ok(inPeak.some((l) => l.includes("此刻：北京时间 周四 15:00（法定节假日不识别，按工作日算）")));
+
+    // 周五 20:00（高峰已过，下一边界=周一 14:00，跨天带星期）。
+    const friday = await runLanesCapture(dir, traitsResult, [], {
+      nowMsFn: () => (Date.UTC(2026, 10, 27, 20, 0) - 8 * 60 * 60 * 1000),
+    });
+    const rowIdxFri = friday.findIndex((l) => /^\s*t1\s/.test(l));
+    assert.match(friday[rowIdxFri], /非高峰，至 周一 14:00/, "跨天带星期");
+    assert.ok(friday.some((l) => l.includes("此刻：北京时间 周五 20:00（法定节假日不识别，按工作日算）")));
   } finally { cleanupDir(dir); }
 });
 
@@ -425,7 +474,8 @@ test("wao lanes：kimiHome 车道就绪按 token 文件推导（不探 tokenEnv�
       assert.equal(row.readyState, "key_only_present", "文件在且非空 → key_only_present（key_only 纪律：不声称令牌有效）");
 
       const text = await runLanes(false);
-      assert.ok(text.includes("readyState: key_only_present"), "人读面 readyState 在场");
+      // 153 批：认证与就绪合一行——原断言测旧的「readyState: …」独立行标签。
+      assert.ok(text.includes("就绪: key_only_present"), "人读面就绪值在场（认证/就绪合行）");
       assert.ok(
         text.includes(`credential: token 文件 ${join(home, "server.token")}`),
         "人读面点名 token 文件路径（操作员知道去哪看）",
@@ -471,7 +521,11 @@ test("wao lanes：车道带 dispatchHold → 人读行与 --json 都显示；无
     } finally { console.log = origLog; }
     const text = lines.join("\n");
     assert.ok(text.includes('dispatchHold: 夹具：暂停说明'), "人读面显示 Owner 原话");
-    assert.ok(/dispatchHold[^\n]*不拦截/.test(text), "人读行明示只告知不拦截");
+    // 153 批：行只写 Owner 原话——原断言测行尾的「（Owner 暂停说明，仅提示不
+    // 拦截…）」后缀；该层意思改由 sourceNotes.dispatchHold 说一次（--json 里断言）。
+    const holdLine = text.split("\n").find((l) => l.includes("dispatchHold: 夹具：暂停说明"));
+    assert.equal(holdLine.trim(), "dispatchHold: 夹具：暂停说明", "行内只有 Owner 原话，无后缀解释");
+    assert.ok(!text.includes("仅提示不拦截——派发决定权在 Lead）"), "旧后缀不复现");
     assert.ok(!/lane h2[\s\S]*?dispatchHold:/.test(text.split("lane h2")[1]?.split("lane ")[0] ?? ""), "无说明车道不带该行");
     const jsonStart = lines.findIndex((l) => l.trim().startsWith("{"));
     const payload = JSON.parse(lines.slice(jsonStart).join("\n"));
@@ -480,6 +534,7 @@ test("wao lanes：车道带 dispatchHold → 人读行与 --json 都显示；无
     assert.equal(h1.dispatchHold, "夹具：暂停说明");
     assert.equal(h2.dispatchHold, null);
     assert.ok(payload.sourceNotes.dispatchHold, "--json 同源带来源注记");
+    assert.ok(payload.sourceNotes.dispatchHold.includes("不拦截"), "「只告知不拦截」由注记说一次");
   } finally { cleanupDir(dir); }
 });
 
@@ -521,5 +576,173 @@ test("TD-318（三）：wao lanes 文本模式——modelId 含换行不伪造�
     assert.ok(text.includes("lane f1 —"), "正常车道行照常在场");
     assert.ok(text.includes("lane f2 —"), "带载荷车道照常渲染");
     assert.ok(text.includes("x\\n[FAIL] forged"), "载荷以可见转义留在原行内");
+  } finally { cleanupDir(dir); }
+});
+
+// ── 153 批：默认一屏只报例外 + --evidence 出处档 + 额度池结构化 ──────────────
+
+test("153 wao lanes：默认输出不印出处（evidence/source/sha256），常态行不占行，「非推荐」只一次", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    const lines = await runLanesCapture(dir, traitsResult);
+    const text = lines.join("\n");
+    for (const banned of ["evidence:", "[source:", "sha256=", "接线: 一致", "注意事项: 无", "评分状态: 当前"]) {
+      assert.ok(!text.includes(banned), `默认输出不印「${banned}」`);
+    }
+    // 夹具 t1–t5 全部接线一致 → 连「接线:」都不出现；车道行照常在场。
+    assert.ok(!text.includes("接线:"), "接线一致的常态行不占行");
+    assert.ok(text.includes("lane t1"), "车道行照常在场");
+    // 认证与就绪合一行（夹具无台账 → 无匹配记录；原因解释只在表头注记）。
+    assert.ok(text.includes("认证: 无匹配记录；就绪: "), "认证与就绪合一行");
+    // 修正一（会审补盖）：null 的原因解释句有测试守卫——删掉 lanesView 里那句即红。
+    // 注记按 120 列硬折行，展平空白后再断言整句。
+    const flat = text.replace(/\s+/g, "");
+    assert.ok(flat.includes("无匹配记录的原因未区分：无记录/身份不匹配/台账缺失或不可读"),
+      "sourceNotes.certification 含「原因未区分」解释（默认面可见一次）");
+    assert.equal(lines.filter((l) => l.includes("非推荐")).length, 1, "「非推荐」只在标题行出现一次");
+    assert.equal(lines.filter((l) => l.includes("行序")).length, 1, "行序只由对照表标题说一次（sourceNotes.order 已删）");
+  } finally { cleanupDir(dir); }
+});
+
+test("153 wao lanes：没评的维度合成一行；七格全没评只留评分状态行；全没评+待复核两条事实都在（修正一）", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    const lines = await runLanesCapture(dir, traitsResult);
+    const text = lines.join("\n");
+    assert.ok(text.includes("  未评: 长程自主、文案、视觉设计"), "t1 未评合成一行（维度原序、顿号）");
+    assert.ok(text.includes("  未评: 调研整理、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
+      "t3 只评了一格，其余六格合一行");
+    assert.ok(!lines.some((l) => /^\s+\S+: 未评$/.test(l)), "不再每格一行「X: 未评」");
+    // t2 七格全没评、无待复核：无评分块、无未评行，只有评分状态行（唯一例外）。
+    const t2Block = text.split("lane t2")[1].split("lane t3")[0];
+    assert.ok(!t2Block.includes("评分（刻度见表头）"), "七格全没评不铺评分块");
+    assert.ok(!t2Block.includes("未评:"), "全没评（评分状态=未评）不再列维度行");
+    assert.ok(t2Block.includes("评分状态: 未评（七格全未评——未评不折算成任何星数）"), "只有评分状态行");
+    // 例外照旧：t1 评分当前不占行。
+    const t1Block = text.split("lane t1")[1].split("lane t2")[0];
+    assert.ok(!t1Block.includes("评分状态"), "评分状态「当前」不占行");
+    // 修正一（会审 FIX_FIRST）：t5 七格全没评 + reviewPending——待复核原因与
+    // 「未评: 七项」两条事实都要显示，不能只剩待复核。
+    const t5Block = text.split("lane t5")[1];
+    assert.ok(t5Block.includes("评分状态: 待复核——"), "待复核照旧写");
+    assert.ok(t5Block.includes("未评: 调研整理、写代码、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
+      "全没评+待复核时未评一行也在场（七项按原顺序）");
+  } finally { cleanupDir(dir); }
+});
+
+test("153 wao lanes --evidence：evidence 行、[source:]、sha256 行在场；细节例外口径两档一致", async () => {
+  const { dir, traitsResult } = makeTableEnv();
+  try {
+    const lines = await runLanesCapture(dir, traitsResult, ["--evidence"]);
+    const text = lines.join("\n");
+    assert.ok(text.includes("evidence: e"), "实测格 evidence 行照旧在场");
+    assert.match(text, /上下文: 1000000 tokens \[source: official（测试）\] · 图片 是 · 视频 否 \[source: official\]/,
+      "context/multimodal 合行，--evidence 时 source 跟在各自后面");
+    assert.match(text, /lanes\.json sha256=[0-9a-f]{64}；画像文件 .*traits\.json sha256=b{64}/, "尾部出处行照旧在场");
+    for (const stillBanned of ["接线: 一致", "注意事项: 无", "评分状态: 当前"]) {
+      assert.ok(!text.includes(stillBanned), `--evidence 也不复活常态行（${stillBanned}）`);
+    }
+    // 修正一：--evidence 档同样要双事实并存（t5 全没评 + 待复核）。
+    const t5Evidence = text.split("lane t5")[1];
+    assert.ok(t5Evidence.includes("评分状态: 待复核——"), "待复核在场");
+    assert.ok(t5Evidence.includes("未评: 调研整理、写代码、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
+      "未评一行在 --evidence 档同样在场");
+  } finally { cleanupDir(dir); }
+});
+
+test("153 wao lanes：共用额度一行——只列两条及以上的池（池序/池内序=声明序）；成本行带池名；--json 行带 quotaPool", async () => {
+  const { dir, traitsResult } = makeTableEnv({ t1: "池甲", t2: "池甲", t3: "池乙", t5: "池乙" });
+  try {
+    const lines = await runLanesCapture(dir, traitsResult);
+    const text = lines.join("\n");
+    const poolsIdx = lines.findIndex((l) => l.trim() === "共用额度:");
+    const scaleIdx = lines.findIndex((l) => l.includes("成本档：Owner 给的相对档位"));
+    const rulesIdx = lines.findIndex((l) => l.includes("Owner 规则（排在前面的优先）"));
+    assert.ok(poolsIdx > -1, "共用额度块标题在场");
+    assert.ok(poolsIdx > scaleIdx && poolsIdx < rulesIdx, "位置=成本档说明之后、Owner 规则之前");
+    // 修正一（会审）：一池一行，不再整行硬折把车道名劈开。
+    assert.equal(lines[poolsIdx], "  共用额度:", "标题行独占");
+    assert.equal(lines[poolsIdx + 1], "    池甲：t1、t2", "第一池一行（池内=声明序）");
+    assert.equal(lines[poolsIdx + 2], "    池乙：t3、t5", "第二池一行");
+    assert.ok(text.includes("成本（池甲）: 按量计费"), "成本行带池名");
+    // --json 车道行同样带 quotaPool（traits 原样投影）。
+    let payload = null;
+    const origLog = console.log;
+    console.log = (s) => { payload = JSON.parse(s); };
+    try {
+      await lanesCommand(
+        ["--json", "--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
+        { registry: "config/agents.json", runDir: join(dir, "runs"), readLaneTraitsFn: () => traitsResult },
+      );
+    } finally { console.log = origLog; }
+    assert.equal(payload.lanes.find((r) => r.id === "t1").traits.quotaPool, "池甲");
+    assert.equal(payload.lanes.find((r) => r.id === "t4").traits, undefined, "无画像车道无 traits（quotaPool 也在其中）");
+  } finally { cleanupDir(dir); }
+});
+
+test("153 wao lanes：只有单车道池（或全部没给 quotaPool）时不写共用额度行；成本行照旧不带池名", async () => {
+  // 三个池各只一条车道 → 没有共用池。
+  const solo = makeTableEnv({ t1: "独池甲", t3: "独池乙", t5: "独池丙" });
+  try {
+    const lines = await runLanesCapture(solo.dir, solo.traitsResult);
+    const text = lines.join("\n");
+    assert.ok(!text.includes("共用额度"), "单车道池不列共用额度行");
+    assert.ok(text.includes("成本（独池甲）: 按量计费"), "成本行仍带单车道池名");
+  } finally { cleanupDir(solo.dir); }
+  // 全部没给 quotaPool → 成本行照旧「成本: …」。
+  const bare = makeTableEnv();
+  try {
+    const lines = await runLanesCapture(bare.dir, bare.traitsResult);
+    const text = lines.join("\n");
+    assert.ok(!text.includes("共用额度"), "没有共用池不写这一行");
+    assert.ok(!text.includes("成本（"), "无池名后缀");
+    assert.ok(text.includes("成本: 按量计费"), "成本行照旧");
+  } finally { cleanupDir(bare.dir); }
+});
+
+// 153 修正一（deepseek-flash 会审 §4 补盖）：未接线与画像无效两条命令级渲染
+// 分支此前无测试——误删不红。夹具：v1 接线一致、u1 不在 registry（未接线）、
+// iv 在 registry 但画像形状错误（经 issues 注入降级）。
+test("153 修正一 wao lanes：未接线车道与画像无效车道照常渲染例外行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-x-"));
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  writeFileSync(join(dir, "lanes.json"), JSON.stringify({
+    schema: 2,
+    lanes: [
+      { id: "v1", backend: "zcode", model: { id: "p1/m1" }, reasoning: { effort: "max" }, aliases: {} },
+      { id: "u1", backend: "codex", model: { id: "m9" }, reasoning: { effort: "high" }, aliases: {} },
+      { id: "iv", backend: "codex", model: { id: "m8" }, reasoning: { effort: "high" }, aliases: {} },
+    ],
+  }), "utf8");
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    agents: {
+      v1: { backend: "zcode", model: { id: "p1/m1" }, reasoning: { effort: "max" }, binary: "C:/wao-test-zcode/zcode.cjs", cwd: dir },
+      iv: { backend: "codex", model: { id: "m8" }, reasoning: { effort: "high" }, cwd: dir },
+    },
+  }), "utf8");
+  const traitsResult = {
+    state: "ok", path: join(dir, "traits.json"), sha256: "b".repeat(64), scale: SCALE,
+    costTierScale: "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数",
+    ownerRules: [], observations: [],
+    traits: { v1: baseEntry() },
+    invalidIds: ["iv"],
+    issues: ["车道 iv 画像形状错误（cost）"],
+  };
+  try {
+    const lines = await runLanesCapture(dir, traitsResult);
+    const text = lines.join("\n");
+    const u1Block = text.split("lane u1")[1].split("lane iv")[0];
+    const ivBlock = text.split("lane iv")[1];
+    assert.ok(
+      u1Block.includes("接线: 未接线（registry 无键 u1——认证/就绪跳过）"),
+      "未接线车道渲染例外行",
+    );
+    assert.ok(!u1Block.includes("认证:"), "未接线车道无认证/就绪行（探测跳过）");
+    assert.ok(u1Block.includes("画像: 未提供（画像文件无该车道键）"), "未接线车道画像缺席照常报告");
+    assert.ok(ivBlock.includes("画像: 形状错误（见尾部 issues）"), "画像无效车道渲染例外行");
+    assert.ok(text.includes("车道 iv 画像形状错误（cost）"), "尾部 issues 点名字段");
+    // 接线一致的 v1 仍不占接线行（只报例外口径不被这两条破坏）。
+    const v1Block = text.split("lane v1")[1].split("lane u1")[0];
+    assert.ok(!v1Block.includes("接线:"), "接线一致不占行");
   } finally { cleanupDir(dir); }
 });

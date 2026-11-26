@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { CAVEATS_CAP, CAVEAT_MAX_CHARS, COST_MAX_CHARS, REVIEW_REASON_MAX_CHARS } from "../../src/application/laneProfile.js";
+import { CAVEATS_CAP, CAVEAT_MAX_CHARS, COST_MAX_CHARS, QUOTA_POOL_MAX_CHARS, REVIEW_REASON_MAX_CHARS } from "../../src/application/laneProfile.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const read = (rel) => readFileSync(join(ROOT, rel), "utf8");
@@ -33,7 +33,9 @@ const BASES = ["measured", "official", "owner"];
 const SOURCE_TOKENS = ["official", "owner", "wire"];
 const LANE_KEYS = new Set([
   "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
+  "quotaPool", // 153 批：额度池名（可选；同名车道共用一份额度）
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
+  "peak", // 152 批：服务商高峰时段（可选；北京时间、工作日、法定节假日不识别）
 ]);
 const CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence", "score"]);
 
@@ -128,6 +130,8 @@ test("0087 ①：lane-traits 结构——schemaVersion 2、键⊆车道键、七
     }
     assert.ok(t.reviewPending === undefined || isStr(t.reviewPending, 1, REVIEW_REASON_MAX_CHARS), `${id}.reviewPending 1–${REVIEW_REASON_MAX_CHARS}`);
     assert.ok(t.cost === null || t.cost === undefined || isStr(t.cost, 1, COST_MAX_CHARS), `${id}.cost 1–${COST_MAX_CHARS} 或 null`);
+    // 153 批：quotaPool 可选，给了必须 1–40 字符串（上限 SSOT 同一常量）。
+    assert.ok(t.quotaPool === undefined || isStr(t.quotaPool, 1, QUOTA_POOL_MAX_CHARS), `${id}.quotaPool 1–${QUOTA_POOL_MAX_CHARS} 或缺席`);
     assert.ok(Array.isArray(t.caveats) && t.caveats.length <= CAVEATS_CAP
       && t.caveats.every((c) => isStr(c, 1, CAVEAT_MAX_CHARS)), `${id}.caveats 0–${CAVEATS_CAP} 条、各 1–${CAVEAT_MAX_CHARS}`);
     // v1 沿用规则。

@@ -157,6 +157,69 @@ test("fail-open：画像读失败/车道不在画像/投影 null → null，不�
   }), null, "输入抛错 → null 不上抛");
 });
 
+// ── 152 批：声明了 peak 的车道带"此刻"段（时钟注入 nowMsFn）──────────────────
+
+const PEAK = { days: "weekdays", hours: ["14:00-18:00"], effect: "非高峰消耗减半" };
+const PEAK_LANES_DOC = {
+  ok: true, sha256: "a".repeat(64), issues: [],
+  lanes: [
+    { id: "peak-lane", backend: "zcode", model: { id: "m1" }, reasoning: { effort: "max" } },
+  ],
+};
+const PEAK_TRAITS = {
+  state: "ok", path: "fixture.json", sha256: "b".repeat(64), scale,
+  costTierScale: "成本档说明", ownerRules: ["规则一"], observations: [],
+  traits: {
+    "peak-lane": baseEntry({
+      costTier: 1,
+      peak: PEAK,
+      ratings: {
+        research: { stars: 3, basis: "measured", n: 99, evidence: "e", score: { hits: 68, total: 99, label: "与终裁一致" } },
+        code: unrated(), review: unrated(), design: unrated(),
+        longHorizon: unrated(), writing: unrated(), visual: unrated(),
+      },
+      ratedAgainst: { backend: "zcode", modelId: "m1", providerID: null, effort: "max" },
+    }),
+  },
+  invalidIds: [], issues: [],
+};
+// 北京墙钟 → epoch ms（固定 +08:00）。
+const bjMs = (y, mo, d, h, mi) => Date.UTC(y, mo - 1, d, h, mi) - 8 * 60 * 60 * 1000;
+const peakLine = (nowMs) => laneFactsLine("peak-lane", {
+  lanesDoc: PEAK_LANES_DOC, traitsResult: PEAK_TRAITS, nowMsFn: () => nowMs,
+});
+
+test("152 回显行：高峰内写「此刻高峰（至 18:00，effect）」，紧随成本档、在维度之前", () => {
+  const line = peakLine(bjMs(2026, 11, 26, 15, 0)); // 周四 15:00
+  assert.ok(line.includes("此刻高峰（至 18:00，非高峰消耗减半）"), "高峰段带 effect");
+  const order = ["成本档", "此刻高峰", "调研整理"].map((k) => line.indexOf(k));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "成本档 → 此刻段 → 维度");
+  assert.ok(!line.includes("周"), "同一天边界不带星期");
+});
+
+test("152 回显行：非高峰写「此刻非高峰（至 …）」；跨天带星期；整行仍在上限内", () => {
+  // 周四 20:00：当日高峰已过 → 至周五 14:00（同一天边界不带星期）。
+  const thursday = peakLine(bjMs(2026, 11, 26, 20, 0));
+  assert.ok(thursday.includes("此刻非高峰（至 周五 14:00）"), thursday);
+  // 周五 20:00：下一边界=周一 14:00（跨天带星期）。
+  const friday = peakLine(bjMs(2026, 11, 27, 20, 0));
+  assert.ok(friday.includes("此刻非高峰（至 周一 14:00）"), friday);
+  for (const line of [thursday, friday]) {
+    assert.ok(!/[\n\r]/.test(line), "一行无换行");
+    assert.ok(line.length <= LANE_FACTS_LINE_MAX_CHARS, "整行仍不超过 480 字上限");
+  }
+});
+
+test("152 回显行：没声明 peak 的车道不带此刻段；时钟缝缺省 Date.now 也可用", () => {
+  const bare = laneFactsLine("full-lane", {
+    lanesDoc: LANES_DOC, traitsResult, nowMsFn: () => bjMs(2026, 11, 26, 15, 0),
+  });
+  assert.ok(!bare.includes("此刻高峰") && !bare.includes("此刻非高峰"), "无 peak 无此刻段");
+  // 注入 traitsResult 直接走真实 Date.now（只验不抛、段缺席）。
+  const noClock = laneFactsLine("full-lane", { lanesDoc: LANES_DOC, traitsResult });
+  assert.ok(!noClock.includes("此刻高峰") && !noClock.includes("此刻非高峰"));
+});
+
 // ── CLI：派发那一刻打到 stderr（dispatchHold advisory 同款纪律）──────────────
 
 function makeGitRepo(dir) {

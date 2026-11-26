@@ -85,7 +85,7 @@ Tester 的轮询反馈给 Lead，异常时 Lead 介入。同一 auditor 会话�
 
 - 角色合同：`config/roles/*.md`；会话复用政策：`config/roles.json`
 - 车道表：`config/lanes.json`；接线模板：`config/agents.example.json`（本机真值 `config/agents.json`，gitignored）
-- 车道画像（擅长什么、成本档与成本、Owner 规则、实测分数、上下文、能否看图与视频、并发取样）：`config/lane-traits.json`；开工时 `lead_preflight` 带紧凑表，全量与证据看 `npm run cli -- wao lanes`
+- 车道画像（擅长什么、成本档与成本、Owner 规则、实测分数、上下文、能否看图与视频、并发取样）：`config/lane-traits.json`；开工时 `lead_preflight` 带紧凑表，全量看 `npm run cli -- wao lanes`，证据与出处加 `--evidence`
 - backend 字段形状与 effort 值域：生成层 `docs/surface/certification.md`（由代码生成，禁止手改）
 - registry 最小配置示例与 kimi-web、deepseek-acp 车道的前提：`docs/usage/lanes.md`
 - 接入新模型 / 新运行时食谱：`docs/certification-runbook.md`「接入新模型 / 新运行时」
