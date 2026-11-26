@@ -361,6 +361,7 @@ import {
   OWNER_RULE_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
+  QUOTA_POOL_MAX_CHARS,
   RATING_BASES,
   RATING_DIMENSIONS,
   RATINGS_STATES,
@@ -3109,6 +3110,9 @@ const LANES_PROJECTION_OUTPUT = z.object({
     reviewReasons: z.array(z.string().max(REVIEW_REASON_MAX_CHARS)).max(REVIEW_REASONS_CAP),
     caveats: z.array(z.string().max(CAVEAT_MAX_CHARS)).max(CAVEATS_CAP),
     cost: z.string().max(COST_MAX_CHARS).nullable(),
+    // 153 批：额度池名（同名车道共用一份额度——一条限流或用尽时同池车道多半
+    // 也不行）。null = 画像没给，不造默认值；上限 = laneProfile SSOT 同一常量。
+    quotaPool: z.string().min(1).max(QUOTA_POOL_MAX_CHARS).nullable(),
     dispatchHold: z.string().max(DISPATCH_HOLD_MAX_CHARS).nullable(),
     contextWindowTokens: z.number().int().positive(),
     imageInput: z.boolean(),

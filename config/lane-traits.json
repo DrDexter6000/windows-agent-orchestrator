@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核；reviewPending 写明待核的格和解除条件，日常任务里等不到样本的格当场定格，不长期挂着。标了（Owner）的是 Owner 原话（注意事项、成本说明与格里的备注都算），被事实推翻的可以改写或删除，动手前向 Owner 确认；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。维护规矩：画像已经能推出的结论，不另写成 Owner 规则；Owner 口头给的选车道规矩，当场写进 ownerRules，不只留在某个会话的记忆里。peak 是车道的高峰时段口径：北京时间（UTC+8）、工作日（周一至周五）；法定节假日不识别、按工作日算。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
+  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核；reviewPending 写明待核的格和解除条件，日常任务里等不到样本的格当场定格，不长期挂着。标了（Owner）的是 Owner 原话（注意事项、成本说明与格里的备注都算），被事实推翻的可以改写或删除，动手前向 Owner 确认；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。维护规矩：画像已经能推出的结论，不另写成 Owner 规则；Owner 口头给的选车道规矩，当场写进 ownerRules，不只留在某个会话的记忆里。quotaPool 是额度池名：同名车道共用一份额度，一条限流或用尽时同池其他车道多半也不行。peak 是车道的高峰时段口径：北京时间（UTC+8）、工作日（周一至周五）；法定节假日不识别、按工作日算。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
   "costTierScale": "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数，取非高峰的基础档；此刻是否高峰看对照表的此刻列",
   "ownerRules": [
     "写代码：日常派 glm-flash（GLM 高峰也照常用）；Lead 判断较难的活，非高峰派 glm-pro 或 deepseek-flash，高峰或它们拿不下时派 sonnet，opus 最后兜底",
@@ -62,6 +62,7 @@
       },
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
+      "quotaPool": "codex 订阅",
       "caveats": [
         "常判 FIX_FIRST 并附内存复现；记录类小问题也可能判要修",
         "codex 沙箱里找不到 Node 22、跑不了 npm 全局命令：任务书写明 Node 22 绝对路径，dsh 之类核验由 Lead 做",
@@ -123,6 +124,7 @@
       },
       "costTier": 5,
       "cost": "codex 订阅额度",
+      "quotaPool": "codex 订阅",
       "caveats": [
         "分项评分只用 Owner 手动输入，不跑横评、不按实测改格（Owner 规则）",
         "与 sol 共用 codex 额度，用尽时同样一分钟内失败、零产出"
@@ -189,7 +191,8 @@
       },
       "costTier": 1,
       "peak": { "days": "weekdays", "hours": ["14:00-18:00"], "effect": "非高峰消耗减半" },
-      "cost": "GLM Coding Plan 订阅，与 glm-flash 共用额度；每 5 小时与每周各有额度上限",
+      "cost": "GLM Coding Plan 订阅；每 5 小时与每周各有额度上限",
+      "quotaPool": "GLM Coding Plan",
       "caveats": [
         "成片出现 zcode turn stalled 时，先核对 cost 所述额度限制，再看主机是否在待机（待机会冻住它跑的本地命令）",
         "隔离派发时会用写文件工具在工作树外（如 %TEMP%）落普查脚本，被判越界、run 当场失败（10-21、10-28）；交付合同已写明写入只在工作树内"
@@ -257,7 +260,8 @@
       "reviewPending": "ZCode 4.0.0（11-22）：认证 conditional、续修冒烟通过；调研、把关少派，沿用旧格；写代码待新版满 10 条交付谱系，按一次落地率核对后解除或改格",
       "costTier": 0.5,
       "peak": { "days": "weekdays", "hours": ["14:00-18:00"], "effect": "非高峰消耗减半" },
-      "cost": "GLM Coding Plan 订阅，与 glm-pro 共用额度；限时活动：11-24 至 12-24 调用 GLM-5.3-Flash 全天按原抵扣系数的 50% 结算",
+      "cost": "GLM Coding Plan 订阅；限时活动：11-24 至 12-24 调用 GLM-5.3-Flash 全天按原抵扣系数的 50% 结算",
+      "quotaPool": "GLM Coding Plan",
       "caveats": [],
       "contextWindow": {
         "tokens": 1000000,
@@ -324,6 +328,7 @@
       },
       "costTier": 4,
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
+      "quotaPool": "Kimi 订阅",
       "caveats": [
         "笔记本待机时本地 serve 的 OAuth 刷新会超时，席位失败",
         "sol 额度用尽时可顶会审：11-15 life-index、carloha_fde 各一轮，意见带复现脚本、被 Lead 采纳"
@@ -389,7 +394,8 @@
         "effort": "high"
       },
       "costTier": 3,
-      "cost": "Claude 订阅（OAuth 长期 token）；与 sonnet、fable 共用一份 Claude 额度",
+      "cost": "Claude 订阅（OAuth 长期 token）",
+      "quotaPool": "Claude 订阅",
       "caveats": [
         "后台命令未完成时它会结束回合，只留中间话；只读与交付合同已写明命令跑完再结束回合"
       ],
@@ -437,7 +443,8 @@
       },
       "ratedAgainst": null,
       "costTier": 5,
-      "cost": "Claude 订阅（OAuth 长期 token），与 sonnet、opus 共用一份 Claude 额度；视套餐与席位档，Fable 用量可能改计 usage credits（套餐自带额度之外）。API 价每百万 token 输入 $8、输出 $40（Opus 5.5 为 $4、$20）",
+      "cost": "Claude 订阅（OAuth 长期 token）；视套餐与席位档，Fable 用量可能改计 usage credits（套餐自带额度之外）。API 价每百万 token 输入 $8、输出 $40（Opus 5.5 为 $4、$20）",
+      "quotaPool": "Claude 订阅",
       "caveats": [
         "无头（-p）运行时，若 Fable 用量要计 usage credits，Claude Code 不经确认直接扣（官方文档）",
         "需要 Claude Code CLI 2.1.321 或更高",
@@ -504,7 +511,8 @@
         "effort": "xhigh"
       },
       "costTier": 2,
-      "cost": "Claude 订阅（OAuth 长期 token），与 opus、fable 共用一份 Claude 额度。API 价每百万 token 输入 $2、输出 $10（Opus 5.5 为 $4、$20）",
+      "cost": "Claude 订阅（OAuth 长期 token）。API 价每百万 token 输入 $2、输出 $10（Opus 5.5 为 $4、$20）",
+      "quotaPool": "Claude 订阅",
       "caveats": [
         "需要 Claude Code CLI 2.1.284 或更高",
         "思考不能关；安全分类器拦下网络安全类请求时改由 Sonnet 5 接手，生物类直接拒（官方文档）"
@@ -554,6 +562,7 @@
       "costTier": null,
       "peak": { "days": "weekdays", "hours": ["09:00-12:00", "14:00-18:00"], "effect": "空闲价是高峰价的一半" },
       "cost": "DeepSeek API 按量计费：每百万 token 输入（缓存未命中）4.5/9 元、输出 13.5/27 元（空闲/高峰）；周末与中国法定节假日全天空闲价；通道不报 token 用量",
+      "quotaPool": "DeepSeek API 余额",
       "caveats": [],
       "contextWindow": {
         "tokens": 1000000,
@@ -618,6 +627,7 @@
       "costTier": 1.5,
       "peak": { "days": "weekdays", "hours": ["09:00-12:00", "14:00-18:00"], "effect": "空闲价是高峰价的一半" },
       "cost": "DeepSeek API 按量计费：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周末与中国法定节假日全天空闲价；通道不报 token 用量",
+      "quotaPool": "DeepSeek API 余额",
       "caveats": [
         "开始干活后很稳（横评 48 次全部跑完）；启动超时只见于机器很忙或笔记本待机时，不耗 token，重派即可",
         "涉及截断与脱敏的改动要专门审：换代前两次犯先截断再脱敏",

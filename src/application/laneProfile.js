@@ -76,6 +76,8 @@ export const REVIEW_REASON_MAX_CHARS = 160;
 export const REVIEW_REASONS_CAP = 4;
 /** cost 的字符数。 */
 export const COST_MAX_CHARS = 200;
+/** quotaPool（额度池名：同名车道共用一份额度）的字符数。 */
+export const QUOTA_POOL_MAX_CHARS = 40;
 /** 投影时每格备注截到的字符数（文件里的备注上限另见 validateRatingCell）。 */
 export const PROJECTED_NOTE_MAX_CHARS = 80;
 /** 投影里刻度行的字符数。 */
@@ -110,7 +112,7 @@ export const WEEKDAY_LABELS = Object.freeze([
 
 /** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid。 */
 const LANE_ENTRY_KEYS = new Set([
-  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
+  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier", "quotaPool",
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
   "peak",
 ]);
@@ -368,6 +370,9 @@ export function validateTraitEntry(id, entry) {
   if (entry.reviewPending !== undefined && !isStr(entry.reviewPending, 1, REVIEW_REASON_MAX_CHARS)) bad.push("reviewPending");
   if (entry.cost !== null && entry.cost !== undefined && !isStr(entry.cost, 1, COST_MAX_CHARS)) bad.push("cost");
   if (entry.cost === undefined) bad.push("cost");
+  // quotaPool（153 批）：可选；给了就必须是 1–40 字的字符串——不合法按现有
+  // 纪律整条车道 invalid（与 cost 同级，不像 costTier/peak 那样只降级自身）。
+  if (entry.quotaPool !== undefined && !isStr(entry.quotaPool, 1, QUOTA_POOL_MAX_CHARS)) bad.push("quotaPool");
   if (!Array.isArray(entry.caveats) || entry.caveats.length > CAVEATS_CAP
     || entry.caveats.some((c) => !isStr(c, 1, CAVEAT_MAX_CHARS))) bad.push("caveats");
   // contextWindow / multimodal / effortNote / concurrencyNote：沿用 v1 规则。
@@ -406,6 +411,7 @@ export function validateTraitEntry(id, entry) {
       ...(entry.reviewPending !== undefined ? { reviewPending: entry.reviewPending } : {}),
       cost: entry.cost,
       costTier,
+      ...(entry.quotaPool !== undefined ? { quotaPool: entry.quotaPool } : {}),
       ...(peakOk && entry.peak !== undefined
         ? { peak: { days: entry.peak.days, hours: [...entry.peak.hours], effect: entry.peak.effect } }
         : {}),
@@ -553,7 +559,8 @@ function clip(text, max) {
  * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
  * 每行带暂停说明、上下文窗口与能否看图/看视频，见 0089；推断族系见 0090；行带
  * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097；行带
- * peakNow、顶层带 now（"此刻"，北京时间），见 152 批）。行序=
+ * peakNow、顶层带 now（"此刻"，北京时间），见 152 批；行带 quotaPool（额度池
+ * 名），见 153 批）。行序=
  * lanes.json 声明序；只含车道表里有画像的车道；不排序、不加推荐字段。所有
  * 字符串在应用层截到 MCP schema 上限，保证投影总能通过校验。
  * @param {number} [input.nowMs] "此刻"的时钟参数（测试注入）；生产缺省 Date.now()。
@@ -608,6 +615,10 @@ export function projectLaneProfiles({ lanesDoc, traitsResult, nowMs = Date.now()
       reviewReasons: rs.reasons.slice(0, REVIEW_REASONS_CAP).map((s) => clip(s, REVIEW_REASON_MAX_CHARS)),
       caveats: [...entry.caveats],
       cost: entry.cost,
+      // 153 批：额度池名（同名车道共用一份额度）；没给为 null，不造默认值。
+      // 修正一（deepseek-flash 会审 Q3）：与其他字符串一样过一次 clip——生产
+      // 路径先过校验不会超长，注入型调用也要截到上限，投影总能过 schema。
+      quotaPool: entry.quotaPool == null ? null : clip(entry.quotaPool, QUOTA_POOL_MAX_CHARS),
       dispatchHold: validDispatchHold(lane.dispatchHold),
       contextWindowTokens: entry.contextWindow.tokens,
       imageInput: entry.multimodal.image,

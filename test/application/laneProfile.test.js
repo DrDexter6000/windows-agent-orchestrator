@@ -32,6 +32,7 @@ import {
   CAVEATS_CAP,
   CAVEAT_MAX_CHARS,
   COST_MAX_CHARS,
+  QUOTA_POOL_MAX_CHARS,
   PROJECTED_NOTE_MAX_CHARS,
   REVIEW_REASON_MAX_CHARS,
   REVIEW_REASONS_CAP,
@@ -208,6 +209,21 @@ test("validateTraitEntry：长度界——note/evidence/cost/caveats/reviewPendi
   assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(CAVEAT_MAX_CHARS)] })).ok, true);
   assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(CAVEAT_MAX_CHARS + 1)] })).ok, false, "单条注意事项超长");
   assert.equal(validateTraitEntry("x", validEntry({ caveats: [] })).ok, true);
+});
+
+// 153 批：quotaPool（额度池名）——可选；给了就必须是 1–40 字字符串，否则按
+// 现有规则整条画像 invalid（与 cost 同级，不像 costTier/peak 只降级自身）。
+test("153 validateTraitEntry：quotaPool 可选；非字符串/空串/41 字 → 整条画像 invalid；40 字合法并原样归一", () => {
+  assert.equal(validateTraitEntry("x", validEntry({})).ok, true, "没给 quotaPool 合法");
+  assert.equal("quotaPool" in validateTraitEntry("x", validEntry({})).entry, false, "没给 → 归一后无该键");
+  for (const bad of [42, "", "字".repeat(QUOTA_POOL_MAX_CHARS + 1), null, ["池"]]) {
+    const v = validateTraitEntry("x", validEntry({ quotaPool: bad }));
+    assert.equal(v.ok, false, `quotaPool=${JSON.stringify(bad)} 整条画像 invalid`);
+    assert.ok(v.fields.includes("quotaPool"), `fields 点名 quotaPool（实际 ${JSON.stringify(v.fields)}）`);
+  }
+  const ok40 = validateTraitEntry("x", validEntry({ quotaPool: "字".repeat(QUOTA_POOL_MAX_CHARS) }));
+  assert.equal(ok40.ok, true, "40 字合法");
+  assert.equal(ok40.entry.quotaPool, "字".repeat(QUOTA_POOL_MAX_CHARS), "原样归一保留");
 });
 
 test("validateTraitEntry：basis 闭集外即 invalid", () => {
@@ -407,6 +423,36 @@ test("projectLaneProfiles：每行带暂停说明、上下文窗口与能否看�
   assert.equal(noHold.rows[0].dispatchHold, null, "没写暂停说明 → null");
 });
 
+// 153 批：额度池名随行投影——给了原样带出，没给 null（不造默认值）。
+test("153 projectLaneProfiles：行带 quotaPool；没给为 null；注入超长值截到上限（修正一）", () => {
+  const traitsResult = (traits) => ({
+    state: "ok", path: "t.json", sha256: "b".repeat(64), scale: validDoc({}).scale,
+    traits, invalidIds: [], issues: [],
+  });
+  const withPool = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A, LANE_B]),
+    traitsResult: traitsResult({ la: validEntry({ quotaPool: "GLM Coding Plan" }), lb: validEntry() }),
+  });
+  assert.equal(withPool.rows[0].quotaPool, "GLM Coding Plan", "给了原样投影");
+  assert.equal(withPool.rows[1].quotaPool, null, "没给为 null");
+  const viaValidator = validateTraitEntry("x", validEntry({ quotaPool: "池" }));
+  assert.equal(viaValidator.ok, true);
+  const proj2 = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: traitsResult({ la: viaValidator.entry }),
+  });
+  assert.equal(proj2.rows[0].quotaPool, "池", "经校验器归一的条目同样投影");
+  // 修正一（deepseek-flash 会审 Q3）：quotaPool 与其他字符串一样过一次 clip——
+  // 生产路径先过校验不会超长，注入型调用（测试）也能构造超长投影，必须截到上限。
+  const longPool = "字".repeat(QUOTA_POOL_MAX_CHARS + 10);
+  const clipped = projectLaneProfiles({
+    lanesDoc: laneDoc([LANE_A]),
+    traitsResult: traitsResult({ la: validEntry({ quotaPool: longPool }) }),
+  });
+  assert.equal(clipped.rows[0].quotaPool.length, QUOTA_POOL_MAX_CHARS, "截后总长=上限");
+  assert.ok(clipped.rows[0].quotaPool.endsWith("…"), "超长截成 … 结尾");
+});
+
 test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note 截成 79+…；evidence 不进投影", () => {
   const entry = entryWithRating({ note: "字".repeat(90) });
   const proj = projectLaneProfiles({
@@ -419,10 +465,10 @@ test("projectLaneProfiles：每格只投影 {stars,basis,n,note}；超长 note �
   assert.equal(cell.note.length, PROJECTED_NOTE_MAX_CHARS, "截断后总长等于投影上限");
   assert.ok(cell.note.endsWith("…") && cell.note.startsWith("字".repeat(PROJECTED_NOTE_MAX_CHARS - 1)), "上限减一个字符再加 …");
   assert.ok(!JSON.stringify(proj.rows[0]).includes("提交 abc1234"), "evidence 不进投影");
-  // 行键闭集与维度中文名。
+  // 行键闭集与维度中文名（153 批起行带 quotaPool）。
   assert.deepEqual(
     Object.keys(proj.rows[0]).sort(),
-    ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons", "videoInput"],
+    ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "quotaPool", "ratings", "ratingsState", "reviewReasons", "videoInput"],
   );
   assert.deepEqual(Object.keys(proj.dimensionLabels), RATING_DIMENSIONS);
   assert.equal(proj.dimensionLabels.research, DIMENSION_LABELS.research, "中文名来自同一归宿");
@@ -603,7 +649,7 @@ test("MCP lead_preflight：合法投影过整份出参 schema（形状即 LEAD_P
       assert.deepEqual(Object.keys(lanes.dimensionLabels), RATING_DIMENSIONS);
       const row = lanes.rows[0];
       assert.deepEqual(Object.keys(row).sort(),
-        ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "ratings", "ratingsState", "reviewReasons", "videoInput"]);
+        ["caveats", "contextWindowTokens", "cost", "costTier", "dispatchHold", "family", "id", "imageInput", "quotaPool", "ratings", "ratingsState", "reviewReasons", "videoInput"]);
       assert.deepEqual(Object.keys(row.ratings), ["research"], "只含已评维度（夹具只评了 research）");
       assert.equal(row.ratingsState, "current");
     } finally { await client.close(); await server.close(); }
@@ -628,8 +674,8 @@ test("MCP 面：只有 lead_preflight 的出参 schema 含画像投影键", asyn
 
 test("画像字段上限只在 laneProfile.js 定义一次；改值要有意改这里（0088 修订条）", () => {
   assert.deepEqual(
-    { CAVEATS_CAP, CAVEAT_MAX_CHARS, REVIEW_REASON_MAX_CHARS, REVIEW_REASONS_CAP, COST_MAX_CHARS, PROJECTED_NOTE_MAX_CHARS, SCALE_MAX_CHARS, PROJECTION_ROWS_CAP },
-    { CAVEATS_CAP: 6, CAVEAT_MAX_CHARS: 120, REVIEW_REASON_MAX_CHARS: 160, REVIEW_REASONS_CAP: 4, COST_MAX_CHARS: 200, PROJECTED_NOTE_MAX_CHARS: 80, SCALE_MAX_CHARS: 240, PROJECTION_ROWS_CAP: 16 },
+    { CAVEATS_CAP, CAVEAT_MAX_CHARS, REVIEW_REASON_MAX_CHARS, REVIEW_REASONS_CAP, COST_MAX_CHARS, QUOTA_POOL_MAX_CHARS, PROJECTED_NOTE_MAX_CHARS, SCALE_MAX_CHARS, PROJECTION_ROWS_CAP },
+    { CAVEATS_CAP: 6, CAVEAT_MAX_CHARS: 120, REVIEW_REASON_MAX_CHARS: 160, REVIEW_REASONS_CAP: 4, COST_MAX_CHARS: 200, QUOTA_POOL_MAX_CHARS: 40, PROJECTED_NOTE_MAX_CHARS: 80, SCALE_MAX_CHARS: 240, PROJECTION_ROWS_CAP: 16 },
   );
 });
 

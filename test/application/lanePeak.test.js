@@ -12,7 +12,8 @@
 //   - preflight 聚合器：lanes 行 peakNow 与顶层 now 同源透传；worker 上下文
 //     lanes 与 now 同 null；MCP 出参过 schema（peakNow 可选、now 可空）；
 //   - 真实 config/lane-traits.json：六条 Owner 规则都在 120 字内；四条车道的
-//     peak 合法；cost 文本不再携带时段与 UTC 换算。
+//     peak 合法；cost 文本不再携带时段与 UTC 换算；额度池（quotaPool，153 批）
+//     每条车道都在 1–40 字内、池内成员按声明序、cost 不再写"共用"。
 process.env.WAO_ALLOW_NESTED_DISPATCH = "1";
 
 import { test } from "node:test";
@@ -371,7 +372,7 @@ test("152 MCP lead_preflight：peakNow 行与顶层 now 过整份出参 schema�
   try {
     const projection = projectLaneProfiles({
       lanesDoc: laneDoc([LANE_A]),
-      traitsResult: traitsResult({ la: validEntry({ peak: DS_PEAK }) }),
+      traitsResult: traitsResult({ la: validEntry({ peak: DS_PEAK, quotaPool: "测试额度池" }) }),
       nowMs: bjEpoch(2026, 11, 26, 12, 30),
     });
     const { server, client } = await buildServerClient({
@@ -381,14 +382,16 @@ test("152 MCP lead_preflight：peakNow 行与顶层 now 过整份出参 schema�
     });
     try {
       const res = await client.callTool({ name: "lead_preflight", arguments: {} });
-      assert.ok(!res.isError, "带 peakNow/now 的投影过 LEAD_PREFLIGHT_OUTPUT");
+      assert.ok(!res.isError, "带 peakNow/now/quotaPool 的投影过 LEAD_PREFLIGHT_OUTPUT");
       assert.deepEqual(res.structuredContent.now, { beijing: "周四 12:30", holidaysRecognized: false });
       const row = res.structuredContent.lanes.rows[0];
       assert.deepEqual(row.peakNow, {
         state: "off_peak", until: "2026-11-26T14:00:00+08:00", untilLocal: "14:00",
       });
+      assert.equal(row.quotaPool, "测试额度池", "行带 quotaPool 过 schema（153 批）");
 
-      // 无 peak、无 now 的旧形状投影（0097 形）：now=null、行不带 peakNow，仍合规。
+      // 无 peak、无 now 的旧形状投影（0097 形）：now=null、行不带 peakNow，仍合规；
+      // quotaPool 闭环内没给即 null（不造默认值）。
       const legacy = { ...projectLaneProfiles({
         lanesDoc: laneDoc([LANE_A]),
         traitsResult: traitsResult({ la: validEntry() }),
@@ -405,6 +408,7 @@ test("152 MCP lead_preflight：peakNow 行与顶层 now 过整份出参 schema�
         assert.ok(!res2.isError, "旧形状投影仍合规");
         assert.equal(res2.structuredContent.now, null, "投影无 now → null（同源缺席）");
         assert.equal("peakNow" in res2.structuredContent.lanes.rows[0], false);
+        assert.equal(res2.structuredContent.lanes.rows[0].quotaPool, null, "没给 quotaPool → null");
       } finally { await c2.close(); await s2.close(); }
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
@@ -439,6 +443,22 @@ test("152 真实数据：六条 Owner 规则都在 120 字内；四条车道的 
   assert.deepEqual(r.traits["glm-pro"].peak.hours, ["14:00-18:00"]);
   assert.deepEqual(r.traits["deepseek-flash"].peak.hours, ["09:00-12:00", "14:00-18:00"]);
   assert.deepEqual(r.traits["deepseek-pro"].peak.hours, ["09:00-12:00", "14:00-18:00"]);
+  // 153 批：额度池结构化——每条车道带 1–40 字的 quotaPool；同名=共用一份额度，
+  // 池内成员按车道表声明序；同一事实只写一处（cost 不再写"共用"字样）。
+  const pools = {};
+  for (const lane of lanesDoc.lanes) {
+    const p = r.traits[lane.id].quotaPool;
+    assert.ok(typeof p === "string" && p.length >= 1 && p.length <= 40, `${lane.id}.quotaPool 1–40 字`);
+    (pools[p] ??= []).push(lane.id);
+    assert.equal((r.traits[lane.id].cost ?? "").includes("共用"), false, `${lane.id}.cost 不再携带共用额度字样`);
+  }
+  assert.deepEqual(pools, {
+    "GLM Coding Plan": ["glm-flash", "glm-pro"],
+    "Kimi 订阅": ["kimi"],
+    "codex 订阅": ["astra", "sol"],
+    "DeepSeek API 余额": ["deepseek-pro", "deepseek-flash"],
+    "Claude 订阅": ["opus", "fable", "sonnet"],
+  }, "额度池分组（池内=声明序）");
   // 真实投影零 notices；此刻计算可用（用真实当前时钟跑一次，只验形状）。
   const proj = projectLaneProfiles({ lanesDoc, traitsResult: r });
   assert.ok(proj != null && proj.now != null, "真实投影带顶层 now");
@@ -450,5 +470,6 @@ test("152 真实数据：六条 Owner 规则都在 120 字内；四条车道的 
     } else {
       assert.equal("peakNow" in row, false);
     }
+    assert.equal(typeof row.quotaPool, "string", `${row.id} 投影行带 quotaPool`);
   }
 });
