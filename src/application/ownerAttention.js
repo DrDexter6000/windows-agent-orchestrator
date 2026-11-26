@@ -678,8 +678,9 @@ export function deriveOwnerAttention(snapshot, { now } = {}) {
 // ===== Workers 默认范围与车道汇总 =====
 
 /**
- * 席位运行 → 它所在会审组的摘要。一个运行同时出现在多个组里时取 createdAt 最早的那个组
- * （快照里的 consults 已按 createdAt 升序）。没有座位或没有 consultId 的组记录不成摘要。
+ * 席位运行 → 它所在会审组的摘要，外加本席自己已给出的结论 q1（闭集；没答复或结论不在闭集内为 null）。
+ * 一个运行同时出现在多个组里时取 createdAt 最早的那个组（快照里的 consults 已按 createdAt 升序）。
+ * 没有座位或没有 consultId 的组记录不成摘要。
  */
 function consultBySeatRun(snapshot) {
   const out = new Map();
@@ -693,7 +694,10 @@ function consultBySeatRun(snapshot) {
       seatsTotal: seats.length,
     };
     for (const seat of seats) {
-      if (typeof seat?.runId === "string" && !out.has(seat.runId)) out.set(seat.runId, summary);
+      // q1: this seat's own verdict (closed set), only for a seat that has answered; null otherwise.
+      if (typeof seat?.runId === "string" && !out.has(seat.runId)) {
+        out.set(seat.runId, { ...summary, q1: seat.replied === true && OWNER_CONSULT_Q1_VALUES.includes(seat.q1) ? seat.q1 : null });
+      }
     }
   }
   return out;
@@ -708,7 +712,7 @@ function consultBySeatRun(snapshot) {
  * @param {{now: number, project?: string|null}} options — now 与那份 attention 同一个；
  *   project 给了就只留该项目的运行
  * @returns {Array<{run: object, laneKey: string|null, title: string|null, subtitle: string|null,
- *   attentionIds: string[], consult: {groupId: string, seatsIn: number, seatsTotal: number}|null}>}
+ *   attentionIds: string[], consult: {groupId: string, seatsIn: number, seatsTotal: number, q1: string|null}|null}>}
  *   attentionIds 是该运行挂着的未了结事项的 id（先 decide 后 anomalies，各按列表顺序；给了
  *   project 时只列 projectSlugs 含该项目的事项，与 /api/attention?project=X 一致）；
  *   consult 是这个运行（当会审席位时）所在会审组的摘要：groupId 是 <项目 slug>:<consultId>，

@@ -186,8 +186,11 @@ const isImagePath = (raw) => typeof raw === "string"
 
 // ===== 谱系轮次与交付轴 =====
 
-/** 续修轮次：沿已证实的父边（parentRunId）往上数；断在快照之外或成环时 complete: false。 */
-function continuationRound(run, runsById) {
+/**
+ * 续修轮次：沿已证实的父边（parentRunId）往上数；断在快照之外或成环时 complete: false。
+ * 第 143a 批起导出：Workers 列表行的轮次标记与侧栏交付轴用同一份口径。
+ */
+export function continuationRound(run, runsById) {
   let number = 1;
   let complete = true;
   const seen = new Set([run.runId]);

@@ -100,6 +100,18 @@
 //   Every number is canonical decimal digits (no sign, no leading zeros, bounded
 //   length); a missing required key, an extra key or a repeated key is the fixed 400.
 //
+// Batch 143a (decision 0131 A3): the /v2 Workers page and side panel read this server through the routes
+// above; what changed here is small and closed.
+//   - A /api/workers row's delivery summary now carries the current delivery commit (the snapshot's
+//     bound fact, a canonical id or null; the page shortens it and searches by it) and its file count
+//     (a number from the same bound delivery reference); the row carries its continuation round
+//     ({ number, complete }, the same count the detail's delivery axis shows); a review seat's
+//     consult summary carries the seat's own verdict q1 (closed set, only once it has answered).
+//     Still no path, settle time, reverify chain or parent / root run id.
+//   - The /v2 static files (and only they) answer with the base CSP plus ONE source: img-src also allows
+//     blob:, because the panel shows a delivered image from a blob URL it made with the bearer. The legacy
+//     UI and every data response keep the base policy.
+//
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
 // node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
 // service, the run-summary cache, the Owner read model (createOwnerReadModel +
@@ -133,7 +145,7 @@ import {
   isValidRepoRelativePath,
   readCommitImage,
 } from "./application/ownerArtifact.js";
-import { currentDelivery, projectWorkerDetail } from "./application/ownerWorkerDetail.js";
+import { continuationRound, currentDelivery, projectWorkerDetail } from "./application/ownerWorkerDetail.js";
 import {
   OWNER_ACTIVITY_FILTERS,
   OWNER_ACTIVITY_LIMIT_MAX,
@@ -220,6 +232,13 @@ const SAFE_HEADERS = Object.freeze({
   "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
 });
 
+// Batch 143a (decision 0131 A3): the /v2 files — and only they — carry ONE more image source:
+// img-src also allows blob:, because the side panel reads a delivered image with the bearer
+// (fetch), turns it into a blob URL for an <img> and revokes the URL when it is done. Nothing else
+// is relaxed: same default-src, same base-uri / object-src / frame-ancestors, no script or style
+// relaxation. The legacy UI and every JSON / image data response keep the policy above.
+const V2_CSP = SAFE_HEADERS["content-security-policy"].replace("img-src 'self' data:", "img-src 'self' data: blob:");
+
 // ===== Package D: the Owner read-only dashboard UI =====
 //
 // The server serves a CLOSED list of fixed static assets (the dashboard UIs).
@@ -237,7 +256,9 @@ const SAFE_HEADERS = Object.freeze({
 // src/owner-dashboard/v2/app.js, src/owner-dashboard/v2/api.js,
 // src/owner-dashboard/v2/i18n.js, src/owner-dashboard/v2/model.js,
 // src/owner-dashboard/v2/store.js, src/owner-dashboard/v2/views.js and
-// src/owner-dashboard/v2/styles.css. "/v2/index.html" is NOT a route.
+// src/owner-dashboard/v2/styles.css; batch 143a adds the Workers page and the side panel:
+// src/owner-dashboard/v2/workers.js, detail.js, artifacts.js (DOM-free) and workersview.js,
+// sidebarview.js (DOM). "/v2/index.html" is NOT a route.
 // A /v2 file is served only when the RAW request path is clean (equal to the parsed
 // pathname: no "." / ".." segments, no repeated slashes, no backslashes); see the handler.
 //
@@ -261,10 +282,15 @@ const STATIC_ASSETS = Object.freeze([
   { route: "/v2/styles.css", file: "v2/styles.css", type: CSS },
   { route: "/v2/app.js", file: "v2/app.js", type: JS },
   { route: "/v2/api.js", file: "v2/api.js", type: JS },
+  { route: "/v2/artifacts.js", file: "v2/artifacts.js", type: JS },
+  { route: "/v2/detail.js", file: "v2/detail.js", type: JS },
   { route: "/v2/i18n.js", file: "v2/i18n.js", type: JS },
   { route: "/v2/model.js", file: "v2/model.js", type: JS },
+  { route: "/v2/sidebarview.js", file: "v2/sidebarview.js", type: JS },
   { route: "/v2/store.js", file: "v2/store.js", type: JS },
   { route: "/v2/views.js", file: "v2/views.js", type: JS },
+  { route: "/v2/workers.js", file: "v2/workers.js", type: JS },
+  { route: "/v2/workersview.js", file: "v2/workersview.js", type: JS },
 ]);
 
 // Preload the fixed assets into an immutable route→{body,type} map. The
@@ -308,6 +334,7 @@ function sendJson(res, status, payload, extra) {
 // preloaded Buffer — no disk read, no client path, no reflection.
 function sendAsset(res, asset) {
   for (const [k, v] of Object.entries(SAFE_HEADERS)) res.setHeader(k, v);
+  if (asset.file.startsWith("v2/")) res.setHeader("content-security-policy", V2_CSP);
   res.setHeader("content-type", asset.type);
   res.setHeader("content-length", asset.body.length);
   res.writeHead(200);
@@ -457,7 +484,7 @@ const ITEM_KEYS = Object.freeze([
   "followUpRuns",
 ]);
 const FOLLOW_UP_RUN_KEYS = Object.freeze(["runId", "state"]);
-const CONSULT_KEYS = Object.freeze(["groupId", "seatsIn", "seatsTotal"]);
+const CONSULT_KEYS = Object.freeze(["groupId", "seatsIn", "seatsTotal", "q1"]);
 const EVIDENCE_KEYS = Object.freeze(["runId", "at", "seq"]);
 const FAILURE_KEYS = Object.freeze(["category", "code"]);
 const CAPACITY_KEYS = Object.freeze(["kind", "state", "observedAt"]);
@@ -498,7 +525,12 @@ function itemDto(item) {
   return out;
 }
 
-function workerRowDto(row) {
+/**
+ * One /api/workers row. `round` is the continuation round of the run (continuationRound, the same
+ * count the detail's delivery axis shows): a list card marks a continuation by it. Numbers only;
+ * no parent / root run ids and no paths.
+ */
+function workerRowDto(row, round) {
   const run = row.run;
   const delivery = run.delivery;
   return {
@@ -516,16 +548,21 @@ function workerRowDto(row) {
     terminalAt: run.terminalAt,
     lastEffectAt: run.lastEffectAt,
     quietSince: run.quietSince,
-    // Delivery summary only: no commit, no settle time, no reverify chain.
+    // Delivery summary only: the current delivery commit (the snapshot's bound fact, canonical id or
+    // null; the page shortens it and searches it) and how many files it changed (a count, never a path),
+    // no settle time, no reverify chain.
     delivery: delivery === null || delivery === undefined ? null : {
+      commit: typeof delivery.commit === "string" && isCanonicalCommitId(delivery.commit) ? delivery.commit : null,
+      changedCount: Number.isInteger(delivery.changedCount) && delivery.changedCount >= 0 ? delivery.changedCount : null,
       settlement: settlementDto(delivery.settlement),
       verification: statusDto(delivery.verification),
       acceptance: statusDto(delivery.acceptance),
       branchPresent: delivery.branchPresent,
     },
+    round: { number: round.number, complete: round.complete },
     failure: failureDto(run.failure),
     attentionIds: [...row.attentionIds],
-    // 会审席位所在组的摘要（几席已到 / 总席数）；不是会审席位就是 null。
+    // 会审席位所在组的摘要（几席已到 / 总席数）与本席已给出的结论 q1（闭集，没答复为 null）；不是会审席位就是 null。
     consult: row.consult === null || row.consult === undefined ? null : pick(row.consult, CONSULT_KEYS),
   };
 }
@@ -566,12 +603,12 @@ const READ_MODEL_ROUTES = new Map([
   }],
   ["/api/workers", {
     keys: ["project"],
-    payload: ({ pub, project, status }) => {
+    payload: ({ pub, project, status, runsById }) => {
       const rows = selectOwnerWorkers(pub.snapshot, pub.attention, { now: pub.now, project });
       return {
         ...status,
         truncated: rows.length > WORKERS_ROWS_MAX,
-        workers: rows.slice(0, WORKERS_ROWS_MAX).map(workerRowDto),
+        workers: rows.slice(0, WORKERS_ROWS_MAX).map((row) => workerRowDto(row, continuationRound(row.run, runsById))),
       };
     },
   }],
@@ -614,7 +651,7 @@ function serveReadModelRoute(ctx, req, res, sp, route) {
   // (never published and the latest round failed) — 200, no data, never "0 runs".
   if (pub === null) return sendJson(res, 200, ctx.status());
   try {
-    return sendJson(res, 200, route.payload({ pub, project, status: ctx.status() }));
+    return sendJson(res, 200, route.payload({ pub, project, status: ctx.status(), runsById: ctx.runsById(pub) }));
   } catch {
     return sendJson(res, 500, ERR.internal);
   }

@@ -23,7 +23,7 @@ import { formatAgo, formatClock, formatDuration, t, tn } from "./i18n.js";
  * Build one element. props: class, text, on ({event: handler}); null / undefined /
  * false props are skipped; everything else is set as an attribute.
  */
-function h(tag, props, ...children) {
+export function h(tag, props, ...children) {
   const node = document.createElement(tag);
   for (const [name, value] of Object.entries(props ?? {})) {
     if (value === undefined || value === null || value === false) continue;
@@ -40,8 +40,8 @@ function h(tag, props, ...children) {
   return node;
 }
 
-const symbol = (glyph) => h("span", { class: "sym", "aria-hidden": "true", text: glyph });
-const chevron = (open) => h("span", { class: open ? "chev chev-open" : "chev", "aria-hidden": "true" });
+export const symbol = (glyph, tone = null) => h("span", { class: tone === null ? "sym" : `sym sym-${tone}`, "aria-hidden": "true", text: glyph });
+export const chevron = (open) => h("span", { class: open ? "chev chev-open" : "chev", "aria-hidden": "true" });
 
 const signatures = new WeakMap();
 
@@ -82,7 +82,7 @@ function selectedRefId(root) {
  * they are flattened away here, so the DOM only ever receives real nodes. A redraw keeps
  * the focused button (by its data-fk key) and a selected reference text (by its data-ref id).
  */
-function mount(root, signature, build) {
+export function mount(root, signature, build) {
   if (signatures.get(root) === signature) return false;
   const key = focusedKey(root);
   const selectedRef = selectedRefId(root);
@@ -226,7 +226,7 @@ function healthText(entry, lang) {
   return entry.ageMs === null ? word : `${word} ${formatDuration(lang, entry.ageMs)}`;
 }
 
-function typeRowNode(row, lang) {
+function typeRowNode(row, lang, actions) {
   return h(
     "li",
     { class: "type-row" },
@@ -241,7 +241,14 @@ function typeRowNode(row, lang) {
         "span",
         { class: "flag flag-amber" },
         symbol("▲"),
-        h("span", { class: "mono", text: entry.runId }),
+        // The named run opens straight in the Workers side panel.
+        h("button", {
+          type: "button",
+          class: "link-btn mono",
+          "data-fk": `run:${entry.runId}`,
+          on: { click: () => actions.openWorker(entry.runId) },
+          text: entry.runId,
+        }),
         h("span", { text: healthText(entry, lang) }),
       )),
       row.seats === null ? null : h("span", { class: "flag flag-muted", text: t(lang, "ov.seats", { in: row.seats.in, total: row.seats.total }) }),
@@ -283,7 +290,7 @@ function projectNode(block, truncated, lang, actions) {
     { class: "project" },
     h("div", { class: "project-head" }, name, markers),
     block.typeRows.length > 0
-      ? h("ul", { class: "type-rows" }, block.typeRows.map((row) => typeRowNode(row, lang)))
+      ? h("ul", { class: "type-rows" }, block.typeRows.map((row) => typeRowNode(row, lang, actions)))
       : h("p", { class: "idle-note", text: t(lang, "ov.runningNoDetail", { n: block.runningCount }) }),
   );
 }
@@ -321,16 +328,6 @@ function overviewNodes(vm, lang, actions) {
   ];
 }
 
-// ===== Workers (placeholder until the next batch) =====
-
-function workersNodes(vm, lang, actions) {
-  return [
-    pageTitle(lang, "workers"),
-    filterBar(vm.project, vm.projectName, lang, actions),
-    h("p", { class: "placeholder", text: t(lang, "workers.soon") }),
-  ];
-}
-
 // ===== Attention =====
 
 const KIND_KEYS = new Set([
@@ -344,11 +341,18 @@ function detailRow(label, ...value) {
   return h("div", { class: "detail-row" }, h("dt", { text: label }), h("dd", {}, ...value));
 }
 
-function workerLine(worker) {
+/** The involved worker's run number opens its side panel; the title and lane stay text. */
+function workerLine(worker, actions) {
   return h(
     "div",
     { class: "worker-line" },
-    h("span", { class: "mono", text: worker.runId }),
+    h("button", {
+      type: "button",
+      class: "link-btn mono",
+      "data-fk": `open:${worker.runId}`,
+      on: { click: () => actions.openWorker(worker.runId) },
+      text: worker.runId,
+    }),
     worker.title === null ? null : h("span", { text: ` · ${worker.title}` }),
     worker.lane === null ? null : h("span", { class: "mono", text: ` · ${worker.lane}` }),
   );
@@ -375,7 +379,7 @@ function detailNode(item, detailId, lang, ui, actions) {
   if (item.workers.length > 0) {
     rows.push(detailRow(
       t(lang, "at.d.workers"),
-      item.workers.map((worker) => workerLine(worker)),
+      item.workers.map((worker) => workerLine(worker, actions)),
       item.moreWorkers > 0 ? h("div", { class: "muted", text: t(lang, "at.more", { n: item.moreWorkers }) }) : null,
     ));
   }
@@ -560,16 +564,36 @@ function messageNodes(vm, lang) {
 }
 
 /**
- * Draw the page body. `ui` is { selected, legacyOpen: {decide, anomalies}, resolvedOpen, copy };
- * it takes part in the signature, so a toggle redraws and a quiet poll does not.
+ * Draw the page body of Overview, Attention or a message (the Workers page is workersview.js's
+ * renderWorkersPage: it keeps its search box alive between draws). `ui` is
+ * { selected, legacyOpen: {decide, anomalies}, resolvedOpen, copy }; it takes part in the signature,
+ * so a toggle redraws and a quiet poll does not.
  */
 export function renderMain(root, vm, lang, ui, actions) {
   return mount(root, JSON.stringify([vm, lang, ui]), () => {
     if (vm.page === "overview") return overviewNodes(vm, lang, actions);
-    if (vm.page === "workers") return workersNodes(vm, lang, actions);
     if (vm.page === "attention") return attentionNodes(vm, lang, ui, actions);
     return messageNodes(vm, lang);
   });
+}
+
+/**
+ * Mark `root` as holding something other than a drawn page (the Workers page builds its own children), so
+ * the next renderMain of a page it had drawn before cannot mistake the stale DOM for its own.
+ */
+export function claim(root, marker) {
+  signatures.set(root, marker);
+}
+
+/** Put the focus on a worker card (the browser scrolls it into view); false when it is not drawn. */
+export function focusCard(root, runId) {
+  for (const node of root.querySelectorAll("[data-fk]")) {
+    if (node.getAttribute("data-fk") === `card:${runId}`) {
+      node.focus();
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

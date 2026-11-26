@@ -183,7 +183,7 @@ button:focus-visible {
 
 .page { padding: 32px var(--gutter) 64px; }
 
-.message, .placeholder, .empty, .note {
+.message, .empty, .note {
   margin: 16px 0;
   color: var(--ink-2);
   font: 400 15px/22px var(--sans);
@@ -268,6 +268,8 @@ button:focus-visible {
 }
 
 .link-btn:hover { text-decoration: underline; }
+/* A run number that is a button keeps the monospaced face of a run number (the shorthand above resets it). */
+.link-btn.mono { font: 400 13px/20px var(--mono); }
 
 .markers { display: flex; flex-wrap: wrap; gap: 4px 24px; margin-left: auto; }
 
@@ -466,6 +468,255 @@ button:focus-visible {
 
 .legacy { list-style: none; }
 
+/* ===== Workers ===== */
+
+/* The list keeps one width whether or not the panel is open (the panel covers the right 45%, so the list
+   stays in the left 55%: nothing is re-laid out when it opens). */
+.wk-page { max-width: calc(55vw - var(--gutter)); }
+
+.wk-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 16px;
+}
+
+/* The five selects are ONE block of fixed width (5 x --wk-select + 4 gaps) that never wraps inside; the search box
+   sits beside it, and it is the search box that drops to the next line in a narrower window. */
+.wk-filters {
+  --wk-select: 104px;
+  display: flex;
+  align-items: center;
+  flex: 0 1 calc(5 * var(--wk-select) + 4 * 8px);
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wk-select, .wk-search {
+  height: 36px;
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: 400 14px/20px var(--sans);
+}
+
+/* Five selects and the search box fit ONE row at 1440px (a 744px column: 552 + 12 + 160 = 724): the selects have a
+   fixed basis and an upper limit and may shrink (min-width 0), so a long English option or a Chinese label never
+   widens them; the search box starts at 160px and takes what is left. Only a narrower window wraps the row. */
+.wk-select { flex: 0 1 var(--wk-select); min-width: 0; max-width: 140px; }
+.wk-search { flex: 1 1 160px; min-width: 160px; }
+/* With a filter SET the row holds chips as wide as their words: the block then takes its natural width and may wrap,
+   so it is the search box that moves down, not a chip that is cut ("Project: sho…"). */
+.wk-filters-chips { flex: 0 1 auto; flex-wrap: wrap; }
+.wk-filters .chip { flex: 0 1 auto; min-width: 0; max-width: 220px; }
+.wk-filters .chip > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.wk-select:focus-visible, .wk-search:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.wk-matched { margin: 0 0 8px; }
+
+.wcard, .wgroup { list-style: none; border-bottom: 1px solid var(--line); }
+.wcard-selected { background: var(--selected); }
+
+.wcard-btn {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  padding: 7px 8px;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Line one is a grid: symbol | title | type | lane | run number. The title gives way (ellipsis); type, lane and
+   run number own fixed columns whose widths are set by the ENGLISH words, so nothing moves when the language
+   is switched. Title 30px + line two 20px + 2 x 7px padding = the 64px card of the design. */
+.wcard-l1 {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 108px 100px 216px;
+  align-items: baseline;
+  column-gap: 10px;
+  font: 400 14px/20px var(--sans);
+}
+
+.wcard-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.wcard-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 22px/30px var(--serif); }
+.wcard-type, .wcard-lane { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.wcard-run { color: var(--ink-2); white-space: nowrap; }
+
+.wcard-l2 {
+  display: block;
+  padding-left: 30px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font: 400 14px/20px var(--sans);
+}
+.wcard .tag { flex: none; white-space: nowrap; }
+
+.wgroup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 8px 2px;
+  font: 600 16px/24px var(--sans);
+}
+
+.wgroup-seats { color: var(--ink-2); }
+.wgroup-cards { list-style: none; margin: 0; padding: 0 0 0 24px; }
+.wgroup-cards .wcard:last-child { border-bottom: 0; }
+.wstarting { margin-top: 4px; }
+
+/* ===== worker side panel ===== */
+
+/* Starts below the top bar, covers the right 45% of the page; 1px seam on its left. */
+.sidebar {
+  position: fixed;
+  top: var(--topbar-h);
+  right: 0;
+  bottom: 0;
+  width: 45%;
+  min-width: 420px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 24px 32px 0;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+}
+
+.sidebar[hidden] { display: none; }
+
+.sb-title-row { display: flex; align-items: baseline; gap: 16px; }
+.sb-title { flex: 1 1 auto; min-width: 0; margin: 0; font: 600 26px/34px var(--serif); overflow-wrap: anywhere; }
+.sb-subtitle { display: block; color: var(--ink-2); font: 400 15px/22px var(--sans); }
+.sb-run { flex: none; color: var(--ink-2); }
+
+.sb-close {
+  flex: none;
+  min-width: 36px;
+  min-height: 36px;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  font: 600 16px/24px var(--sans);
+  cursor: pointer;
+}
+
+.sb-sub { display: flex; justify-content: space-between; gap: 16px; margin: 4px 0 0; color: var(--ink-2); font: 400 15px/22px var(--sans); }
+.sb-health { display: flex; align-items: baseline; gap: 6px; margin: 4px 0 0; font: 600 15px/22px var(--sans); }
+.sb-note { margin: 8px 0 0; padding: 4px 8px; background: var(--selected); border-radius: 4px; font: 400 14px/20px var(--sans); }
+.sb-failure { margin-top: 8px; }
+.evidence-fact { color: var(--ink-2); }
+
+.sb-axes { margin-top: 12px; border-top: 1px solid var(--line); }
+
+.axis {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.axis-name { font: 600 13px/20px var(--sans); letter-spacing: 0.04em; }
+.steps { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 0; margin: 0; padding: 0; list-style: none; }
+.step { display: inline-flex; align-items: baseline; gap: 6px; font: 400 15px/22px var(--sans); }
+.step + .step::before { content: ""; display: inline-block; align-self: center; width: 24px; margin: 0 8px; border-top: 1px solid var(--ink-2); }
+.step-current { font-weight: 600; }
+.step-done .step-glyph { color: var(--ink-2); }
+.step-future, .step-unknown { color: var(--ink-2); }
+.step-bad .step-glyph { color: var(--amber); }
+.axis-notes { grid-column: 2; color: var(--ink-2); font: 400 14px/20px var(--sans); }
+.axis-review .axis-notes { color: var(--ink); font-size: 15px; line-height: 22px; }
+.axis-round { margin: 0; padding: 8px 0; border-bottom: 1px solid var(--line); font: 400 15px/22px var(--sans); }
+
+.sb-tabs { display: flex; gap: 24px; margin-top: 16px; border-bottom: 1px solid var(--line); }
+
+.sb-tab {
+  padding: 8px 0;
+  background: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  color: var(--ink-2);
+  font: 400 16px/24px var(--sans);
+  cursor: pointer;
+}
+
+.sb-tab[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+
+.sb-panel { flex: 1 0 auto; padding: 16px 0 24px; }
+.sb-h { margin: 16px 0 4px; font: 600 22px/30px var(--serif); }
+.sb-panel > .sb-h:first-child { margin-top: 0; }
+.sb-h .mono { font-size: inherit; line-height: inherit; }
+.sb-line { margin: 4px 0; font: 400 15px/22px var(--sans); overflow-wrap: anywhere; }
+.sb-panel .muted { margin: 2px 0; font: 400 14px/20px var(--sans); }
+
+.files, .cmds, .seats, .images { list-style: none; margin: 4px 0; padding: 0; }
+.file-row, .cmd-row, .seat-row, .image-row { padding: 4px 0; border-bottom: 1px solid var(--line); }
+.file-row, .cmd-row { display: flex; justify-content: space-between; gap: 16px; }
+.file-path, .cmd { overflow-wrap: anywhere; }
+.file-stats, .cmd-result { flex: none; color: var(--ink-2); white-space: nowrap; }
+
+.seat-row { display: flex; align-items: baseline; gap: 16px; }
+.seat-row .seat-btn { padding: 0; }
+
+.seat-btn {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font: 400 15px/22px var(--sans);
+  cursor: pointer;
+}
+
+.seat-btn:hover .seat-lane { text-decoration: underline; }
+.seat-lane { min-width: 112px; }
+.seat-q1 { min-width: 120px; }
+.tag-amber { color: var(--amber); border-color: var(--amber); }
+.tag-red { color: var(--red); border-color: var(--red); }
+
+.sb-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font: 400 13px/20px var(--mono);
+}
+
+.image-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.thumb-btn { padding: 0; background: none; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+.thumb { display: block; max-width: 96px; max-height: 96px; }
+.thumb-open { flex: 1 0 100%; }
+.thumb-open .thumb { max-width: 100%; max-height: 480px; margin: 0 auto; object-fit: contain; }
+
+.sb-foot {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 12px 0;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
 /* ===== narrow windows ===== */
 
 @media (max-width: 1000px) {
@@ -475,4 +726,9 @@ button:focus-visible {
   .c-longest, .c-flags { grid-column: 1 / -1; }
   .detail-row { grid-template-columns: 1fr; gap: 0; }
   .row-detail { padding-left: 8px; }
+
+  .wk-page { max-width: none; }
+  .sidebar { width: 100%; min-width: 0; padding: 24px; }
+  .axis { grid-template-columns: 1fr; }
+  .axis-notes { grid-column: 1; }
 }

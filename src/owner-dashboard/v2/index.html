@@ -10,11 +10,13 @@
   <link rel="stylesheet" href="/v2/styles.css">
 </head>
 <body>
-  <!-- Both regions are drawn by /v2/app.js (plain-text DOM nodes only). The
-       absolute /v2/ paths matter: "/v2" without a trailing slash would resolve
-       a relative path against "/". -->
+  <!-- The regions are drawn by /v2/app.js (plain-text DOM nodes only); the worker side
+       panel starts hidden and covers the right part of the page below the top bar while a
+       worker is open. The absolute /v2/ paths matter: "/v2" without a trailing slash would
+       resolve a relative path against "/". -->
   <header class="topbar" id="topbar"></header>
   <main class="page" id="main"></main>
+  <aside class="sidebar" id="sidebar" hidden></aside>
   <script type="module" src="/v2/app.js"></script>
 </body>
 </html>

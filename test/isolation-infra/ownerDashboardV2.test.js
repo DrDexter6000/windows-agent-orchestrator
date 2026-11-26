@@ -1,7 +1,9 @@
 // test/isolation-infra/ownerDashboardV2.test.js
 //
 // Batch 142 (decision 0131 A3): the new Owner dashboard front end at /v2 — top bar,
-// three-page navigation, EN/中 string table, Overview and Attention.
+// three-page navigation, EN/中 string table, Overview and Attention. Batch 143a adds the Workers page and
+// the worker side panel: their own tests are in ownerDashboardV2Workers.test.js; the guards here
+// (closed endpoint set, one fetch, no markup parsing, CSP, static table) cover every v2 module.
 //
 // Sections:
 //   S  server   /v2 routes: status, MIME, headers, closed route table, 404 forms,
@@ -25,6 +27,7 @@ import { createOwnerDashboardServer } from "../../src/ownerDashboardServer.js";
 import * as i18n from "../../src/owner-dashboard/v2/i18n.js";
 import * as model from "../../src/owner-dashboard/v2/model.js";
 import * as api from "../../src/owner-dashboard/v2/api.js";
+import * as workers from "../../src/owner-dashboard/v2/workers.js";
 import * as store from "../../src/owner-dashboard/v2/store.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -34,7 +37,9 @@ const V2 = join(SRC, "v2");
 const read = (...parts) => readFileSync(join(SRC, ...parts), "utf8");
 const readV2 = (name) => read("v2", name);
 
-const V2_JS = ["app.js", "api.js", "i18n.js", "model.js", "store.js", "views.js"];
+const V2_JS = [
+  "app.js", "api.js", "artifacts.js", "detail.js", "i18n.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js",
+];
 const V2_FILES = ["index.html", "styles.css", ...V2_JS];
 const JS_TYPE = "text/javascript; charset=utf-8";
 const CSS_TYPE = "text/css; charset=utf-8";
@@ -113,7 +118,8 @@ test("S3 the static table is a closed set: source routes, loaded names and the v
   const routes = [...table.matchAll(/route: "([^"]+)"/g)].map((m) => m[1]).sort();
   assert.deepEqual(routes, [
     "/", "/app.js", "/index.html", "/styles.css",
-    "/v2", "/v2/", "/v2/api.js", "/v2/app.js", "/v2/i18n.js", "/v2/model.js", "/v2/store.js", "/v2/styles.css", "/v2/views.js",
+    "/v2", "/v2/", "/v2/api.js", "/v2/app.js", "/v2/artifacts.js", "/v2/detail.js", "/v2/i18n.js", "/v2/model.js", "/v2/sidebarview.js",
+    "/v2/store.js", "/v2/styles.css", "/v2/views.js", "/v2/workers.js", "/v2/workersview.js",
   ].sort(), "exactly the legacy four plus the v2 routes; /v2/index.html is not a route");
   // The loader is asked for exactly these file names (once each, however many routes share one).
   const asked = [];
@@ -209,11 +215,13 @@ test("S7 assets need no token; every data route answers 401 without one (and wit
   assert.equal(ok.status, 200, "the issued token is accepted (loading before the first round)");
 });
 
-test("S8 the v2 page has the legacy CSP: no inline script/style, no eval, no wildcard, no external source", async () => {
+test("S8 the v2 page has the legacy CSP plus ONE thing (img-src blob:): no inline script/style, no eval, no wildcard, no external source", async () => {
   const s = makeServer();
   const v2 = (await drive(s.handler, { url: "/v2" })).headers["content-security-policy"];
   const legacy = (await drive(s.handler, { url: "/" })).headers["content-security-policy"];
-  assert.equal(v2, legacy, "same policy on both pages");
+  assert.equal(v2, legacy.replace("img-src 'self' data:", "img-src 'self' data: blob:"), "the legacy policy with blob: added to img-src, byte for byte otherwise");
+  assert.match(v2, /img-src 'self' data: blob:/);
+  assert.ok(!legacy.includes("blob:"), "the legacy page is not relaxed");
   assert.match(v2, /default-src 'self'/);
   assert.match(v2, /object-src 'none'/);
   assert.match(v2, /base-uri 'none'/);
@@ -455,7 +463,7 @@ test("P9 request(): closed route set, bearer header only, outcomes without any s
     await assert.rejects(() => api.request(path, TOKEN), /not one of the dashboard routes/, path);
   }
   assert.equal(calls.length, before, "a refused path never reaches the network");
-  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention"]);
+  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact"]);
 });
 
 test("P10 page fragment: three pages, default Overview, project filter only on Workers/Attention", () => {
@@ -484,7 +492,10 @@ test("P10 page fragment: three pages, default Overview, project filter only on W
   }
   assert.deepEqual([...model.PAGES], ["overview", "workers", "attention"]);
   assert.deepEqual([...model.endpointsFor("overview")], ["/api/overview", "/api/workers"]);
-  assert.deepEqual([...model.endpointsFor("workers")], ["/api/overview"]);
+  assert.deepEqual([...model.endpointsFor("workers")], ["/api/overview", "/api/workers", "/api/attention"], "Workers reads the rows and the items they point at");
+  assert.deepEqual([...model.endpointsFor("workers", "shop-api")], ["/api/overview", "/api/workers?project=shop-api", "/api/attention"], "the server narrows the rows to the project (its row cap then applies to that project alone)");
+  assert.deepEqual([...model.endpointsFor("workers", "bad slug")], ["/api/overview", "/api/workers", "/api/attention"], "an invalid slug is no filter");
+  assert.deepEqual([...model.endpointsFor("attention", "shop-api")], ["/api/overview", "/api/attention", "/api/workers"], "Attention filters on the page, not in the request");
   assert.deepEqual([...model.endpointsFor("attention")], ["/api/overview", "/api/attention", "/api/workers"]);
   assert.deepEqual([...model.endpointsFor("junk")], ["/api/overview", "/api/workers"]);
   assert.equal(model.POLL_MS, 5000, "lists poll every 5 seconds (A4)");
@@ -525,7 +536,7 @@ const OK = (body) => ({ ok: true, body });
 const OVERVIEW = "/api/overview";
 const WORKERS = "/api/workers";
 const ATTENTION = "/api/attention";
-const PAGE_PATHS = { overview: [OVERVIEW, WORKERS], workers: [OVERVIEW], attention: [OVERVIEW, ATTENTION, WORKERS] };
+const PAGE_PATHS = { overview: [OVERVIEW, WORKERS], workers: [OVERVIEW, WORKERS, ATTENTION], attention: [OVERVIEW, ATTENTION, WORKERS] };
 
 const NONE = { status: "none", reason: null };
 const snapProject = (slug, name = slug) => ({ slug, name, repo: "available", branchesObservedAt: GEN, consultRecords: "available" });
@@ -612,11 +623,13 @@ async function chain(snapshot, now = GEN_MS) {
 }
 
 /** The page state after the page's own polling cycle(s), from bodies of one publication. */
-function netOf(bodies, pages = ["overview", "workers", "attention"], prev = model.INITIAL_NET, nowMs = GEN_MS) {
+function netOf(bodies, pages = ["overview", "workers", "attention"], prev = model.INITIAL_NET, nowMs = GEN_MS, project = null) {
   const byPath = { [OVERVIEW]: bodies.overview, [WORKERS]: bodies.workers, [ATTENTION]: bodies.attention };
   let net = prev;
   for (const page of pages) {
-    net = model.applyCycle(net, { page, paths: PAGE_PATHS[page], results: PAGE_PATHS[page].map((path) => OK(byPath[path])) }, nowMs);
+    // The Workers page asks for its rows narrowed to the project filter: the path is the key of the body.
+    const paths = page === "workers" ? model.endpointsFor("workers", project) : PAGE_PATHS[page];
+    net = model.applyCycle(net, { page, paths, results: paths.map((path) => OK(byPath[path.split("?")[0]])) }, nowMs);
   }
   return net;
 }
@@ -1210,8 +1223,12 @@ test("P30 project filter and names (real chain): the filter narrows the lists by
   const main = model.buildMain({ net, page: "attention", project: slug, visit: visitFirst(), nowMs: GEN_MS });
   assert.equal(main.project, slug);
   assert.equal(main.projectName, "Carloha Agent");
-  assert.equal(model.buildMain({ net, page: "workers", project: slug, visit: visitFirst(), nowMs: GEN_MS }).projectName, "Carloha Agent");
-  assert.equal(model.buildMain({ net, page: "workers", project: "unknown-slug", visit: visitFirst(), nowMs: GEN_MS }).projectName, "unknown-slug");
+  // The Workers page asks the server for the project's rows: its data is keyed by that very request.
+  const slugNet = netOf(bodies, ["workers"], model.INITIAL_NET, GEN_MS, slug);
+  assert.equal(model.buildMain({ net: slugNet, page: "workers", project: slug, visit: visitFirst(), nowMs: GEN_MS }).projectName, "Carloha Agent");
+  const unknownNet = netOf(bodies, ["workers"], model.INITIAL_NET, GEN_MS, "unknown-slug");
+  assert.equal(model.buildMain({ net: unknownNet, page: "workers", project: "unknown-slug", visit: visitFirst(), nowMs: GEN_MS }).projectName, "unknown-slug");
+  assert.deepEqual(model.buildMain({ net, page: "workers", project: slug, visit: visitFirst(), nowMs: GEN_MS }), { page: "message", kind: "loading" }, "rows fetched for no project are not this project's rows");
   // The top bar reads the Overview only: its counts are the directory-wide numbers whatever the list shows.
   const top = model.buildTopbar(net, "attention", GEN_MS).counts;
   assert.deepEqual(top, { needsYou: all.decide.total, alerts: all.anomalies.total });
@@ -1357,14 +1374,18 @@ test("P35 buildMain: a page without its own retained data is a message (the prob
   assert.deepEqual(mainOf(model.INITIAL_NET, "overview"), { page: "message", kind: "loading" });
   assert.deepEqual(mainOf({ ...model.INITIAL_NET, problem: "network" }, "overview"), { page: "message", kind: "network" });
   assert.deepEqual(mainOf({ ...model.INITIAL_NET, problem: "noToken" }, "overview"), { page: "message", kind: "noToken" });
-  // After the Overview's own cycle: Workers (needs only /api/overview) has not been polled yet, so it has no data of its own.
+  // After the Overview's own cycle: Workers (rows + items) has not been polled yet, so it has no data of its own.
   const net = netOf(bodies, ["overview"]);
   assert.equal(mainOf(net, "overview").page, "overview");
   assert.deepEqual(mainOf(net, "workers"), { page: "message", kind: "loading" });
   assert.deepEqual(mainOf(net, "attention"), { page: "message", kind: "loading" });
   const all = netOf(bodies);
-  assert.equal(mainOf(all, "workers", { project: "shop-api" }).page, "workers");
-  assert.deepEqual(mainOf(all, "workers", { project: "shop-api" }), { page: "workers", project: "shop-api", projectName: "shop-api" }, "the filter is kept for the next batch");
+  assert.equal(mainOf(all, "workers").page, "workers");
+  const filtered = netOf(bodies, ["workers"], model.INITIAL_NET, GEN_MS, "shop-api");
+  const workers = mainOf(filtered, "workers", { project: "shop-api" });
+  assert.deepEqual([workers.page, workers.project, workers.projectName], ["workers", "shop-api", "shop-api"]);
+  assert.deepEqual(Object.keys(workers.bodies).sort(), ["attention", "overview", "workers"], "the page body carries the three bodies of its publication");
+  assert.deepEqual(mainOf(all, "workers", { project: "shop-api" }), { page: "message", kind: "loading" }, "data fetched for another filter is not this filter's data");
   const stale = model.applyCycle(all, { page: "overview", paths: PAGE_PATHS.overview, results: [{ ok: false, reason: "network" }, { ok: false, reason: "network" }] }, GEN_MS + 5000);
   assert.equal(mainOf(stale, "overview").page, "overview", "stale data is still shown");
 });
@@ -1427,6 +1448,7 @@ class FakeNode {
     this.append(...nodes);
   }
   setAttribute(name, value) { this.attrs.set(name, String(value)); }
+  removeAttribute(name) { this.attrs.delete(name); }
   getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
   addEventListener(event, fn) { this.listeners.set(event, [...(this.listeners.get(event) ?? []), fn]); }
   click() { for (const fn of this.listeners.get("click") ?? []) fn({ type: "click" }); }
@@ -1463,6 +1485,7 @@ globalThis.window = fakeWindow;
 after(() => { delete globalThis.document; delete globalThis.window; });
 
 const { renderTopbar, renderMain, selectRefText, focusSection } = await import("../../src/owner-dashboard/v2/views.js");
+const { renderWorkersPage } = await import("../../src/owner-dashboard/v2/workersview.js");
 
 const find = (root, pred) => { const out = []; root.walk((n) => { if (pred(n)) out.push(n); }); return out; };
 const byClass = (root, cls) => find(root, (n) => n.className.split(" ").includes(cls));
@@ -1476,9 +1499,13 @@ const noopActions = () => {
     calls,
     navigate: rec("navigate"), clearFilter: rec("clearFilter"), setLang: rec("setLang"), select: rec("select"),
     toggleLegacy: rec("toggleLegacy"), toggleResolved: rec("toggleResolved"), copyRef: rec("copyRef"),
+    openWorker: rec("openWorker"), setFilter: rec("setFilter"), setQuery: rec("setQuery"), toggleStarting: rec("toggleStarting"),
+    closeWorker: rec("closeWorker"), setTab: rec("setTab"), toggleFiles: rec("toggleFiles"), toggleImage: rec("toggleImage"), copyWorkerRef: rec("copyWorkerRef"),
   };
 };
-const UI0 = () => ({ selected: null, legacyOpen: { decide: false, anomalies: false }, resolvedOpen: false, copy: null });
+const UI0 = () => ({ selected: null, legacyOpen: { decide: false, anomalies: false }, resolvedOpen: false, copy: null, startingOpen: false });
+/** The Workers page vm of a net: buildMain's body plus the view state (filters live in the fragment). */
+const workersVmOf = (net, view = workers.emptyView()) => workers.workersPage(mainOf(net, "workers", { project: view.project }), view);
 
 let shopBodiesOnce = null;
 const getShop = () => (shopBodiesOnce ??= shopChain());
@@ -1904,24 +1931,23 @@ test("V12 Attention: empty sections say so; the project chip shows the project N
   assert.deepEqual(actions.calls.pop(), ["clearFilter"]);
 });
 
-test("V13 Workers page: one placeholder line and the filter chip (by name), kept for the next batch", async () => {
+test("V13 Workers page: the project filter chip shows the NAME, clears itself and survives the language switch (the page itself: ownerDashboardV2Workers.test.js)", async () => {
   const slug = "carloha-8629bc9a";
   const bodies = await chain(snapshotOf({ projects: [snapProject(slug, "Carloha Agent")], runs: [snapRun("run_c", { project: { slug, name: "Carloha Agent" } })] }));
-  const net = netOf(bodies);
-  const vm = mainOf(net, "workers", { project: slug });
+  const net = netOf(bodies, ["workers"], model.INITIAL_NET, GEN_MS, slug);
+  const vm = workersVmOf(net, workers.emptyView(slug));
   const root = region();
   const actions = noopActions();
-  renderMain(root, vm, "en", UI0(), actions);
-  assert.equal(byClass(root, "placeholder")[0].textContent, "Coming in the next batch.");
+  renderWorkersPage(root, vm, "en", actions);
+  assert.equal(byClass(root, "placeholder").length, 0, "no placeholder line any more");
   assert.equal(byClass(root, "chip")[0].textContent, "Project: Carloha Agent✕");
   byClass(root, "chip-x")[0].click();
-  assert.deepEqual(actions.calls.pop(), ["clearFilter"]);
+  assert.deepEqual(actions.calls.pop(), ["setFilter", "project", null]);
   const zh = region();
-  renderMain(zh, vm, "zh", UI0(), noopActions());
-  assert.equal(byClass(zh, "placeholder")[0].textContent, "下一批提供。");
+  renderWorkersPage(zh, vm, "zh", noopActions());
   assert.equal(byClass(zh, "chip")[0].textContent, "项目：Carloha Agent✕", "the filter survives the language switch");
   const bare = region();
-  renderMain(bare, mainOf(net, "workers"), "en", UI0(), noopActions());
+  renderWorkersPage(bare, workersVmOf(netOf(bodies, ["workers"])), "en", noopActions());
   assert.equal(byClass(bare, "chip").length, 0);
 });
 
@@ -2059,15 +2085,18 @@ const allJs = () => V2_JS.map((name) => [name, sourceOf(name)]);
 /** Code without // and block comments (the sources hold no "//" inside a string). */
 const codeOf = (name) => sourceOf(name).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention", () => {
+// Decision 0131 A3 (batch 143a): the closed endpoint set grew by the side panel's two routes. The
+// Activity tab's two routes (/api/worker/activity, /api/worker/event) stay out until their batch.
+test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact", () => {
   const found = new Set();
-  for (const [, text] of allJs()) for (const m of text.matchAll(/\/api\/([A-Za-z0-9_-]+)/g)) found.add(m[1]);
-  assert.deepEqual([...found].sort(), ["attention", "overview", "workers"], "no other endpoint anywhere in the v2 code");
-  assert.ok(!/\/api\/[A-Za-z]+\?/.test(allJs().map(([, t]) => t).join("\n")), "no query string on a data route");
+  for (const [, text] of allJs()) for (const m of text.matchAll(/\/api\/([A-Za-z0-9_-]+)(\/[A-Za-z0-9_-]+)?/g)) found.add(m[1] + (m[2] ?? ""));
+  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "worker", "workers"], "no other endpoint anywhere in the v2 code (no /api/worker/activity, /api/worker/event yet)");
+  // No query string is spelled out in code: the only queries are the ones api.js builds for its own closed key sets.
+  assert.ok(!/\/api\/[A-Za-z]+\?/.test(allJs().map(([name]) => codeOf(name)).join("\n")), "no query string literal on a data route");
   assert.doesNotMatch(readV2("index.html"), /\/api\//);
-  assert.deepEqual([...api.API_PATHS].sort(), ["/api/attention", "/api/overview", "/api/workers"]);
+  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/worker", "/api/workers"]);
   // The pages ask for no route outside the set.
-  for (const page of model.PAGES) for (const path of model.endpointsFor(page)) assert.ok(api.API_PATHS.includes(path), `${page}: ${path}`);
+  for (const page of model.PAGES) for (const path of [...model.endpointsFor(page), ...model.endpointsFor(page, "shop-api")]) assert.ok(api.isDataPath(path), `${page}: ${path}`);
 });
 
 test("G2 exactly ONE direct network call in the v2 code, and it is in api.js", () => {
@@ -2140,7 +2169,7 @@ test("G5 the token never reaches the page, a URL, a log, a message or storage ot
 });
 
 test("G6 DOM-free modules never touch the DOM or browser globals", () => {
-  for (const name of ["model.js", "i18n.js", "store.js"]) {
+  for (const name of ["model.js", "i18n.js", "store.js", "workers.js", "detail.js", "artifacts.js"]) {
     assert.doesNotMatch(codeOf(name), /\b(document|window|navigator|localStorage|sessionStorage|location|history|fetch|setTimeout)\b/, name);
   }
   assert.doesNotMatch(codeOf("api.js"), /\b(document|window|navigator|localStorage|sessionStorage|location)\b/, "api.js talks through injected getters");
@@ -2275,11 +2304,16 @@ test("G14 keyboard-first: only <button>s are clickable, whatever the page; no fa
   drawn.push(top);
   const pages = [
     [await overviewVm(), UI0()], [attention, UI0()], [await attentionVm("shop-api"), uiOpen],
-    [mainOf(netOf(await getShop()), "workers", { project: "shop-api" }), UI0()],
   ];
   for (const [vm, ui] of pages) {
     const root = region();
     renderMain(root, vm, "zh", ui, noopActions());
+    drawn.push(root);
+  }
+  // The Workers page (its own renderer: the search box lives outside the redrawn parts).
+  for (const view of [workers.emptyView(), workers.emptyView("shop-api"), { ...workers.emptyView(), status: "starting" }]) {
+    const root = region();
+    renderWorkersPage(root, workers.workersPage(mainOf(netOf(await getShop(), ["workers"], model.INITIAL_NET, GEN_MS, view.project), "workers", { project: view.project }), view, true), "zh", noopActions());
     drawn.push(root);
   }
   const tags = drawn.flatMap(clickable);
