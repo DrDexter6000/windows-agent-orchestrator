@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核。标了（Owner）的是 Owner 原话（注意事项、成本说明与格里的备注都算），被事实推翻的可以改写或删除，动手前向 Owner 确认；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。维护规矩：画像已经能推出的结论，不另写成 Owner 规则；Owner 口头给的选车道规矩，当场写进 ownerRules，不只留在某个会话的记忆里。peak 是车道的高峰时段口径：北京时间（UTC+8）、工作日（周一至周五）；法定节假日不识别、按工作日算。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
+  "_comment": "车道画像：只给 Lead 看（wao lanes 全量、lead_preflight 紧凑表），不进派发解析、门禁、认证与运行时，WAO 不按星级排序或推荐。每格写星级与依据：measured 是 Lead 实测（带样本量与证据，由 Lead 凭证据维护并汇报 Owner），owner 是 Owner 体感（实测覆盖到的维度以实测为准；只有注意事项写明分项评分只用 Owner 手动输入的车道例外），official 是官方资料；stars 为 null 即未评，不折算成任何星数。ratedAgainst 是打分时的车道身份，与车道表不一致或写了 reviewPending 即待复核；reviewPending 写明待核的格和解除条件，日常任务里等不到样本的格当场定格，不长期挂着。标了（Owner）的是 Owner 原话（注意事项、成本说明与格里的备注都算），被事实推翻的可以改写或删除，动手前向 Owner 确认；标了（Owner 规则）的是 Owner 定的政策，实测不改它。costTier 是 Owner 给的相对成本档（0.5–5，数越小越便宜；只有 Owner 改，车道换代巡检时复核）。score 只写在调研、写代码、把关三个维度的 measured 格，且只计本格 n 所数的那批样本（如 n=2 题里的 28 个隐藏测试，total 不必等于 n）；hits/total 与 label，数字只留在 score，note 不重复。ownerRules 是选车道的 Owner 政策，只放这一处，排在前面的优先，实测不改它。维护规矩：画像已经能推出的结论，不另写成 Owner 规则；Owner 口头给的选车道规矩，当场写进 ownerRules，不只留在某个会话的记忆里。peak 是车道的高峰时段口径：北京时间（UTC+8）、工作日（周一至周五）；法定节假日不识别、按工作日算。派发受理时回显所选车道一行事实（只陈列，不推荐）。",
   "costTierScale": "成本档：Owner 给的相对档位，0.5–5，数越小越便宜；不是价格倍数，取非高峰的基础档；此刻是否高峰看对照表的此刻列",
   "ownerRules": [
     "写代码：日常派 glm-flash（GLM 高峰也照常用）；Lead 判断较难的活，非高峰派 glm-pro 或 deepseek-flash，高峰或它们拿不下时派 sonnet，opus 最后兜底",
@@ -60,7 +60,6 @@
         "providerID": null,
         "effort": "high"
       },
-      "reviewPending": "codex 0.170.0→0.171.0（11-21）：strict 认证（certified）、跨 run drill 与真实续修冒烟通过；review 待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "codex 订阅额度，触顶后到点恢复；触顶只在 --json 输出里报 usage limit，WAO 诊断为 provider_capacity",
       "caveats": [
@@ -163,7 +162,7 @@
           "basis": "measured",
           "n": 17,
           "evidence": "提交 4f1b7fd、412dc47；同题横评（10-17 五题×3 轮、10-29 V1 复测，按答案键人工判分），运行如 run_202610171842445443q0yyz；标为中等严重仍判通过见 run_20261029033516395a1rk5f",
-          "note": "该判先修的 17 次（会审 2、横评 15）全判通过；横评关键缺陷只找到 7/24，自己标为中等严重的缺陷也放行"
+          "note": "该判先修的 17 次（会审 2、横评 15）全判通过；横评关键缺陷只找到 7/24，自己标为中等严重的缺陷也放行；GLM-5.4 横评 V1 一个样本找到了"
         },
         "design": {
           "stars": null,
@@ -188,7 +187,6 @@
         "providerID": null,
         "effort": "max"
       },
-      "reviewPending": "GLM-5.4（11-23 升级）：认证 conditional、续修冒烟通过；同题横评 R1 14/22（14.6 分钟，偏慢）、C2 15/16 与旧格相符，research、code 沿用；V1 首次找到关键缺陷且结论正确，只一个样本，review 待会审实测再定格",
       "costTier": 1,
       "peak": { "days": "weekdays", "hours": ["14:00-18:00"], "effect": "非高峰消耗减半" },
       "cost": "GLM Coding Plan 订阅，与 glm-flash 共用额度；每 5 小时与每周各有额度上限",
@@ -256,7 +254,7 @@
         "providerID": null,
         "effort": "max"
       },
-      "reviewPending": "ZCode 3.18.2→4.0.0（11-21 升 3.19.1，11-22 升 4.0.0）：两版 delta 认证（conditional）与 4.0.0 装前真实续修冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
+      "reviewPending": "ZCode 4.0.0（11-22）：认证 conditional、续修冒烟通过；调研、把关少派，沿用旧格；写代码待新版满 10 条交付谱系，按一次落地率核对后解除或改格",
       "costTier": 0.5,
       "peak": { "days": "weekdays", "hours": ["14:00-18:00"], "effect": "非高峰消耗减半" },
       "cost": "GLM Coding Plan 订阅，与 glm-pro 共用额度；限时活动：11-24 至 12-24 调用 GLM-5.3-Flash 全天按原抵扣系数的 50% 结算",
@@ -324,7 +322,6 @@
         "providerID": null,
         "effort": null
       },
-      "reviewPending": "kimi 2.6.3→2.7.2（11-21，第 128 批适配）：delta 认证（conditional）、真实续修、工具执行中纠偏（第 129 批后）与停止冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 4,
       "cost": "Kimi 订阅，有周额度与 5 小时额度，触顶返回 403（quota_exhausted）",
       "caveats": [
@@ -391,7 +388,6 @@
         "providerID": null,
         "effort": "high"
       },
-      "reviewPending": "claude-code 2.1.326→2.1.330（11-20）：delta 认证（conditional）与真实续修冒烟通过；code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 3,
       "cost": "Claude 订阅（OAuth 长期 token）；与 sonnet、fable 共用一份 Claude 额度",
       "caveats": [
@@ -581,12 +577,12 @@
           "note": "10-29 复测 70/99 与前三轮持平（glm-pro 三轮 204/297）；中位用时 2.4 分钟"
         },
         "code": {
-          "stars": 4,
+          "stars": 3,
           "basis": "measured",
-          "n": 23,
-          "score": { "hits": 14, "total": 23, "label": "谱系一次落地" },
-          "evidence": "WAO 运行记录 2026-10-25 至 11-18，五个项目的交付谱系按首轮车道计（脚本 runs-archive/2026-11/dev-worktree-b115-20261118/lineage.mjs）",
-          "note": "carloha_fde、life-index 落地的 14 条全部一次过；WAO 难活 4 条平均修 1.75 轮；横评隐藏测试 107/112"
+          "n": 45,
+          "score": { "hits": 16, "total": 45, "label": "谱系一次落地" },
+          "evidence": "WAO 运行记录 2026-10-25 至 11-18 与 11-21 至 11-26，五个项目已收口的交付谱系按首轮车道计（脚本 runs-archive/2026-11/dev-worktree-b115-20261118/lineage.mjs）",
+          "note": "11-21 起落地 22 条只 2 条一次过、平均修 1.3 轮（同期 carloha_fde 的 glm-pro 8/15）；此前 14/23；横评隐藏测试 107/112"
         },
         "review": {
           "stars": 4,
@@ -619,7 +615,6 @@
         "providerID": "deepseek-official",
         "effort": "max"
       },
-      "reviewPending": "dsh 0.2.1-rc.4→0.2.2-rc.5（11-21）：delta 认证（conditional）、跨 run drill、跨版本续修与停止冒烟通过；research、code、review 待新版实际任务，相符才解除，不符改格",
       "costTier": 1.5,
       "peak": { "days": "weekdays", "hours": ["09:00-12:00", "14:00-18:00"], "effect": "空闲价是高峰价的一半" },
       "cost": "DeepSeek API 按量计费：每百万 token 输入（缓存未命中）1/2 元、输出 4/8 元（空闲/高峰）；周末与中国法定节假日全天空闲价；通道不报 token 用量",

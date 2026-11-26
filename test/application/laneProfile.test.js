@@ -896,7 +896,7 @@ test("0097 真实数据：进了 score 的那组数字不再出现在同格 note
     ["kimi", "code", "隐藏测试 26/28"],
     ["kimi", "review", "5/8"],
     ["deepseek-flash", "research", "277/396"],
-    ["deepseek-flash", "code", "14/23"],
+    ["deepseek-flash", "code", "16/45"],
     ["deepseek-flash", "review", "24/32"],
     ["opus", "code", "8/14"],
   ];
