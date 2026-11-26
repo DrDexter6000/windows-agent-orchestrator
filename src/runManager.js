@@ -3485,8 +3485,8 @@ export class Run {
         // canonical Win32 segment shape (no trailing dot/space, ADS colon, or
         // reserved device name such as NUL), and no redaction marker (DeepSeek
         // redacts the event before enqueueing it). Everything else keeps the
-        // pre-batch fail-closed behavior: no toolCallId (kimi-web/zcode/codex
-        // file_written events carry none), no matching inside intent, a
+        // pre-batch fail-closed behavior: no toolCallId (a write first seen at
+        // completion carries none, TD-361), no matching inside intent, a
         // non-ENOENT error, physical_outside, or a failed root realpath.
         // Known boundary (not defended): swapping the junction between the
         // intent check and the write is TOCTOU; the backend-reported intent is a
@@ -4679,7 +4679,9 @@ export class Run {
         return;
       }
       const removed = await this.removeWorktreeForTerminalRelease(wtPath);
-      if (!removed || existsSync(wtPath)) {
+      // removeWorktreeNoForce 返回 true | false | "tree_contains_junction"（树里有链接危险、
+      // 没调 git）：只有恰好 true 才算删成功——字符串原因是真值，不能判真假。
+      if (removed !== true || existsSync(wtPath)) {
         await this.transcript.append("run.worktree_release_failed", { reason: "still_present" });
       } else {
         await this.transcript.append("run.worktree_released", {});

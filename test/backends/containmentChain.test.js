@@ -352,7 +352,7 @@ const codexFileChangeFrame = (path) => ({
 test("containment chain / codex: 源级钉——file_change 逐 change 取 ch.path 且只认写入类 kind", () => {
   assertSourcePins([
     ["src/backends/parsers/codex.js", "if (typeof ch.path === \"string\" && WRITE_KINDS.has(ch.kind)) {"],
-    ["src/backends/parsers/codex.js", "events.push(fileWrittenEvent(ch.path));"],
+    ["src/backends/parsers/codex.js", "? fileWrittenEvent(ch.path)"],
   ]);
 });
 
@@ -545,13 +545,17 @@ function kimiWriteTurn({ displayPath, inputPath, prompt = "do the task" }) {
  */
 function kimiWebServer(sessionId, { script = [] } = {}) {
   let spawned = false;
+  let turnReads = 0;
   const fetchImpl = async (url, init = {}) => {
     const urlStr = String(url);
     const base = `http://127.0.0.1:4311/api/v1/sessions`;
     if (urlStr === base) return kimiEnvelope({ id: sessionId });
     if (urlStr === `${base}/${sessionId}`) return kimiDetailEnvelope(sessionId);
     if (urlStr === `${base}/${sessionId}/agents/main/turns`) {
-      return kimiTurnsEnvelope(spawned ? script : []);
+      if (!spawned) return kimiTurnsEnvelope([]);
+      // script 可以是按"提交后第几次读 turns"给快照的函数（TD-361 的在途→收口时序）。
+      turnReads += 1;
+      return kimiTurnsEnvelope(typeof script === "function" ? script(turnReads) : script);
     }
     if (urlStr === `${base}/${sessionId}/prompts`) {
       if ((init.method ?? "GET") === "GET") return kimiEnvelope({ active: null, queued: [] });
@@ -562,9 +566,9 @@ function kimiWebServer(sessionId, { script = [] } = {}) {
   return { fetchImpl, markSpawned: () => { spawned = true; } };
 }
 
-async function kimiWebScenario({ effectiveCwd, write }) {
+async function kimiWebScenario({ effectiveCwd, write, script }) {
   const { fetchImpl, markSpawned } = kimiWebServer("session_kimiweb_chain", {
-    script: [kimiWriteTurn(write)],
+    script: script ?? [kimiWriteTurn(write)],
   });
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(
@@ -677,22 +681,24 @@ const zcodeAssistantPartsMsg = (parts) => {
   };
 };
 
-const zcodeWritePart = ({ callId, input }) => ({
+const zcodeWritePart = ({ callId, input, status = "completed" }) => ({
   id: `part_${callId}`,
   sessionID: ZCODE_SESSION_ID,
   messageID: "msg_tool_1",
   type: "tool",
   callId,
   tool: "Write",
-  state: {
-    status: "completed",
-    input,
-    output: "wrote",
-    title: "done",
-    metadata: {},
-    startedAt: 1,
-    completedAt: 2,
-  },
+  state: status === "running"
+    ? { status, input, title: "running", startedAt: 1 }
+    : {
+      status,
+      input,
+      output: "wrote",
+      title: "done",
+      metadata: {},
+      startedAt: 1,
+      completedAt: 2,
+    },
 });
 
 /** 假 app-server：create/setModel/setMode/send/usage/stop 全应答；messages 按脚本。 */
@@ -757,7 +763,7 @@ function fakeZcodePeer(child, { messages = () => [] } = {}) {
   return { clientFrames, notify: (method, params) => send({ method, params }) };
 }
 
-async function zcodeScenario({ effectiveCwd, writeInput }) {
+async function zcodeScenario({ effectiveCwd, writeInput, messages }) {
   const child = fakeProcessChild();
   const killCalls = [];
   const backend = new ZcodeBackend({
@@ -768,14 +774,14 @@ async function zcodeScenario({ effectiveCwd, writeInput }) {
     },
   });
   fakeZcodePeer(child, {
-    messages: (n) => (n <= 1 ? [] : [
+    messages: messages ?? ((n) => (n <= 1 ? [] : [
       zcodeUserMsg("do the task"),
       zcodeAssistantPartsMsg([
         zcodeWritePart({ callId: "call_zc_write", input: writeInput }),
         { type: "text", text: "wrote the file" },
         { type: "step-finish", reason: "stop", tokens: {} },
       ]),
-    ]),
+    ])),
   });
   const handle = await backend.spawn(
     {
@@ -1019,5 +1025,493 @@ test("containment chain / deepseek-acp: 界内写正对照——file_path 优先
   } finally {
     await cleanupFixture(fixture);
     if (scenario) await rm(scenario.dir, { recursive: true, force: true });
+  }
+});
+
+// ===== TD-361：codex / kimi-web / zcode 在写入完成之前发 write_intent（跨控制面）=====
+//
+// worker 在工作树里写了一个临时文件又删掉，等 file_written 到控制面时文件已不在盘上。
+// 每条车道在补丁/工具完成之前的帧里发带 toolCallId 的 write_intent（意图时刻判界内），
+// 完成时发同 id、同原文路径的 file_written，控制面（runManager 的 TD-372 放行）不判
+// workdir_escape；同样形状但没有意图的（完成帧之前没见过的写入）仍判越界。每条车道都经真实
+// parser / backend 把协议帧投影成事件，再喂给真实 Run。意图的收口事件（错误 tool_result）
+// 也穿一遍控制面：未收口的意图在 completed 时会被判 write_intent_pending_at_completion。
+
+/** 被删的文件：已写入又删除的临时文件在确认时刻不在盘上（ENOENT）。 */
+async function writeThenDelete(effectiveCwd, relPath) {
+  const abs = await createInsideFile(effectiveCwd, relPath, "ephemeral");
+  await rm(abs, { force: true });
+}
+
+/** 通过：零违规、打包照常、意图与确认两段都落盘且带同一个 toolCallId、同一原文路径。 */
+function assertIntentThenConfirmed(fixture, output, { toolCallId, path }) {
+  assert.equal(fixture.getPackageCount(), 1, "打包照常");
+  assert.ok(!output.events.some((event) => event.type === "run.isolation_violation"), "不判 workdir_escape");
+  assert.equal(output.result.isolationViolation, undefined);
+  const persisted = output.events.filter((event) => event.type === "run.event");
+  const intent = persisted.find((event) => event.kind === "write_intent");
+  const written = persisted.find((event) => event.kind === "file_written");
+  assert.equal(intent?.correlationStatus, "tracked");
+  assert.equal(intent?.toolCallId, toolCallId);
+  assert.equal(intent?.path, path);
+  assert.equal(written?.toolCallId, toolCallId);
+  assert.equal(written?.path, path, "确认的路径与意图的原文路径逐字节相同");
+}
+
+/** 无意图的同形状：file_written 在盘上找不到（ENOENT）→ 按今天的样子判越界。 */
+function assertDeletedWriteWithoutIntentBlocked(fixture, output) {
+  assert.equal(fixture.getPackageCount(), 0, "不进打包");
+  assert.equal(fixture.run.state, "failed");
+  assert.equal(output.result.isolationViolation, true);
+  const violation = output.events.find((event) => event.type === "run.isolation_violation");
+  assert.deepEqual(
+    { code: violation?.code, eventKind: violation?.eventKind, reason: violation?.reason },
+    { code: "workdir_escape", eventKind: "file_written", reason: "file_written_physical_unresolved" },
+  );
+  assert.ok(!output.events.some((event) => event.type === "run.event" && event.kind === "write_intent"));
+}
+
+/**
+ * 意图路径在树内、完成帧路径在树外：file_written 报的是完成帧的路径，门照常检查真实路径，
+ * 判 workdir_escape（越界的是 file_written，不是意图；报出的路径是树外那个）。
+ */
+function assertCompletionPathEscapeBlocked(fixture, output, { marker, toolCallId }) {
+  assert.equal(fixture.getPackageCount(), 0, "不进打包");
+  assert.equal(fixture.run.state, "failed");
+  assert.equal(output.result.isolationViolation, true);
+  const violation = output.events.find((event) => event.type === "run.isolation_violation");
+  assert.deepEqual(
+    { code: violation?.code, eventKind: violation?.eventKind, reason: violation?.reason },
+    { code: "workdir_escape", eventKind: "file_written", reason: "file_written_lexical_outside" },
+  );
+  assert.ok(violation.reportedPath.includes(marker), "报出的是完成帧里树外的那个路径");
+  const persisted = output.events.filter((event) => event.type === "run.event");
+  const intent = persisted.find((event) => event.kind === "write_intent");
+  assert.equal(intent?.toolCallId, toolCallId, "树内的意图已落盘");
+  assert.ok(!intent.path.includes(marker), "意图路径不是树外那个");
+  assert.ok(!persisted.some((event) => event.kind === "file_written"), "越界的 file_written 本身不落盘");
+}
+
+/** 意图已落盘（在途发过），但确认没有 id、文件又缺失：照今天判越界，不享受放宽。 */
+function assertDeletedWriteNotRelaxed(fixture, output) {
+  assert.equal(fixture.getPackageCount(), 0, "不进打包");
+  assert.equal(fixture.run.state, "failed");
+  assert.equal(output.result.isolationViolation, true);
+  const violation = output.events.find((event) => event.type === "run.isolation_violation");
+  assert.deepEqual(
+    { code: violation?.code, eventKind: violation?.eventKind, reason: violation?.reason },
+    { code: "workdir_escape", eventKind: "file_written", reason: "file_written_physical_unresolved" },
+  );
+  assert.ok(output.events.some((event) => event.type === "run.event" && event.kind === "write_intent"), "意图确实发过并落盘");
+}
+
+/** 空白在途路径不发意图：打包照常、零违规、没有 write_intent 落盘，file_written 无 id。 */
+function assertBlankInFlightPathAccepted(fixture, output, { path }) {
+  assert.equal(fixture.getPackageCount(), 1, "打包照常");
+  assert.ok(!output.events.some((event) => event.type === "run.isolation_violation"), "不判 workdir_escape");
+  const persisted = output.events.filter((event) => event.type === "run.event");
+  assert.ok(!persisted.some((event) => event.kind === "write_intent"), "零意图");
+  const written = persisted.find((event) => event.kind === "file_written");
+  assert.equal(written?.path, path);
+  assert.ok(!Object.hasOwn(written, "toolCallId"));
+}
+
+/** 收口事件被控制面接受：completed 不因未收口意图失败。 */
+function assertCompletedWithoutPendingIntent(fixture, output) {
+  assert.equal(fixture.getPackageCount(), 1);
+  assert.ok(!output.events.some((event) => event.type === "run.isolation_violation"));
+  assert.ok(!output.events.some((event) => event.type === "run.error" && event.code === "workdir_escape"));
+}
+
+// ----- codex：CodexStreamParser 吃 item.started / item.completed 帧，写入与删除夹在中间 -----
+
+const codexFileChangeItem = (status, path, id = "item_td361") => ({
+  id, type: "file_change", changes: [{ kind: "add", path }], status,
+});
+
+function codexLifecycleHandle({ effectiveCwd, relPath, announce, finalStatus = "completed", deleteBetween = true }) {
+  const parser = new CodexStreamParser();
+  return {
+    backend: "codex",
+    backendSessionId: "session_codex_td361",
+    async *events() {
+      if (announce) {
+        yield* parser.feed(jsonFrame({ type: "item.started", item: codexFileChangeItem("in_progress", relPath) }));
+      }
+      if (deleteBetween) await writeThenDelete(effectiveCwd, relPath);
+      yield* parser.feed(jsonFrame({ type: "item.completed", item: codexFileChangeItem(finalStatus, relPath) }));
+      yield* parser.feed(jsonFrame({ type: "item.completed", item: { type: "agent_message", text: "done" } }));
+      yield* parser.feed(jsonFrame({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } }));
+    },
+    async abort() {},
+  };
+}
+
+test("containment chain TD-361 / codex: item.started 意图 → 写入树内文件 → 文件被删 → item.completed 确认——不判 workdir_escape", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "codex",
+    spawnHandle: ({ effectiveCwd }) => codexLifecycleHandle({ effectiveCwd, relPath: "src/ephemeral-codex.js", announce: true }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertIntentThenConfirmed(fixture, output, { toolCallId: "item_td361#0", path: "src/ephemeral-codex.js" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / codex: 同形状但完成帧之前没见过 item.started——仍判越界（不按分类时刻的磁盘放宽）", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "codex",
+    spawnHandle: ({ effectiveCwd }) => codexLifecycleHandle({ effectiveCwd, relPath: "src/ephemeral-codex.js", announce: false }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertDeletedWriteWithoutIntentBlocked(fixture, output);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / codex: 补丁失败——意图由错误 tool_result 收口，completed 不因未收口意图失败，也没有 file_written", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "codex",
+    spawnHandle: ({ effectiveCwd }) => codexLifecycleHandle({
+      effectiveCwd, relPath: "src/never-applied.js", announce: true, finalStatus: "failed", deleteBetween: false,
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertCompletedWithoutPendingIntent(fixture, output);
+    assert.ok(!output.events.some((event) => event.type === "run.event" && event.kind === "file_written"));
+    assert.equal(output.events.filter((event) => event.type === "run.event" && event.kind === "write_intent").length, 1);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / codex: 意图没等到 item.completed 回合就结束——回合收口的错误 tool_result 让 completed 照常通过", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "codex",
+    spawnHandle: () => {
+      const parser = new CodexStreamParser();
+      return {
+        backend: "codex",
+        backendSessionId: "session_codex_td361_open",
+        async *events() {
+          yield* parser.feed(jsonFrame({ type: "item.started", item: codexFileChangeItem("in_progress", "src/open.js") }));
+          yield* parser.feed(jsonFrame({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+        },
+        async abort() {},
+      };
+    },
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertCompletedWithoutPendingIntent(fixture, output);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / codex: item.started 的路径是空白——零意图（否则门直接判 write_intent_lexical_outside），随后真实存在的树内文件照常打包", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "codex",
+    spawnHandle: () => {
+      const parser = new CodexStreamParser();
+      return {
+        backend: "codex",
+        backendSessionId: "session_codex_td361_blank",
+        async *events() {
+          yield* parser.feed(jsonFrame({ type: "item.started", item: codexFileChangeItem("in_progress", "   ", "item_blank") }));
+          yield* parser.feed(jsonFrame({ type: "item.completed", item: codexFileChangeItem("completed", "src/real-codex.js", "item_blank") }));
+          yield* parser.feed(jsonFrame({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+        },
+        async abort() {},
+      };
+    },
+  });
+  await createInsideFile(fixture.effectiveCwd, "src/real-codex.js");
+  try {
+    const output = await finishRun(fixture);
+    assertBlankInFlightPathAccepted(fixture, output, { path: "src/real-codex.js" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+// ----- zcode：ZcodeBackend + 假 app-server，running 拍 → completed 拍 -----
+
+function zcodeLifecycleMessages({ relPath, statuses, completedPath }) {
+  const user = zcodeUserMsg("do the task");
+  const phases = statuses.map((status) => [
+    user,
+    zcodeAssistantPartsMsg([
+      zcodeWritePart({
+        callId: "call_zc_td361",
+        status,
+        // completedPath：完成帧里的路径与在途帧（意图时刻）不同。
+        input: { filePath: status === "completed" && completedPath !== undefined ? completedPath : relPath, content: "x" },
+      }),
+      ...(status === "completed" || statuses.length === 1
+        ? [{ type: "text", text: "wrote the file" }, { type: "step-finish", reason: "stop", tokens: {} }]
+        : []),
+    ]),
+  ]);
+  // n=1 是提交前的基线读；之后每个阶段两拍（多拍重复帧），最后一个阶段保持到收口。
+  return (n) => (n <= 1 ? [] : phases[Math.min(phases.length - 1, Math.floor((n - 2) / 2))]);
+}
+
+test("containment chain TD-361 / zcode: running 拍意图 → 文件写入后被删 → completed 拍确认——不判 workdir_escape", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "zcode",
+    spawnHandle: ({ effectiveCwd }) => zcodeScenario({
+      effectiveCwd,
+      messages: zcodeLifecycleMessages({ relPath: "out/ephemeral-zcode.js", statuses: ["running", "completed"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertIntentThenConfirmed(fixture, output, { toolCallId: "call_zc_td361", path: "out/ephemeral-zcode.js" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / zcode: 意图路径在树内、completed 帧路径在树外——file_written 报完成帧路径，判 workdir_escape（意图不能替真实路径背书）", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "zcode",
+    spawnHandle: ({ effectiveCwd, root }) => zcodeScenario({
+      effectiveCwd,
+      messages: zcodeLifecycleMessages({
+        relPath: "out/inside-zcode-swap.js",
+        completedPath: join(root, "outside-zcode-swap", "escaped.js"),
+        statuses: ["running", "completed"],
+      }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertCompletionPathEscapeBlocked(fixture, output, { marker: "outside-zcode-swap", toolCallId: "call_zc_td361" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / zcode: running 拍的路径是空白——零意图，completed 拍真实存在的树内文件照常打包", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "zcode",
+    spawnHandle: ({ effectiveCwd }) => zcodeScenario({
+      effectiveCwd,
+      messages: zcodeLifecycleMessages({ relPath: "   ", completedPath: "out/real-zcode.js", statuses: ["running", "completed"] }),
+    }),
+  });
+  await createInsideFile(fixture.effectiveCwd, "out/real-zcode.js");
+  try {
+    const output = await finishRun(fixture);
+    assertBlankInFlightPathAccepted(fixture, output, { path: "out/real-zcode.js" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / zcode: 同形状但首见即 completed——仍判越界", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "zcode",
+    spawnHandle: ({ effectiveCwd }) => zcodeScenario({
+      effectiveCwd,
+      messages: zcodeLifecycleMessages({ relPath: "out/ephemeral-zcode.js", statuses: ["completed"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertDeletedWriteWithoutIntentBlocked(fixture, output);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / zcode: 收口时 write part 仍停在 running——补发的错误 tool_result 让 completed 照常通过", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "zcode",
+    spawnHandle: ({ effectiveCwd }) => zcodeScenario({
+      effectiveCwd,
+      messages: zcodeLifecycleMessages({ relPath: "out/stuck-zcode.js", statuses: ["running"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertCompletedWithoutPendingIntent(fixture, output);
+    assert.ok(!output.events.some((event) => event.type === "run.event" && event.kind === "file_written"));
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+// ----- kimi-web：KimiWebBackend + 按"第几次读 turns"出快照的假服务器 -----
+
+function kimiLifecycleScript({ path, phases, endedPath }) {
+  const opener = { type: "user_message", item_id: "msg_q1", prompt_ids: ["msg_q1"], placement: "opener", text: "do the task" };
+  // endedPath：整轮收口时条目自己的路径与在途帧（意图时刻）不同。
+  const ended = kimiWriteTurn({ displayPath: endedPath ?? path });
+  const inFlightItem = kimiWriteTurn({ displayPath: path }).items[1];
+  const toolItem = (status) => (status === "running"
+    ? { ...inFlightItem, status, outcome: undefined, output: undefined }
+    : { ...inFlightItem, status });
+  const snapshots = {
+    running: () => [{ ...ended, status: "running", outcome: undefined, usage: undefined, steps: [], items: [opener, toolItem("running")] }],
+    ended: () => [ended],
+    // 整轮已收口，但写条目自己仍是 running（不是 ended）。
+    endedWithRunningItem: () => [{ ...ended, items: [opener, toolItem("running"), ended.items[2]] }],
+    // 整轮收口的快照里没有这条写入（条目不见了）。
+    endedWithoutItem: () => [{ ...ended, items: [opener, ended.items[2]] }],
+  };
+  return (reads) => snapshots[phases[Math.min(phases.length - 1, Math.floor((reads - 1) / 2))]]();
+}
+
+test("containment chain TD-361 / kimi-web: 在途拍意图 → 文件写入后被删 → 带回答收口时确认——不判 workdir_escape", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiLifecycleScript({ path: "out/ephemeral-kimi.txt", phases: ["running", "ended"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertIntentThenConfirmed(fixture, output, { toolCallId: "tool_write", path: "out/ephemeral-kimi.txt" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / kimi-web: 意图路径在树内、整轮收口时条目路径在树外——file_written 报收口路径，判 workdir_escape（意图不能替真实路径背书）", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd, root }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiLifecycleScript({
+        path: "out/inside-kimi-swap.txt",
+        endedPath: join(root, "outside-kimi-swap", "escaped.txt"),
+        phases: ["running", "ended"],
+      }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertCompletionPathEscapeBlocked(fixture, output, { marker: "outside-kimi-swap", toolCallId: "tool_write" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / kimi-web: 在途路径是空白——零意图，整轮收口时真实存在的树内文件照常打包", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiLifecycleScript({ path: "   ", endedPath: "out/real-kimi.txt", phases: ["running", "ended"] }),
+    }),
+  });
+  await createInsideFile(fixture.effectiveCwd, "out/real-kimi.txt");
+  try {
+    const output = await finishRun(fixture);
+    assertBlankInFlightPathAccepted(fixture, output, { path: "out/real-kimi.txt" });
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / kimi-web: 整轮收口时写条目仍是 running——file_written 不带 id，不享受放宽，文件缺失仍判越界", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiLifecycleScript({ path: "out/never-created-kimi.txt", phases: ["running", "endedWithRunningItem"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertDeletedWriteNotRelaxed(fixture, output);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+const kimiDupItem = ({ path, status }) => ({
+  type: "tool_call",
+  item_id: "tool_dup",
+  step_index: 1,
+  status,
+  name: "Write",
+  input: { path, content: "x" },
+  display: { kind: "file_io", operation: "write", path },
+  ...(status === "ended" ? { outcome: "completed", output: "wrote" } : {}),
+});
+
+function kimiDupScript({ insidePath, outsidePath }) {
+  const base = kimiWriteTurn({ displayPath: insidePath });
+  const [opener, , answer] = base.items;
+  return (reads) => (reads <= 2
+    ? [{ ...base, status: "running", outcome: undefined, usage: undefined, steps: [], items: [opener, kimiDupItem({ path: insidePath, status: "running" })] }]
+    : [{ ...base, items: [opener, kimiDupItem({ path: insidePath, status: "ended" }), kimiDupItem({ path: outsidePath, status: "ended" }), answer] }]);
+}
+
+test("containment chain TD-361 / kimi-web: 同一快照里两个写条目撞了 item_id（一个树内、一个树外）——两条路径都被检查，树外那条判 workdir_escape", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd, root }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiDupScript({ insidePath: "out/inside-kimi-dup.txt", outsidePath: join(root, "outside-kimi-dup", "escaped.txt") }),
+    }),
+  });
+  await createInsideFile(fixture.effectiveCwd, "out/inside-kimi-dup.txt");
+  try {
+    const output = await finishRun(fixture);
+    assert.equal(fixture.getPackageCount(), 0, "不进打包");
+    assert.equal(fixture.run.state, "failed");
+    const violation = output.events.find((event) => event.type === "run.isolation_violation");
+    assert.deepEqual(
+      { code: violation?.code, eventKind: violation?.eventKind, reason: violation?.reason },
+      { code: "workdir_escape", eventKind: "file_written", reason: "file_written_lexical_outside" },
+    );
+    assert.ok(violation.reportedPath.includes("outside-kimi-dup"), "报出的是第二个条目的树外路径");
+    const written = output.events.filter((event) => event.type === "run.event" && event.kind === "file_written");
+    assert.deepEqual(written.map((event) => [event.path, Object.hasOwn(event, "toolCallId")]), [["out/inside-kimi-dup.txt", false]], "树内那条无 id 落盘，树外那条被拒不落盘");
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / kimi-web: 同形状但只在整轮收口时才见到这条写入——仍判越界", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiLifecycleScript({ path: "out/ephemeral-kimi.txt", phases: ["ended"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertDeletedWriteWithoutIntentBlocked(fixture, output);
+  } finally {
+    await cleanupFixture(fixture);
+  }
+});
+
+test("containment chain TD-361 / kimi-web: 意图的条目在收口快照里不见了——补发的错误 tool_result 让 completed 照常通过", async () => {
+  const fixture = await makeDeliveryRunFixture({
+    backendName: "kimi-web",
+    spawnHandle: ({ effectiveCwd }) => kimiWebScenario({
+      effectiveCwd,
+      script: kimiLifecycleScript({ path: "out/vanished-kimi.txt", phases: ["running", "endedWithoutItem"] }),
+    }),
+  });
+  try {
+    const output = await finishRun(fixture);
+    assertCompletedWithoutPendingIntent(fixture, output);
+    assert.ok(!output.events.some((event) => event.type === "run.event" && event.kind === "file_written"));
+  } finally {
+    await cleanupFixture(fixture);
   }
 });

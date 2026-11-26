@@ -47,8 +47,11 @@
 // 安全模型：分支凡删必先进 bundle（完整历史；是否零独有只是信息字段，不是
 // 不保全的理由——两条待删分支可能互相覆盖同一个别处没有的提交）。指纹四件套
 // （HEAD / 工作区 diff sha256 / 暂存 diff sha256 / 未跟踪+被忽略清单 sha256）
-// 只用于判断"批准之后有没有变化"，不是内容备份。所有只读 git 调用带
-// --no-optional-locks——裸 `git status` 会刷新索引，等于写盘。
+// 只用于判断"批准之后有没有变化"，不是内容备份。树里未提交的内容另在 apply 删树
+// 前备份（TD-374）：有受控改动或未忽略新文件的树，先把 `git diff HEAD --binary` 与
+// 这些新文件的副本存进本次记录的 dirty/ 再删，存不下（失败/超单树字节上限）就不
+// 删这棵树；被忽略的文件（node_modules、dist 之类）只存状态清单、不备份内容。
+// 所有只读 git 调用带 --no-optional-locks——裸 `git status` 会刷新索引，等于写盘。
 //
 // 路径语义：登记路径（git 记录的 raw path）用于目录名推 runId、git 操作与
 // 符号链接/junction 检测（lstat raw）；realpath 用于身份比较（源工作树、
@@ -81,7 +84,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
+  constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
   realpathSync, rmdirSync, statSync, writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -94,13 +97,19 @@ import { checkOwnerLiveness } from "./ownerLiveness.js";
 // 份实现，只导入不改——计划分类 7b 与执行门 stillActiveFromDisk 共用。
 import { determineRunSettlement } from "./runSettlement.js";
 import {
-  enumerateLineageMembers, lineageClosedIn, lineageMemberFiles, lineageRootFromEvents, lineageSlotClaimBusy,
+  enumerateLineageMembers, isTreeHeadDrifted, lineageClosedIn, lineageMemberFiles, lineageRootFromEvents,
+  lineageSlotClaimBusy,
 } from "./lineageClose.js";
 // 第 120 批：派生"被取代"（与 lead_preflight / 交付读面同一份实现）。计划面
 // 复用它撤掉 delivery_packaged_undecided 这一个阻塞；执行面删树/删分支前重新
 // 推导一次（证不出就跳过并如实记原因）。
 import { createLineageSupersession, legalDeliveryDecision } from "./lineageSupersession.js";
-import { removeWorktreeAdminEntry } from "../isolation.js";
+// 第 150 批修正一：删树走 isolation.removeWorktree（rmSync，不跟进 junction；不再直接调
+// `git worktree remove --force`——它在 Windows 上会跟进 junction 删掉树外文件）；删前对
+// 树里的链接与索引标志的检查也复用 isolation 的实现，不另写一份。
+import {
+  findTreeLinkHazard, indexInventoryUnreliable, removeWorktree, removeWorktreeAdminEntry, TREE_CONTAINS_JUNCTION,
+} from "../isolation.js";
 
 /** 类别闭集（计划 items[].category 与计数键）。 */
 export const RECLAIM_CATEGORIES = Object.freeze([
@@ -123,15 +132,20 @@ export const RECLAIM_KEEP_REASONS = Object.freeze([
 
 /** apply 整体拒绝码闭集。拒绝 = 不再执行任何删除；其中 bundle_* 三码发生时
  * 保全目录与 bundle 文件可能已写盘（无害残留：目录名带时刻、不覆盖既有记
- * 录），其余码零删除、零写盘。 */
+ * 录），其余码零删除、零写盘。preserve_dir_unsafe（第 150 批）：保全目录的归档祖先是
+ * 链接、或真实路径不在受信的归档根下——备份会落到别处，零写盘拒绝。 */
 export const RECLAIM_REFUSAL_CODES = Object.freeze([
   "plan_unreadable", "sha_mismatch", "repo_identity_mismatch",
-  "preserve_dir_inside_target", "run_dir_inside_target", "run_dir_mismatch",
+  "preserve_dir_inside_target", "preserve_dir_unsafe", "run_dir_inside_target", "run_dir_mismatch",
   "bundle_create_failed", "bundle_verify_failed", "bundle_heads_mismatch",
 ]);
 
 /** 最后一条绑定事件的新鲜阈（第 3 类）。 */
 export const RECENT_BOUND_EVENT_MS = 15 * 60_000;
+
+/** 脏树内容备份的单树字节上限（TD-374）：<runId>.diff 与全部未忽略新文件副本合计。
+ * 超限的树不删（apply 记 skipped/dirty_backup_too_large，分支也不删）。 */
+export const DIRTY_BACKUP_MAX_BYTES = 256 * 1024 * 1024;
 
 /** 不计入近期活动（计划第 3 类与执行门共用的 recent_event 谓词）的绑定事件
  * 类型闭集（第 133 批）：只收 Lead 自己的记账事件——自身不启动也不续跑任何
@@ -297,11 +311,17 @@ function dirtyFlagsFromStatus(records) {
 }
 
 /**
- * 未跟踪+被忽略清单：逐文件记相对路径、字节数、mtimeMs，按路径排序后取
+ * 未跟踪+被忽略清单：逐文件记相对路径、所属类别、字节数、mtimeMs，按路径排序后取
  * sha256。git status --ignored 对整目录只报一行，目录在这里递归展开；遍历用
  * lstat，不跟随符号链接与 junction（链接本身记一行，不深入目标）。记字节数
  * 和 mtime 而不逐文件哈希，是为了不在大的忽略目录（如 node_modules）上花
  * 太久——这是有意取舍：指纹只回答"变没变"，不回答"变成了什么"。
+ *
+ * 类别（第 150 批修正二）= status 记录的两位状态码：未跟踪 `??`、被忽略 `!!`，受控文件的
+ * 改动是它们的 XY 码；目录展开出来的文件继承所在记录的类。没有这一列时，两个文件在计划之
+ * 后互换忽略身份（只改 .git/info/exclude），路径、字节数、mtime 和四个脏标志都不变，清单
+ * 哈希也不变——apply 会备份新变成未忽略的那个，把原本该备份的那个随树删掉。计划与 apply
+ * 用的是同一个函数，格式随它走，不需要兼容旧格式（旧计划到 apply 只会判 content_changed）。
  *
  * 读不出就失败（抛错，由调用方归 undeterminable / 跳过）：清单不完整会让
  * "变没变"的比对静默失真，不能跳过读不出的条目。
@@ -326,8 +346,8 @@ export function untrackedIgnoredManifest(treePath, records, nestedExcluded = [],
     }
     return false;
   };
-  const recordLine = (rel, st) => lines.push(`${rel}\t${st.size}\t${st.mtimeMs}\n`);
-  const walk = (relDir) => {
+  const recordLine = (rel, cls, st) => lines.push(`${rel}\t${cls}\t${st.size}\t${st.mtimeMs}\n`);
+  const walk = (relDir, cls) => {
     let names;
     try {
       names = io.readdirSync(join(treePath, relDir), { withFileTypes: true });
@@ -343,20 +363,21 @@ export function untrackedIgnoredManifest(treePath, records, nestedExcluded = [],
       } catch (error) {
         throw new Error(`untrackedIgnoredManifest: lstat failed for ${rel}: ${error?.code ?? error?.message}`);
       }
-      if (st.isSymbolicLink() || st.isFile()) recordLine(rel, st);
-      else if (st.isDirectory()) walk(rel);
+      if (st.isSymbolicLink() || st.isFile()) recordLine(rel, cls, st);
+      else if (st.isDirectory()) walk(rel, cls);
     }
   };
   for (const r of records) {
     if (isExcluded(r.path)) continue;
+    const cls = `${r.x}${r.y}`;
     let st;
     try {
       st = io.lstatSync(join(treePath, r.path));
     } catch (error) {
       throw new Error(`untrackedIgnoredManifest: lstat failed for ${r.path}: ${error?.code ?? error?.message}`);
     }
-    if (st.isSymbolicLink() || st.isFile()) recordLine(r.path, st);
-    else if (st.isDirectory()) walk(r.path);
+    if (st.isSymbolicLink() || st.isFile()) recordLine(r.path, cls, st);
+    else if (st.isDirectory()) walk(r.path, cls);
   }
   lines.sort();
   return Buffer.from(lines.join(""), "utf8");
@@ -1340,12 +1361,15 @@ export async function planWorktreeReclaim({
 
     // 7 tree_protection：头指针漂移。只对树的属主（目录名 = runId）求值——
     // 共享树的成员不在此门（整树去重时按属主的分类裁决，成员经共享分组
-    // 保留或连带回收）。detached HEAD 上的提交不被任何分支引用，bundle 只收
-    // 分支，删树即丢——照 lineageClose 的同名门保留。
+    // 保留或连带回收）。判定与 runs lineage-close 同一份（isTreeHeadDrifted，
+    // TD-375）：树在 wao/<runId> 上且 HEAD 等于这条分支此刻的 tip 才放——此时树
+    // 上的每个提交都被分支引用，而分支删前进 bundle，删树不丢提交；detached HEAD、
+    // 别的分支、HEAD 不在 tip 上的提交可能没有任何分支引用，bundle 只收分支，
+    // 删树即丢，留树。
     if (f.treePath && !f.isHusk && !f.isLooseSymlink && basename(f.treePath) === runId) {
-      const onOwnBranch = f.treeBranch === `wao/${runId}` || f.treeBranch === `refs/heads/wao/${runId}`;
-      const tipOk = !f.branch || samePath(f.treeHead ?? "", f.branch.tip);
-      if (!onOwnBranch || !tipOk) { keep("tree_protection", "head_drift"); return; }
+      if (isTreeHeadDrifted({
+        runId, treeBranch: f.treeBranch, treeHead: f.treeHead, branchTip: f.branch?.tip ?? null,
+      })) { keep("tree_protection", "head_drift"); return; }
     }
 
     // 7b 交付未收口（sol 会审 1）：交付请求了但收口仍 unsettled——验证或补验
@@ -2006,10 +2030,26 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
     return { skip: "head_changed" };
   }
   if (reg.unreadable) return { skip: "undeterminable_now", detail: "live_registration_unreadable" };
+  const nestedExcluded = reg.raws
+    .filter((raw) => raw !== p && isBelow(raw, p))
+    .map((raw) => relative(p, raw).split(sep).join("/"));
+  // 第 150 批修正一（TD-374 d）：生成指纹和备份之前，先不跟进链接地走一遍整棵树。有目录型
+  // 链接（junction，Node 分不出的目录符号链接一并算）、悬空链接或读不出的目录，就保留整
+  // 棵树、不碰内容：git diff 会读进 junction 目标的内容，原生 git 删树还会删掉目标里的文
+  // 件。已知不防：这一遍与后面的备份、删除之间有人新建 junction（竞态）。
+  const hazard = findTreeLinkHazard(p, { skip: nestedExcluded });
+  if (hazard) return { skip: TREE_CONTAINS_JUNCTION, detail: `${hazard.path}（${hazard.why}）` };
+  // TD-374 b：索引标志（skip-worktree / assume-unchanged / 非正常缓存位 / gitlink）会把改动藏
+  // 起来，status 看着干净其实不是——凡清点不了的一律保留。对每棵要删的树都查，不只脏树。
   try {
-    const nestedExcluded = reg.raws
-      .filter((raw) => raw !== p && isBelow(raw, p))
-      .map((raw) => relative(p, raw).split(sep).join("/"));
+    if (indexInventoryUnreliable(gitReadOnly(["ls-files", "-v"], p), gitReadOnly(["ls-files", "-s"], p))) {
+      return { skip: "inventory_unreadable", detail: "index_flags" };
+    }
+  } catch {
+    return { skip: "inventory_unreadable", detail: "ls_files_failed" };
+  }
+  let freshDirty;
+  try {
     const fp = await computeTreeFingerprint(p, { nestedExcluded });
     if (fp.head !== item.fingerprint.head
       || fp.worktreeDiffSha256 !== item.fingerprint.worktreeDiffSha256
@@ -2017,6 +2057,12 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
       || fp.untrackedIgnoredManifestSha256 !== item.fingerprint.untrackedIgnoredManifestSha256) {
       return { skip: "content_changed", dirty: fp.dirty };
     }
+    // TD-374 c：脏状态也要与计划时一致。只改 .git/info/exclude 时，文件路径、大小、时间戳
+    // 和各 diff 都不变，指纹四件套看不出，但原本被忽略的文件已变成未忽略——计划里"只有被
+    // 忽略文件、只留清单"的结论不再成立。有变化就跳过；是否备份、备份什么都以这一次的
+    // 新鲜状态为准（返回值带回 dirty）。
+    if (!sameDirtyFlags(fp.dirty, item.dirty)) return { skip: "content_changed", dirty: fp.dirty };
+    freshDirty = fp.dirty;
   } catch {
     return { skip: "content_changed" };
   }
@@ -2059,7 +2105,215 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
   const otherMembers = [...memberIds].filter((m) => !basisSet.has(m));
   const memberGate = await reverifyMemberGate(otherMembers, ctx);
   if (memberGate.skip) return memberGate;
-  return { ok: true };
+  return { ok: true, dirty: freshDirty };
+}
+
+/**
+ * 保全目录的落点预检（第 150 批 TD-374 e，零写盘）。受信锚 = archiveParent（run-dir 所在
+ * 目录）真实路径下的 runs-archive。归档根、月份目录若已存在，不得是链接（lstat），且归档
+ * 根的真实路径必须等于锚——否则递归 mkdir 与文件创建会沿着链接走到别处；
+ * 锚本身不能在任何待删的树里。尚不存在的层由我们自己建，建完在 claimPreserveDir 里
+ * 再用 realpath 复核。
+ * @returns {{trustedRoot: string} | {refused: string, detail?: string}}
+ */
+function checkPreserveLanding(archiveParent, month, targetReals) {
+  let parentReal;
+  try {
+    parentReal = realpathSync(archiveParent);
+  } catch {
+    return { refused: "preserve_dir_unsafe", detail: "archive_parent_unresolvable" };
+  }
+  const trustedRoot = join(parentReal, "runs-archive");
+  const archiveRoot = join(archiveParent, "runs-archive");
+  for (const p of [archiveRoot, join(archiveRoot, month)]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error?.code === "ENOENT") break; // 还不存在：之后由我们自己建
+      return { refused: "preserve_dir_unsafe", detail: `unreadable:${error?.code ?? "error"}` };
+    }
+    if (st.isSymbolicLink()) return { refused: "preserve_dir_unsafe", detail: `link:${p}` };
+    // 普通文件占了目录名不是逃逸（没有地方可去）：交给后面的 mkdir 按原有路径失败
+    //（bundle_create_failed / 记录写失败，既有合同），这里不拦。
+    if (!st.isDirectory()) break;
+  }
+  if (existsSync(archiveRoot)) {
+    let real;
+    try {
+      real = realpathSync(archiveRoot);
+    } catch {
+      return { refused: "preserve_dir_unsafe", detail: "archive_root_unresolvable" };
+    }
+    if (!samePath(real, trustedRoot)) return { refused: "preserve_dir_unsafe", detail: "archive_root_real_path_differs" };
+  }
+  if (targetReals.some((t) => samePath(trustedRoot, t) || isBelow(trustedRoot, t))) {
+    return { refused: "preserve_dir_inside_target" };
+  }
+  return { trustedRoot };
+}
+
+const DIRTY_FLAG_KEYS = ["staged", "unstaged", "untracked", "ignored"];
+
+/** 两份脏状态（staged / unstaged / untracked / ignored 四个布尔）是否一致；缺席按全 false。 */
+function sameDirtyFlags(a, b) {
+  return DIRTY_FLAG_KEYS.every((k) => Boolean(a?.[k]) === Boolean(b?.[k]));
+}
+
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
+
+/**
+ * 备份路径里的一段是否异常（第 150 批 TD-374 e）：空段、`.`、`..`、带冒号的段（盘符、NTFS
+ * 备用数据流写法）、Windows 保留设备名（con、prn、aux、nul、com0-9、lpt0-9，带不带扩展名
+ * 都算）。备份文件名由 runId 与树里的相对路径拼出来，遇到这样的段一律拒绝、留树，不去猜
+ * 它落到哪里。
+ */
+export function isAbnormalBackupSegment(segment) {
+  const s = String(segment);
+  return s === "" || s === "." || s === ".." || s.includes(":") || WINDOWS_RESERVED_NAME.test(s);
+}
+
+/** 带错误码的 Error：codeMessage 进 skipped 结果的 detail。 */
+function codedError(code) {
+  return Object.assign(new Error(`worktree reclaim 备份：${code}`), { code });
+}
+
+/**
+ * TD-374：删脏树之前备份内容，写进本次回收记录的 dirty/ 目录（dirtyDir）。所有文件都独占创建
+ *（wx / COPYFILE_EXCL / 非递归 mkdir）：已存在同名条目就失败留树，绝不覆盖：
+ *   <key>.staged.diff          HEAD→索引：`git diff --cached --binary`
+ *   <key>.unstaged.diff        索引→工作区：`git diff --binary`
+ *   <key>.untracked/<相对路径>  `git ls-files --others --exclude-standard -z` 列出的普通文件副本
+ *   <key>.untracked-links.txt  没复制的条目的相对路径（每行一条）：符号链接、junction、目录、
+ *                              特殊文件；要穿过链接才走得到的条目记链接本身
+ * 被忽略的文件（node_modules、dist 之类）不备份。
+ *
+ * 为什么分两层：同一个文件先暂存 B、再把工作区改回 A 时，`git diff HEAD` 只给 HEAD→工作区
+ * 的净差异（空补丁），暂存区里的 B 随树一起丢。两层按顺序回放：先 `git apply --index`
+ * 暂存层，再 `git apply` 工作区层。补丁固定 `--src-prefix=a/ --dst-prefix=b/`（不受
+ * diff.noprefix、diff.mnemonicPrefix 影响）与 `--unified=3`（不受 diff.context 影响），
+ * 默认的 git apply 就能回放，并带
+ * `--no-ext-diff --no-textconv --no-color`（外部 diff / textconv / 颜色会让输出不是补丁）。
+ * 状态显示有暂存改动（flags.staged）而暂存层补丁为空 → 无法可靠表示，抛错留树。
+ *
+ * 链接一律不跟进、不复制：先 lstat，只认普通文件。Windows 上 git 会穿过 junction 列出树外
+ * 的文件（git 2.50.1 实测列出 `linkdir/secret.txt`），所以不能只 lstat 条目本身——条目的每一层
+ * 父目录也逐级 lstat，其中任何一层不是真目录就记那一层、不复制。（调用方在此之前已经用
+ * findTreeLinkHazard 把带 junction 的树整棵保留了，这里是第二道。）
+ *
+ * 单树总字节（两层补丁 + 全部副本）超 maxBytes → 什么都不写，返回 { tooLarge: true }；其余任何
+ * 一步失败直接抛错，调用方据此留树。两条 diff 都在私有索引副本上跑（同 computeTreeFingerprint）：
+ * 工作区 diff 会经 autoRefreshIndex 写回索引，这棵树若因超限或失败被保留，真实索引字节不该被
+ * 备份动过；副本建不出来而真实索引在盘时抛错，不退回真实索引。
+ *
+ * 已知不防：备份与删除之间有人又往树里写东西（竞态）；父层 lstat 与复制之间有人把真目录换成
+ * junction（竞态）。
+ * @param {string} treePath
+ * @param {string} dirtyDir 本次记录的 dirty/ 目录（调用方已确认它是真目录、在受信归档根下）
+ * @param {string} key 文件名前缀（runId 清洗后）
+ * @param {number} maxBytes
+ * @param {{staged: boolean}} flags 执行时的新鲜脏状态
+ * @param {Function|null} gitExec 测试缝：(args, opts) => Buffer，替代两条 diff 的 git 执行
+ * @returns {{tooLarge: true} | {tooLarge: false, stagedPath: string, unstagedPath: string,
+ *   untrackedDir: string|null, linksPath: string|null, files: number, links: number, bytes: number}}
+ */
+function backupDirtyTree(treePath, dirtyDir, key, maxBytes, flags, gitExec = null) {
+  if (isAbnormalBackupSegment(key)) throw codedError("bad_path_segment");
+  const indexAbs = resolve(treePath, gitReadOnly(["rev-parse", "--git-path", "index"], treePath).trim());
+  const priv = createPrivateIndexCopy(indexAbs);
+  if (priv === null && existsSync(indexAbs)) throw codedError("private_index_unavailable");
+  let staged;
+  let unstaged;
+  try {
+    const diffOut = (extraArgs, budget) => {
+      // --unified=3：用户配了 diff.context=0 时 git diff 不输出上下文行，默认的 git apply 不收
+      // 这样的补丁（要 --unidiff-zero）；显式固定 3 行，回放说明才对任何配置都成立。
+      const args = [
+        "--no-optional-locks", "diff", ...extraArgs, "--binary", "--unified=3", "--src-prefix=a/", "--dst-prefix=b/",
+        "--no-ext-diff", "--no-textconv", "--no-color",
+      ];
+      const opts = {
+        cwd: treePath,
+        env: gitChildEnv(priv === null ? undefined : { ...process.env, ...priv.env }),
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: budget + 1,
+      };
+      return typeof gitExec === "function" ? gitExec(args, opts) : execFileSync("git", args, opts);
+    };
+    staged = diffOut(["--cached"], maxBytes);
+    if (staged.length > maxBytes) return { tooLarge: true };
+    unstaged = diffOut([], maxBytes - staged.length);
+  } catch (error) {
+    if (error?.code === "ENOBUFS") return { tooLarge: true }; // 补丁自己就超了上限
+    throw error;
+  } finally {
+    priv?.dispose();
+  }
+  if (staged.length + unstaged.length > maxBytes) return { tooLarge: true };
+  if (flags?.staged && staged.length === 0) throw codedError("staged_patch_empty");
+
+  const listing = execFileSync("git", ["--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z"], {
+    cwd: treePath,
+    env: gitChildEnv(),
+    encoding: "utf8",
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  // 相对目录 → 它自己或某层祖先里第一个不是真目录的路径（没有则 null）。
+  const notPlainDir = new Map([["", null]]);
+  const firstNonDir = (relDir) => {
+    if (notPlainDir.has(relDir)) return notPlainDir.get(relDir);
+    const slash = relDir.lastIndexOf("/");
+    let found = firstNonDir(slash < 0 ? "" : relDir.slice(0, slash));
+    if (found === null && !lstatSync(join(treePath, relDir)).isDirectory()) found = relDir; // lstat：链接不是目录
+    notPlainDir.set(relDir, found);
+    return found;
+  };
+  const copies = [];
+  const links = new Set();
+  let total = staged.length + unstaged.length;
+  for (const entry of listing.split("\0")) {
+    if (entry === "") continue;
+    const rel = entry.endsWith("/") ? entry.slice(0, -1) : entry; // 嵌套仓库以 / 结尾
+    const slash = rel.lastIndexOf("/");
+    const blocked = firstNonDir(slash < 0 ? "" : rel.slice(0, slash));
+    if (blocked !== null) { links.add(blocked); continue; }
+    const st = lstatSync(join(treePath, rel));
+    if (st.isFile()) {
+      if (rel.split("/").some(isAbnormalBackupSegment)) throw codedError("bad_path_segment");
+      copies.push(rel);
+      total += st.size;
+    } else {
+      links.add(rel);
+    }
+  }
+  if (total > maxBytes) return { tooLarge: true };
+
+  const stagedPath = join(dirtyDir, `${key}.staged.diff`);
+  const unstagedPath = join(dirtyDir, `${key}.unstaged.diff`);
+  writeFileSync(stagedPath, staged, { flag: "wx" });
+  writeFileSync(unstagedPath, unstaged, { flag: "wx" });
+  let untrackedDir = null;
+  if (copies.length > 0) {
+    untrackedDir = join(dirtyDir, `${key}.untracked`);
+    mkdirSync(untrackedDir); // 非递归：已存在就抛 EEXIST
+    for (const rel of copies) {
+      const dst = join(untrackedDir, ...rel.split("/"));
+      mkdirSync(dirname(dst), { recursive: true }); // untrackedDir 是刚独占建的，下面的层都是我们自己建的
+      copyFileSync(join(treePath, rel), dst, fsConstants.COPYFILE_EXCL);
+    }
+  }
+  let linksPath = null;
+  if (links.size > 0) {
+    linksPath = join(dirtyDir, `${key}.untracked-links.txt`);
+    writeFileSync(linksPath, `${[...links].join("\n")}\n`, { flag: "wx" });
+  }
+  return {
+    tooLarge: false, stagedPath, unstagedPath, untrackedDir, linksPath,
+    files: copies.length, links: links.size, bytes: total,
+  };
 }
 
 /**
@@ -2072,11 +2326,16 @@ async function reverifyTreeBeforeRemoval(item, ctx) {
  * @param {Function} [beforeBranchDelete] 测试缝：分支预检与检出判断之后、CAS
  *   删除之前（生产为 null）。
  * @param {Function} [beforeTreeSnapshot] 测试缝：脏树快照写盘之前（生产为 null）。
+ * @param {number} [dirtyBackupMaxBytes] 单树内容备份的字节上限（缺省
+ *   DIRTY_BACKUP_MAX_BYTES；测试注入小值证明超限路径）。
+ * @param {Function} [backupGitExec] 测试缝：(args, opts) => Buffer，替代内容备份里两条
+ *   `git diff` 的执行（真实 git 造不出"status 报暂存、git diff --cached 却为空"这种形状；
+ *   生产为 null）。
  * @param {Function} [afterTranscriptIndex] 测试缝：apply 的事实索引建好之后、
  *   摘树之前——用于在索引缓存之后改变磁盘转录，证明删前复核读的是最新内容
  *   （生产为 null）。
- * @param {Function} [removeTreeExec] 测试缝：摘树 git 调用的替身（item =>
- *   执行删除或抛错；生产为 null，用真实 git）。
+ * @param {Function} [removeTreeExec] 测试缝：摘树的替身（item =>
+ *   执行删除或抛错；生产为 null，用 isolation.removeWorktree）。
  * @param {Function} [worktreeListFn] 测试缝：实时登记读取的替身
  *   （(phase: "tree_recheck" | "branch_delete") => `git worktree list
  *   --porcelain` 文本；抛错 = git 失败。生产为 null，用真实 git）。
@@ -2087,6 +2346,8 @@ export async function applyWorktreeReclaim({
   afterTranscriptIndex = null, removeTreeExec = null, worktreeListFn = null,
   // 测试缝：派生读器的文件枚举（注入枚举失败，证明刷新失败不会放行删除）。
   supersessionEnumerateFn = null,
+  dirtyBackupMaxBytes = DIRTY_BACKUP_MAX_BYTES,
+  backupGitExec = null,
 }) {
   let planBytes;
   try {
@@ -2149,6 +2410,13 @@ export async function applyWorktreeReclaim({
   if (!firstFree) throw new Error(`worktree reclaim: 保全目录命名空间耗尽（${preserveBase}）`);
   if (preserveInsideTarget(firstFree)) return { refused: "preserve_dir_inside_target" };
   if (targets.some((t) => isBelow(runDirAbs, t))) return { refused: "run_dir_inside_target" };
+  // 保全目录的落点（第 150 批 TD-374 e）：词法上不在目标里还不够——归档祖先是链接时，递归
+  // mkdir 与文件创建会沿着它走到别处（实测归档根预先是 junction，补丁与副本物理上落进了
+  // 另一个目录）。受信锚 = run-dir 所在目录真实路径下的 runs-archive；零写盘拒绝。
+  const targetReals = [...treeItems, ...huskItems].map((i) => i.treeRealPath ?? resolve(String(i.treePath ?? "")));
+  const landing = checkPreserveLanding(dirname(runDirAbs.replace(/[\\/]+$/, "")), month, targetReals);
+  if (landing.refused) return { refused: landing.refused, ...(landing.detail ? { detail: landing.detail } : {}) };
+  const trustedArchiveRoot = landing.trustedRoot;
   // 保全目录名只精确到秒：同一秒内的两次 apply 不得互相覆盖记录。首次写盘时
   // 原子 mkdir 抢位；同秒竞争者已抢到位就换名（-2、-3…）并重跑越界检查。
   let preserveDir = null;
@@ -2161,6 +2429,14 @@ export async function applyWorktreeReclaim({
       try {
         mkdirSync(dirname(cand), { recursive: true });
         mkdirSync(cand);
+        // 落点复核（TD-374 e）：刚建出来的保全目录，真实路径必须在受信归档根之下、不在任何
+        // 待删的树里（上面的预检之后、mkdir 之前，祖先仍可能被换成链接）。
+        const real = realpathSync(cand);
+        if (!isBelow(real.toLowerCase(), trustedArchiveRoot.toLowerCase())
+          || targetReals.some((t) => samePath(real, t) || isBelow(real, t))) {
+          try { rmdirSync(cand); } catch { /* 刚建的空目录，尽力清 */ }
+          throw new Error(`worktree reclaim: 保全目录落点不在受信归档根下（${cand} → ${real}）`);
+        }
         preserveDir = cand;
         return preserveDir;
       } catch (error) {
@@ -2319,6 +2595,7 @@ export async function applyWorktreeReclaim({
   const orderedTrees = [...treeItems].sort((a, b) => b.treePath.split(sep).length - a.treePath.split(sep).length);
   const failedBranches = new Set();
   const dirtySnapshots = [];
+  const dirtyBackups = []; // TD-374：已备份内容的树（逐棵的备份文件位置）
   const removedTrees = [];
   const missingTreePaths = new Map(); // runId → treePath（tree_missing 跳过的）
   let aborted = null;
@@ -2340,38 +2617,74 @@ export async function applyWorktreeReclaim({
         reclaimTreeReals.delete((item.treeRealPath ?? item.treePath).toLowerCase());
         continue;
       }
+      // 第 150 批（TD-374 c）：脏状态以删前复核这一次算出的新鲜状态为准（与计划时不一致
+      // 的树在复核里已跳过 content_changed），不是计划里的旧值。
       const d = check.dirty ?? item.dirty;
       if (d && (d.staged || d.unstaged || d.untracked || d.ignored)) {
-        // 脏树快照（SOP 要求）：记丢了哪些路径，不是内容。快照写失败时这棵树
-        // 不删（记为跳过、分支不删）——记录是销毁的审计面，失败不能吞。
-        let snapPath = null;
+        // 记录是销毁的审计面：下面任何一步存不下，这棵树都不删（记为跳过、分支不
+        // 删），失败不能吞。三个跳过原因：dirty_snapshot_failed（状态清单写失败）、
+        // dirty_backup_failed（内容备份写失败）、dirty_backup_too_large（备份字节超上限）。
+        const skipDirtyTree = (reason, detail) => {
+          results.push({
+            runId: item.runId, action: "remove_tree", outcome: "skipped", reason,
+            ...(detail ? { detail } : {}), branch: item.branch ?? null,
+          });
+          if (item.branch) failedBranches.add(item.branch);
+          reclaimTreeReals.delete((item.treeRealPath ?? item.treePath).toLowerCase());
+        };
+        const runKey = item.runId.replace(/[^A-Za-z0-9._-]/g, "_");
+        // 脏树快照（SOP 要求）：记丢了哪些路径，不是内容；内容见下面的备份。
+        let dirtyDir = null;
         try {
           const claimed = claimPreserveDir();
           // 测试缝：快照写盘前一刻（保全目录已抢占后）——用于注入快照失败，证明
           // 快照失败会让这棵树跳过而不是继续删除。生产为 null。
           if (typeof beforeTreeSnapshot === "function") await beforeTreeSnapshot(item, claimed);
-          mkdirSync(join(claimed, "dirty"), { recursive: true });
+          dirtyDir = join(claimed, "dirty");
+          mkdirSync(dirtyDir, { recursive: true });
+          // dirty/ 必须是我们自己的真目录（不是被预先占成的链接）：备份文件都写在它下面。
+          const dirtySt = lstatSync(dirtyDir);
+          if (dirtySt.isSymbolicLink() || !dirtySt.isDirectory()) throw new Error("dirty/ 不是真目录");
+          if (isAbnormalBackupSegment(runKey)) throw new Error("runId 清洗后是异常路径段");
           const raw = execFileSync("git", ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"], {
             cwd: item.treePath,
             env: gitChildEnv(),
             windowsHide: true,
             maxBuffer: 64 * 1024 * 1024,
           });
-          snapPath = join(claimed, "dirty", `${item.runId.replace(/[^A-Za-z0-9._-]/g, "_")}.status.txt`);
-          writeFileSync(snapPath, raw);
+          const snapPath = join(dirtyDir, `${runKey}.status.txt`);
+          writeFileSync(snapPath, raw, { flag: "wx" }); // 独占创建：同名已在就失败留树，不覆盖
           dirtySnapshots.push(snapPath);
         } catch {
-          results.push({ runId: item.runId, action: "remove_tree", outcome: "skipped", reason: "dirty_snapshot_failed", branch: item.branch ?? null });
-          if (item.branch) failedBranches.add(item.branch);
-          reclaimTreeReals.delete((item.treeRealPath ?? item.treePath).toLowerCase());
+          skipDirtyTree("dirty_snapshot_failed");
           continue;
+        }
+        // TD-374 内容备份：有受控改动（staged/unstaged）或未忽略新文件（untracked）的树
+        // 才备份；只有被忽略文件的树只存上面的状态快照，照旧直接删。
+        if (d.staged || d.unstaged || d.untracked) {
+          let backup;
+          try {
+            backup = backupDirtyTree(item.treePath, dirtyDir, runKey, dirtyBackupMaxBytes, d, backupGitExec);
+          } catch (error) {
+            skipDirtyTree("dirty_backup_failed", error?.code ? String(error.code) : undefined);
+            continue;
+          }
+          if (backup.tooLarge) {
+            skipDirtyTree("dirty_backup_too_large", `limit ${dirtyBackupMaxBytes} bytes`);
+            continue;
+          }
+          const { tooLarge, ...saved } = backup;
+          dirtyBackups.push({ runId: item.runId, ...saved });
         }
       }
       try {
-        // 测试缝：摘树 git 调用的替身（注入"git remove 失败但目录仍在"，代替
-        // 独占文件锁）。生产为 null，用真实 git。
+        // 测试缝：摘树的替身（注入"删除失败但目录仍在"，代替独占文件锁）。生产为 null。
+        // 第 150 批修正一：生产路径走 isolation.removeWorktree（rmSync，不跟进 junction），不再
+        // 直接调 `git worktree remove --force`——Windows 上它会跟进树里的 junction，把目标目录
+        // （树外）里的文件一并删掉。归属、上锁、树根是链接的检查都在 removeWorktree 里；
+        // 它什么都没删时目录仍在，下面照旧按 failed_still_present 记。
         if (typeof removeTreeExec === "function") await removeTreeExec(item);
-        else gitText(["worktree", "remove", "--force", item.treePath], sourceRepo);
+        else await removeWorktree(item.treePath);
       } catch { /* 删后复检裁决 */ }
       if (existsSync(item.treePath)) {
         results.push({ runId: item.runId, action: "remove_tree", outcome: "failed_still_present", branch: item.branch ?? null });
@@ -2383,8 +2696,8 @@ export async function applyWorktreeReclaim({
       }
     }
 
-    // ── 摘树后的登记收尾：只删本次摘掉的树自己的管理条目（git worktree
-    // remove 成功时 git 已自清，这里是对 rmSync 兜底等形态的幂等核对）。不做
+    // ── 摘树后的登记收尾：只删本次摘掉的树自己的管理条目（removeWorktree 内部已定向清过一
+    // 次，这里是幂等核对，也覆盖 removeTreeExec 替身的形态）。不做
     // 仓库级 prune——与别的会话正在进行的 `git worktree add` 存在关不掉的竞
     // 争（isolation.WORKTREE_PRUNE_EXPIRE 的 SSOT 注释），其他 stale 登记留给
     // serve 维护 / runs verify-commit 的通用清扫。──
@@ -2556,6 +2869,7 @@ export async function applyWorktreeReclaim({
         byCategory,
         executionCounts,
         dirtySnapshots,
+        dirtyBackups,
         ...(staleRegistrations.size > 0 ? { staleRegistrations: [...staleRegistrations].sort() } : {}),
         ...(liveRegistrationUnreadable ? { liveRegistrationUnreadable: true } : {}),
         aborted: aborted ? { message: aborted.message } : null,
@@ -2568,7 +2882,7 @@ export async function applyWorktreeReclaim({
 
   return {
     countsBefore, countsAfter, preserveDir, bundlePath, bundleSha256, results,
-    byCategory, executionCounts, recordsWriteFailed,
+    dirtyBackups, byCategory, executionCounts, recordsWriteFailed,
     ...(liveRegistrationUnreadable ? { liveRegistrationUnreadable: true } : {}),
     ...(aborted ? { aborted: { message: aborted.message } } : {}),
     ...(staleRegistrations.size > 0 ? { staleRegistrations: [...staleRegistrations].sort() } : {}),

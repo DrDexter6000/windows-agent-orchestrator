@@ -1,6 +1,7 @@
 import { LineStreamParser } from "./lineStream.js";
 import {
-  messageEvent, doneEvent, metricsEvent, commandEvent, fileWrittenEvent, toolUseEvent, toolResultEvent,
+  messageEvent, doneEvent, metricsEvent, commandEvent, fileWrittenEvent, writeIntentEvent, toolUseEvent, toolResultEvent,
+  WRITE_INTENT_CORRELATION_STATUS,
 } from "../../runEvent.js";
 
 /**
@@ -11,6 +12,7 @@ import {
  *   type:"item.started"   + item.type:"command_execution"   → toolUseEvent("shell", { command })（决定 0070）
  *   type:"item.completed" + item.type:"command_execution"   → commandEvent（证据链用）
  *                                                             + toolResultEvent("shell", aggregated_output)（决定 0070）
+ *   type:"item.started"   + item.type:"file_change"         → 每个写入类 change 一条 writeIntentEvent（TD-361，见下）
  *   type:"item.completed" + item.type:"file_change"         → status 为 "completed" 时 fileWrittenEvent（每个非 delete change）；
  *                                                            否则一条 isError 的 toolResultEvent（TD-357，补丁未完成）
  *   type:"turn.completed"                                    → metricsEvent(usage) + doneEvent("completed")
@@ -66,8 +68,30 @@ import {
  * 与系统临时目录，部分写入不会落到别处；交付打包按真实改动清点。这些情形落一条既有形状的
  * 失败 tool_result（isError:true），让活动页看得见补丁未完成——不新增事件类型，也不回显
  * 上游 status 原文。
+ *
+ * TD-361（写意图）：补丁应用之前 `exec --json` 先发 item.started（file_change、in_progress，
+ * 带 item.id 与 changes[].path，codex-cli 0.171.0 实测）。此刻对每个写入类 change 发一条
+ * TRACKED write_intent，toolCallId = `<item.id>#<change 在 changes 数组里的序号>`、path 原样。
+ * 控制面据此在"意图时刻"判界内，文件写了又删之后的 file_written 才不被判越界（见 runManager 的
+ * TD-372 放行）。只从 item.started 发意图，绝不在 file_written 那一刻补发——那等于按分类时刻
+ * 的磁盘放宽。item.completed 时按路径把 change 对回意图：对上的 file_written 带同一个
+ * toolCallId，对不上的照旧只发不带 toolCallId 的 file_written；补丁没完成、完成帧里缺了的 change、
+ * 回合或流结束时仍没收口的意图，各发一条 isError 的 tool_result（tool = toolCallId）收口——
+ * 控制面在 run 以 completed 结束时对未收口意图判失败。拿不到稳定 id 不发意图；同一条目只发一次；
+ * 未收口意图到 128 条就不再发新意图（控制面上限 256，不能被这里打到）。
  */
 const WRITE_KINDS = new Set(["add", "edit", "update", "create"]);
+const MAX_OPEN_WRITE_INTENTS = 128;
+
+function isStableToolCallId(value) {
+  return typeof value === "string" && value.trim().length > 0 && value !== "unknown";
+}
+
+// 固定文案：不回显上游 status 原文，也不回显路径。
+const PATCH_FAILED_TEXT = "file_change did not complete: the patch failed";
+const NO_COMPLETED_STATUS_TEXT = "file_change did not complete: no completed status";
+const CHANGE_NOT_APPLIED_TEXT = "file_change did not complete: this change is not in the applied patch";
+const INCOMPLETE_AT_END_TEXT = "file_change did not complete: the turn ended before the patch finished";
 
 // 只做换行归一与去首尾空白，不截断（理由见类注释）。
 function normalizeFailureMessage(message) {
@@ -82,6 +106,56 @@ export class CodexStreamParser extends LineStreamParser {
     // 解析器没产出 done 时由 ProcessBackend 的失败兜底读出。
     this.turnFailure = null;
     this.transientError = null;
+    // TD-361：file_change 条目 id → 该条目尚未收口的写意图 [{ toolCallId, path }]。条目完成
+    // （或回合/流结束收口）后留一个空数组而不删键——迟到的重复 item.started 不会再发意图。
+    this._intentsByItem = new Map();
+    this._openIntents = 0;
+  }
+
+  /** item.started 的 file_change：对每个写入类 change 发一条 TRACKED write_intent。 */
+  _announceFileChange(item) {
+    if (!isStableToolCallId(item.id) || this._intentsByItem.has(item.id)) return [];
+    const intents = [];
+    const events = [];
+    (Array.isArray(item.changes) ? item.changes : []).forEach((ch, index) => {
+      if (this._openIntents >= MAX_OPEN_WRITE_INTENTS) return;
+      // 空串/纯空白路径当作没有路径：控制面把它判 lexical_outside，会在补丁的错误结果
+      // 收口之前直接让 run 失败。file_written 的行为不动。
+      if (typeof ch?.path !== "string" || ch.path.trim().length === 0 || !WRITE_KINDS.has(ch.kind)) return;
+      const toolCallId = `${item.id}#${index}`;
+      intents.push({ toolCallId, path: ch.path });
+      events.push(writeIntentEvent(ch.path, toolCallId, WRITE_INTENT_CORRELATION_STATUS.TRACKED));
+      this._openIntents += 1;
+    });
+    this._intentsByItem.set(item.id, intents);
+    return events;
+  }
+
+  /** 取走一个条目的全部未收口意图（并把该条目标成已见）。 */
+  _takeIntents(itemId) {
+    if (!isStableToolCallId(itemId)) return [];
+    const intents = this._intentsByItem.get(itemId) ?? [];
+    this._intentsByItem.set(itemId, []);
+    this._openIntents -= intents.length;
+    return intents;
+  }
+
+  /** 每条意图一条 isError 的 tool_result（tool = toolCallId）——控制面据此收口。 */
+  _closeIntents(intents, message) {
+    return intents.map((intent) => toolResultEvent(intent.toolCallId, message, true));
+  }
+
+  /** 回合/流结束时仍没收口的全部意图。 */
+  _closeAllIntents() {
+    const events = [];
+    for (const itemId of this._intentsByItem.keys()) {
+      events.push(...this._closeIntents(this._takeIntents(itemId), INCOMPLETE_AT_END_TEXT));
+    }
+    return events;
+  }
+
+  flush() {
+    return [...super.flush(), ...this._closeAllIntents()];
   }
 
   /** 自报失败原话，本轮终局优先（可选接口，见 LineStreamParser#failureReason）。 */
@@ -119,6 +193,7 @@ export class CodexStreamParser extends LineStreamParser {
       if (item?.type === "command_execution" && typeof item.command === "string") {
         return [toolUseEvent("shell", { command: item.command })];
       }
+      if (item?.type === "file_change") return this._announceFileChange(item);
       return [];
     }
     if (obj.type === "item.completed") {
@@ -132,31 +207,36 @@ export class CodexStreamParser extends LineStreamParser {
         return [ev, toolResultEvent("shell", item.aggregated_output, typeof item.exit_code === "number" && item.exit_code !== 0)];
       }
       if (item?.type === "file_change") {
+        // TD-361: this item's still-open write intents are settled by this frame.
+        const intents = this._takeIntents(item.id);
         if (item.status !== "completed") {
           // TD-357: a failed/malformed patch must never become file_written
           // evidence. One existing-shape tool result for the whole item keeps
           // the activity page honest; the raw upstream status is not echoed.
-          return [toolResultEvent(
-            "file_change",
-            item.status === "failed"
-              ? "file_change did not complete: the patch failed"
-              : "file_change did not complete: no completed status",
-            true,
-          )];
+          // TD-361: each announced change is closed by its own error result.
+          const text = item.status === "failed" ? PATCH_FAILED_TEXT : NO_COMPLETED_STATUS_TEXT;
+          return [toolResultEvent("file_change", text, true), ...this._closeIntents(intents, text)];
         }
         const events = [];
         for (const ch of Array.isArray(item.changes) ? item.changes : []) {
           // 只记写入类（add/edit/create/update），delete 不算 file_written
           if (typeof ch.path === "string" && WRITE_KINDS.has(ch.kind)) {
-            events.push(fileWrittenEvent(ch.path));
+            // TD-361: confirm with the id announced for this exact path; a change
+            // that was never announced stays a bare file_written (no relaxation).
+            const at = intents.findIndex((intent) => intent.path === ch.path);
+            events.push(at < 0
+              ? fileWrittenEvent(ch.path)
+              : fileWrittenEvent(ch.path, { toolCallId: intents.splice(at, 1)[0].toolCallId }));
           }
         }
-        return events;
+        return [...events, ...this._closeIntents(intents, CHANGE_NOT_APPLIED_TEXT)];
       }
       return [];
     }
     if (obj.type === "turn.completed") {
-      const events = [];
+      // TD-361: an announced patch that never got its item.completed must not
+      // leave an open intent behind the completed done.
+      const events = this._closeAllIntents();
       const u = obj.usage;
       if (u) {
         // input 轴保留上游 input_tokens 原值（总输入，含缓存子集）——tokenBudget

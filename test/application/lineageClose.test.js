@@ -9,11 +9,11 @@
 // 的主张——行为主张全部由显式断言承担。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
-import { closeRunLineage } from "../../src/application/lineageClose.js";
+import { execFileSync, execSync } from "node:child_process";
+import { closeRunLineage, isTreeHeadDrifted } from "../../src/application/lineageClose.js";
 
 test("TD-254 冒烟：合成线系 dry-run→apply→补偿重试全链（真 git 树）", async () => {
   const repo = mkdtempSync(join(tmpdir(), "lc-smoke-"));
@@ -221,6 +221,157 @@ test("TD-338: 子运行 id close——run.lineage_closed 落根转录、子转�
     assert.equal(dryRoot.alreadyClosed, true, "根转录里的闭态被看到");
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── TD-375：头指针漂移与 worktree reclaim 第 7 门同一判定（isTreeHeadDrifted）──
+// 旧口径要求树 HEAD 等于成员的交付提交（没打包时等于基点提交）：分支在交付之后又被
+// 推进过，HEAD 等于分支 tip 却不等于交付提交，树被误留。新口径：树在 wao/<m> 上且
+// HEAD 等于这条分支此刻的 tip 才放——提交都在分支上（lineage-close 从不删分支），
+// 释放树不丢提交。worktree reclaim 一侧的同形态对照见 worktreeReclaim.test.js。
+
+/**
+ * 单成员线系夹具：真 git 树 wao/<runId> 在 base 上，先提交交付提交 D，交付之后分支
+ * 又前进到 E（树 HEAD = 分支 tip = E ≠ D）。转录写明 D 为交付提交。
+ */
+function advancedBranchFixture(prefix, runId, { withDelivery = true, withBase = true } = {}) {
+  const repo = mkdtempSync(join(tmpdir(), prefix));
+  const runDir = join(repo, "runs");
+  mkdirSync(runDir, { recursive: true });
+  const sh = (cmd, cwd = repo) => execSync(cmd, { cwd, stdio: "ignore" });
+  const out = (cmd, cwd = repo) => execSync(cmd, { cwd, encoding: "utf8" }).trim();
+  sh("git init -q && git config user.email t@t && git config user.name t");
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  sh("git add . && git commit -qm init");
+  const base = out("git rev-parse HEAD");
+  const wt = join(repo, ".wao-worktrees", runId);
+  sh(`git worktree add -b wao/${runId} "${wt}" ${base}`);
+  writeFileSync(join(wt, "delivered.txt"), "d\n");
+  sh("git add . && git commit -qm delivered", wt);
+  const delivered = out("git rev-parse HEAD", wt);
+  writeFileSync(join(wt, "after.txt"), "e\n");
+  sh("git add . && git commit -qm after-delivery", wt);
+  const tip = out("git rev-parse HEAD", wt);
+  writeFileSync(join(runDir, `${runId}.jsonl`), [
+    {
+      type: "run.started", runId, agentId: "sol", backend: "codex", worktreePath: wt, cwd: repo,
+      ...(withBase ? { delivery: { baseCommit: base } } : {}), seq: 1,
+    },
+    ...(withDelivery ? [{ type: "run.delivery_created", runId, delivery: { deliveryCommit: delivered }, seq: 2 }] : []),
+    { type: "run.state_change", runId, to: "completed", seq: 3 },
+  ].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+  return { repo, runDir, wt, base, delivered, tip, sh, out };
+}
+
+const realGitRev = (path, args) => execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+
+test("TD-375: isTreeHeadDrifted 判定表——只有在自己分支上且 HEAD=tip 才没漂移", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  const base = { runId: "run_x", treeBranch: "wao/run_x", treeHead: A, branchTip: A };
+  assert.equal(isTreeHeadDrifted(base), false, "自己的分支、HEAD=tip");
+  assert.equal(isTreeHeadDrifted({ ...base, treeBranch: "refs/heads/wao/run_x" }), false, "完整引用名写法同样认");
+  assert.equal(isTreeHeadDrifted({ ...base, treeHead: A.toUpperCase() }), false, "哈希大小写不敏感");
+  assert.equal(isTreeHeadDrifted({ ...base, treeHead: B }), true, "HEAD 不在 tip 上");
+  assert.equal(isTreeHeadDrifted({ ...base, treeBranch: "HEAD" }), true, "detached HEAD（abbrev-ref 给 HEAD）");
+  assert.equal(isTreeHeadDrifted({ ...base, treeBranch: "main" }), true, "在别的分支上");
+  assert.equal(isTreeHeadDrifted({ ...base, treeBranch: "wao/run_y" }), true, "在另一个运行的分支上");
+  assert.equal(isTreeHeadDrifted({ ...base, branchTip: null }), true, "tip 读不出：证明不了就不放");
+  assert.equal(isTreeHeadDrifted({ ...base, branchTip: "" }), true);
+  assert.equal(isTreeHeadDrifted({ ...base, treeHead: "" }), true, "HEAD 读不出同样不放");
+});
+
+test("TD-375: lineage-close——分支在交付之后被推进（HEAD=分支 tip≠交付提交）→ 释放树、分支保留且提交还在", async () => {
+  const fx = advancedBranchFixture("lc-adv-", "run_adv1");
+  try {
+    assert.notEqual(fx.tip, fx.delivered, "前置：HEAD 不等于交付提交");
+    const r = await closeRunLineage({ runId: "run_adv1", runDir: fx.runDir, reasonText: "TD-375 分支已推进", apply: true });
+    assert.deepEqual(r.worktrees.map((w) => w.outcome), ["released"], JSON.stringify(r.worktrees));
+    assert.ok(!existsSync(fx.wt), "树已释放");
+    assert.deepEqual(r.branchesKept, ["wao/run_adv1"]);
+    assert.equal(fx.out("git rev-parse refs/heads/wao/run_adv1"), fx.tip, "分支保留，tip 不变——树上的提交都在分支上");
+  } finally {
+    rmSync(fx.repo, { recursive: true, force: true });
+  }
+});
+
+test("TD-375: lineage-close——既没有交付提交也没有基点提交的非交付谱系树，在自己分支 tip 上 → 释放树、分支保留", async () => {
+  // 新口径下的行为变化（决定 0060 当时写的是"这类树 tip 门必 skipped_head_drift、只记账"，
+  // Lead 会去追记）：旧口径要求 HEAD 等于交付/基点提交，两者都没有时 expected 为空、永远
+  // 判漂移；现在只看 HEAD 是否在自己分支的 tip 上——提交都在分支上，释放树不丢提交。
+  const fx = advancedBranchFixture("lc-nodeliv-", "run_nodeliv1", { withDelivery: false, withBase: false });
+  try {
+    const r = await closeRunLineage({ runId: "run_nodeliv1", runDir: fx.runDir, reasonText: "TD-375 无交付无基点", apply: true });
+    assert.deepEqual(r.worktrees.map((w) => w.outcome), ["released"], JSON.stringify(r.worktrees));
+    assert.ok(!existsSync(fx.wt), "树已释放");
+    assert.deepEqual(r.branchesKept, ["wao/run_nodeliv1"]);
+    assert.equal(fx.out("git rev-parse refs/heads/wao/run_nodeliv1"), fx.tip, "分支保留，tip 不变");
+  } finally {
+    rmSync(fx.repo, { recursive: true, force: true });
+  }
+});
+
+test("TD-375: lineage-close——detached HEAD / 在别的分支上 → 留树（树上的提交可能没有分支引用）", async () => {
+  const shapes = [
+    { name: "detached 在 tip 上", expectBranch: "HEAD", setup: (fx) => fx.sh("git checkout -q --detach", fx.wt) },
+    {
+      name: "detached + 只在这里的新提交",
+      expectBranch: "HEAD",
+      setup: (fx) => {
+        fx.sh("git checkout -q --detach", fx.wt);
+        writeFileSync(join(fx.wt, "only-here.txt"), "x\n");
+        fx.sh("git add . && git commit -qm only-here", fx.wt);
+      },
+    },
+    { name: "在别的分支上", expectBranch: "scratch-branch", setup: (fx) => fx.sh("git checkout -q -b scratch-branch", fx.wt) },
+  ];
+  for (const shape of shapes) {
+    const fx = advancedBranchFixture("lc-keep-", "run_keep1");
+    try {
+      shape.setup(fx);
+      const headBefore = fx.out("git rev-parse HEAD", fx.wt);
+      const r = await closeRunLineage({ runId: "run_keep1", runDir: fx.runDir, reasonText: "TD-375 应留树", apply: true });
+      assert.deepEqual(r.worktrees.map((w) => w.outcome), ["skipped_not_tip"], `${shape.name}: ${JSON.stringify(r.worktrees)}`);
+      assert.equal(r.worktrees[0].branch, shape.expectBranch, shape.name);
+      assert.ok(existsSync(fx.wt), `${shape.name}: 树必须还在`);
+      assert.equal(fx.out("git rev-parse HEAD", fx.wt), headBefore, `${shape.name}: HEAD 不动`);
+      assert.equal(fx.out("git rev-parse refs/heads/wao/run_keep1"), fx.tip, `${shape.name}: 分支不动`);
+    } finally {
+      rmSync(fx.repo, { recursive: true, force: true });
+    }
+  }
+});
+
+test("TD-375: lineage-close——HEAD 与分支 tip 读到不一致、或 tip 读不出 → skipped_head_drift 留树", async () => {
+  // 附着在自己分支上时 HEAD 就是分支引用，两次读之间被并发改动才会不一致；用 gitRev 缝
+  // 复现这个形态（分支 tip 那一次读回别的值 / 读失败）。
+  const fx = advancedBranchFixture("lc-drift-", "run_drift1");
+  try {
+    const tipRef = "refs/heads/wao/run_drift1";
+    const moved = await closeRunLineage({
+      runId: "run_drift1", runDir: fx.runDir, reasonText: "TD-375 tip 读到别的值", apply: true,
+      gitRev: (p, args) => (args[0] === "rev-parse" && args[1] === tipRef ? fx.base : realGitRev(p, args)),
+    });
+    assert.deepEqual(moved.worktrees.map((w) => w.outcome), ["skipped_head_drift"], JSON.stringify(moved.worktrees));
+    assert.equal(moved.worktrees[0].head, fx.tip);
+    assert.equal(moved.worktrees[0].expected, fx.base, "expected 现在是分支 tip（旧口径是交付/基点提交）");
+    assert.deepEqual(moved.branchesKept, ["wao/run_drift1"]);
+    assert.ok(existsSync(fx.wt), "树还在");
+
+    // 已闭合重入 = 补偿重试释放；这次 tip 读失败 → 同样留树。
+    const unreadable = await closeRunLineage({
+      runId: "run_drift1", runDir: fx.runDir, reasonText: "retry", apply: true,
+      gitRev: (p, args) => {
+        if (args[0] === "rev-parse" && args[1] === tipRef) throw new Error("injected: tip unreadable");
+        return realGitRev(p, args);
+      },
+    });
+    assert.equal(unreadable.alreadyClosed, true);
+    assert.deepEqual(unreadable.worktrees.map((w) => w.outcome), ["skipped_head_drift"], JSON.stringify(unreadable.worktrees));
+    assert.equal(unreadable.worktrees[0].expected, null);
+    assert.ok(existsSync(fx.wt), "tip 读不出时树还在");
+  } finally {
+    rmSync(fx.repo, { recursive: true, force: true });
   }
 });
 

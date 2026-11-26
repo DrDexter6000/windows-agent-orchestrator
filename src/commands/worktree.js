@@ -13,12 +13,11 @@
 //   - 外部模块：../isolation.js（listWorktrees/removeWorktree）
 //   - 应用服务：../application/worktreeReclaim.js（planWorktreeReclaim/applyWorktreeReclaim）
 //   - 共享工具：./shared.js（parseOptions，纯函数）
-//   - node built-in：path（resolve）
+//   - node built-in：path（join/resolve）
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
-import { linkedWorktreeEntry, listWorktrees, removeWorktree } from "../isolation.js";
+import { linkedWorktreeEntry, listWorktrees, pathPresent, removeWorktree } from "../isolation.js";
 import {
   planWorktreeReclaim, applyWorktreeReclaim, RECENT_BOUND_EVENT_MS, RECLAIM_REFUSAL_CODES,
 } from "../application/worktreeReclaim.js";
@@ -79,6 +78,11 @@ async function worktreeReclaimCommand(rest, config) {
     for (const r of result.results) {
       const why = r.reason ? `（${r.reason}${r.detail ? `：${r.detail}` : ""}）` : "";
       console.log(`  ${r.action} ${r.runId}${r.branch ? ` ${r.branch}` : ""} -> ${r.outcome}${why}`);
+    }
+    // TD-374：脏树删前备份了几棵、存在哪里（跳过的树与原因已在上面逐项列出，如
+    // dirty_backup_failed / dirty_backup_too_large——跳过的树没删、分支也没删）。
+    if (result.dirtyBackups?.length) {
+      console.log(`  脏树备份 ${result.dirtyBackups.length} 棵（删前存下受控改动 diff 与未忽略新文件副本，被忽略的文件不备份）：${join(result.preserveDir, "dirty")}`);
     }
     if (result.countsAfter) {
       console.log(`  worktrees ${result.countsBefore.worktrees} -> ${result.countsAfter.worktrees}；wao/* 分支 ${result.countsBefore.waoBranches} -> ${result.countsAfter.waoBranches}`);
@@ -210,10 +214,11 @@ async function worktreeCommand(args, config) {
     const target = rest.find((a) => !a.startsWith("--"));
     if (!target) throw new Error("worktree remove requires <path>");
     let path = resolve(target);
-    // removeWorktree 在 git worktree remove 失败时强删目录：独立仓库（只读运行的私有
-    // 克隆、主检出）与普通目录交给它，会不经任何检查被删掉，所以这里只放行链接工作树。
-    // 目录已不在时 removeWorktree 本就什么都不做。
-    if (existsSync(path)) {
+    // removeWorktree 强删目录：独立仓库（只读运行的私有克隆、主检出）与普通目录交给它，会不经
+    // 任何检查被删掉，所以这里只放行链接工作树。目录已不在时 removeWorktree 本就什么都不做。
+    // 在不在盘上用 pathPresent（lstat，不跟进链接）：悬空的链接 existsSync 看不见，会被当成
+    // "已经不在"、跳过下面的检查并打印 removed，而链接其实还在盘上。
+    if (pathPresent(path)) {
       const entry = linkedWorktreeEntry(path);
       if (!entry) {
         throw new Error(
@@ -227,11 +232,19 @@ async function worktreeCommand(args, config) {
       // 按 git 登记的路径删：经 junction 给出的路径，强删兜底只会删掉 junction 本身。
       path = resolve(entry.path);
     }
-    await removeWorktree(path);
-    if (existsSync(path)) {
+    const outcome = await removeWorktree(path);
+    if (!outcome.removed || pathPresent(path)) {
       throw new Error(
         `${path} 删除失败，目录仍在（常见是有进程以它为当前目录或占着里面的文件），` +
         "见 wao manual maintenance \"worktree 清理失败\"",
+      );
+    }
+    // 树删净了但 git 里本树的登记没清掉（相对路径登记认不出、管理目录被进程占着等）：如实
+    // 报错、非零退出，不打印 removed——残留的登记会让 git 一直把它当成一棵在册的树。
+    if (outcome.registrationLeft) {
+      throw new Error(
+        `${path} 的目录已删除，但 git 里它的登记没清掉（${outcome.registrationLeft}）。` +
+        "结束占用该管理目录的进程后，走 serve 维护 / runs verify-commit 的通用清扫（git worktree prune）清掉",
       );
     }
     console.log(JSON.stringify({ removed: path }));

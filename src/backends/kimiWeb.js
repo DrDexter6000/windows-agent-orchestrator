@@ -103,9 +103,11 @@ import {
   metricsEvent,
   commandEvent,
   fileWrittenEvent,
+  writeIntentEvent,
   toolUseEvent,
   toolResultEvent,
   runtimeActivityEvent,
+  WRITE_INTENT_CORRELATION_STATUS,
 } from "../runEvent.js";
 import { readFileSync } from "node:fs";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
@@ -1150,9 +1152,9 @@ export class KimiWebBackend {
           return;
         }
         // 证据先行：全部归属轮（纠偏会让工作跨轮）还没落过的工具证据在这里补齐。
-        for (const turn of attributed) {
-          for (const ev of projectKimiToolCalls(turn, toolLedger, { final: true })) yield ev;
-        }
+        for (const ev of projectKimiToolCalls(attributed, toolLedger, { final: true })) yield ev;
+        // TD-361：收口快照里找不到的写意图在 done 之前收口。
+        for (const ev of closeKimiOpenWriteIntents(toolLedger)) yield ev;
         const echo = openerText(attributed[0]);
         if (echo !== null) yield messageEvent("user", [{ type: "text", text: echo }]);
         // 每段发言一个 assistant message 事件（约定见 docs/02-architecture.md §2.2），
@@ -1167,9 +1169,7 @@ export class KimiWebBackend {
       }
       // 决定 0071：在途的工具调用就绪即落证据（命令 / 工具调用在输入就绪时，结果在
       // 条目 ended 时）；写文件类只预告路径（决定 0072）。
-      for (const turn of attributed) {
-        for (const ev of projectKimiToolCalls(turn, toolLedger)) yield ev;
-      }
+      for (const ev of projectKimiToolCalls(attributed, toolLedger)) yield ev;
       // 无进展停滞门（TD-197① 观测自适应时间门）：最终轮签名变化 / 换了最终轮 = 进度；
       // 静默段 ≥ budgetMs → 先取 serve 证词。budget = min(240s, max(60s, 3 × 已恢复的
       // 最大静默间隙))。
@@ -1481,38 +1481,134 @@ function answerOfTurn(turn) {
 // 在途的投影事件等输入就绪才发（Bash 在 input.command 到之前会被错分成 tool_use）。
 // final=true 把还没落过的全部补齐。没有 item_id 的条目在途不投影（下标不是身份），
 // 整轮带回答完成时按整轮投影落。
-function projectKimiToolCalls(turn, ledger, { final = false } = {}) {
+//
+// TD-361（写意图）：写文件类条目在途（status 不是 ended）且已有非空白路径时，除了上面的预告
+// 再发一条 TRACKED write_intent（toolCallId = item_id，path = 此刻的 kimiWritePath，记进台账）。
+// 控制面在"意图时刻"判界内；整轮收口时的 file_written 报条目收口时自己的路径（在途可能只有
+// input.path、收口时才有 display.path——不替换成意图路径，意图时刻的输入可能不完整或与完成
+// 时不同）。"写了又删"的文件是否放宽，由控制面按"意图路径与 file_written 路径逐字节相同"
+// 判定（runManager 的 TD-372），backend 不比较路径。规则：
+//   - 只从在途的轮询帧发：首见即 ended 的条目、整轮收口时才第一次见到的条目照旧只发无
+//     toolCallId 的 file_written，绝不在确认那一刻补发；空白路径当作没有路径，不发；
+//   - 收口时只有 status 已是 ended 的条目才带 item_id 确认（带 id 的 file_written 同时收口
+//     意图）；收口时仍是 running 的条目照旧只发无 id 的 file_written（有路径时），其意图留给
+//     closeKimiOpenWriteIntents 用同 id 的 isError tool_result 收口；
+//   - 同一快照（全部归属轮）里不同的 tool_call 条目撞了同一个 item_id（collidingKimiToolIds）：
+//     台账按 item_id 记，无法分辨是谁的写入，所以这个 id 不再发意图、已有的意图立即用 isError
+//     tool_result 收口，每个撞 id 的写条目各自发无 id 的 file_written（有路径时），不看台账里
+//     的 projected——每条完成路径都要进隔离检查。"同一条目在多次轮询里重放"不算撞 id；
+//   - 终态的错误结果（tool = 意图 id、isError）同时收口意图，收口时没有路径的失败写条目因此只
+//     发这一条错误结果；收口时没有路径的成功条目与整轮快照里找不到的条目，同样由
+//     closeKimiOpenWriteIntents 收口；
+//   - 拿不到稳定 item_id 不发；一个 item_id 只发一次（台账条目即去重）；未收口意图到 128 条
+//     不再发新意图（控制面上限 256）。
+const MAX_OPEN_WRITE_INTENTS = 128;
+const UNSETTLED_WRITE_INTENT_TEXT = "write was not confirmed before the turn finished";
+const AMBIGUOUS_WRITE_INTENT_TEXT = "write intent dropped: several tool calls share this item id";
+
+function isStableKimiToolCallId(value) {
+  return typeof value === "string" && value.trim().length > 0 && value !== "unknown";
+}
+
+function openKimiWriteIntents(ledger) {
+  let open = 0;
+  for (const entry of ledger.values()) {
+    if (entry.intent !== null && !entry.intent.closed) open += 1;
+  }
+  return open;
+}
+
+// 同一快照里（跨全部归属轮）被多个 tool_call 条目共用的 item_id。
+function collidingKimiToolIds(turns) {
+  const seen = new Set();
+  const colliding = new Set();
+  for (const turn of turns) {
+    for (const item of arrayOf(turn?.items)) {
+      if (item?.type !== "tool_call" || typeof item.item_id !== "string" || item.item_id.length === 0) continue;
+      if (seen.has(item.item_id)) colliding.add(item.item_id);
+      seen.add(item.item_id);
+    }
+  }
+  return colliding;
+}
+
+// 撞 id：这个 id 不再有意图可依（歧义），已有的意图用 isError tool_result 单独收口。
+function dropAmbiguousKimiIntent(entry) {
+  entry.ambiguous = true;
+  if (entry.intent === null || entry.intent.closed) return [];
+  entry.intent.closed = true;
+  return [toolResultEvent(entry.intent.toolCallId, AMBIGUOUS_WRITE_INTENT_TEXT, true)];
+}
+
+// 条目自己的终态结果若是 tool = 意图 id 的 isError 结果，它就收口了这条意图。
+function settleKimiIntentByResult(entry, result) {
+  if (entry?.intent && !entry.intent.closed && result.isError === true && result.tool === entry.intent.toolCallId) {
+    entry.intent.closed = true;
+  }
+}
+
+// turns = 本拍全部归属轮（同一快照）。
+function projectKimiToolCalls(turns, ledger, { final = false } = {}) {
   const events = [];
-  for (const item of arrayOf(turn?.items)) {
-    if (item?.type !== "tool_call") continue;
-    const id = typeof item.item_id === "string" && item.item_id.length > 0 ? item.item_id : null;
-    const terminal = item.status === "ended";
-    if (!final && isFileWriteToolKey(kimiToolKey(item))) {
-      const writePath = kimiWritePath(item);
-      if (id !== null && writePath !== null) {
-        const entry = kimiLedgerEntry(ledger, id);
-        if (!entry.announced) {
-          events.push(toolUseEvent(String(item.name), { path: writePath }));
-          entry.announced = true;
+  const colliding = collidingKimiToolIds(turns);
+  for (const turn of turns) {
+    for (const item of arrayOf(turn?.items)) {
+      if (item?.type !== "tool_call") continue;
+      const id = typeof item.item_id === "string" && item.item_id.length > 0 ? item.item_id : null;
+      const terminal = item.status === "ended";
+      const isWrite = isFileWriteToolKey(kimiToolKey(item));
+      if (!final && isWrite) {
+        const writePath = kimiWritePath(item);
+        const collides = id !== null && colliding.has(id);
+        if (id !== null && (writePath !== null || collides)) {
+          const entry = kimiLedgerEntry(ledger, id);
+          if (collides) events.push(...dropAmbiguousKimiIntent(entry));
+          if (writePath !== null && !entry.announced) {
+            events.push(toolUseEvent(String(item.name), { path: writePath }));
+            entry.announced = true;
+          }
+          if (writePath !== null && writePath.trim().length > 0 && !terminal && !entry.ambiguous
+            && entry.intent === null && isStableKimiToolCallId(id)
+            && openKimiWriteIntents(ledger) < MAX_OPEN_WRITE_INTENTS) {
+            entry.intent = { toolCallId: id, path: writePath, closed: false };
+            events.push(writeIntentEvent(writePath, id, WRITE_INTENT_CORRELATION_STATUS.TRACKED));
+          }
         }
+        continue;
       }
-      continue;
+      if (id === null) {
+        if (!final) continue;
+        events.push(...kimiToolProjectionEvents(item));
+        if (terminal) events.push(kimiToolResultEvent(item));
+        continue;
+      }
+      const entry = kimiLedgerEntry(ledger, id);
+      // 撞 id 的写条目：每个条目都要投影（各自的完成路径都进隔离检查），不看 projected。
+      const collidingWrite = isWrite && colliding.has(id);
+      if (collidingWrite) events.push(...dropAmbiguousKimiIntent(entry));
+      if ((!entry.projected || collidingWrite) && (final || terminal || kimiToolInputReady(item))) {
+        events.push(...kimiToolProjectionEvents(item, entry));
+        entry.projected = true;
+      }
+      if (terminal && !entry.resulted) {
+        const result = kimiToolResultEvent(item);
+        events.push(result);
+        entry.resulted = true;
+        settleKimiIntentByResult(entry, result);
+      }
     }
-    if (id === null) {
-      if (!final) continue;
-      events.push(...kimiToolProjectionEvents(item));
-      if (terminal) events.push(kimiToolResultEvent(item));
-      continue;
-    }
-    const entry = kimiLedgerEntry(ledger, id);
-    if (!entry.projected && (final || terminal || kimiToolInputReady(item))) {
-      events.push(...kimiToolProjectionEvents(item));
-      entry.projected = true;
-    }
-    if (terminal && !entry.resulted) {
-      events.push(kimiToolResultEvent(item));
-      entry.resulted = true;
-    }
+  }
+  return events;
+}
+
+// 整轮带回答收口、全部条目都投影过之后仍没收口的写意图（条目不在收口快照里）：
+// 一条 isError 的 tool_result（tool = toolCallId）收口，不冒充写成功。
+function closeKimiOpenWriteIntents(ledger) {
+  const events = [];
+  for (const entry of ledger.values()) {
+    if (entry.intent === null || entry.intent.closed) continue;
+    entry.intent.closed = true;
+    events.push(toolResultEvent(entry.intent.toolCallId, UNSETTLED_WRITE_INTENT_TEXT, true));
   }
   return events;
 }
@@ -1520,7 +1616,7 @@ function projectKimiToolCalls(turn, ledger, { final = false } = {}) {
 function kimiLedgerEntry(ledger, id) {
   let entry = ledger.get(id);
   if (entry === undefined) {
-    entry = { projected: false, resulted: false, announced: false };
+    entry = { projected: false, resulted: false, announced: false, intent: null, ambiguous: false };
     ledger.set(id, entry);
   }
   return entry;
@@ -1557,7 +1653,7 @@ function kimiToolResultEvent(item) {
   return toolResultEvent(kimiToolCallId(item), item?.output, item?.outcome !== "completed");
 }
 
-function kimiToolProjectionEvents(item) {
+function kimiToolProjectionEvents(item, entry) {
   const tool = String(item?.name ?? "unknown");
   const toolKey = tool.toLowerCase();
   const input = item?.input ?? {};
@@ -1565,8 +1661,18 @@ function kimiToolProjectionEvents(item) {
     return [commandEvent(input.command, undefined, { toolCallId: kimiToolCallId(item) })];
   }
   if (isFileWriteToolKey(toolKey)) {
+    // TD-361：file_written 报收口时条目自己的路径（原样，不用在途记下的）。只有"在途发过意图、
+    // 这个 id 没撞过、条目收口时已 ended"的条目才带意图的 toolCallId（同时收口它）；收口时仍
+    // running 的条目只发无 id 的 file_written，意图留给 closeKimiOpenWriteIntents 用同 id 的
+    // isError tool_result 收口。收口时没有路径则不发 file_written（意图由终态错误结果或
+    // closeKimiOpenWriteIntents 收口）。放不放宽由控制面按路径逐字节比较决定。
     const filePath = kimiWritePath(item);
-    return filePath === null ? [] : [fileWrittenEvent(filePath)];
+    if (filePath === null) return [];
+    if (entry?.intent && !entry.intent.closed && !entry.ambiguous && item?.status === "ended") {
+      entry.intent.closed = true;
+      return [fileWrittenEvent(filePath, { toolCallId: entry.intent.toolCallId })];
+    }
+    return [fileWrittenEvent(filePath)];
   }
   return [toolUseEvent(tool, input)];
 }
