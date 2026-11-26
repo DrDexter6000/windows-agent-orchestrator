@@ -297,6 +297,179 @@ test("TD-357: completed 的补丁（含多 change）仍逐条 emit file_written�
   assert.ok(!events.some((e) => e.kind === "tool_result"), "成功补丁不落失败工具结果");
 });
 
+// ===== TD-361: file_change 在补丁应用之前（item.started）发写意图 =====
+// codex-cli 0.171.0 实测：exec --json 在补丁应用前先发 item.started（type:file_change、
+// status:in_progress，带 item.id 与 changes[].path），应用后发 item.completed。解析器在
+// item.started 对每个写入类 change 发一条 TRACKED write_intent（toolCallId = 条目 id#change 序号），
+// item.completed(completed) 时按路径把 change 对回意图，发同 id、同原文路径的 file_written。
+// 绝不在 file_written 那一刻补发意图：没见过 item.started 的写入照旧只发无 toolCallId 的 file_written。
+
+const fcStarted = (id, changes) => `${JSON.stringify({ type: "item.started", item: { id, type: "file_change", changes, status: "in_progress" } })}\n`;
+const fcDone = (id, changes, statusFields = { status: "completed" }) => `${JSON.stringify({ type: "item.completed", item: { id, type: "file_change", changes, ...statusFields } })}\n`;
+const kinds = (events) => events.map((e) => e.kind);
+
+test("TD-361 codex: item.started → write_intent（TRACKED、id#序号、路径原样；delete 不发意图、序号按原数组位置）；item.completed → 同 id 同路径的 file_written", () => {
+  const p = new CodexStreamParser();
+  const changes = [
+    { path: "D:\\proj\\src\\a.js", kind: "add" },
+    { path: "D:\\proj\\src\\old.js", kind: "delete" },
+    { path: "D:\\proj\\src\\c.js", kind: "edit" },
+  ];
+  const started = p.feed(fcStarted("item_7", changes));
+  assert.deepEqual(started, [
+    { kind: "write_intent", path: "D:\\proj\\src\\a.js", toolCallId: "item_7#0", correlationStatus: "tracked" },
+    { kind: "write_intent", path: "D:\\proj\\src\\c.js", toolCallId: "item_7#2", correlationStatus: "tracked" },
+  ]);
+  const done = p.feed(fcDone("item_7", changes));
+  assert.deepEqual(done, [
+    { kind: "file_written", path: "D:\\proj\\src\\a.js", toolCallId: "item_7#0" },
+    { kind: "file_written", path: "D:\\proj\\src\\c.js", toolCallId: "item_7#2" },
+  ]);
+});
+
+test("TD-361 codex: 完成帧之前没见过的写入（只有 item.completed）——只发不带 toolCallId 的 file_written，零意图", () => {
+  const p = new CodexStreamParser();
+  const events = p.feed(fcDone("item_8", [{ path: "src/never-announced.js", kind: "add" }]));
+  assert.deepEqual(events, [{ kind: "file_written", path: "src/never-announced.js" }]);
+  assert.ok(!Object.hasOwn(events[0], "toolCallId"));
+});
+
+test("TD-361 codex: 失败的补丁——意图由每条 change 各一条 isError 的 tool_result（tool=toolCallId）收口，既有的整条目 tool_result 照旧", () => {
+  for (const statusFields of [{ status: "failed" }, { status: "in_progress" }, {}, { status: "partial" }]) {
+    const p = new CodexStreamParser();
+    const changes = [{ path: "src/x.js", kind: "add" }, { path: "src/y.js", kind: "edit" }];
+    assert.equal(kinds(p.feed(fcStarted("item_9", changes))).join(), "write_intent,write_intent");
+    const events = p.feed(fcDone("item_9", changes, statusFields));
+    assert.ok(!events.some((e) => e.kind === "file_written"), `${JSON.stringify(statusFields)} 不发 file_written`);
+    assert.deepEqual(events[0].tool, "file_change", "既有的整条目失败结果仍在最前");
+    assert.equal(events[0].isError, true);
+    const closers = events.filter((e) => e.kind === "tool_result" && e.tool !== "file_change");
+    assert.deepEqual(closers.map((e) => e.tool), ["item_9#0", "item_9#1"], "每条已发意图各一条收口");
+    assert.ok(closers.every((e) => e.isError === true));
+    assert.ok(closers.every((e) => !String(e.output).includes("x.js") && !String(e.output).includes("y.js")), "不回显路径");
+    assert.equal(events.length, 3);
+  }
+});
+
+test("TD-361 codex: 没有稳定 id（缺 id / 空白 / 非字符串 / unknown）不发意图——完成帧照今天只发无 toolCallId 的 file_written", () => {
+  for (const id of [undefined, "", "   ", "unknown", 42, null]) {
+    const p = new CodexStreamParser();
+    const startedItem = { type: "file_change", changes: [{ path: "src/a.js", kind: "add" }], status: "in_progress", ...(id === undefined ? {} : { id }) };
+    assert.deepEqual(p.feed(`${JSON.stringify({ type: "item.started", item: startedItem })}\n`), [], `id=${JSON.stringify(id)}`);
+    const done = p.feed(`${JSON.stringify({ type: "item.completed", item: { ...startedItem, status: "completed" } })}\n`);
+    assert.deepEqual(done, [{ kind: "file_written", path: "src/a.js" }], `id=${JSON.stringify(id)}`);
+  }
+});
+
+test("TD-361 codex: 同一条目重复出现（item.started 多次，甚至完成之后再来一帧）——意图只发一次", () => {
+  const p = new CodexStreamParser();
+  const changes = [{ path: "src/a.js", kind: "add" }];
+  assert.equal(p.feed(fcStarted("item_10", changes)).length, 1);
+  assert.deepEqual(p.feed(fcStarted("item_10", changes)), [], "在途重复帧不再发意图");
+  assert.equal(p.feed(fcDone("item_10", changes)).length, 1);
+  assert.deepEqual(p.feed(fcStarted("item_10", changes)), [], "完成之后迟到的 started 帧不再发意图");
+  // 完成帧重复：第二次没有意图可对，退回无 toolCallId 的 file_written，不再带同一个 id。
+  assert.deepEqual(p.feed(fcDone("item_10", changes)), [{ kind: "file_written", path: "src/a.js" }]);
+});
+
+test("TD-361 codex: 尚未收口的意图到 128 条就不再发新意图（这些写入只发 file_written）；收口后额度回来", () => {
+  const p = new CodexStreamParser();
+  const only = (i) => [{ path: `src/f${i}.js`, kind: "add" }];
+  for (let i = 0; i < 128; i += 1) {
+    assert.equal(p.feed(fcStarted(`cap_${i}`, only(i))).length, 1, `第 ${i + 1} 条仍发意图`);
+  }
+  assert.deepEqual(p.feed(fcStarted("cap_128", only(128))), [], "第 129 条在途写入不再发意图");
+  assert.deepEqual(p.feed(fcDone("cap_128", only(128))), [{ kind: "file_written", path: "src/f128.js" }], "第 129 条完成时只发无 toolCallId 的 file_written");
+  // 一个多 change 条目整体按 change 计：额度满时它的每个 change 都不发。
+  assert.deepEqual(p.feed(fcStarted("cap_multi", [{ path: "m1.js", kind: "add" }, { path: "m2.js", kind: "add" }])), []);
+  // 收口一条，额度回来一条。
+  assert.equal(p.feed(fcDone("cap_0", only(0))).length, 1);
+  const after = p.feed(fcStarted("cap_after", only(999)));
+  assert.equal(after.length, 1);
+  assert.equal(after[0].toolCallId, "cap_after#0");
+  assert.deepEqual(p.feed(fcStarted("cap_after2", only(1000))), [], "额度又满");
+});
+
+test("TD-361 codex: 完成帧里对不上意图的 change 照今天只发无 toolCallId 的 file_written；意图里有、完成帧里没有的 change 用 isError tool_result 收口", () => {
+  const p = new CodexStreamParser();
+  p.feed(fcStarted("item_11", [{ path: "src/a.js", kind: "add" }, { path: "src/b.js", kind: "add" }]));
+  const events = p.feed(fcDone("item_11", [{ path: "src/a.js", kind: "add" }, { path: "src/other.js", kind: "add" }]));
+  assert.deepEqual(events, [
+    { kind: "file_written", path: "src/a.js", toolCallId: "item_11#0" },
+    { kind: "file_written", path: "src/other.js" },
+    events[2],
+  ]);
+  assert.equal(events[2].kind, "tool_result");
+  assert.equal(events[2].tool, "item_11#1", "src/b.js 的意图没有对上任何完成帧的 change → 错误结果收口");
+  assert.equal(events[2].isError, true);
+  assert.ok(!String(events[2].output).includes("b.js"));
+});
+
+test("TD-361 codex: 同一条目里两条相同路径的 change——按出现顺序一一对回各自的意图，每个 id 只确认一次", () => {
+  const p = new CodexStreamParser();
+  const changes = [{ path: "src/same.js", kind: "add" }, { path: "src/same.js", kind: "edit" }];
+  p.feed(fcStarted("item_12", changes));
+  assert.deepEqual(p.feed(fcDone("item_12", changes)), [
+    { kind: "file_written", path: "src/same.js", toolCallId: "item_12#0" },
+    { kind: "file_written", path: "src/same.js", toolCallId: "item_12#1" },
+  ]);
+});
+
+test("TD-361 codex: 回合收口时仍没有 item.completed 的意图——在 metrics/done 之前用 isError tool_result 收口，done 照旧 completed", () => {
+  const p = new CodexStreamParser();
+  p.feed(fcStarted("item_13", [{ path: "src/a.js", kind: "add" }]));
+  const events = p.feed('{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}\n');
+  assert.deepEqual(kinds(events), ["tool_result", "metrics", "done"]);
+  assert.equal(events[0].tool, "item_13#0");
+  assert.equal(events[0].isError, true);
+  assert.equal(events[2].reason, "completed");
+  // 收口过的意图不会二次收口。
+  assert.deepEqual(kinds(p.feed('{"type":"turn.completed"}\n')), ["done"]);
+});
+
+test("TD-361 codex: 流在没有 turn.completed 时结束（进程退出 flush）——未收口意图同样用 isError tool_result 收口", () => {
+  const p = new CodexStreamParser();
+  p.feed(fcStarted("item_14", [{ path: "src/a.js", kind: "add" }, { path: "src/b.js", kind: "edit" }]));
+  const events = p.flush();
+  assert.deepEqual(events.map((e) => [e.kind, e.tool, e.isError]), [
+    ["tool_result", "item_14#0", true],
+    ["tool_result", "item_14#1", true],
+  ]);
+  assert.deepEqual(p.flush(), [], "flush 幂等");
+});
+
+test("TD-361 codex: 只有 delete 的条目不发意图，也不留下待收口的东西", () => {
+  const p = new CodexStreamParser();
+  assert.deepEqual(p.feed(fcStarted("item_15", [{ path: "src/old.js", kind: "delete" }])), []);
+  assert.deepEqual(p.feed(fcDone("item_15", [{ path: "src/old.js", kind: "delete" }])), []);
+  assert.deepEqual(kinds(p.feed('{"type":"turn.completed"}\n')), ["done"]);
+});
+
+test("TD-361 codex: 空串/纯空白的 change 路径不发意图（控制面会把空白路径直接判 lexical_outside）；其余 change 照常，file_written 与失败补丁照旧", () => {
+  for (const blank of ["", "   ", "\t "]) {
+    const p = new CodexStreamParser();
+    assert.deepEqual(p.feed(fcStarted("item_blank", [{ path: blank, kind: "add" }])), [], `path=${JSON.stringify(blank)}`);
+    // 完成帧带真实路径：没有意图可依，只发无 toolCallId 的 file_written。
+    assert.deepEqual(p.feed(fcDone("item_blank", [{ path: "src/real.js", kind: "add" }])), [{ kind: "file_written", path: "src/real.js" }]);
+    // 补丁本来就失败：没有意图要收口，只落既有的那一条整条目 tool_result。
+    const q = new CodexStreamParser();
+    assert.deepEqual(q.feed(fcStarted("item_blank_fail", [{ path: blank, kind: "add" }])), []);
+    const failed = q.feed(fcDone("item_blank_fail", [{ path: blank, kind: "add" }], { status: "failed" }));
+    assert.deepEqual(failed.map((e) => [e.kind, e.tool, e.isError]), [["tool_result", "file_change", true]]);
+    assert.deepEqual(kinds(q.feed('{"type":"turn.completed"}\n')), ["done"], "没有待收口意图");
+  }
+  // 同一条目里空白与真实路径混着：只有真实路径的 change 发意图（序号仍按原数组位置）。
+  const mixed = new CodexStreamParser();
+  const changes = [{ path: "  ", kind: "add" }, { path: "src/ok.js", kind: "add" }];
+  assert.deepEqual(mixed.feed(fcStarted("item_mixed", changes)), [
+    { kind: "write_intent", path: "src/ok.js", toolCallId: "item_mixed#1", correlationStatus: "tracked" },
+  ]);
+  assert.deepEqual(mixed.feed(fcDone("item_mixed", changes)), [
+    { kind: "file_written", path: "  " },
+    { kind: "file_written", path: "src/ok.js", toolCallId: "item_mixed#1" },
+  ], "空白路径的 file_written 行为不动（无 id）");
+});
+
 // ===== 自报失败原话（可选接口 failureReason）=====
 // codex 失败时原因原话只在 stdout 的 JSON 里：type:"error" 的 message，或
 // turn.failed 的 error.message；stderr 往往只有 "Reading additional input from

@@ -2862,6 +2862,7 @@ test("kimi-web 0071①: 命令在输入就绪时落、结果在条目 ended 时�
       "command", // Bash：输入就绪才落（首见没有 input → 不落，也不被错分成 tool_use）
       "tool_result:tc_b",
       "tool_use", // Write：在途只预告路径（决定 0072）
+      "write_intent", // TD-361：在途（running）拍发写意图
       "file_written", "tool_result:tc_w", // 写文件证据与结果：整轮带回答完成时才落
       "message", "message", "metrics", "done",
     ],
@@ -2869,6 +2870,7 @@ test("kimi-web 0071①: 命令在输入就绪时落、结果在条目 ended 时�
   assert.equal(events.find((e) => e.kind === "command").command, "npm test");
   assert.equal(events.filter((e) => e.kind === "command").length, 1);
   assert.equal(events.find((e) => e.kind === "file_written").path, "D:/w/out.txt");
+  assert.equal(events.find((e) => e.kind === "file_written").toolCallId, "tc_w", "TD-361：在途见过意图的写入，确认带同一个 item_id");
 });
 
 test("kimi-web 0071②: 失败路径不补发——只留在途时已看到的命令；写文件证据仍只在带回答完成时落（N1 不变）", async () => {
@@ -2958,7 +2960,7 @@ test("kimi-web 0072: 写文件条目在途只预告路径（一条 tool_use，�
   ]);
   assert.deepEqual(
     completed.map((e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind)),
-    ["tool_use", "file_written", "tool_result:tc_w", "message", "message", "metrics", "done"],
+    ["tool_use", "write_intent", "file_written", "tool_result:tc_w", "message", "message", "metrics", "done"],
   );
   const announced = completed.find((e) => e.kind === "tool_use");
   assert.deepEqual(announced, { kind: "tool_use", tool: "Write", input: { path: "D:/w/src/out.txt" } }, "只带路径");
@@ -2985,6 +2987,290 @@ test("kimi-web 0072: 写文件条目在途只预告路径（一条 tool_use，�
   assert.deepEqual(skipped.map((e) => e.kind), ["done"]);
   const neverSeen = await collect0071("session_0072d", [ended0071([writeDone, assistantItem("all done")])]);
   assert.deepEqual(neverSeen.map((e) => e.kind), ["file_written", "tool_result", "message", "message", "metrics", "done"]);
+});
+
+// ===== TD-361：写文件类条目在途发 write_intent，整轮带回答收口时带同 id 的 file_written 确认 =====
+// 控制面在"意图时刻"判界内、完成时刻按同 toolCallId + 同原文路径放行"写了又删"的文件
+// （runManager 的 TD-372；路径逐字节相同才放，backend 不比较路径）。意图只从在途（status
+// 不是 ended）且路径非空白的轮询帧发；首见即 ended 的条目、从没在途见过的条目照旧只发无
+// toolCallId 的 file_written，绝不在确认那一刻补发。toolCallId = item_id；file_written 报
+// 收口时条目自己的路径（在途可能只有 input.path，收口时才有 display.path——不替换成意图
+// 路径），只有收口时已 ended 且 item_id 在快照里唯一的条目才带 id；收口时仍 running、
+// 或同一快照里不同条目撞了 item_id，都发无 id 的 file_written，意图用错误 tool_result
+// 收口；每条意图恰被收口一次；128 条上限；拿不到稳定 item_id 不发。
+
+const writeItem361 = (overrides = {}) => toolCallItem({
+  item_id: "tc_w",
+  name: "Write",
+  status: "running",
+  input: { path: "src/out.txt", content: "x" },
+  display: { kind: "file_io", operation: "write", path: "D:/w/src/out.txt" },
+  outcome: undefined,
+  output: undefined,
+  ...overrides,
+});
+const ended361 = (item, extra = {}) => ({ ...item, status: "ended", outcome: "completed", output: "Wrote 1 bytes", ...extra });
+const kindOf361 = (e) => (e.kind === "tool_result" ? `tool_result:${e.tool}` : e.kind);
+
+test("kimi-web TD-361①: 在途拍发 write_intent（TRACKED、item_id、路径原样，多拍重复只发一次），带回答完成时发同 id 同路径的 file_written", async () => {
+  const running = writeItem361();
+  const events = await collect0071("session_361a", [
+    running0071([running]),
+    running0071([running]),
+    running0071([running]),
+    ended0071([ended361(running), assistantItem("all done")]),
+  ]);
+  assert.deepEqual(
+    events.map(kindOf361),
+    ["tool_use", "write_intent", "file_written", "tool_result:tc_w", "message", "message", "metrics", "done"],
+  );
+  assert.deepEqual(events.find((e) => e.kind === "write_intent"), {
+    kind: "write_intent", path: "D:/w/src/out.txt", toolCallId: "tc_w", correlationStatus: "tracked",
+  });
+  assert.deepEqual(events.find((e) => e.kind === "file_written"), {
+    kind: "file_written", path: "D:/w/src/out.txt", toolCallId: "tc_w",
+  });
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1, "同一条目反复出现在多次轮询里，意图只发一次");
+});
+
+test("kimi-web TD-361②: file_written 报收口时条目自己的路径（在途只有 input.path、收口时有 display.path，不替换），并带意图的 item_id 收口；放不放宽由控制面按逐字节比较决定", async () => {
+  const inFlight = writeItem361({ display: { kind: "file_io", operation: "write" } });
+  const events = await collect0071("session_361b", [
+    running0071([inFlight]),
+    ended0071([ended361(writeItem361()), assistantItem("all done")]),
+  ]);
+  assert.deepEqual(events.find((e) => e.kind === "write_intent"), {
+    kind: "write_intent", path: "src/out.txt", toolCallId: "tc_w", correlationStatus: "tracked",
+  }, "意图仍是在途时刻的路径");
+  assert.deepEqual(events.find((e) => e.kind === "file_written"), {
+    kind: "file_written", path: "D:/w/src/out.txt", toolCallId: "tc_w",
+  }, "确认报收口时的 display.path，不是记下的意图路径");
+  // 收口时的路径与意图完全不同（树外的另一个文件）：照样原样报，交给控制面检查真实路径。
+  const swapped = ended361(writeItem361({ display: { kind: "file_io", operation: "write", path: "../elsewhere/escaped.txt" } }));
+  const events2 = await collect0071("session_361b2", [
+    running0071([writeItem361()]),
+    ended0071([swapped, assistantItem("all done")]),
+  ]);
+  assert.deepEqual(events2.find((e) => e.kind === "file_written"), {
+    kind: "file_written", path: "../elsewhere/escaped.txt", toolCallId: "tc_w",
+  });
+});
+
+test("kimi-web TD-361②b: 收口时条目没有路径、但在途发过意图——不发 file_written，意图由 tool=item_id、isError:true 的 tool_result 收口", async () => {
+  const noPathAtEnd = ended361(writeItem361({ input: { content: "x" }, display: { kind: "file_io", operation: "write" } }));
+  const events = await collect0071("session_361b3", [
+    running0071([writeItem361()]),
+    ended0071([noPathAtEnd, assistantItem("all done")]),
+  ]);
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1);
+  assert.ok(!events.some((e) => e.kind === "file_written"), "没有路径不虚构 file_written");
+  const closers = events.filter((e) => e.kind === "tool_result" && e.tool === "tc_w" && e.isError === true);
+  assert.equal(closers.length, 1, "意图恰被一条错误 tool_result 收口");
+  assert.ok(!String(closers[0].output).includes("src/out.txt"), "不回显路径");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("kimi-web TD-361③: 完成帧之前没在途见过的写入（首见即 ended 的轮询帧、或只在整轮收口时才见到）——只发不带 toolCallId 的 file_written，零意图", async () => {
+  const doneItem = ended361(writeItem361());
+  const seenEnded = await collect0071("session_361c", [
+    running0071([doneItem]),
+    ended0071([doneItem, assistantItem("all done")]),
+  ]);
+  assert.ok(!seenEnded.some((e) => e.kind === "write_intent"), "首见即 ended：不是完成之前的帧");
+  assert.deepEqual(seenEnded.find((e) => e.kind === "file_written"), { kind: "file_written", path: "D:/w/src/out.txt" });
+  const neverSeen = await collect0071("session_361d", [ended0071([doneItem, assistantItem("all done")])]);
+  assert.ok(!neverSeen.some((e) => e.kind === "write_intent"));
+  assert.deepEqual(neverSeen.find((e) => e.kind === "file_written"), { kind: "file_written", path: "D:/w/src/out.txt" });
+  assert.ok(!Object.hasOwn(neverSeen.find((e) => e.kind === "file_written"), "toolCallId"));
+});
+
+test("kimi-web TD-361④: 失败的写条目——收口时照旧发 file_written（现在带 toolCallId，关闭意图）再跟一条错误 tool_result", async () => {
+  const running = writeItem361();
+  const failedItem = { ...running, status: "ended", outcome: "failed", output: "permission denied" };
+  const events = await collect0071("session_361e", [
+    running0071([running]),
+    ended0071([failedItem, assistantItem("could not write")]),
+  ]);
+  assert.deepEqual(
+    events.map(kindOf361),
+    ["tool_use", "write_intent", "file_written", "tool_result:tc_w", "message", "message", "metrics", "done"],
+  );
+  assert.deepEqual(events.find((e) => e.kind === "file_written"), { kind: "file_written", path: "D:/w/src/out.txt", toolCallId: "tc_w" });
+  assert.deepEqual(events.find((e) => e.kind === "tool_result"), { kind: "tool_result", tool: "tc_w", output: "permission denied", isError: true });
+});
+
+test("kimi-web TD-361⑤: 没有稳定 item_id 不发意图（缺失 / 空串 / 空白 / unknown）——收口时照今天只发无 toolCallId 的 file_written", async () => {
+  for (const item_id of [undefined, "", "   ", "unknown"]) {
+    const running = writeItem361({ item_id });
+    const events = await collect0071("session_361f", [
+      running0071([running]),
+      ended0071([ended361(running), assistantItem("all done")]),
+    ]);
+    assert.ok(!events.some((e) => e.kind === "write_intent"), `item_id=${JSON.stringify(item_id)}: 零意图`);
+    const written = events.find((e) => e.kind === "file_written");
+    assert.deepEqual(written, { kind: "file_written", path: "D:/w/src/out.txt" }, `item_id=${JSON.stringify(item_id)}`);
+  }
+});
+
+test("kimi-web TD-361⑥: 尚未收口的意图到 128 条就不再发新意图——第 129 条在途写入只发 file_written（无 toolCallId）", async () => {
+  const items = Array.from({ length: 129 }, (_, i) => writeItem361({
+    item_id: `tc_cap_${i}`,
+    input: { path: `src/f${i}.txt`, content: "x" },
+    display: { kind: "file_io", operation: "write", path: `D:/w/src/f${i}.txt` },
+  }));
+  const events = await collect0071("session_361g", [
+    running0071(items),
+    running0071(items),
+    ended0071([...items.map((item) => ended361(item)), assistantItem("all done")]),
+  ]);
+  const intents = events.filter((e) => e.kind === "write_intent");
+  assert.equal(intents.length, 128);
+  assert.ok(!intents.some((e) => e.toolCallId === "tc_cap_128"), "第 129 条没有意图");
+  const written = events.filter((e) => e.kind === "file_written");
+  assert.equal(written.length, 129);
+  assert.equal(written.filter((e) => Object.hasOwn(e, "toolCallId")).length, 128);
+  assert.deepEqual(written.find((e) => e.path === "D:/w/src/f128.txt"), { kind: "file_written", path: "D:/w/src/f128.txt" });
+});
+
+test("kimi-web TD-361⑦: 意图的条目在整轮收口的快照里不见了——意图在 done(completed) 之前用 isError tool_result 收口（今天能过的运行不因这条新意图失败）", async () => {
+  const running = writeItem361();
+  const events = await collect0071("session_361h", [
+    running0071([running]),
+    ended0071([assistantItem("all done")]),
+  ]);
+  assert.deepEqual(
+    events.map(kindOf361),
+    ["tool_use", "write_intent", "tool_result:tc_w", "message", "message", "metrics", "done"],
+  );
+  const closer = events.find((e) => e.kind === "tool_result");
+  assert.equal(closer.isError, true);
+  assert.ok(!events.some((e) => e.kind === "file_written"), "没见到收口的写入不冒充确认");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("kimi-web TD-361⑧: 同一次运行里不同条目各自一条意图；在途就没有路径的条目不发意图（路径到了才发）", async () => {
+  const a = writeItem361({ item_id: "tc_a", name: "Edit", input: { path: "a.txt" }, display: { kind: "file_io", path: "D:/w/a.txt" } });
+  const bNoPath = writeItem361({ item_id: "tc_b", name: "Write", input: { content: "x" }, display: { kind: "file_io" } });
+  const bWithPath = writeItem361({ item_id: "tc_b", name: "Write", input: { path: "b.txt", content: "x" }, display: { kind: "file_io", path: "D:/w/b.txt" } });
+  const events = await collect0071("session_361i", [
+    running0071([a, bNoPath]),
+    running0071([a, bWithPath]),
+    ended0071([ended361(a), ended361(bWithPath), assistantItem("all done")]),
+  ]);
+  assert.deepEqual(
+    events.filter((e) => e.kind === "write_intent").map((e) => [e.toolCallId, e.path]),
+    [["tc_a", "D:/w/a.txt"], ["tc_b", "D:/w/b.txt"]],
+  );
+  assert.deepEqual(
+    events.filter((e) => e.kind === "file_written").map((e) => [e.toolCallId, e.path]),
+    [["tc_a", "D:/w/a.txt"], ["tc_b", "D:/w/b.txt"]],
+  );
+});
+
+// ----- TD-361 修正二 -----
+
+test("kimi-web TD-361⑨: 空串/纯空白的在途路径不发意图（控制面会把空白路径直接判 lexical_outside）；file_written 照旧", async () => {
+  for (const blank of ["", "   ", "\t "]) {
+    const blankInFlight = writeItem361({ input: { content: "x" }, display: { kind: "file_io", operation: "write", path: blank } });
+    const events = await collect0071("session_361j", [
+      running0071([blankInFlight]),
+      running0071([blankInFlight]),
+      ended0071([ended361(writeItem361()), assistantItem("all done")]),
+    ]);
+    assert.ok(!events.some((e) => e.kind === "write_intent"), `path=${JSON.stringify(blank)}: 零意图`);
+    assert.deepEqual(events.find((e) => e.kind === "file_written"), { kind: "file_written", path: "D:/w/src/out.txt" }, `path=${JSON.stringify(blank)}: 无 toolCallId`);
+    assert.equal(events.at(-1).reason, "completed");
+  }
+  // 在途先是空白、后来路径到了：路径到了才发意图。
+  const blankFirst = writeItem361({ input: { content: "x" }, display: { kind: "file_io", operation: "write", path: "  " } });
+  const later = await collect0071("session_361j2", [
+    running0071([blankFirst]),
+    running0071([writeItem361()]),
+    ended0071([ended361(writeItem361()), assistantItem("all done")]),
+  ]);
+  assert.deepEqual(later.filter((e) => e.kind === "write_intent").map((e) => e.path), ["D:/w/src/out.txt"]);
+});
+
+test("kimi-web TD-361⑩: 整轮收口的快照里写条目仍是 running——file_written 无 toolCallId（有路径时），意图由同 id 的错误 tool_result 收口，不放宽", async () => {
+  const events = await collect0071("session_361k", [
+    running0071([writeItem361()]),
+    ended0071([writeItem361(), assistantItem("all done")]),
+  ]);
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1);
+  const written = events.filter((e) => e.kind === "file_written");
+  assert.deepEqual(written, [{ kind: "file_written", path: "D:/w/src/out.txt" }], "无 toolCallId");
+  const closers = events.filter((e) => e.kind === "tool_result" && e.tool === "tc_w" && e.isError === true);
+  assert.equal(closers.length, 1, "意图恰被一条错误 tool_result 收口");
+  assert.equal(events.at(-1).reason, "completed");
+  // 仍 running 又没有路径：只有错误收口，没有 file_written。
+  const noPath = writeItem361({ input: { content: "x" }, display: { kind: "file_io", operation: "write" } });
+  const events2 = await collect0071("session_361k2", [
+    running0071([writeItem361()]),
+    ended0071([noPath, assistantItem("all done")]),
+  ]);
+  assert.ok(!events2.some((e) => e.kind === "file_written"));
+  assert.equal(events2.filter((e) => e.kind === "tool_result" && e.tool === "tc_w" && e.isError === true).length, 1);
+});
+
+test("kimi-web TD-361⑪: 同一快照里不同条目撞了 item_id——每个条目的完成路径都出 file_written（无 toolCallId），已有意图用错误结果单独收口，不放宽", async () => {
+  const dupInside = (overrides = {}) => writeItem361({ item_id: "tc_dup", input: { path: "in.txt" }, display: { kind: "file_io", operation: "write", path: "D:/w/in.txt" }, ...overrides });
+  const dupOutside = (overrides = {}) => writeItem361({ item_id: "tc_dup", input: { path: "../out.txt" }, display: { kind: "file_io", operation: "write", path: "../escaped/out.txt" }, ...overrides });
+  const expectedPaths = ["D:/w/in.txt", "../escaped/out.txt"];
+  const checkResult = (events, label) => {
+    const written = events.filter((e) => e.kind === "file_written");
+    assert.deepEqual(written.map((e) => e.path), expectedPaths, `${label}: 两个条目的完成路径都出 file_written`);
+    assert.ok(written.every((e) => !Object.hasOwn(e, "toolCallId")), `${label}: 都不带 toolCallId`);
+    const intents = events.filter((e) => e.kind === "write_intent");
+    const closers = events.filter((e) => e.kind === "tool_result" && e.tool === "tc_dup" && e.isError === true);
+    assert.equal(closers.length, intents.length, `${label}: 每条意图恰被一条错误结果收口`);
+    assert.equal(events.at(-1).reason, "completed");
+  };
+  // 腿 1：先在途发了意图（只有第一个条目在时），随后同一快照里出现撞 id 的第二个条目。
+  const leg1 = await collect0071("session_361l1", [
+    running0071([dupInside()]),
+    running0071([dupInside(), dupOutside()]),
+    ended0071([ended361(dupInside()), ended361(dupOutside()), assistantItem("all done")]),
+  ]);
+  assert.equal(leg1.filter((e) => e.kind === "write_intent").length, 1);
+  checkResult(leg1, "在途先见意图、在途撞 id");
+  // 腿 2：撞 id 只在整轮收口的快照里才第一次出现。
+  const leg2 = await collect0071("session_361l2", [
+    running0071([dupInside()]),
+    ended0071([ended361(dupInside()), ended361(dupOutside()), assistantItem("all done")]),
+  ]);
+  assert.equal(leg2.filter((e) => e.kind === "write_intent").length, 1);
+  checkResult(leg2, "收口时才撞 id");
+  // 腿 3：一直没有在途帧，两个条目在收口快照里一起出现：零意图，仍是两条 file_written。
+  const leg3 = await collect0071("session_361l3", [
+    ended0071([ended361(dupInside()), ended361(dupOutside()), assistantItem("all done")]),
+  ]);
+  assert.equal(leg3.filter((e) => e.kind === "write_intent").length, 0);
+  checkResult(leg3, "从未在途");
+  // 撞 id 之后不再对这个 id 发新意图。
+  const leg4 = await collect0071("session_361l4", [
+    running0071([dupInside(), dupOutside()]),
+    ended0071([ended361(dupInside()), ended361(dupOutside()), assistantItem("all done")]),
+  ]);
+  assert.equal(leg4.filter((e) => e.kind === "write_intent").length, 0, "撞 id 的条目在途就不发意图");
+  checkResult(leg4, "在途就撞 id");
+});
+
+test("kimi-web TD-361⑫: 失败且收口时没有路径的写条目——只有一条错误 tool_result（它收口意图），没有 file_written，done(completed)", async () => {
+  const failedNoPath = {
+    ...writeItem361({ input: { content: "x" }, display: { kind: "file_io", operation: "write" } }),
+    status: "ended",
+    outcome: "failed",
+    output: "permission denied",
+  };
+  const events = await collect0071("session_361m", [
+    running0071([writeItem361()]),
+    ended0071([failedNoPath, assistantItem("could not write")]),
+  ]);
+  assert.equal(events.filter((e) => e.kind === "write_intent").length, 1);
+  assert.ok(!events.some((e) => e.kind === "file_written"));
+  const errors = events.filter((e) => e.kind === "tool_result" && e.isError === true);
+  assert.deepEqual(errors, [{ kind: "tool_result", tool: "tc_w", output: "permission denied", isError: true }], "恰一条错误结果，原样是条目自己的终态结果");
+  assert.equal(events.at(-1).reason, "completed");
 });
 
 // ===== 决定 0074：车道声明 kimiHome → 服务器 token 取自该主目录的 server.token =====
