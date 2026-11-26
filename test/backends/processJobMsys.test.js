@@ -235,7 +235,7 @@ test("processJobMsys: MSYS env 断链的忙循环走树不可见，作业证词�
         const gone = await waitProcessGone(busyPid, 5_000);
         assert.ok(gone, `忙循环进程 pid=${busyPid} 清场后仍存活——实验进程残留`);
       }
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       log("cleanup done");
     } catch (cleanupError) {
       if (bodyError === null) bodyError = cleanupError;
@@ -330,7 +330,7 @@ async function runnerExitLeafScenario({ bashExe, attach, goneWaitMs, label }) {
         const gone = await waitProcessGone(leafPid, 5_000);
         assert.ok(gone, `叶子 pid=${leafPid} 清场后仍存活——实验进程残留`);
       }
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       log("cleanup done");
     } catch (cleanupError) {
       if (bodyError === null) bodyError = cleanupError;
