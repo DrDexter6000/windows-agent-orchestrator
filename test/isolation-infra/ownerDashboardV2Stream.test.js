@@ -31,6 +31,7 @@ import { createOwnerDashboardServer } from "../../src/ownerDashboardServer.js";
 import { OWNER_SEQ_MAX, projectWorkerActivity } from "../../src/application/ownerWorkerActivity.js";
 import * as stream from "../../src/application/ownerWorkerStream.js";
 import * as api from "../../src/owner-dashboard/v2/api.js";
+import { createActivityFeed } from "../../src/owner-dashboard/v2/activity.js";
 import {
   TRANSCRIPT_FIXTURES, chunkPlan, describeRow, eventOf, eventsOfBytes, firstDifference, httpJson, openStream, openStreamWorld,
   replayTranscript, toBytes,
@@ -226,19 +227,29 @@ function memoryIo(bytes) {
 }
 const memoryModel = (io) => ({ locateRunTranscript: async () => ({ path: "/mem/run_x.jsonl", bytes: io.file.bytes }) });
 
-/** 假的流响应：记下写出去的帧；flush=false 时写回调永不触发（读得很慢、根本不读的客户端）。 */
-function fakeRes({ flush = true } = {}) {
+/**
+ * 假的流响应：记下写出去的帧。stalled=true 时 write() 答 false（缓冲没排空）而且 'drain' 不来——
+ * 根本不读的客户端；drain() 是客户端把缓冲读走了：write() 又答 true，并发出 'drain'。
+ */
+function fakeRes({ stalled = false } = {}) {
   const listeners = new Map();
   return {
-    status: null, headers: {}, writes: [], ended: false, destroyed: false, unflushed: 0,
+    status: null, headers: {}, writes: [], ended: false, destroyed: false, stalled,
     setHeader(key, value) { this.headers[String(key).toLowerCase()] = value; },
     writeHead(status) { this.status = status; },
     write(chunk, callback) {
       this.writes.push(String(chunk));
-      if (callback && flush) setImmediate(callback);
-      else if (callback) this.unflushed += 1;
-      return true;
+      if (callback) setImmediate(callback);
+      return !this.stalled;
     },
+    drain() {
+      this.stalled = false;
+      this.emit("drain");
+      if (this.ended) this.emit("finish"); // 最后一帧也交完了
+    },
+    // 与真实响应一样：end() 之后 writableEnded 为 true；缓冲没排空（客户端不读）时 writableFinished 仍是 false。
+    get writableEnded() { return this.ended; },
+    get writableFinished() { return this.destroyed || (this.ended && !this.stalled); },
     end(chunk, callback) {
       if (chunk !== undefined) this.write(chunk);
       this.ended = true;
@@ -299,7 +310,7 @@ test("U4 游标代际失效回 reset：别的服务实例的游标、对不上�
   await hub.open({ runId: "run_x", cursor: "not-a-cursor", res });
   await ioSleep();
   assert.deepEqual(framesWritten(res).map((frame) => [frame.event, frame.data.reason]), [["reset", "cursor"]]);
-  assert.deepEqual([...stream.OWNER_STREAM_RESET_REASONS], ["cursor", "changed", "unreadable", "overflow", "undeliverable", "unreachable"]);
+  assert.deepEqual([...stream.OWNER_STREAM_RESET_REASONS], ["cursor", "changed", "unreadable", "overflow", "undeliverable", "unreachable", "revoked"]);
   // 流代际是服务实例自己的：不传的话每个实例各不相同（服务重启后的旧游标因此一律对不上）。
   const generations = new Set([1, 2, 3, 4].map(() => stream.createWorkerStreams({ readModel: {} }).generation));
   assert.deepEqual([generations.size, /^[0-9a-f]{16}$/.test([...generations][0])], [4, true], "四个实例四个代际，各是 16 位十六进制");
@@ -328,30 +339,50 @@ test("U4b 带着本实例的真游标重连：接着游标之后的位置读，�
   resumed.connection.close();
 });
 
-test("U5 积压上限关闭连接：写出去没人读的帧超过具名上限，这条连接立即被断开，watcher 一并清掉，不占名额", async () => {
+test("U5 积压按停滞时间断开：write() 答 false（缓冲没排空）只记一个起点；一轮里同步写出再多的帧也不断；客户端读走了（drain）起点作废；一直没人读，过了停滞时限的下一次检查才断开，watcher 一并清掉、不占名额", async () => {
   const b = commandHead("run_x");
-  const io = memoryIo(b.events);
-  const hub = hubOf(io, { backlogMaxFrames: 2 });
-  const res = fakeRes({ flush: false });
-  const opened = await hub.open({ runId: "run_x", res });
+  const base = memoryIo(b.events);
+  let ms = 1_000_000;
+  const io = { ...base, now: () => ms };
+  const hub = hubOf(io, { stallMs: 3000 });
+  const res = fakeRes({ stalled: true }); // 没人读：每一次 write() 都答 false
+  const opened = await hub.open({ runId: "run_x", afterSeq: 3, res });
   assert.equal(opened.ok, true);
+  const grow = (count, label) => { for (let i = 0; i < count; i += 1) b.add("run.event", message(`${label} ${i}`)); io.file.bytes = toBytes(b.events); };
+
+  // (1) 一轮里装满：8 页同步写出，每一次 write() 都答 false——这一轮里不能断（Sol 用真实 HTTP 复现过：一轮 1,400 条被误断）。
+  grow(stream.OWNER_STREAM_LIMIT * stream.OWNER_STREAM_PAGES_MAX, "burst");
+  await opened.connection.check();
   await ioSleep();
-  assert.deepEqual([res.unflushed, res.destroyed], [1, false], "开流时的那一帧还没被读走：1 帧在上限内，不断");
-  const push = async (i) => {
-    b.add("run.event", message(`burst ${i}`));
-    io.file.bytes = toBytes(b.events);
-    await opened.connection.check();
-    await ioSleep();
-  };
-  await push(0);
-  assert.deepEqual([res.writes.length, res.unflushed, res.destroyed], [2, 2, false], "第 2 帧仍在上限内");
-  await push(1);
-  assert.deepEqual([res.writes.length, res.unflushed, res.destroyed], [3, 3, true], "第 3 帧没人读走：超过上限 2，连接被断开");
-  await push(2);
-  assert.equal(res.writes.length, 3, "断开之后不再写");
-  assert.equal(hub.size(), 0, "名额放掉");
+  assert.deepEqual([res.destroyed, framesWritten(res).filter((frame) => frame.event === "rows").length], [false, 1 + stream.OWNER_STREAM_PAGES_MAX], "开流那一帧 + 一轮 8 页，全写出去了，没断");
+
+  // (2) 没到时限：不断。
+  ms += 2000;
+  await opened.connection.check();
+  assert.equal(res.destroyed, false, "停滞 2 秒，时限 3 秒");
+
+  // (3) 客户端把缓冲读走了：起点作废，再久也不算停滞。
+  res.drain();
+  ms += 10_000;
+  grow(1, "after the drain");
+  await opened.connection.check();
+  await ioSleep();
+  assert.deepEqual([res.destroyed, framesWritten(res).at(-1).data.rows.map((row) => row.summary)], [false, ["after the drain 0"]], "读走了就不算停滞：新行照常送到");
+
+  // (4) 又没人读了：从下一次写 false 起算，过了时限的下一次检查断开（连带不再读转录）。
+  res.stalled = true;
+  grow(1, "stalled");
+  await opened.connection.check();
+  await ioSleep();
+  assert.equal(res.destroyed, false, "刚开始停滞");
+  ms += 3000;
+  grow(1, "never read");
+  const writes = res.writes.length;
+  await opened.connection.check();
+  await ioSleep();
+  assert.deepEqual([res.destroyed, res.writes.length, hub.size()], [true, writes, 0], "过了时限：断开，不再写，名额放掉");
   assert.ok(io.file.watchers.every((watcher) => watcher.closed), "watcher 关了");
-  assert.ok(stream.OWNER_STREAM_BACKLOG_MAX_FRAMES >= 2 && stream.OWNER_STREAM_BACKLOG_MAX_FRAMES <= 64);
+  assert.equal(stream.OWNER_STREAM_STALL_MS, 5000, "读模型一轮刷新的间隔，也是五个兜底轮询周期");
 });
 
 test("U5b 心跳：开着的流每 15 秒发一行注释心跳，别的什么都不多发；连接关闭后两个定时器一并清掉", async (t) => {
@@ -673,6 +704,345 @@ test("U10 一次新增多过一轮能翻的页数 → reset（overflow）；恰�
   assert.equal(res.ended, true);
 });
 
+// ===== 第 144 批修正一：续传不漏退出码、开流后的授权、watcher 失效后的对账、终态收尾与增量读不并行 =====
+
+const settleIo = async () => { for (let i = 0; i < 12; i += 1) await ioSleep(); };
+
+/**
+ * 页面（真实的 createActivityFeed）接在真实的流上：它的 fetchStream 对 hub 开一条连接——假响应写出的字节交给页面
+ * 自己的解析器，帧一帧一帧交给 feed；cutAfter[n] = 第 n 条连接收满这么多帧就被掐断（网络掉线）。
+ * 页面轮询的那一页（fetchPage）用整份转录现算，与服务端同一个投影。
+ */
+function pageOverHub(hub, io, runId, { cutAfter = [] } = {}) {
+  const attempts = [];
+  const feed = createActivityFeed({
+    fetchPage: async (query) => ({ ok: true, body: projectWorkerActivity({ runId, events: eventsOfBytes(io.file.bytes), env: {}, ...query }) }),
+    fetchFull: async () => ({ ok: false, reason: "notFound" }),
+    fetchStream: async (query) => {
+      const index = attempts.length;
+      const res = fakeRes();
+      const parser = api.createSseParser();
+      let seen = 0;
+      let cut = false;
+      const attempt = { query, res, connection: null };
+      attempts.push(attempt);
+      const write = res.write.bind(res);
+      res.write = (chunk, callback) => {
+        const answer = write(chunk, callback);
+        for (const frame of parser.push(String(chunk))) {
+          if (cut) break;
+          query.onFrame({ id: frame.id, event: frame.event, data: JSON.parse(frame.data) });
+          seen += 1;
+          if (seen >= (cutAfter[index] ?? Infinity)) {
+            cut = true;
+            res.destroy(); // 网络掉线：这一帧是最后收到的
+          }
+        }
+        return answer;
+      };
+      const opened = await hub.open({
+        runId: query.runId, res,
+        ...(query.afterSeq === undefined ? {} : { afterSeq: query.afterSeq }),
+        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+        ...(query.filter === undefined ? {} : { filter: query.filter }),
+      });
+      if (!opened.ok) return { ok: false, reason: "notFound" };
+      attempt.connection = opened.connection;
+      const over = () => (cut ? { ok: false, reason: "network" } : { ok: true, done: true });
+      if (res.destroyed) return over();
+      return new Promise((resolve) => {
+        res.on("close", () => resolve(over()));
+        query.signal.addEventListener("abort", () => { res.destroy(); resolve({ ok: false, reason: "aborted" }); }, { once: true });
+      });
+    },
+  });
+  return { feed, attempts };
+}
+
+test("U11 断线续传不漏退出码（Sol 第 2 条）：同一页的 update 先于 rows、带推进之前的游标——只收到 update 就断线，或 update 与 rows 都收到了再断线，页面从最后收到的游标续传，命令行都带上了退出码，输出行也恰好一份", async () => {
+  for (const cutAfter of [2, 3]) {
+    const b = commandHead("run_cmd");
+    b.add("run.event", { kind: "command", command: "npm test", toolCallId: "c9" });
+    const io = memoryIo(b.events);
+    const hub = hubOf(io);
+    const page = pageOverHub(hub, io, "run_cmd", { cutAfter: [cutAfter] });
+    page.feed.open("run_cmd");
+    await settleIo();
+    assert.equal(page.attempts.length, 1, "第一页到手就开流");
+    const commandRow = () => page.feed.get().rows.find((row) => row.code === "CMD");
+    assert.equal(commandRow().exitCode, null, "结果还没有写：不编造退出码");
+
+    b.add("run.event", { kind: "tool_result", tool: "c9", output: "1 failing test", isError: true });
+    io.file.bytes = toBytes(b.events);
+    await page.attempts[0].connection.check();
+    await settleIo();
+    // 连接断了。这里不轮询（轮询自己也会带 updates，会盖住流的毛病）：页面只是再试一次流，从最后收到的那一帧的游标续传。
+    page.feed.setVisible(false);
+    page.feed.setVisible(true);
+    await settleIo();
+    assert.equal(page.attempts.length, 2, `cutAfter ${cutAfter}: 续传开了第二条连接`);
+    assert.equal(typeof page.attempts[1].query.cursor, "string", "带着传输游标续传");
+    const full = projectWorkerActivity({ runId: "run_cmd", events: b.events, env: {} });
+    assert.deepEqual(page.feed.get().rows.map((row) => [row.code, row.seq]), full.rows.map((row) => [row.code, row.seq]), `cutAfter ${cutAfter}: 不缺行、不重行`);
+    assert.deepEqual([commandRow().exitCode, commandRow().exitSource], [1, "inferred"], `cutAfter ${cutAfter}: 命令行带上了退出码`);
+    page.attempts[1].connection.close();
+  }
+});
+
+test("U12 开流后的授权跟着读模型走（Sol 第 2 节）：每 OWNER_STREAM_AUTH_MS 复核一次——运行仍在已发布快照里且是 ok（authorize）、副本复核过得去（locateRunTranscript）；不过就发 reset（revoked）并关流，那一轮的新行不再送；没到点不重复读盘", async () => {
+  const b = commandHead("run_x");
+  const base = memoryIo(b.events);
+  let ms = 5_000_000;
+  const io = { ...base, now: () => ms };
+  let located = 0;
+  let usable = true;
+  let published = true;
+  const hub = stream.createWorkerStreams({
+    readModel: { locateRunTranscript: async () => { located += 1; return usable ? { path: "/mem/run_x.jsonl", bytes: base.file.bytes } : null; } },
+    env: {}, generation: "0123456789abcdef", io, authorize: (runId) => published && runId === "run_x",
+  });
+  const res = fakeRes();
+  const opened = await hub.open({ runId: "run_x", afterSeq: 3, res });
+  assert.equal(located, 1, "开流自己读了一次");
+  ms += 4900;
+  await opened.connection.check();
+  assert.equal(located, 1, "没到点：不重复读盘");
+  ms += 100;
+  await opened.connection.check();
+  assert.deepEqual([located, res.destroyed], [2, false], "到点：复核一次，过了");
+
+  // (a) 副本复核不过（读模型的定位不到了）：reset，这一轮追加的行不再送。
+  ms += 5000;
+  usable = false;
+  b.add("run.event", message("must not be sent"));
+  base.file.bytes = toBytes(b.events);
+  await opened.connection.check();
+  await ioSleep();
+  assert.deepEqual(framesWritten(res).slice(1).map((frame) => [frame.event, frame.data.reason]), [["reset", "revoked"]]);
+  assert.ok(!res.writes.join("").includes("must not be sent"), "复核不过的那一轮没有送行");
+  assert.deepEqual([res.ended, hub.size()], [true, 0]);
+
+  // (b) 运行不在已发布快照里了（或不是 ok）：先问 authorize，不用再读盘。
+  usable = true;
+  published = true;
+  const second = fakeRes();
+  const again = await hub.open({ runId: "run_x", afterSeq: 3, res: second });
+  const readsBefore = located;
+  published = false;
+  ms += 5000;
+  await again.connection.check();
+  await ioSleep();
+  assert.deepEqual(framesWritten(second).slice(1).map((frame) => [frame.event, frame.data.reason]), [["reset", "revoked"]]);
+  assert.equal(located, readsBefore, "快照里就不认了：不必读盘");
+  assert.equal(hub.size(), 0);
+  assert.equal(stream.OWNER_STREAM_AUTH_MS, 5000, "读模型一轮刷新的节奏");
+  assert.ok(stream.OWNER_STREAM_RESET_REASONS.includes("revoked"));
+});
+
+test("U13 watcher 运行中报错失效之后，下一轮整读对账一次（不只靠增量读）：已读前缀被改掉（长度没缩）再追加 → reset（changed）；什么都没变时对账不多发帧，之后的追加照常增量读到", async () => {
+  const wired = (io, locates) => stream.createWorkerStreams({
+    readModel: { locateRunTranscript: async () => { locates.count += 1; return { path: "/mem/run_x.jsonl", bytes: io.file.bytes }; } },
+    env: {}, generation: "0123456789abcdef",
+    io: { ...io, watch: (path, onEvent, fail) => { locates.fail = fail; return () => {}; } },
+  });
+  const eperm = () => Object.assign(new Error("EPERM, watch"), { code: "EPERM" });
+
+  // (a) 什么都没变：对账一次，不多发帧；之后的追加走增量读（不再整读）。
+  const b = commandHead("run_x");
+  const io = memoryIo(b.events);
+  const locates = { count: 0, fail: null };
+  const hub = wired(io, locates);
+  const res = fakeRes();
+  const opened = await hub.open({ runId: "run_x", afterSeq: 3, res });
+  await ioSleep();
+  assert.equal(locates.count, 1);
+  locates.fail(eperm());
+  await opened.connection.check();
+  await ioSleep();
+  assert.deepEqual([locates.count, framesWritten(res).length, res.destroyed], [2, 1, false], "整读对账了一次，没有多发帧");
+  b.add("run.event", message("incremental again"));
+  io.file.bytes = toBytes(b.events);
+  await opened.connection.check();
+  await ioSleep();
+  assert.deepEqual([locates.count, framesWritten(res).at(-1).data.rows.map((row) => row.summary)], [2, ["incremental again"]], "对账过了：之后的追加走增量读，不再整读");
+  opened.connection.close();
+
+  // (b) 已读的前缀被改掉（长度一个字节没变）再追加一行：对账发现前缀不是原来的，reset。
+  const b2 = commandHead("run_x");
+  const io2 = memoryIo(b2.events);
+  const locates2 = { count: 0, fail: null };
+  const hub2 = wired(io2, locates2);
+  const res2 = fakeRes();
+  const second = await hub2.open({ runId: "run_x", afterSeq: 3, res: res2 });
+  await ioSleep();
+  const tampered = b2.events.map((event) => (event.type === "session.created" ? { ...event, backendSessionId: "proc_2" } : event));
+  b2.add("run.event", message("appended behind a rewritten prefix"));
+  io2.file.bytes = toBytes([...tampered, b2.last()]);
+  assert.ok(io2.file.bytes.length > toBytes(commandHead("run_x").events).length, "文件没有缩短，身份也没变");
+  locates2.fail(eperm());
+  await second.connection.check();
+  await ioSleep();
+  assert.deepEqual(framesWritten(res2).slice(1).map((frame) => [frame.event, frame.data.reason]), [["reset", "changed"]]);
+  assert.deepEqual([res2.ended, hub2.size()], [true, 0]);
+});
+
+test("U14 终态收尾与增量读不并行（Opus 第 2 节、Sol 第 3 条）：增量读停在读盘上、收尾定时器到点——收尾等这一轮走完，结果是 end（总数含这一行），不是 reset；收尾对账时文件变长了也不算 changed", async () => {
+  const b = finish(commandHead("run_x"));
+  const base = memoryIo(b.events);
+  let release = null;
+  const io = { ...base, read: (path, position, length) => new Promise((resolve) => { release = () => resolve(base.read(path, position, length)); }) };
+  let calls = 0;
+  let openGate = null;
+  const gate = new Promise((resolve) => { openGate = resolve; });
+  // 第 3 次定位（收尾第二轮的整读）停住：收尾还没走完的时候，被扣住的增量读回来。
+  const readModel = { locateRunTranscript: async () => { calls += 1; if (calls === 3) await gate; return { path: "/mem/run_x.jsonl", bytes: base.file.bytes }; } };
+  const hub = hubOf(io, { endSettleMs: 100 }, readModel);
+  const res = fakeRes();
+  const opened = await hub.open({ runId: "run_x", res });
+  await settleIo();
+  // 终态之后紧跟的记账行落盘：增量读读到一半，停在读盘上。
+  b.add("run.event", message("bookkeeping right behind the terminal event"));
+  base.file.bytes = toBytes(b.events);
+  const parked = opened.connection.check();
+  await settleIo();
+  assert.equal(typeof release, "function", "增量读停在读盘上");
+  await sleep(350); // 收尾定时器（100 毫秒）在这期间到点
+  release();
+  await parked;
+  openGate();
+  for (let i = 0; i < 300 && !res.ended; i += 1) await sleep(10);
+  assert.equal(res.ended, true);
+  const frames = framesWritten(res);
+  assert.deepEqual(frames.map((frame) => [frame.event, frame.data.reason]), [["rows", undefined], ["rows", undefined], ["end", undefined]], "开流一帧、增量读送出的那一行、end；没有 reset");
+  assert.deepEqual(frames[1].data.rows.map((row) => row.summary), ["bookkeeping right behind the terminal event"]);
+  assert.deepEqual(frames[2].data, { runId: "run_x", state: "completed", terminal: true, total: b.events.length });
+
+  // 收尾对账时文件变长了：正常情况（多出来的行先送出去），不算 changed。
+  const b2 = finish(commandHead("run_x"));
+  const io2 = memoryIo(b2.events);
+  let hold = null;
+  const grew = new Promise((resolve) => { hold = resolve; });
+  let located = 0;
+  const hub2 = hubOf(io2, { endSettleMs: 20 }, { locateRunTranscript: async () => { located += 1; if (located === 2) await grew; return { path: "/mem/run_x.jsonl", bytes: io2.file.bytes }; } });
+  const res2 = fakeRes();
+  await hub2.open({ runId: "run_x", res: res2 });
+  await settleIo();
+  await sleep(100); // 收尾的整读开始了，停在定位上
+  b2.add("run.event", message("written while the final read was on its way"));
+  io2.file.bytes = toBytes(b2.events);
+  hold();
+  for (let i = 0; i < 300 && !res2.ended; i += 1) await sleep(10);
+  assert.deepEqual(framesWritten(res2).map((frame) => frame.event), ["rows", "rows", "end"]);
+  assert.equal(framesWritten(res2).at(-1).data.total, b2.events.length);
+});
+test("U15 终态收尾接手时授权复核已经到期（Sol 第 5 节第 5 条）：先复核，不过就 reset（revoked），不送这之后新增的行，也不发 end", async () => {
+  const b = finish(commandHead("run_x"));
+  const base = memoryIo(b.events);
+  let ms = 1_000_000;
+  let release = null;
+  const io = { ...base, now: () => ms, read: (path, position, length) => new Promise((resolve) => { release = () => resolve(base.read(path, position, length)); }) };
+  let published = true;
+  const hub = stream.createWorkerStreams({
+    readModel: memoryModel(base), env: {}, generation: "0123456789abcdef", io, authorize: () => published, limits: { endSettleMs: 60 },
+  });
+  const res = fakeRes();
+  const opened = await hub.open({ runId: "run_x", res }); // 开流就是终态：收尾定时器（60 毫秒）已经在走
+  await settleIo();
+  // 4.9 秒（还没到复核时间）：一次增量读读到一行，停在读盘上。
+  ms += 4900;
+  b.add("run.event", message("L1: written before the authorization was due"));
+  base.file.bytes = toBytes(b.events);
+  const parked = opened.connection.check();
+  await settleIo();
+  assert.equal(typeof release, "function", "增量读停在读盘上");
+  await sleep(250); // 收尾定时器到点：这一轮还占着 busy，收尾等它
+  ms += 200; // 5.1 秒：授权复核到期了
+  published = false; // 已发布的快照里不认这个运行了
+  b.add("run.event", message("L2: written after the run was revoked"));
+  base.file.bytes = toBytes(b.events);
+  release();
+  await parked;
+  for (let i = 0; i < 300 && !res.ended; i += 1) await sleep(10);
+  assert.equal(res.ended, true);
+  const frames = framesWritten(res);
+  assert.deepEqual(frames.map((frame) => [frame.event, frame.data.reason]), [["rows", undefined], ["rows", undefined], ["reset", "revoked"]], "开流一帧、到期之前读到的 L1、reset；没有 end");
+  assert.deepEqual(frames[1].data.rows.map((row) => row.summary), ["L1: written before the authorization was due"]);
+  assert.ok(!res.writes.join("").includes("L2"), "到期之后写进去的行没有送出");
+  assert.equal(hub.size(), 0);
+});
+
+test("U16 已 end()、缓冲还没排空的响应仍归服务管（Sol 第 5 节第 6 条）：占着连接名额；停滞超时照样断开它；closeAll() 也销毁它；缓冲交完了（finish）才放手", async () => {
+  const ended = async (limits) => {
+    const b = finish(commandHead("run_x"));
+    const base = memoryIo(b.events);
+    let ms = 1_000_000;
+    const io = { ...base, now: () => ms };
+    const hub = hubOf(io, { endSettleMs: 20, ...limits });
+    const res = fakeRes({ stalled: true }); // 客户端根本不读：最后一帧留在缓冲里
+    const opened = await hub.open({ runId: "run_x", res });
+    for (let i = 0; i < 300 && !res.ended; i += 1) await sleep(10);
+    assert.equal(res.ended, true, "收尾发出了 end");
+    assert.deepEqual([res.writableEnded, res.writableFinished, res.destroyed, hub.size()], [true, false, false, 1], "end() 之后缓冲还没交完：仍占着名额");
+    assert.ok(base.file.watchers.every((watcher) => watcher.closed), "不再读转录");
+    return { hub, res, opened, advance: (by) => { ms += by; } };
+  };
+
+  // (a) 停滞超时
+  const a = await ended({ stallMs: 3000 });
+  a.advance(2000);
+  await a.opened.connection.check();
+  assert.deepEqual([a.res.destroyed, a.hub.size()], [false, 1], "停滞 2 秒，时限 3 秒：还在");
+  a.advance(1500);
+  await a.opened.connection.check();
+  assert.deepEqual([a.res.destroyed, a.hub.size()], [true, 0], "过了时限：销毁，放掉名额");
+
+  // (b) closeAll()（服务关闭）
+  const c = await ended({ stallMs: 3000 });
+  c.hub.closeAll();
+  assert.deepEqual([c.res.destroyed, c.hub.size()], [true, 0], "closeAll 销毁它");
+
+  // (c) 缓冲交完了：放手，不销毁
+  const d = await ended({ stallMs: 3000 });
+  d.res.drain();
+  assert.deepEqual([d.res.destroyed, d.hub.size()], [false, 0], "交完了（finish）就放手，响应自己结束");
+});
+test("U17 被拒的游标回的 reset、第一页就以 reset 收尾的响应，也归服务管（Sol 第 5 节第 6 条）：缓冲没交完时占着名额，停滞超时与 closeAll() 都销毁它；它们不挂文件监听", async () => {
+  const wrongGeneration = stream.encodeStreamCursor({ generation: "ffffffffffffffff", file: "0000000000000000", offset: 0, seq: 0, chain: "0".repeat(16) });
+  const cases = [
+    ["cursor", commandHead("run_x").events, {}, { cursor: wrongGeneration }], // 游标被拒
+    ["overflow", (() => { const b = commandHead("run_x"); for (let i = 0; i < 40; i += 1) b.add("run.event", message(`row ${i}`)); return b.events; })(), { limit: 10, pagesMax: 2 }, {}], // 第一轮翻不完
+  ];
+  for (const [reason, events, limits, query] of cases) {
+    const open = async () => {
+      const base = memoryIo(events);
+      let ms = 1_000_000;
+      const hub = hubOf({ ...base, now: () => ms }, { stallMs: 3000, ...limits });
+      const res = fakeRes({ stalled: true }); // 客户端根本不读：reset 那一帧留在缓冲里
+      const opened = await hub.open({ runId: "run_x", res, ...query });
+      assert.equal(opened.ok, true);
+      assert.deepEqual(framesWritten(res).map((frame) => [frame.event, frame.data.reason]), [["reset", reason]], reason);
+      assert.deepEqual([res.writableEnded, res.writableFinished, res.destroyed, hub.size()], [true, false, false, 1], `${reason}: 缓冲没交完，仍占着名额`);
+      assert.equal(base.file.watchers.length, 0, `${reason}: 不挂文件监听`);
+      return { hub, res, opened, advance: (by) => { ms += by; } };
+    };
+    // 停滞超时
+    const a = await open();
+    a.advance(2000);
+    await a.opened.connection.check();
+    assert.deepEqual([a.res.destroyed, a.hub.size()], [false, 1], `${reason}: 停滞 2 秒，时限 3 秒：还在`);
+    a.advance(1500);
+    await a.opened.connection.check();
+    assert.deepEqual([a.res.destroyed, a.hub.size()], [true, 0], `${reason}: 过了时限：销毁，放掉名额`);
+    // closeAll()
+    const c = await open();
+    c.hub.closeAll();
+    assert.deepEqual([c.res.destroyed, c.hub.size()], [true, 0], `${reason}: closeAll 销毁它`);
+    // 缓冲交完了：放手，不销毁
+    const d = await open();
+    d.res.drain();
+    assert.deepEqual([d.res.destroyed, d.hub.size()], [false, 0], `${reason}: 交完了就放手`);
+  }
+});
 // =====================================================================
 // E) 本机 HTTP 端到端（真实 createOwnerDashboardServer，127.0.0.1 临时端口）
 // =====================================================================
@@ -760,10 +1130,11 @@ test("E3 命令行先写、结果后写：收到 rows（输出行）与 update�
   const tap = await openStream(w, { runId: "run_cmd", afterSeq: 4 });
   assert.equal(await tap.first("rows"), true, "the first frame arrived");
 
+  const before = tap.frames[0].id;
   b.add("run.event", { kind: "tool_result", tool: "c9", output: "1 failing test", isError: true });
   w.append("run_cmd", [b.last()]);
-  assert.notEqual(await tap.next("update", 1, 3000), null, "update arrives");
-  assert.deepEqual(tap.events, ["rows", "rows", "update"], "先是新行，再是就地更新");
+  assert.notEqual(await tap.next("rows", 1, 3000), null, "rows arrives");
+  assert.deepEqual(tap.events, ["rows", "update", "rows"], "同一页：先是就地更新，再是新行");
   const rowsFrame = ofKind(tap, "rows")[1];
   const update = ofKind(tap, "update")[0];
   const full = projectWorkerActivity({ runId: "run_cmd", events: b.events, env: {}, afterSeq: 4 });
@@ -771,8 +1142,12 @@ test("E3 命令行先写、结果后写：收到 rows（输出行）与 update�
   assert.deepEqual(seqsOf(rowsFrame), [5]);
   assert.deepEqual(update.data, { runId: "run_cmd", updates: full.updates });
   assert.deepEqual([update.data.updates[0].seq, update.data.updates[0].exitCode, update.data.updates[0].exitSource], [4, 1, "inferred"]);
-  assert.equal(update.id, rowsFrame.id, "update 帧沿用 rows 帧推进到的传输游标，不回拨");
-  assert.equal(stream.decodeStreamCursor(update.id).seq, 5);
+  // 游标里的事件位置是"已送到哪里"：update 带的是这一页推进之前的位置（4），rows 才把它推进到这一页末尾（5）。
+  // （字节偏移与哈希链跟着已读到的文件走，两帧相同。）从 update 的游标续传，整页（含 update）会重发。
+  assert.equal(stream.decodeStreamCursor(before).seq, 4);
+  assert.deepEqual([stream.decodeStreamCursor(update.id).seq, stream.decodeStreamCursor(rowsFrame.id).seq], [4, 5]);
+  const head = (id) => id.split(".").slice(0, 4).join("."); // 版本、代际、文件标签、字节偏移
+  assert.equal(head(update.id), head(rowsFrame.id), "同一代际、同一份文件、同一个偏移");
   tap.close();
 });
 
@@ -943,15 +1318,21 @@ test("E6 带 3 条打开的流调 close()：1 秒内完成，3 条流都断开�
     assert.equal(tap.ended, false);
     taps.push(tap);
   }
-  const at = Date.now();
-  await withTimeout(w.server.close(), 1000, "close() with 3 open streams");
-  const closeMs = Date.now() - at;
-  assert.ok(closeMs < 1000, `close() took ${closeMs} ms`);
-  // 服务端已经把三条连接都断了；客户端要到下一个 tick 才读到连接结束。
-  await withTimeout(Promise.all(taps.map((tap) => tap.waitFor(() => tap.ended, 3000))), 3000, "every stream ends");
-  assert.ok(taps.every((tap) => tap.ended), "每条流都断了");
-  assert.equal(w.server.server.listening, false, "server 关了");
-  await assert.rejects(httpJson(w, "/health"), "端口不再应答");
+  try {
+    const at = Date.now();
+    await withTimeout(w.server.close(), 1000, "close() with 3 open streams");
+    const closeMs = Date.now() - at;
+    assert.ok(closeMs < 1000, `close() took ${closeMs} ms`);
+    // 服务端已经把三条连接都断了；客户端要到下一个 tick 才读到连接结束。
+    await withTimeout(Promise.all(taps.map((tap) => tap.waitFor(() => tap.ended, 3000))), 3000, "every stream ends");
+    assert.ok(taps.every((tap) => tap.ended), "每条流都断了");
+    assert.equal(w.server.server.listening, false, "server 关了");
+    await assert.rejects(httpJson(w, "/health"), "端口不再应答");
+  } finally {
+    // close() 回归（流没被断开）时它会一直挂着，而用例结束时 t.after 又去等同一个 close() 的 promise：
+    // 整个文件要等测试超时才结束。客户端先自己断开，挂住的 close() 才能走完，回归于是在这里快速变红。
+    for (const tap of taps) tap.close();
+  }
 });
 
 test("E7 无令牌 401、错令牌 401；参数错 400（多余键、重复键、缺 runId、afterSeq / cursor / filter 形状不对）——都是固定错误体", async (t) => {
@@ -1093,6 +1474,68 @@ test("E10 连接总数到上限：多出来的流回 503，固定错误体；断
   again.close();
   // 别的接口照常。
   assert.equal((await httpJson(w, "/api/worker/activity?runId=run_cap")).status, 200);
+});
+
+test("E11 一轮换入 1,400+ 条（8 页 rows 外加一个 update）：正常读的客户端一条不少地收到，连接不断（Sol 用真实 HTTP 复现过：一条也没收到）；drain 之后过了停滞时限也不被断开，新行照常送到", async (t) => {
+  const b = commandHead("run_flood");
+  b.add("run.event", { kind: "command", command: "npm test", toolCallId: "c1" }); // #4：页面已经有这条命令行
+  // 停滞时限与轮询周期都设得很短（400 / 100 毫秒）：下面等过的 900 毫秒足够让"drain 没清掉起点"这种回归现形。
+  const w = await startedWorld(t, [["run_flood", b.events]], {
+    config: { createWorkerStreamsFn: (input) => stream.createWorkerStreams({ ...input, limits: { stallMs: 400, pollMs: 100 } }) },
+  });
+  const tap = await openStream(w, { runId: "run_flood", afterSeq: 4 });
+  assert.equal(await tap.first("rows"), true, "the first frame arrived");
+  // 保留已发出前缀的新文件一次换入：命令的结果（给第 4 条补退出码的 update）加 1,400 条消息。
+  b.add("run.event", { kind: "tool_result", tool: "c1", output: "1 failing test", isError: true });
+  for (let i = 0; i < 1400; i += 1) b.add("run.event", message(`flood ${i + 1}`));
+  writeFileSync(join(w.base, "flood.jsonl"), toBytes(b.events));
+  renameSync(join(w.base, "flood.jsonl"), w.fileOf("run_flood"));
+  const delivered = (list) => ofKind({ frames: list }, "rows").slice(1).reduce((sum, frame) => sum + frame.data.rows.length, 0);
+  assert.notEqual(await tap.waitFor((list) => delivered(list) >= 1401, 8000), null, `${delivered(tap.frames)} of 1401 rows arrived`);
+  assert.equal(tap.ended, false, "连接没有被断开");
+  assert.equal(ofKind(tap, "update").length, 1, "补退出码的 update 在 rows 之前到了");
+  assert.equal(ofKind(tap, "update")[0].data.updates[0].exitCode, 1);
+  assert.ok(ofKind(tap, "rows").slice(1).length >= 8, "8 页");
+  // 读走了：过了停滞时限也不断，之后追加的行照常到。
+  await sleep(900);
+  assert.equal(tap.ended, false, "drain 之后停滞的起点作废了");
+  b.add("run.event", message("after the flood"));
+  w.append("run_flood", [b.last()]);
+  assert.notEqual(await tap.next("rows", 1, 3000), null, "之后的追加照常送到");
+  assert.deepEqual(seqsOf(ofKind(tap, "rows").at(-1)), [b.last().seq]);
+  tap.close();
+});
+
+test("E12 开流后副本分叉（另一个桶里出现同一个运行的相同副本，随后只有原文件追加）：旧流不再送行，发 reset（revoked）并关流；同一时刻 /api/worker/activity 也回 404（Sol 第 2 节）；服务把自己的发布快照交给流做授权", async (t) => {
+  const b = commandHead("run_dup");
+  b.add("run.event", { kind: "command", command: "npm test", toolCallId: "c1" });
+  let hubInput = null;
+  // authMs: 1 —— 每一轮都复核（不靠真实等待去碰 5 秒的节奏；节奏本身由 U12 用假时钟钉住）。
+  const w = await startedWorld(t, [["run_dup", b.events]], {
+    config: { createWorkerStreamsFn: (input) => { hubInput = input; return stream.createWorkerStreams({ ...input, limits: { authMs: 1 } }); } },
+  });
+  const tap = await openStream(w, { runId: "run_dup", afterSeq: 4 });
+  assert.equal(await tap.first("rows"), true, "the first frame arrived");
+  // 另一个桶里出现同一个运行的相同副本：内容相同不算冲突，照常读得出。
+  const bucket = join(w.runDir, "projects", "dup-22222222");
+  mkdirSync(bucket, { recursive: true });
+  writeFileSync(join(bucket, "run_dup.jsonl"), toBytes(b.events));
+  await w.server.refreshNow();
+  assert.equal((await httpJson(w, "/api/worker/activity?runId=run_dup")).status, 200, "相同的副本不算冲突");
+  await sleep(100);
+  assert.deepEqual(tap.events, ["rows"], "到这里流还是好的，没有多出帧");
+  // 只有原文件追加：两份副本从此不同。
+  b.add("run.event", { kind: "tool_result", tool: "c1", output: "appended after the fork", isError: true });
+  w.append("run_dup", [b.last()]);
+  assert.deepEqual((await httpJson(w, "/api/worker/activity?runId=run_dup")).status, 404, "新发的请求已经读不到它了");
+  assert.equal(await tap.first("reset", 4000), true, "旧流也被收回：reset（它可能在上面等 HTTP 回答的时候就到了）");
+  assert.deepEqual(ofKind(tap, "reset")[0].data, { runId: "run_dup", reason: "revoked" });
+  assert.ok(!tap.raw.includes("appended after the fork"), "分叉之后的内容没有送出去");
+  assert.deepEqual(tap.events, ["rows", "reset"], "没有 update、没有新行");
+  await withTimeout(tap.waitFor(() => tap.ended, 3000), 3000, "reset closes the stream");
+  // 服务把自己的发布快照交给流做授权：在快照里且是 ok 才认。
+  assert.equal(typeof hubInput.authorize, "function", "服务把已发布快照的授权交给流");
+  assert.deepEqual([hubInput.authorize("run_dup"), hubInput.authorize("run_nope")], [true, false]);
 });
 
 // =====================================================================

@@ -1246,9 +1246,13 @@ test("S3 three stream failures in a row turn the tab back to polling: each poll 
   assert.equal(hub.calls.length, 2, "the second try follows that poll");
   assert.equal(pages.at(-1).afterSeq, 3, "the poll asks after its own cursor");
   assert.deepEqual(activity.buildActivityView(feed.get()).rows.map((row) => row.key).slice(-1), ["event:4"], "and the event arrived by polling");
+  // (A real tick is 5 s after the last: the failed try is long over. A try still on the wire would keep the tick quiet.)
+  await settle();
   await feed.poll();
   assert.equal(hub.calls.length, 3, "the third try");
+  await settle();
   await feed.poll();
+  await settle();
   await feed.poll();
   assert.equal(hub.calls.length, 3, "three in a row: no more tries");
   assert.equal(pages.filter((query) => Number.isInteger(query.afterSeq)).length, 4, "the 5 s poll went on the whole time, once per tick");
@@ -1536,10 +1540,14 @@ test("S12 reconcile: every twelfth tick re-reads the newest page and swaps the e
   assert.equal(commandOf(polling.feed).exitCode, null, "the first page was read before the result existed");
   servedEarly = events.after; // the result lands after the first page was read
   await polling.feed.poll(); // the result row arrives, but its update was dropped
+  await settle(); // (the failed stream try is over before the next 5 s tick)
   const shown = activity.buildActivityView(polling.feed.get()).rows.length;
   const lastSeq = polling.feed.get().lastSeq;
   assert.deepEqual([shown, commandOf(polling.feed).exitCode], [3, null]);
-  for (let tick = 2; tick <= 11; tick += 1) await polling.feed.poll();
+  for (let tick = 2; tick <= 11; tick += 1) {
+    await polling.feed.poll();
+    await settle();
+  }
   assert.deepEqual([polling.snapshots.length, commandOf(polling.feed).exitCode], [1, null], "eleven ticks: no snapshot yet, the row still lacks its exit code");
   await polling.feed.poll();
   assert.deepEqual([polling.snapshots.length, polling.increments.length, commandOf(polling.feed).exitCode], [2, 11, 1], "the twelfth tick re-read the newest page (instead of a page after the cursor) and the row caught up");
@@ -1557,7 +1565,10 @@ test("S12 reconcile: every twelfth tick re-reads the newest page and swaps the e
   const late = wired(streamHub({ failWith: "network" }), () => served);
   late.feed.open("run_rec");
   await settle();
-  for (let tick = 1; tick <= 11; tick += 1) await late.feed.poll();
+  for (let tick = 1; tick <= 11; tick += 1) {
+    await late.feed.poll();
+    await settle();
+  }
   assert.deepEqual([codesOf(late.feed), late.feed.get().lastSeq, commandOf(late.feed).exitCode], [["CMD", "MSG"], 4, null]);
   served = events.after; // the result lands between the eleventh tick and the twelfth
   await late.feed.poll(); // the twelfth tick: the reconcile
@@ -1605,6 +1616,846 @@ test("S12 reconcile: every twelfth tick re-reads the newest page and swaps the e
     [codesOf(live2.feed), live2.feed.get().lastSeq, activity.buildActivityView(live2.feed.get()).freshness.kind],
     [["CMD", "MSG", "OUT"], 5, "live"],
   );
+});
+
+// ===== batch 144, fix 1: where the stream and the poll meet =====
+
+/**
+ * A feed whose page requests can be held or failed. The answer of a held request is the transcript AS IT WAS
+ * WHEN IT WAS ASKED (a real server answers from the file at request time); it is delivered when released.
+ */
+function gatedFeed(hub, runId, eventsOf) {
+  const pages = [];
+  const held = [];
+  const heldFull = [];
+  const gate = { hold: () => false, fail: false, holdFull: false };
+  const feed = activity.createActivityFeed({
+    fetchPage: (query) => {
+      pages.push(query);
+      if (gate.fail) {
+        gate.fail = false;
+        return Promise.resolve({ ok: false, reason: "network" });
+      }
+      const answer = { ok: true, body: pageOf(runId, eventsOf(), query) };
+      if (!gate.hold(query)) return Promise.resolve(answer);
+      return new Promise((resolve) => held.push({ query, release: () => resolve(answer) }));
+    },
+    fetchFull: (query) => {
+      const body = projectWorkerEvent({ runId, events: eventsOf(), env: {}, ...query });
+      const answer = body === null ? { ok: false, reason: "notFound" } : { ok: true, body };
+      if (!gate.holdFull) return Promise.resolve(answer);
+      return new Promise((resolve) => heldFull.push({ query, release: () => resolve(answer) }));
+    },
+    fetchStream: hub.fetchStream,
+  });
+  return { feed, pages, held, heldFull, gate };
+}
+
+const runtimeRow = (b) => b.add("run.event", { kind: "runtime_activity", status: "process_active" });
+/** run.started (#1, not on the timeline) and two runtime events (#2, #3): one folded row of two. */
+function foldTranscript(runId) {
+  const b = transcript(runId);
+  b.clock(T0 + 1000);
+  runtimeRow(b);
+  runtimeRow(b);
+  return b;
+}
+const foldsOf = (feed) => feed.get().rows.filter((row) => row.row === "fold").map((row) => [row.fromSeq, row.toSeq, row.count]);
+
+test("S15 the stream request is out and its first frame has not come: the tick reads nothing after the cursor — the same runtime events reach the page by one path only, so a folded row's count is never added twice", async () => {
+  // (a) Opus: the request is on the wire, the poll comes first, the first frame second.
+  const b = foldTranscript("run_fold");
+  let events = b.events;
+  const hub = streamHub();
+  const { feed, pages } = streamFeed(hub, "run_fold", () => events);
+  feed.open("run_fold");
+  await settle();
+  assert.deepEqual([hub.calls.length, foldsOf(feed)], [1, [[2, 3, 2]]]);
+  runtimeRow(b);
+  runtimeRow(b);
+  events = b.events; // #4 and #5
+  const asked = pages.length;
+  assert.equal(await feed.poll(), false, "the stream is on its way: the tick has nothing to ask");
+  assert.equal(pages.length, asked, "no page after the cursor was fetched");
+  hub.frame(0, "rows", pageOf("run_fold", events, { afterSeq: 3 }));
+  assert.deepEqual(foldsOf(feed), [[2, 5, 4]], "four runtime events, folded once — not six");
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "live");
+});
+
+test("S15b the other order: the tab comes back while a poll is on its way, or while the first page is still loading — no stream opens until it is done, and the rows still arrive by one path only", async () => {
+  const c = foldTranscript("run_fold2");
+  let eventsC = c.events;
+  const hubC = streamHub();
+  const gated = gatedFeed(hubC, "run_fold2", () => eventsC);
+  gated.feed.setVisible(false);
+  gated.feed.open("run_fold2");
+  await settle();
+  assert.equal(hubC.calls.length, 0, "a hidden tab opens no stream");
+  runtimeRow(c);
+  runtimeRow(c);
+  eventsC = c.events;
+  gated.gate.hold = (query) => Number.isInteger(query.afterSeq);
+  const polled = gated.feed.poll();
+  await settle();
+  assert.equal(gated.held.length, 1, "the poll's page is on its way");
+  gated.feed.setVisible(true);
+  await settle();
+  assert.equal(hubC.calls.length, 0, "no stream while a poll is in flight");
+  gated.held[0].release();
+  await polled;
+  await settle();
+  assert.deepEqual([hubC.calls.length, foldsOf(gated.feed)], [1, [[2, 5, 4]]], "the poll carried the rows, then the stream opened");
+  assert.equal(hubC.calls[0].afterSeq, 5, "from the cursor the poll reached");
+  hubC.frame(0, "rows", pageOf("run_fold2", eventsC, { afterSeq: 5 }));
+  assert.deepEqual(foldsOf(gated.feed), [[2, 5, 4]]);
+
+  // (c) the first page itself is still loading: no stream until it is in hand.
+  const hubD = streamHub();
+  const loading = gatedFeed(hubD, "run_fold3", () => foldTranscript("run_fold3").events);
+  loading.gate.hold = () => true;
+  loading.feed.open("run_fold3");
+  await settle();
+  loading.feed.setVisible(false);
+  loading.feed.setVisible(true);
+  await settle();
+  assert.equal(hubD.calls.length, 0, "a first load in flight opens no stream");
+  loading.held[0].release();
+  await settle();
+  assert.equal(hubD.calls.length, 1, "the first page is in: now the stream opens");
+});
+
+test("S16 safety net: a stream frame whose range does not start after the cursor (range.fromSeq <= lastSeq) is never merged — the stream is let go for the poll, the next try starts from the new cursor, and such frames count as failed tries", async () => {
+  const b = foldTranscript("run_overlap");
+  let events = b.events;
+  const hub = streamHub();
+  const { feed, pages } = streamFeed(hub, "run_overlap", () => events);
+  feed.open("run_overlap");
+  await settle();
+  runtimeRow(b);
+  runtimeRow(b);
+  events = b.events;
+  const frame = pageOf("run_overlap", events, { afterSeq: 3 }); // #4–#5
+  hub.frame(0, "rows", frame, "k1");
+  assert.deepEqual([foldsOf(feed), feed.get().lastSeq], [[[2, 5, 4]], 5]);
+  hub.frame(0, "rows", frame, "k2"); // the same page again: it starts at #4, the cursor is already at #5
+  assert.deepEqual([foldsOf(feed), feed.get().lastSeq], [[[2, 5, 4]], 5], "not merged: the count stays four");
+  assert.equal(hub.calls[0].signal.aborted, true, "the stream was let go");
+  assert.equal(activity.buildActivityView(feed.get()).freshness.kind, "polling");
+  assert.equal(await feed.poll(), true, "the poll carries on");
+  assert.equal(pages.at(-1).afterSeq, 5);
+  assert.deepEqual([hub.calls.length, hub.calls[1].afterSeq, hub.calls[1].cursor], [2, 5, "k1"], "and the next try starts from the new cursor, with the last good frame's id");
+  // Frames of this kind are failed tries: three in a row and the tab stays with the poll.
+  hub.frame(1, "rows", frame, "k3");
+  await feed.poll();
+  assert.equal(hub.calls.length, 3);
+  hub.frame(2, "rows", frame, "k4");
+  await feed.poll();
+  await feed.poll();
+  assert.equal(hub.calls.length, 3, "given up after three");
+});
+
+/** The transcript of run_r after it was replaced by a different file. */
+function replacedTranscript() {
+  const fresh = transcript("run_r");
+  fresh.clock(T0 + 1000);
+  say(fresh, T0 + 1000, "replacement one");
+  say(fresh, T0 + 2000, "replacement two");
+  return fresh.events;
+}
+const summariesOf = (feed) => feed.get().rows.map((row) => row.summary);
+
+test("S17 reset makes the answers asked before it void (a): the reconcile page of the OLD file, read at the twelfth tick, arrives after the snapshot and never lands on the replaced table", async () => {
+  const replaced = replacedTranscript;
+  const summaries = summariesOf;
+  let events = liveTranscript("run_r").events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_r", () => events);
+  g.feed.open("run_r");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_r", events, { afterSeq: g.feed.get().lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  g.gate.hold = (query) => !Number.isInteger(query.afterSeq);
+  const reconcile = g.feed.poll();
+  await settle();
+  assert.equal(g.held.length, 1, "the reconcile page of the old file is on its way");
+  events = replaced();
+  hub.frame(0, "reset", { runId: "run_r", reason: "changed" });
+  await settle();
+  assert.equal(g.held.length, 2, "the reset asked its own snapshot");
+  g.held[1].release();
+  await settle();
+  assert.deepEqual(summaries(g.feed), ["replacement one", "replacement two"], "the fresh page replaced the table");
+  g.held[0].release(); // the old file's page arrives late
+  await reconcile;
+  await settle();
+  assert.deepEqual([summaries(g.feed), g.feed.get().lastSeq], [["replacement one", "replacement two"], 3], "the late answer of the old file never lands");
+});
+
+test("S17b reset makes the answers asked before it void (b): an older page of the OLD file, asked before the reset, arrives after the snapshot and is not put above the new table", async () => {
+  const replaced = replacedTranscript;
+  const summaries = summariesOf;
+  let events;
+  const long = transcript("run_r");
+  long.clock(T0 + 1000);
+  for (let i = 1; i <= 450; i += 1) say(long, T0 + 1000 + i, `old message ${i}`);
+  events = long.events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_r", () => events);
+  g.feed.open("run_r");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_r", events, { afterSeq: g.feed.get().lastSeq }));
+  assert.equal(g.feed.canLoadOlder(), true);
+  g.gate.hold = () => true;
+  assert.equal(g.feed.loadOlder(), true);
+  await settle();
+  events = replaced();
+  hub.frame(0, "reset", { runId: "run_r", reason: "changed" });
+  await settle();
+  assert.equal(g.held.length, 2);
+  g.held[1].release();
+  await settle();
+  g.held[0].release(); // the older page of the OLD file
+  await settle();
+  assert.deepEqual(summaries(g.feed), ["replacement one", "replacement two"], "the old file's older page is not put above the new table");
+  assert.equal(g.feed.canLoadOlder(), false, "and 'older' is the new table's own answer");
+  assert.equal(g.feed.loadOlder(), false);
+});
+
+test("S17c reset makes the answers asked before it void (c): the snapshot is held — no poll, no new stream, the old stream's late frame is dropped; once it is back the stream opens from it and its first rows stay on the table", async () => {
+  const replaced = replacedTranscript;
+  const summaries = summariesOf;
+  let events = liveTranscript("run_r").events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_r", () => events);
+  g.feed.open("run_r");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_r", events, { afterSeq: g.feed.get().lastSeq }), "k1");
+  g.gate.hold = () => true;
+  events = replaced();
+  hub.frame(0, "reset", { runId: "run_r", reason: "cursor" });
+  await settle();
+  assert.equal(g.held.length, 1, "the snapshot is on its way");
+  const asked = g.pages.length;
+  const ticked = g.feed.poll();
+  await settle();
+  assert.equal(g.pages.length, asked, "no poll: nothing is asked while the snapshot is on its way");
+  assert.equal(await ticked, false);
+  g.feed.setVisible(false);
+  g.feed.setVisible(true);
+  await settle();
+  assert.equal(hub.calls.length, 1, "no new stream");
+  const before = summaries(g.feed);
+  const oldLater = [...liveTranscript("run_r").events, { type: "run.event", runId: "run_r", agentId: "glm-pro", seq: 4, ts: iso(T0 + 8000), kind: "message", role: "assistant", parts: [{ type: "text", text: "late row of the old stream" }] }];
+  hub.frame(0, "rows", pageOf("run_r", oldLater, { afterSeq: 3 }), "k2"); // the old stream's late frame
+  assert.deepEqual(summaries(g.feed), before, "is dropped: it belongs to a stream that was let go");
+  g.held[0].release();
+  await settle();
+  assert.deepEqual(summaries(g.feed), ["replacement one", "replacement two"]);
+  assert.deepEqual([hub.calls.length, hub.calls[1].afterSeq, "cursor" in hub.calls[1]], [2, 3, false], "the snapshot is in: the stream opens from it, with no cursor");
+  const more = [...events, { type: "run.event", runId: "run_r", agentId: "glm-pro", seq: 4, ts: iso(T0 + 9000), kind: "message", role: "assistant", parts: [{ type: "text", text: "from the new stream" }] }];
+  hub.frame(1, "rows", pageOf("run_r", more, { afterSeq: 3 }), "n1");
+  assert.deepEqual([summaries(g.feed).at(-1), g.feed.get().lastSeq], ["from the new stream", 4], "the new stream's row is on the table, and nothing older overwrote it");
+});
+
+test("S17d reset makes the answers asked before it void (d): the snapshot FAILED — the old cursor is no good either, so the next tick asks for a snapshot again, never for a page after the old file's cursor", async () => {
+  const replaced = replacedTranscript;
+  const summaries = summariesOf;
+  let events = liveTranscript("run_r").events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_r", () => events);
+  g.feed.open("run_r");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_r", events, { afterSeq: g.feed.get().lastSeq }));
+  events = replaced();
+  g.gate.fail = true;
+  hub.frame(0, "reset", { runId: "run_r", reason: "changed" });
+  await settle();
+  assert.deepEqual([g.feed.get().problem, hub.calls.length], ["network", 1], "failed: stale, and still no stream");
+  assert.equal(await g.feed.poll(), true);
+  assert.equal("afterSeq" in g.pages.at(-1), false, "the retry is a snapshot — never a page after the old file's cursor");
+  assert.deepEqual([summaries(g.feed), g.feed.get().problem, hub.calls.length], [["replacement one", "replacement two"], null, 2], "recovered, and the stream is back");
+});
+
+test("S18 paused, an update frame leaves the picture alone: it changes only the copy that resume will show (made from the shown rows when none is held yet); following, it changes the shown table", async () => {
+  const b = transcript("run_upd");
+  b.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+  b.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-9" });
+  b.clock(T0 + 2000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "working" }] });
+  let events = b.events;
+  const hub = streamHub();
+  const { feed } = streamFeed(hub, "run_upd", () => events);
+  feed.open("run_upd");
+  await settle();
+  const cursor = feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_upd", events, { afterSeq: cursor }), "k1");
+  const command = () => feed.get().rows.find((row) => row.code === "CMD");
+  const held = () => feed.get().pendingRows?.find((row) => row.code === "CMD");
+  b.clock(T0 + 3000).add("run.event", { kind: "tool_result", tool: "call-9", output: "1 failing test", isError: true });
+  events = b.events;
+  const page = projectWorkerActivity({ runId: "run_upd", events, env: {}, afterSeq: cursor });
+  assert.equal(page.updates.length, 1);
+
+  // Paused, nothing held yet: the shown row stays as it is.
+  assert.equal(feed.pause("selection"), true);
+  const shownRows = feed.get().rows;
+  hub.frame(0, "update", { runId: "run_upd", updates: page.updates }, "k1");
+  assert.equal(feed.get().rows, shownRows, "the visible table is the very same one");
+  assert.equal(command().exitCode, null, "the visible command row did not move");
+  assert.deepEqual([held().exitCode, feed.get().newCount], [1, 0], "the exit code waits for resume; it is not a new event");
+  // Then the page's rows: held back too, counted.
+  hub.frame(0, "rows", { ...page, updates: [] }, "k2");
+  assert.deepEqual([feed.get().rows === shownRows, feed.get().newCount, command().exitCode], [true, 1, null]);
+  assert.equal(feed.follow(), true);
+  assert.deepEqual([command().exitCode, command().exitSource, feed.get().rows.filter((row) => row.code === "OUT").length], [1, "inferred", 1], "resume shows the exit code and the new row");
+
+  // Following: the update frame changes the shown table at once.
+  const c = transcript("run_upd2");
+  c.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+  c.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-1" });
+  let eventsC = c.events;
+  const hub2 = streamHub();
+  const second = streamFeed(hub2, "run_upd2", () => eventsC);
+  second.feed.open("run_upd2");
+  await settle();
+  const cursor2 = second.feed.get().lastSeq;
+  hub2.frame(0, "rows", pageOf("run_upd2", eventsC, { afterSeq: cursor2 }));
+  c.clock(T0 + 3000).add("run.event", { kind: "tool_result", tool: "call-1", output: "ok", isError: false });
+  eventsC = c.events;
+  hub2.frame(0, "update", { runId: "run_upd2", updates: projectWorkerActivity({ runId: "run_upd2", events: eventsC, env: {}, afterSeq: cursor2 }).updates });
+  assert.equal(second.feed.get().rows.find((row) => row.code === "CMD").exitCode, 0, "following: the shown row changed");
+  assert.equal(second.feed.get().pendingRows, null);
+});
+
+test("S19 a rows frame with terminal:true only says the run is over — the stream still owes its end frame: when it drops first, the page asks once more after its cursor, takes the rows written after the terminal event, and only then stops", async () => {
+  const b = liveTranscript("run_done2");
+  let events = b.events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_done2", () => events);
+  g.feed.open("run_done2");
+  await settle();
+  const lastSeq = g.feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_done2", events, { afterSeq: lastSeq }));
+  b.clock(T0 + 4000).add("run.completed", {});
+  b.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_done2", events, { afterSeq: lastSeq }), "k9");
+  assert.equal(activity.buildActivityView(g.feed.get()).terminal, true);
+  const cursor = g.feed.get().lastSeq;
+  // The line written right behind the terminal event; the stream drops before it can say `end`.
+  b.clock(T0 + 5000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "settled after the terminal event" }] });
+  events = b.events;
+  g.gate.fail = true; // the first catch-up fails: it is tried again on the next tick
+  hub.end(0, { ok: false, reason: "network" });
+  await settle();
+  const after = () => g.pages.filter((query) => Number.isInteger(query.afterSeq));
+  assert.equal(after().at(-1)?.afterSeq, cursor, "the page asked after its cursor, at once");
+  assert.equal(g.feed.get().rows.some((row) => row.summary === "settled after the terminal event"), false, "that read failed");
+  assert.equal(await g.feed.poll(), true, "the next tick asks again");
+  assert.equal(g.feed.get().rows.at(-1).summary, "settled after the terminal event", "the row behind the terminal event is on the table");
+  assert.equal(g.feed.get().terminal, true);
+  const asked = g.pages.length;
+  assert.equal(await g.feed.poll(), false, "and then it stops");
+  assert.equal(g.pages.length, asked);
+  g.feed.setVisible(false);
+  g.feed.setVisible(true);
+  await settle();
+  assert.equal(hub.calls.length, 1, "no reconnect either");
+
+  // The normal ending is unchanged: the end frame closes it, no catch-up is asked.
+  const done = liveTranscript("run_done3");
+  const hub2 = streamHub();
+  const second = gatedFeed(hub2, "run_done3", () => done.events);
+  second.feed.open("run_done3");
+  await settle();
+  const seq = second.feed.get().lastSeq;
+  done.clock(T0 + 4000).add("run.completed", {});
+  done.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  hub2.frame(0, "rows", pageOf("run_done3", done.events, { afterSeq: seq }), "k5");
+  hub2.frame(0, "end", { runId: "run_done3", state: "completed", terminal: true, total: done.events.length }, "k5");
+  const calls = second.pages.length;
+  assert.equal(await second.feed.poll(), false);
+  assert.equal(second.pages.length, calls, "end: nothing more is asked");
+});
+
+test("S20 a failed reconcile read while the stream is Live and frames keep arriving only voids that one check — the status bar stays Live; with no stream the same failure still says Stale since", async () => {
+  const b = liveTranscript("run_rec2");
+  const events = b.events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_rec2", () => events);
+  g.feed.open("run_rec2");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_rec2", events, { afterSeq: g.feed.get().lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  g.gate.fail = true;
+  assert.equal(await g.feed.poll(), false, "the twelfth tick: the check failed");
+  const vm = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([vm.freshness.kind, vm.problem], ["live", null], "still Live: only this check is void");
+  await g.feed.poll(); // the next tick is quiet again, and the stream is as it was
+  assert.equal(activity.buildActivityView(g.feed.get()).freshness.kind, "live");
+
+  // No stream: the failure is the old one.
+  const hub2 = streamHub({ failWith: "network" });
+  const polling = gatedFeed(hub2, "run_rec2", () => events);
+  polling.feed.open("run_rec2");
+  await settle();
+  for (let tick = 1; tick <= 11; tick += 1) await polling.feed.poll();
+  polling.gate.fail = true;
+  await polling.feed.poll();
+  assert.equal(activity.buildActivityView(polling.feed.get()).freshness.kind, "stale", "no stream: Stale since, as before");
+});
+
+// ===== batch 144, fix 2: the last crossings =====
+
+test("S21 the read after a stream that died before its end frame is always a page after the cursor — even on the twelfth tick, the reconcile never takes its place and the row written behind the terminal event arrives", async () => {
+  const b = liveTranscript("run_final");
+  let events = b.events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_final", () => events);
+  g.feed.open("run_final");
+  await settle();
+  const lastSeq = g.feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_final", events, { afterSeq: lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll(); // Live: eleven quiet ticks
+  b.clock(T0 + 4000).add("run.completed", {});
+  b.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_final", events, { afterSeq: lastSeq }), "k9");
+  const cursor = g.feed.get().lastSeq;
+  b.clock(T0 + 5000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "written behind the terminal event" }] });
+  events = b.events;
+  hub.end(0, { ok: false, reason: "network" }); // the stream drops before `end`: the catch-up is the twelfth tick
+  await settle();
+  assert.equal("afterSeq" in g.pages.at(-1), true, "the catch-up is a page after the cursor, not the reconcile's newest page");
+  assert.equal(g.pages.at(-1).afterSeq, cursor);
+  assert.equal(g.feed.get().rows.at(-1).summary, "written behind the terminal event");
+  assert.equal(await g.feed.poll(), false, "and then it stops");
+});
+
+test("S22 a reconcile page asked before the end was learned never undoes it: terminal, the total and the closed stream stay as the end frame left them, and a row's exit code from an update frame is not taken back", async () => {
+  // (a) the end
+  const b = liveTranscript("run_late");
+  let events = b.events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_late", () => events);
+  g.feed.open("run_late");
+  await settle();
+  const lastSeq = g.feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_late", events, { afterSeq: lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  g.gate.hold = (query) => !Number.isInteger(query.afterSeq);
+  const tick12 = g.feed.poll(); // the newest page of the RUNNING run, on its way
+  await settle();
+  assert.equal(g.held.length, 1);
+  b.clock(T0 + 4000).add("run.completed", {});
+  b.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  events = b.events;
+  hub.frame(0, "rows", pageOf("run_late", events, { afterSeq: lastSeq }), "k9");
+  hub.frame(0, "end", { runId: "run_late", state: "completed", terminal: true, total: events.length }, "k9");
+  let vm = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([vm.terminal, vm.total, vm.freshness.kind], [true, 5, "ended"]);
+  const shown = g.feed.get().rows;
+  g.held[0].release(); // the older answer arrives
+  await tick12;
+  await settle();
+  vm = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([vm.terminal, vm.total, vm.freshness.kind], [true, 5, "ended"], "the end stands");
+  assert.equal(g.feed.get().rows, shown, "and so does the table");
+  assert.equal(hub.calls.length, 1, "no stream is opened again");
+
+  // (b) a command's exit code that an update frame brought
+  const c = transcript("run_cmd2");
+  c.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+  c.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-7" });
+  let eventsC = c.events;
+  const hub2 = streamHub();
+  const g2 = gatedFeed(hub2, "run_cmd2", () => eventsC);
+  g2.feed.open("run_cmd2");
+  await settle();
+  const cursor = g2.feed.get().lastSeq;
+  hub2.frame(0, "rows", pageOf("run_cmd2", eventsC, { afterSeq: cursor }));
+  for (let tick = 1; tick <= 11; tick += 1) await g2.feed.poll();
+  g2.gate.hold = (query) => !Number.isInteger(query.afterSeq);
+  const tick12b = g2.feed.poll(); // the newest page before the result existed
+  await settle();
+  c.clock(T0 + 3000).add("run.event", { kind: "tool_result", tool: "call-7", output: "1 failing test", isError: true });
+  eventsC = c.events;
+  const page = projectWorkerActivity({ runId: "run_cmd2", events: eventsC, env: {}, afterSeq: cursor });
+  hub2.frame(0, "update", { runId: "run_cmd2", updates: page.updates }, "k1");
+  hub2.frame(0, "rows", { ...page, updates: [] }, "k2");
+  const exit = () => g2.feed.get().rows.find((row) => row.code === "CMD").exitCode;
+  assert.equal(exit(), 1);
+  g2.held[0].release();
+  await tick12b;
+  await settle();
+  assert.equal(exit(), 1, "the older page does not take the exit code back");
+});
+
+test("S23 a reset while paused: the table in front of the Owner is the old transcript's and stays read-only — no older page (with the new table's boundary, nor with the old one's while the snapshot is on its way) is mixed into it; at resume the new table brings its own boundary", async () => {
+  const many = (label) => {
+    const b = transcript("run_r2");
+    b.clock(T0 + 1000);
+    for (let i = 1; i <= 450; i += 1) say(b, T0 + 1000 + i, `${label} message ${i}`);
+    return b.events;
+  };
+  const summaries = (feed) => feed.get().rows.map((row) => row.summary);
+  const olderAsked = (g) => g.pages.filter((query) => "beforeSeq" in query).length;
+  let events = many("old");
+  let hub = streamHub();
+  let g = gatedFeed(hub, "run_r2", () => events);
+  g.feed.open("run_r2");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_r2", events, { afterSeq: g.feed.get().lastSeq }));
+  assert.equal(g.feed.canLoadOlder(), true);
+  g.feed.pause("scroll");
+  events = many("new");
+  g.gate.hold = () => true;
+  hub.frame(0, "reset", { runId: "run_r2", reason: "changed" });
+  await settle();
+  // the snapshot is on its way: the old table's boundary must not be used
+  assert.deepEqual([g.feed.canLoadOlder(), g.feed.loadOlder(), olderAsked(g)], [false, false, 0], "snapshot in flight: no older page");
+  g.held[0].release();
+  await settle();
+  assert.ok(summaries(g.feed).every((text) => text.startsWith("old ")), "paused: what is shown is still the old transcript");
+  assert.ok(g.feed.get().pendingRows.every((unit) => unit.summary.startsWith("new ")), "the new table waits aside");
+  assert.deepEqual([g.feed.canLoadOlder(), g.feed.loadOlder(), olderAsked(g)], [false, false, 0], "the snapshot is back, the old table is still shown: still no older page");
+  assert.equal(activity.buildActivityView(g.feed.get()).older, null, "and the view offers none");
+  g.gate.hold = () => false;
+  assert.equal(g.feed.follow(), true);
+  assert.ok(summaries(g.feed).every((text) => text.startsWith("new ")), "resume: the new table");
+  assert.equal(g.feed.canLoadOlder(), true, "now its own boundary is open");
+  assert.equal(g.feed.loadOlder(), true);
+  await settle();
+  assert.ok(summaries(g.feed).length > 200 && summaries(g.feed).every((text) => text.startsWith("new ")), "the older page is the new transcript's: nothing of the old one is mixed in");
+
+  // following: a reset's snapshot in flight blocks the old boundary too
+  events = many("old");
+  hub = streamHub();
+  g = gatedFeed(hub, "run_r2", () => events);
+  g.feed.open("run_r2");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_r2", events, { afterSeq: g.feed.get().lastSeq }));
+  events = many("new");
+  g.gate.hold = () => true;
+  hub.frame(0, "reset", { runId: "run_r2", reason: "changed" });
+  await settle();
+  assert.deepEqual([g.feed.canLoadOlder(), g.feed.loadOlder(), olderAsked(g)], [false, false, 0], "following, snapshot in flight: no older page either");
+  g.held[0].release();
+  await settle();
+  g.gate.hold = () => false;
+  assert.deepEqual([g.feed.canLoadOlder(), summaries(g.feed).every((text) => text.startsWith("new "))], [true, true]);
+});
+
+test("S24 a reset voids the full texts: one asked for a row of the old transcript lands on nothing, a full text shown is not carried to the new table's row, and while the old table is shown nothing is asked about its rows", async () => {
+  const withOutput = (label) => {
+    const b = transcript("run_f2");
+    b.clock(T0 + 1000).add("run.event", {
+      kind: "tool_result", tool: "big", output: Array.from({ length: 600 }, (_, i) => `${label} line ${i + 1} ${"x".repeat(60)}`).join("\n"),
+    });
+    return b.events;
+  };
+  let events = withOutput("OLD");
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_f2", () => events);
+  g.feed.open("run_f2");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_f2", events, { afterSeq: g.feed.get().lastSeq }));
+  const key = g.feed.get().rows.find((row) => row.code === "OUT").key;
+  g.gate.holdFull = true;
+  assert.equal(g.feed.openFull(key), true, "asked for the old transcript's row");
+  await settle();
+  assert.equal(g.heldFull.length, 1);
+  events = withOutput("NEW");
+  hub.frame(0, "reset", { runId: "run_f2", reason: "changed" });
+  await settle();
+  // the old table is still shown (paused by the open full text): nothing may be asked about its rows
+  assert.equal(g.feed.get().stale, true);
+  assert.deepEqual([g.feed.openFull(key), g.feed.fullPage(key, 1), g.heldFull.length], [false, false, 1]);
+  assert.equal(g.feed.get().full.size, 0, "the full text asked so far is gone with the old table");
+  assert.equal(g.feed.follow(), true);
+  assert.equal(g.feed.get().full.size, 0, "the new table starts with no full text open");
+  // The new table's row opens: its request is on the wire (same key, same seq) when the OLD transcript's text
+  // finally arrives. The old text must not take the new request's place.
+  assert.equal(g.feed.openFull(key), true);
+  await settle();
+  assert.equal(g.heldFull.length, 2);
+  g.heldFull[0].release(); // the old transcript's text
+  await settle();
+  assert.equal(g.feed.get().full.get(key).state, "loading", "still waiting for its own answer: the old text landed on nothing");
+  g.heldFull[1].release();
+  await settle();
+  const shown = activity.buildActivityView(g.feed.get()).rows.find((row) => row.key === key).full;
+  assert.ok(shown.state === "ready" && shown.text.includes("NEW line 1") && !shown.text.includes("OLD"), "the text is the new transcript's");
+});
+
+test("S25 the poll's occupation belongs to the poll that took it: an older poll that ends after the worker was closed and opened again frees nothing of the newer one, and opens no stream beside it", async () => {
+  const b = foldTranscript("run_own");
+  const long = [...b.events];
+  runtimeRow(b);
+  runtimeRow(b);
+  const grown = [...b.events]; // #1 ... #5
+  let events = grown;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_own", () => events);
+  g.feed.setVisible(false);
+  events = long; // #1 ... #3
+  g.feed.open("run_own");
+  await settle();
+  events = grown;
+  g.gate.hold = (query) => Number.isInteger(query.afterSeq);
+  const oldPoll = g.feed.poll();
+  await settle();
+  assert.equal(g.held.length, 1, "the old poll is on its way");
+  // The Owner closes the worker and opens it again; its first page is the short one.
+  g.feed.close();
+  events = long;
+  g.feed.open("run_own");
+  await settle();
+  events = grown;
+  const newPoll = g.feed.poll();
+  await settle();
+  assert.equal(g.held.length, 2, "the new poll is on its way");
+  g.held[0].release(); // the OLD poll ends first
+  await oldPoll;
+  await settle();
+  g.feed.setVisible(true);
+  await settle();
+  assert.equal(hub.calls.length, 0, "the new poll still holds the occupation: no stream beside it");
+  g.held[1].release();
+  await newPoll;
+  await settle();
+  assert.deepEqual([foldsOf(g.feed), hub.calls.length, hub.calls[0]?.afterSeq], [[[2, 5, 4]], 1, 5], "four runtime events, once; the stream opens after the poll, from its cursor");
+  hub.frame(0, "rows", pageOf("run_own", events, { afterSeq: 5 }));
+  assert.deepEqual(foldsOf(g.feed), [[2, 5, 4]]);
+});
+
+// ===== batch 144, fix 3: owed reconcile, one-segment landing, short tables, serial resets, owner-only stream try, the end on a reconcile tick =====
+
+/** One more message row delivered by the stream: the transcript grows and the frame is the page after the cursor. */
+function pushFrame(b, g, hub, n, at = 0) {
+  b.clock(T0 + 20_000 + n * 1000).add("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: `streamed ${n}` }] });
+  hub.frame(at, "rows", pageOf(b.runId, b.events, { afterSeq: g.feed.get().lastSeq }), `p${n}`);
+}
+
+test("S26 a reconcile page that was dropped as older than the table is owed: the next tick asks again — every tick until one lands — and then the twelve-tick rhythm starts over", async () => {
+  const b = liveTranscript("run_owed");
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_owed", () => b.events);
+  g.feed.open("run_owed");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_owed", b.events, { afterSeq: g.feed.get().lastSeq }));
+  const snapshots = () => g.pages.filter((query) => !Number.isInteger(query.afterSeq)).length;
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll(); // eleven quiet ticks
+  const base = snapshots();
+  g.gate.hold = (query) => !Number.isInteger(query.afterSeq);
+  // Three reconcile pages in a row, each overtaken by a frame while it is on its way.
+  for (let drop = 0; drop < 3; drop += 1) {
+    const tick = g.feed.poll();
+    await settle();
+    assert.equal(g.held.length, drop + 1, `tick ${drop + 12}: the reconcile is asked again at once, not twelve ticks later`);
+    pushFrame(b, g, hub, drop + 1);
+    g.held[drop].release();
+    await tick;
+    await settle();
+  }
+  assert.equal(snapshots() - base, 3);
+  // The fourth time nothing comes in between: it lands.
+  const fourth = g.feed.poll();
+  await settle();
+  assert.equal(g.held.length, 4);
+  g.held[3].release();
+  await fourth;
+  await settle();
+  // Back to the rhythm: eleven quiet ticks read nothing, the twelfth asks.
+  g.gate.hold = () => false;
+  const before = snapshots();
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  assert.equal(snapshots(), before, "no snapshot while the rhythm runs");
+  await g.feed.poll();
+  assert.equal(snapshots(), before + 1, "the twelfth tick since the last one that landed");
+});
+
+test("S27 a reconcile page is checked against the table in the very segment that applies it: a frame that lands in the microtask between the first check and the apply wins — terminal, total and the closed stream stay", async () => {
+  const b = liveTranscript("run_micro");
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_micro", () => b.events);
+  g.feed.open("run_micro");
+  await settle();
+  const lastSeq = g.feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_micro", b.events, { afterSeq: lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  g.gate.hold = (query) => !Number.isInteger(query.afterSeq);
+  const tick12 = g.feed.poll(); // the newest page of the RUNNING run
+  await settle();
+  assert.equal(g.held.length, 1);
+  b.clock(T0 + 4000).add("run.completed", {});
+  b.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  const rows = pageOf("run_micro", b.events, { afterSeq: lastSeq });
+  const total = b.events.length;
+  g.held[0].release();
+  // One microtask later: after the page's first version check, before it is applied.
+  queueMicrotask(() => {
+    hub.frame(0, "rows", rows, "k9");
+    hub.frame(0, "end", { runId: "run_micro", state: "completed", terminal: true, total }, "k9");
+  });
+  await tick12;
+  await settle();
+  const vm = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([vm.terminal, vm.total, vm.freshness.kind, hub.calls.length], [true, total, "ended", 1], "the end stands and no stream is opened again");
+});
+
+test("S28 paused, a reset replaced the transcript with a table of the same length (a page that does not scroll): the status bar offers a click that puts the new table in front of the Owner", async () => {
+  const two = (label) => {
+    const b = transcript("run_short");
+    b.clock(T0 + 1000);
+    say(b, T0 + 1000, `${label} one`);
+    say(b, T0 + 2000, `${label} two`);
+    return b.events;
+  };
+  let events = two("old");
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_short", () => events);
+  g.feed.open("run_short");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_short", events, { afterSeq: g.feed.get().lastSeq }));
+  assert.equal(g.feed.pause("selection"), true);
+  events = two("new");
+  hub.frame(0, "reset", { runId: "run_short", reason: "changed" });
+  await settle();
+  let vm = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([vm.newCount, vm.replaced, vm.rows.map((row) => row.summary)], [0, true, ["old one", "old two"]], "same number of rows: nothing counts as new, the old table is still shown");
+  const en = renderActivity(vm, "en");
+  const button = byClass(en.root, "act-new-btn")[0];
+  assert.equal(button.textContent, "Transcript updated — click to view");
+  assert.equal(button.getAttribute("data-fk"), "act-resume");
+  assert.equal(byClass(renderActivity(vm, "zh").root, "act-new-btn")[0].textContent, "转录已更新，点击查看");
+  button.click();
+  assert.deepEqual(en.actions.calls.pop(), ["resumeActivity"], "the click is the resume");
+  assert.equal(g.feed.follow(), true);
+  vm = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([vm.replaced, vm.rows.map((row) => row.summary)], [false, ["new one", "new two"]], "the new table is in front");
+  assert.equal(byClass(renderActivity(vm, "en").root, "act-new-btn").length, 0, "and the entry is gone");
+  // Not a reset: a paused table with nothing new offers nothing.
+  const quiet = streamHub();
+  const second = gatedFeed(quiet, "run_short", () => two("old"));
+  second.feed.open("run_short");
+  await settle();
+  second.feed.pause("selection");
+  assert.equal(activity.buildActivityView(second.feed.get()).replaced, false);
+});
+
+test("S29 every reset voids the one before it: the replacement the first reset brought (its table aside and its paging boundary) never reaches the Owner after the second reset; paging uses only the boundary of the snapshot of the current generation", async () => {
+  const many = (label) => {
+    const b = transcript("run_abc");
+    b.clock(T0 + 1000);
+    for (let i = 1; i <= 450; i += 1) say(b, T0 + 1000 + i, `${label} message ${i}`);
+    return b.events;
+  };
+  const summaries = (feed) => feed.get().rows.map((row) => row.summary);
+  const only = (feed, label) => summaries(feed).length > 0 && summaries(feed).every((text) => text.startsWith(`${label} `));
+  let events = many("alpha");
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_abc", () => events);
+  g.feed.open("run_abc");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_abc", events, { afterSeq: g.feed.get().lastSeq }));
+  g.feed.pause("scroll");
+  events = many("beta");
+  hub.frame(0, "reset", { runId: "run_abc", reason: "changed" });
+  await settle();
+  assert.equal(hub.calls.length, 2, "the first reset's snapshot is back and the stream is open again");
+  assert.ok(g.feed.get().replacement !== null && g.feed.get().pendingRows.every((unit) => unit.summary.startsWith("beta ")), "B waits aside");
+  // The second reset: C replaces B before the Owner looked at it; C's snapshot is held.
+  events = many("gamma");
+  g.gate.hold = () => true;
+  hub.frame(1, "reset", { runId: "run_abc", reason: "changed" });
+  await settle();
+  assert.equal(g.held.length, 1);
+  assert.equal(g.feed.follow(), true);
+  assert.ok(only(g.feed, "alpha"), "resume shows nothing of B — what is on screen is still the old table, read-only");
+  assert.deepEqual([g.feed.canLoadOlder(), g.feed.loadOlder(), g.pages.filter((query) => "beforeSeq" in query).length], [false, false, 0], "no older page with B's boundary");
+  g.held[0].release();
+  await settle();
+  g.gate.hold = () => false;
+  assert.ok(only(g.feed, "gamma"), "C's snapshot is the table");
+  assert.equal(g.feed.canLoadOlder(), true);
+  assert.equal(g.feed.loadOlder(), true);
+  await settle();
+  assert.ok(summaries(g.feed).length > 200 && only(g.feed, "gamma"), "the older page is C's: B and A are nowhere in the table");
+});
+
+test("S30 a poll of an older table generation never opens a stream: when it ends after a reset it frees nothing and tries nothing — the new generation's own tick does", async () => {
+  const b = liveTranscript("run_gen");
+  let events = b.events;
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_gen", () => events);
+  g.feed.open("run_gen");
+  await settle();
+  hub.frame(0, "rows", pageOf("run_gen", events, { afterSeq: g.feed.get().lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  g.gate.hold = (query) => !Number.isInteger(query.afterSeq);
+  const tick12 = g.feed.poll(); // the reconcile page of the old generation
+  await settle();
+  assert.equal(g.held.length, 1);
+  g.gate.hold = () => false;
+  const fresh = transcript("run_gen");
+  fresh.clock(T0 + 1000);
+  say(fresh, T0 + 1000, "replacement one");
+  events = fresh.events;
+  hub.frame(0, "reset", { runId: "run_gen", reason: "changed" });
+  await settle();
+  assert.equal(hub.calls.length, 2, "the snapshot is back: the second stream is open");
+  hub.end(1, { ok: false, reason: "network" }); // it drops; its next try belongs to the next tick
+  await settle();
+  assert.equal(hub.calls.length, 2);
+  g.held[0].release(); // the old generation's poll ends now
+  await tick12;
+  await settle();
+  assert.equal(hub.calls.length, 2, "it opened no stream");
+  await g.feed.poll(); // the current generation's own tick
+  await settle();
+  assert.equal(hub.calls.length, 3, "the stream is tried after that one");
+});
+
+test("S31 polling: the end shows up on the reconcile tick while the cursor is behind — the rows after the cursor (the command's result, its exit code) are read first, and only then is the run shown as ended; with a stream up it carries them and nothing is asked", async () => {
+  const b = transcript("run_poll_end");
+  b.clock(T0 + 500).add("session.created", { backend: "claude-code", backendSessionId: "proc_1", serveUrl: null });
+  b.clock(T0 + 1000).add("run.event", { kind: "command", command: "npm test", toolCallId: "call-1" });
+  const { feed, pages } = await openedFeed("run_poll_end", b.events);
+  const command = () => feed.get().rows.find((row) => row.code === "CMD");
+  assert.equal(command().exitCode, null);
+  for (let i = 1; i <= 220; i += 1) say(b, T0 + 2000 + i, `message ${i}`);
+  await feed.poll(); // tick 1: two pages catch the 220 up
+  for (let tick = 2; tick <= 11; tick += 1) await feed.poll();
+  const cursor = feed.get().lastSeq;
+  b.clock(T0 + 9000).add("run.event", { kind: "tool_result", tool: "call-1", output: "1 failing test", isError: true });
+  b.clock(T0 + 10_000).add("run.completed", {});
+  b.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  const total = b.events.length;
+  await feed.poll(); // tick 12: the reconcile reads the newest page and sees the end
+  assert.equal(pages.filter((query) => query.afterSeq === cursor && !("beforeSeq" in query)).length >= 1, true, "the rows after the cursor were asked for");
+  const vm = activity.buildActivityView(feed.get());
+  assert.deepEqual([vm.terminal, vm.total, feed.get().lastSeq, command().exitCode], [true, total, b.events.at(-1).seq, 1], "ended only after the cursor reached the end; the command has its exit code");
+  assert.equal(await feed.poll(), false, "and then it stops");
+
+  // With the stream up: the reconcile page that says "ended" only swaps rows in; the stream brings the rest and the end.
+  const c = liveTranscript("run_live_end");
+  const hub = streamHub();
+  const g = gatedFeed(hub, "run_live_end", () => c.events);
+  g.feed.open("run_live_end");
+  await settle();
+  const lastSeq = g.feed.get().lastSeq;
+  hub.frame(0, "rows", pageOf("run_live_end", c.events, { afterSeq: lastSeq }));
+  for (let tick = 1; tick <= 11; tick += 1) await g.feed.poll();
+  c.clock(T0 + 4000).add("run.completed", {});
+  c.add("run.state_change", { from: "running", to: "completed", reason: "completed" });
+  const asked = g.pages.length;
+  await g.feed.poll(); // tick 12: the page already says ended; the cursor is behind it
+  assert.equal(g.pages.length, asked + 1, "only the newest page was read — the stream carries the rest");
+  assert.equal(activity.buildActivityView(g.feed.get()).terminal, false, "not ended yet: the rows and the end come by the stream");
+  hub.frame(0, "rows", pageOf("run_live_end", c.events, { afterSeq: lastSeq }), "k9");
+  hub.frame(0, "end", { runId: "run_live_end", state: "completed", terminal: true, total: c.events.length }, "k9");
+  const done = activity.buildActivityView(g.feed.get());
+  assert.deepEqual([done.terminal, done.total, g.feed.get().lastSeq], [true, c.events.length, c.events.at(-1).seq]);
 });
 // ===== api.js: the stream route in the closed set, and the one reader of server-sent events =====
 

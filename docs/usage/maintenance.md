@@ -116,7 +116,7 @@ wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 r
 npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cwd GIT_ROOT]
 ```
 
-命令打印一次 `http://127.0.0.1:<port>/#token=<64hex>` 和停止提示；在浏览器打开该 URL，按 `Ctrl-C` 关闭（首轮普查中关闭会等它跑完）。省略 `--port` 时使用临时端口。新界面在 `/v2#token=…`，读 `/api/overview|workers|attention|worker*|artifact`（决定 0131）。`--web` 不与 `--watch` 或 `--format json` 共用。
+命令打印一次 `http://127.0.0.1:<port>/#token=<64hex>` 和停止提示；在浏览器打开该 URL，按 `Ctrl-C` 关闭（首轮普查中关闭会等它跑完）。省略 `--port` 时使用临时端口。新界面在 `/v2#token=…`，读 `/api/overview|workers|attention|worker*|artifact`（决定 0131、0132）。`--web` 不与 `--watch` 或 `--format json` 共用。
 
 看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询。选中 run 的详情面板给出后端、阶段、终态、事件总量、写域观察、活性与有界活动时间线，都是只读事实，不是语义进度判断。
 

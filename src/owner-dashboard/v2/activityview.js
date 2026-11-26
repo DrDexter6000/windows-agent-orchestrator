@@ -449,7 +449,9 @@ function filterRow(vm, lang, actions) {
 
 function streamNode(vm, lang, sui, actions) {
   const copy = sui.eventCopy ?? null;
-  const showWaiting = !vm.following && (vm.newCount > 0 || vm.newCountExact === false);
+  // Paused when a reset replaced the transcript: the new table waits aside — even with as many rows as the old one
+  // and a page that never scrolls, the way in is a click here (it is the same resume the "new events" button is).
+  const showWaiting = !vm.following && (vm.replaced === true || vm.newCount > 0 || vm.newCountExact === false);
   return h(
     "div",
     { class: "act-stream" },
@@ -460,7 +462,9 @@ function streamNode(vm, lang, sui, actions) {
         class: "act-new-btn",
         "data-fk": "act-resume",
         on: { click: () => actions.resumeActivity() },
-        text: t(lang, vm.newCountExact === false ? "sb.a.newEventsPlus" : "sb.a.newEvents", { n: vm.newCount }),
+        text: vm.replaced === true
+          ? t(lang, "sb.a.replaced")
+          : t(lang, vm.newCountExact === false ? "sb.a.newEventsPlus" : "sb.a.newEvents", { n: vm.newCount }),
       })
       : null,
     vm.newCountExact === false && !vm.following
@@ -523,7 +527,7 @@ export function renderActivity(host, vm, lang, sui, actions) {
   changed = mount(frame.older, JSON.stringify(["older", vm.older, lang]), () => (older === null ? [] : [older])) || changed;
   changed = mount(
     frame.stream,
-    JSON.stringify(["stream", vm.following, vm.pausedBy, vm.newCount, vm.freshness, vm.total, sui.eventCopy, lang]),
+    JSON.stringify(["stream", vm.following, vm.pausedBy, vm.newCount, vm.replaced, vm.freshness, vm.total, sui.eventCopy, lang]),
     () => [streamNode(vm, lang, sui, actions)],
   ) || changed;
   return changed;
