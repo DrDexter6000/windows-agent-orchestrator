@@ -58,12 +58,37 @@
 //     use the same filter.
 //   - The legacy /api/runs and /api/activity do NOT read this publication.
 //
+// Batch 141a (decision 0131 §3): two more read-only routes for the Workers side
+// panel of the new front end. Same bearer / GET-only / no-CORS / no-store / fixed
+// error / closed-query rules as the read-model routes.
+//   - GET /api/worker?runId=            one worker's detail DTO (ownerWorkerDetail):
+//     identity, health, run axis, delivery axis, consult axis, deliverable, brief.
+//     Authorization is the read model's resolveRun (the run belongs to this run
+//     directory and its content is unambiguous) re-checked at REQUEST time against
+//     the files on disk (readRunEvents: every copy is inside the real run directory
+//     — a junction/symlink out of it is refused — and all copies are identical);
+//     anything else answers the fixed 404 and echoes nothing. Before the first
+//     publication it answers the status (loading), like the three read-model routes.
+//     The DTO is a whitelist
+//     assembled field by field — never a whole application object — and carries
+//     no repository path, worktree path or unredacted secret.
+//   - GET /api/artifact?runId=&commit=&fileIndex=   one image of the run's CURRENT
+//     delivery, read from the Git object database only (never the working tree,
+//     never a client path). `commit` must equal the run's current delivery commit
+//     and `fileIndex` must index its changedFiles, so a changed candidate can never
+//     make the same index point at another file. The transcript only CLAIMS the
+//     delivery: the commit, its parent and the actual changed-file list are proven
+//     against the repository first (createDeliveryProver), then the blob is read.
+//     Only png / jpeg / webp by file structure (not just the prefix), bounded size;
+//     everything else (incl. SVG) is the fixed 404.
+//
 // Imports (the import-contract test in ownerDashboardServer.test.js pins it):
 // node:http / node:crypto / node:url / node:fs / node:path, the ownerDashboard
 // service, the run-summary cache, the Owner read model (createOwnerReadModel +
-// OWNER_LIVENESS_VALUES), the Owner attention derivation (ownerAttention) and
-// the project slug shape (projectBuckets.SAFE_BUCKET_SLUG_RE). No second copy
-// of any closed set lives here.
+// OWNER_LIVENESS_VALUES), the Owner attention derivation (ownerAttention), the
+// Owner worker detail (ownerWorkerDetail) and artifact reader (ownerArtifact) and
+// the project slug shape (projectBuckets.SAFE_BUCKET_SLUG_RE). No second copy of
+// any closed set lives here.
 
 import http from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -83,6 +108,13 @@ import {
 import { createRunSummaryCache } from "./application/runSummaryCache.js";
 import { createOwnerReadModel, OWNER_LIVENESS_VALUES } from "./application/ownerReadModel.js";
 import { deriveOwnerAttention, ownerLanes, selectOwnerWorkers } from "./application/ownerAttention.js";
+import {
+  createDeliveryProver,
+  isCanonicalCommitId,
+  isValidRepoRelativePath,
+  readCommitImage,
+} from "./application/ownerArtifact.js";
+import { currentDelivery, projectWorkerDetail } from "./application/ownerWorkerDetail.js";
 import { SAFE_BUCKET_SLUG_RE } from "./projectBuckets.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -525,6 +557,134 @@ function serveReadModelRoute(ctx, req, res, sp, route) {
   }
 }
 
+// ===== Batch 141a: /api/worker and /api/artifact =====
+
+// fileIndex: canonical decimal digits only (no sign, no leading zeros, ≤ 7 digits).
+const FILE_INDEX_RE = /^(0|[1-9][0-9]{0,6})$/;
+
+function parseWorkerQuery(sp) {
+  assertStrictKeys(sp, new Set(["runId"]));
+  const runId = sp.get("runId");
+  if (!isValidRunId(runId)) throw new BadRequest();
+  return { runId };
+}
+
+function parseArtifactQuery(sp) {
+  assertStrictKeys(sp, new Set(["runId", "commit", "fileIndex"]));
+  const runId = sp.get("runId");
+  const commit = sp.get("commit");
+  const rawIndex = sp.get("fileIndex");
+  if (!isValidRunId(runId) || !isCanonicalCommitId(commit) || rawIndex === null || !FILE_INDEX_RE.test(rawIndex)) {
+    throw new BadRequest();
+  }
+  return { runId, commit, fileIndex: Number(rawIndex) };
+}
+
+/**
+ * The run's snapshot row + its transcript events as read just now — or null when
+ * the run is not usable: not in the published snapshot, not "ok", or the read
+ * model's resolveRun / read says no (unreadable, conflicting copies, not in this
+ * run directory). Nothing about WHY crosses the boundary.
+ */
+async function loadWorkerSource(ctx, pub, runId) {
+  const model = ctx.readModel;
+  if (typeof model?.readRunEvents !== "function") return null;
+  const run = ctx.runsById(pub).get(runId);
+  if (run === undefined || run.availability !== "ok") return null;
+  const events = await model.readRunEvents(runId);
+  return events === null ? null : { run, events };
+}
+
+/** The project's repository root, held server-side only (never in a response). */
+function repoRootOf(ctx, run) {
+  const slug = run.project?.slug;
+  return typeof slug === "string" && typeof ctx.readModel?.projectRepoRoot === "function"
+    ? ctx.readModel.projectRepoRoot(slug)
+    : null;
+}
+
+/** Shared prologue of both routes: bearer → closed query. Returns the query, or null once it has answered. */
+function authorizeAndParse(ctx, req, res, sp, parse) {
+  if (!bearerOk(req.headers.authorization, ctx.token)) {
+    sendJson(res, 401, ERR.unauthorized);
+    return null;
+  }
+  try {
+    return parse(sp);
+  } catch (e) {
+    sendJson(res, e instanceof BadRequest ? 400 : 500, e instanceof BadRequest ? ERR.bad_request : ERR.internal);
+    return null;
+  }
+}
+
+async function serveWorker(ctx, req, res, sp) {
+  const query = authorizeAndParse(ctx, req, res, sp, parseWorkerQuery);
+  if (query === null) return;
+  const pub = ctx.published();
+  // Never published: same loading / unavailable answer as the read-model routes.
+  if (pub === null) return sendJson(res, 200, ctx.status());
+  try {
+    const source = await loadWorkerSource(ctx, pub, query.runId);
+    if (source === null) return sendJson(res, 404, ERR.not_found);
+    const detail = await projectWorkerDetail({
+      run: source.run,
+      snapshot: pub.snapshot,
+      runsById: ctx.runsById(pub),
+      events: source.events,
+      now: pub.now, // the SAME now the publication was built with
+      ...(ctx.env !== undefined ? { env: ctx.env } : {}),
+      repoRoot: repoRootOf(ctx, source.run),
+      proveDelivery: ctx.proveDelivery,
+    });
+    return sendJson(res, 200, { ...ctx.status(), ...detail });
+  } catch {
+    return sendJson(res, 500, ERR.internal);
+  }
+}
+
+// An image response: the safe headers, with the content type the MAGIC NUMBER
+// decided (nosniff keeps the browser from second-guessing it).
+function sendImage(res, contentType, bytes) {
+  for (const [k, v] of Object.entries(SAFE_HEADERS)) res.setHeader(k, v);
+  res.setHeader("content-type", contentType);
+  res.setHeader("content-length", bytes.length);
+  res.writeHead(200);
+  res.end(bytes);
+}
+
+async function serveArtifact(ctx, req, res, sp) {
+  const query = authorizeAndParse(ctx, req, res, sp, parseArtifactQuery);
+  if (query === null) return;
+  const pub = ctx.published();
+  if (pub === null) return sendJson(res, 404, ERR.not_found);
+  try {
+    const source = await loadWorkerSource(ctx, pub, query.runId);
+    if (source === null) return sendJson(res, 404, ERR.not_found);
+    // The commit must be the run's CURRENT delivery commit (from the transcript read just
+    // now — the same generation the detail uses) and the index one of its changedFiles: a
+    // changed candidate can never make the same index point elsewhere.
+    const delivery = currentDelivery(source.events, query.runId);
+    if (delivery.state !== "bound" || delivery.commit !== query.commit) return sendJson(res, 404, ERR.not_found);
+    const path = delivery.changedFiles[query.fileIndex];
+    const repoRoot = repoRootOf(ctx, source.run);
+    if (repoRoot === null || typeof path !== "string" || !isValidRepoRelativePath(path)) {
+      return sendJson(res, 404, ERR.not_found);
+    }
+    // The transcript only CLAIMS the delivery: prove the commit object, its parent, the actual
+    // changed-file list, the "wao-delivery: <runId>" message and the WAO packaging identity
+    // against the repository before any blob is read by index.
+    const proof = await ctx.proveDelivery({
+      runId: query.runId, repoRoot, baseCommit: delivery.baseCommit, commit: delivery.commit, changedFiles: delivery.changedFiles,
+    });
+    if (!proof.ok) return sendJson(res, 404, ERR.not_found);
+    const image = await readCommitImage({ repoRoot, commit: delivery.commit, path });
+    if (!image.ok) return sendJson(res, 404, ERR.not_found);
+    return sendImage(res, image.contentType, image.bytes);
+  } catch {
+    return sendJson(res, 500, ERR.internal);
+  }
+}
+
 function createHandler(ctx) {
   return async function handler(req, res) {
     // Method-first: GET only. Every other method (incl. OPTIONS) → 405, with NO
@@ -620,6 +780,10 @@ function createHandler(ctx) {
         return sendJson(res, 500, ERR.internal);
       }
     }
+
+    // Batch 141a: one worker's detail and one image of its current delivery.
+    if (u.pathname === "/api/worker") return serveWorker(ctx, req, res, sp);
+    if (u.pathname === "/api/artifact") return serveArtifact(ctx, req, res, sp);
 
     // Batch 140c: Overview / Workers / Attention — all three read one publication.
     const readModelRoute = READ_MODEL_ROUTES.get(u.pathname);
@@ -740,6 +904,23 @@ export function createOwnerDashboardServer(config) {
     getOwnerActivity: getOwnerActivityFn ?? getOwnerActivity,
     readSummaryFn: (filePath) => summaryCache.read(filePath),
     now: typeof nowFn === "function" ? nowFn : () => Date.now(),
+    // Batch 141a: proves a run's delivery objects against its repository (commit type,
+    // parent = base, actual changed files = changedFiles, message + author/committer identity)
+    // and hands back the per-file line
+    // counts. The counts are cached per (repo, base, commit) — objects are immutable — but
+    // the proof itself runs on every request, so a pruned object is never reported bound.
+    proveDelivery: createDeliveryProver(),
+  };
+
+  // runId → snapshot row, built once per publication (the snapshot object is the key).
+  const runsByIdCache = new WeakMap();
+  ctx.runsById = (pub) => {
+    let map = runsByIdCache.get(pub.snapshot);
+    if (map === undefined) {
+      map = new Map((Array.isArray(pub.snapshot.runs) ? pub.snapshot.runs : []).map((run) => [run.runId, run]));
+      runsByIdCache.set(pub.snapshot, map);
+    }
+    return map;
   };
 
   const handler = createHandler(ctx);
@@ -772,7 +953,10 @@ export function createOwnerDashboardServer(config) {
   // and for a pending listen() to settle (a failed listen resolves it; a
   // successful one is then shut). listen() after close() rejects without
   // opening a socket.
-  const readModel = (createReadModelFn ?? ((input) => createOwnerReadModel(input)))({ runDir, nowFn: ctx.now });
+  const readModel = (createReadModelFn ?? ((input) => createOwnerReadModel(input)))({
+    runDir, nowFn: ctx.now, ...(env !== undefined ? { env } : {}),
+  });
+  ctx.readModel = readModel; // 141a: /api/worker and /api/artifact read through it
 
   let published = null;
   let failing = false; // the latest round failed

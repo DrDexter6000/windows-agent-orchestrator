@@ -16,6 +16,11 @@ import {
   assertCommittedDeliveryRef,
   proveContinuationWorktree,
   DeliveryError,
+  DELIVERY_IDENTITY,
+  commitMetaMatchesDelivery,
+  commitMetaShowArgs,
+  deliveryCommitMessage,
+  parseCommitMessageAndIdentity,
 } from "../../src/delivery.js";
 import { baseRepoFixture, copyGitRepo, git as fixtureGit, initGitRepo } from "../_gitRepoFixture.mjs";
 
@@ -2793,4 +2798,29 @@ test("b108-04: a persisted contract is revalidated without the glob rule (resume
     (err) => err.deliveryCode === "invalid_allowed_paths",
     "the older path rules still apply to a persisted contract",
   );
+});
+
+// ===== 第 141 批修正二：交付提交的说明与身份判定（Owner 看板的有界异步证明共用） =====
+
+test("交付提交元数据：说明恰好 wao-delivery: <runId>、作者与提交者是 WAO 固定打包身份；解析与比较是纯函数，与内核同一份语义", () => {
+  const meta = (an, ae, cn, ce, body) => `${an}\0${ae}\0${cn}\0${ce}\0${body}`;
+  const good = meta(DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, `${deliveryCommitMessage("run_x")}\n`);
+  assert.equal(deliveryCommitMessage("run_x"), "wao-delivery: run_x");
+  assert.equal(commitMetaMatchesDelivery(good, "wao-delivery: run_x"), true, "说明整体 trim；身份逐字段 trim");
+  assert.equal(commitMetaMatchesDelivery(meta(` ${DELIVERY_IDENTITY.name} `, DELIVERY_IDENTITY.email, DELIVERY_IDENTITY.name, `${DELIVERY_IDENTITY.email} `, "wao-delivery: run_x"), "wao-delivery: run_x"), true);
+  assert.equal(commitMetaMatchesDelivery(good, "wao-delivery: run_y"), false, "说明绑定的是另一个运行");
+  assert.equal(commitMetaMatchesDelivery(meta("t", DELIVERY_IDENTITY.email, DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, "wao-delivery: run_x"), "wao-delivery: run_x"), false, "作者名不对");
+  assert.equal(commitMetaMatchesDelivery(meta(DELIVERY_IDENTITY.name, "t@example.invalid", DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, "wao-delivery: run_x"), "wao-delivery: run_x"), false, "作者邮箱不对");
+  assert.equal(commitMetaMatchesDelivery(meta(DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, "t", DELIVERY_IDENTITY.email, "wao-delivery: run_x"), "wao-delivery: run_x"), false, "提交者名不对");
+  assert.equal(commitMetaMatchesDelivery(meta(DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, DELIVERY_IDENTITY.name, "t@example.invalid", "wao-delivery: run_x"), "wao-delivery: run_x"), false, "提交者邮箱不对");
+  assert.equal(commitMetaMatchesDelivery(meta(DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, DELIVERY_IDENTITY.name, DELIVERY_IDENTITY.email, "wao-delivery: run_x\n\n正文"), "wao-delivery: run_x"), false, "说明必须正好是这一行");
+  for (const bad of ["", "a\0b\0c", `a\0b\0c\0d`, null, undefined, 7]) {
+    assert.equal(commitMetaMatchesDelivery(bad, "wao-delivery: run_x"), false, `截断 / 非字符串输出失败关闭：${JSON.stringify(bad)}`);
+  }
+  // 解析在前四个 NUL 处切开，说明里的 NUL 留在说明里。
+  assert.deepEqual(parseCommitMessageAndIdentity("a\0b\0c\0d\0msg\0more"), {
+    message: "msg\0more", authorName: "a", authorEmail: "b", committerName: "c", committerEmail: "d",
+  });
+  assert.deepEqual(commitMetaShowArgs("a".repeat(40)), ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", "a".repeat(40)]);
+  assert.ok(Object.isFrozen(DELIVERY_IDENTITY), "常量不可改");
 });

@@ -21,7 +21,7 @@ import { readTranscript, findState, TERMINAL_STATES } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
-import { diagnoseFailure } from "../diagnosis.js";
+import { diagnoseFailure, isolationViolationDetail } from "../diagnosis.js";
 // 批 119（A4）：带调用目标根时的归属核验（与 readRunActivity 同一 SSOT 入口）。
 import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
@@ -35,7 +35,11 @@ import { verifyRunWorkspaceOwnershipTyped as verifyRunWorkspaceOwnership } from 
  * @param {string} [input.authorizedWorkspaceRoot] — 批 119（A4）：可选调用目标根
  *   （canonical Git root）。给了就在读完转录后 fail-closed 核验归属（归属比较抛
  *   code="workspace_not_authorized"）；不给则按 runId 直读，行为不变。
- * @returns {Promise<{runId, state, terminal, category, code, evidence}>}
+ * @returns {Promise<{runId, state, terminal, category, code, evidence, isolationViolation?}>}
+ *   isolationViolation — 第 141b 批：只在 category === "workdir_escape" 且绑定本
+ *   runId 的事件上有可信字段时带（闭集 reason/destination、清理并限长后的
+ *   reportedPath/resolvedPath、物理越界时的 escapedAt；见 diagnosis.js 的
+ *   projectIsolationViolation）。
  *   code — nullable closed-set diagnosis code, a member of the single general
  *   DIAGNOSIS_CODES SSOT (provider-auth ∪ provider-capacity ∪ no-effect).
  *   provider_auth/provider_capacity carry their category code; no_effect carries
@@ -88,5 +92,13 @@ export async function getRunDiagnosis({
   // run.delivery_failed event must NOT pollute this run's diagnosis.
   const { category, code, evidence } = diagnoseFailure(events, runId);
 
-  return { runId, state, terminal, category, code, evidence };
+  // 第 141b 批：越界类别带上绑定事件的机读事实（闭集 reason/destination + 清理过的
+  // 路径字段）；只给 MCP run_diagnose 用，CLI 照旧只读 evidence 文字。没有可信字段
+  // 或不是越界 → 不带这个键。
+  const isolationViolation = category === "workdir_escape" ? isolationViolationDetail(events, runId) : null;
+
+  return {
+    runId, state, terminal, category, code, evidence,
+    ...(isolationViolation !== null ? { isolationViolation } : {}),
+  };
 }

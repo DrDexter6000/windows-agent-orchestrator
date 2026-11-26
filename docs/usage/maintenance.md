@@ -116,9 +116,9 @@ wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 r
 npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cwd GIT_ROOT]
 ```
 
-命令打印一次 `http://127.0.0.1:<port>/#token=<64hex>` 和停止提示；在浏览器打开该 URL，按 `Ctrl-C` 关闭（首轮普查中关闭会等它跑完）。省略 `--port` 时使用临时端口。新界面用的 `/api/overview|workers|attention`（决定 0131）旧界面不读。`--web` 不与 `--watch` 或 `--format json` 共用。
+命令打印一次 `http://127.0.0.1:<port>/#token=<64hex>` 和停止提示；在浏览器打开该 URL，按 `Ctrl-C` 关闭（首轮普查中关闭会等它跑完）。省略 `--port` 时使用临时端口。新界面用的 `/api/overview|workers|attention|worker|artifact`（决定 0131）旧界面不读。`--web` 不与 `--watch` 或 `--format json` 共用。
 
-看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询；移动端 recent-runs 区域独立滚动。选中 run 的详情面板给出 backend、execution stage、terminal、事件总量、scope observation、liveness 与有界活动时间线；这些均是 transcript/application projection 的只读事实，不是语义进度判断。
+看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询。选中 run 的详情面板给出后端、阶段、终态、事件总量、写域观察、活性与有界活动时间线，都是只读事实，不是语义进度判断。
 
 浏览器终态通知需人类显式 opt-in：只有 Owner 点击启用且浏览器授予 Notification permission 后，页面才在观察到同一选中 run 从非终态变为终态时通知恰好一次。首次加载/刷新时已终态的 run 不补发，重复 polling 不重复发送，拒绝权限会明确显示 `notifications blocked`。通知只含固定安全字段。所有异步 activity 请求同时绑定选中 `runId` 与 selection epoch，A→B→A 快速切换时旧响应不得覆盖当前 run 的详情。
 

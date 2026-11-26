@@ -43,10 +43,17 @@ export const VERIFICATION_TIMEOUT_MS_MIN = 1000;
 export const VERIFICATION_TIMEOUT_MS_MAX = 7_200_000; // 120 minutes
 export const VERIFICATION_TIMEOUT_MS_DEFAULT = 300_000; // 5 minutes
 
-const DELIVERY_IDENTITY = {
+// WAO 固定的打包身份（作者与提交者）与提交说明格式：打包、证明（本文件）与 Owner 看板的有界异步
+// 证明（src/application/ownerArtifact.js）共用这一份，不另写第二份常量。
+export const DELIVERY_IDENTITY = Object.freeze({
   name: "WAO Delivery",
   email: "wao-delivery@local",
-};
+});
+
+/** 交付提交的提交说明：恰好是 `wao-delivery: <runId>`。 */
+export function deliveryCommitMessage(runId) {
+  return `wao-delivery: ${runId}`;
+}
 
 // ===== Git execution (structured args, never shell strings) =====
 
@@ -298,19 +305,20 @@ function parseNul(output) {
  * @param {string} errorDeliveryCode — DeliveryCode to throw on mismatch
  * @throws {DeliveryError} if author or committer identity does not match
  */
-function assertWaoIdentityFields(authorName, authorEmail, committerName, committerEmail, errorDeliveryCode) {
+/** 四个身份字段与 WAO 打包身份对不上的原因文本；对得上 → null。比较语义只有这一处。 */
+function waoIdentityMismatch(authorName, authorEmail, committerName, committerEmail) {
   if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
-    throw new DeliveryError(
-      errorDeliveryCode,
-      `author identity (${authorName} <${authorEmail}>) != WAO identity`,
-    );
+    return `author identity (${authorName} <${authorEmail}>) != WAO identity`;
   }
   if (committerName !== DELIVERY_IDENTITY.name || committerEmail !== DELIVERY_IDENTITY.email) {
-    throw new DeliveryError(
-      errorDeliveryCode,
-      `committer identity (${committerName} <${committerEmail}>) != WAO identity`,
-    );
+    return `committer identity (${committerName} <${committerEmail}>) != WAO identity`;
   }
+  return null;
+}
+
+function assertWaoIdentityFields(authorName, authorEmail, committerName, committerEmail, errorDeliveryCode) {
+  const mismatch = waoIdentityMismatch(authorName, authorEmail, committerName, committerEmail);
+  if (mismatch !== null) throw new DeliveryError(errorDeliveryCode, mismatch);
 }
 
 /**
@@ -342,6 +350,18 @@ function assertDeliveryIdentity(cwd, errorDeliveryCode) {
 }
 
 /**
+ * 已知提交元数据的只读 argv（一次 `git show -s` 取四个身份字段加提交说明）。Owner 看板的有界
+ * 异步证明用同一份 argv 与同一个解析与判定（parseCommitMessageAndIdentity /
+ * commitMetaMatchesDelivery）。
+ *
+ * @param {string} commitRef — explicit full commit hash
+ * @returns {string[]}
+ */
+export function commitMetaShowArgs(commitRef) {
+  return ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", commitRef];
+}
+
+/**
  * Known-commit metadata read: ONE `git show -s` returns the commit message AND
  * all four identity fields (%an%x00%ae%x00%cn%x00%ce%x00%B) for an explicit
  * full commit hash. The output is cut at the FIRST four NULs — the message is
@@ -355,11 +375,18 @@ function assertDeliveryIdentity(cwd, errorDeliveryCode) {
  *   carries fewer than four NULs (truncated/empty) — caller fails closed
  */
 function readCommitMessageAndIdentity(cwd, commitRef) {
-  const out = String(
-    git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", commitRef], { cwd }),
-  );
+  return parseCommitMessageAndIdentity(String(git(commitMetaShowArgs(commitRef), { cwd })));
+}
+
+/**
+ * `git show -s --format=%an%x00%ae%x00%cn%x00%ce%x00%B` 的输出 → 元数据（纯函数）。输出在前四个
+ * NUL 处切开，提交说明是最后一段；不足四个 NUL（截断 / 空输出）→ null，调用方失败关闭。
+ *
+ * @param {string} out
+ */
+export function parseCommitMessageAndIdentity(out) {
   const fields = [];
-  let rest = out;
+  let rest = String(out);
   for (let i = 0; i < 4; i += 1) {
     const nul = rest.indexOf("\0");
     if (nul === -1) return null;
@@ -373,6 +400,23 @@ function readCommitMessageAndIdentity(cwd, commitRef) {
     committerName: fields[2],
     committerEmail: fields[3],
   };
+}
+
+/**
+ * 提交元数据是不是 WAO 的交付提交：提交说明（整体 trim 后）恰好等于 expectedMessage，作者与提交者
+ * 都是 WAO 固定打包身份（逐字段 trim）。比较语义与 assertCommitMessageAndIdentity 是同一份
+ * （消息先、身份后；身份用 waoIdentityMismatch）。
+ *
+ * @param {string} out — commitMetaShowArgs 那次 git show 的输出
+ * @param {string} expectedMessage — 一般是 deliveryCommitMessage(runId)
+ * @returns {boolean}
+ */
+export function commitMetaMatchesDelivery(out, expectedMessage) {
+  const meta = parseCommitMessageAndIdentity(out);
+  if (meta === null || meta.message.trim() !== expectedMessage) return false;
+  return waoIdentityMismatch(
+    meta.authorName.trim(), meta.authorEmail.trim(), meta.committerName.trim(), meta.committerEmail.trim(),
+  ) === null;
 }
 
 /**
@@ -641,7 +685,7 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
 
   const cwd = repoRoot;
   const delivery = deliveryRef.deliveryCommit;
-  const expectedMessage = `wao-delivery: ${deliveryRef.runId}`;
+  const expectedMessage = deliveryCommitMessage(deliveryRef.runId);
 
   // 1. repoRoot must be a git repository.
   const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
@@ -2102,7 +2146,7 @@ function packageDeliveryAfterReset(input, stagedReset) {
   const changedFiles = proposed.changedFiles;
   const baseCommit = proposed.baseCommit;
   const branchRef = `refs/heads/${proposed.branch}`;
-  const expectedMessage = `wao-delivery: ${proposed.runId}`;
+  const expectedMessage = deliveryCommitMessage(proposed.runId);
 
   // 2. Stage exact inspected authorized paths
   git(["add", "-A", "--", ...changedFiles], { cwd });
@@ -2340,7 +2384,7 @@ function recoverDeliveryCommit(input) {
   }
 
   // Exact message, then WAO identity — one merged show (message checked first).
-  const expectedMessage = `wao-delivery: ${validated.runId}`;
+  const expectedMessage = deliveryCommitMessage(validated.runId);
   assertCommitMessageAndIdentity(
     cwd, canonicalHead, expectedMessage, "artifact_mismatch", "recovered commit message mismatch",
   );

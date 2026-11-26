@@ -26,9 +26,17 @@ import {
   PROVIDER_DIAGNOSIS_CODES,
   PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   NO_EFFECT_DIAGNOSIS_CODES,
+  ISOLATION_DESTINATIONS,
+  ISOLATION_DISPLAY_PATH_MAX_CHARS,
   ISOLATION_VIOLATION_REASONS,
   ISOLATION_PHYSICAL_ERROR_CODES,
+  isolationDisplayPath,
+  isolationViolationDetail,
+  projectIsolationViolation,
 } from "../../src/diagnosis.js";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
+import { createSecretRedactor } from "../../src/secretRedaction.js";
 
 // ---------------------------------------------------------------------------
 // 分类准确性（给证据）
@@ -2487,8 +2495,9 @@ test("DX-ISO-3: a reason that is not physical_unresolved never grows the suffix"
 // TD-373: the CLI-side isolation fact appends the redacted destination fields
 // for confirmed-outside reasons. Every field is untrusted transcript text on
 // this side: wrong types are ignored, control characters are escaped again and
-// the value is bounded again. MCP run_diagnose keeps projecting event types
-// only (its separate surface is pinned in mcpRunDiagnose.test.js).
+// the value is bounded again. 第 141b 批：MCP run_diagnose 另带同一份清理结果的
+// 机读对象 isolationViolation（见 DX-ISO-8..12 与 mcpRunDiagnose.test.js 的
+// 141b-ISO-*）；diagnoseFailure 本身的返回形状不变。
 test("DX-ISO-4: outside reasons append destination + worker-reported path + resolved path + escapedAt", () => {
   const d = diagnoseIsolationViolation({
     reason: "file_written_physical_outside",
@@ -2560,4 +2569,161 @@ test("DX-ISO-7: escapedAt is displayed only for a physical-outside reason", () =
   });
   assert.ok(!lexical.evidence[0].fact.includes("escaped at:"), "lexical reasons never display escapedAt");
   assert.ok(!lexical.evidence[0].fact.includes("forged-level"), "the field is not echoed either");
+});
+
+// 第 141b 批：机读面。文字证据（上面 DX-ISO-4..7）与 isolationViolation 读同一份清理，
+// 下面逐条钉住清理本身与绑定规则。
+
+test("DX-ISO-8: projectIsolationViolation admits closed-set reason/destination only, sanitizes paths, gates escapedAt", () => {
+  const full = {
+    reason: "file_written_physical_outside", destination: "other_worktree",
+    reportedPath: "a/b.js", resolvedPath: "C:\\o\\b.js", escapedAt: "a",
+    errorCode: "EBUSY", eventKind: "file_written", unrelatedField: "x", // 不是五个字段之一 → 丢弃
+  };
+  assert.deepEqual(projectIsolationViolation(full), {
+    reason: "file_written_physical_outside", destination: "other_worktree",
+    reportedPath: "a/b.js", resolvedPath: "C:\\o\\b.js", escapedAt: "a",
+  });
+  // 每个闭集成员原样放行；闭集外（含大小写、空白、原型键）一律不回显。
+  for (const reason of ISOLATION_VIOLATION_REASONS) {
+    assert.equal(projectIsolationViolation({ reason }).reason, reason);
+  }
+  // 目的地与路径只在越界类原因下放行（第 141 批会审：按原因放行，见 DX-ISO-13）。
+  for (const destination of ISOLATION_DESTINATIONS) {
+    assert.equal(projectIsolationViolation({ reason: "file_written_lexical_outside", destination }).destination, destination);
+  }
+  for (const bad of ["Temp", "temp ", "", "toString", "__proto__", "constructor", 5, null, ["temp"], {}]) {
+    assert.equal(projectIsolationViolation({ destination: bad }), null, `destination ${JSON.stringify(bad)}`);
+    assert.equal(projectIsolationViolation({ reason: bad }), null, `reason ${JSON.stringify(bad)}`);
+    assert.equal(
+      Object.hasOwn(projectIsolationViolation({ reason: "file_written_lexical_outside", destination: bad }), "destination"),
+      false,
+      `越界原因下的闭集外 destination ${JSON.stringify(bad)} 也不回显`,
+    );
+  }
+  // 路径字段：非字符串与空串不回显；控制字符转义；统一限长。
+  for (const bad of [undefined, null, 0, false, {}, [], ""]) {
+    assert.equal(projectIsolationViolation({ reportedPath: bad, resolvedPath: bad }), null);
+    assert.deepEqual(projectIsolationViolation({ reason: "file_written_lexical_outside", reportedPath: bad, resolvedPath: bad }), { reason: "file_written_lexical_outside" });
+  }
+  const clean = projectIsolationViolation({
+    reason: "file_written_lexical_outside",
+    reportedPath: "x\u0007\n\u0085",
+    resolvedPath: "y".repeat(ISOLATION_DISPLAY_PATH_MAX_CHARS + 50),
+  });
+  assert.equal(clean.reportedPath, "x\\u0007\\n\\u0085");
+  assert.equal(clean.resolvedPath.length, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+  // 清理幂等：服务层与 MCP 边界各过一次不会二次改写。
+  assert.deepEqual(projectIsolationViolation(clean), clean);
+  assert.deepEqual(projectIsolationViolation(projectIsolationViolation(full)), projectIsolationViolation(full));
+  // 非对象输入与没有任何可信字段 → null。
+  for (const bad of [undefined, null, "s", 7, true, [], [{ reason: "file_written_physical_outside" }], {}]) {
+    assert.equal(projectIsolationViolation(bad), null, `input ${JSON.stringify(bad)}`);
+  }
+});
+
+test("DX-ISO-9: escapedAt needs a CLOSED-SET reason ending _physical_outside (a lookalike or absent reason never unlocks it)", () => {
+  for (const reason of ISOLATION_VIOLATION_REASONS) {
+    const p = projectIsolationViolation({ reason, escapedAt: "lvl" });
+    assert.equal(Object.hasOwn(p, "escapedAt"), reason.endsWith("_physical_outside"), reason);
+  }
+  for (const reason of ["future_physical_outside", "_physical_outside", "x_physical_outside ", undefined, null, 3]) {
+    assert.equal(projectIsolationViolation({ reason, escapedAt: "lvl" }), null, `reason ${JSON.stringify(reason)}`);
+  }
+});
+
+test("DX-ISO-13: destination 与两个路径字段按原因放行——只有闭集内 *_lexical_outside / *_physical_outside；其余原因（含缺失、未知、unresolved）一个都不给", () => {
+  const paths = { destination: "temp", reportedPath: "a/b.js", resolvedPath: "C:\\o\\b.js", escapedAt: "a" };
+  for (const reason of ISOLATION_VIOLATION_REASONS) {
+    const p = projectIsolationViolation({ reason, ...paths });
+    if (/_(lexical|physical)_outside$/.test(reason)) {
+      assert.equal(p.destination, "temp", reason);
+      assert.equal(p.reportedPath, "a/b.js", reason);
+      assert.equal(p.resolvedPath, "C:\\o\\b.js", reason);
+    } else {
+      assert.deepEqual(p, { reason }, `${reason}：只给原因本身`);
+    }
+  }
+  for (const reason of [undefined, null, "", "future_physical_outside", "x_lexical_outside", 3, ["file_written_lexical_outside"]]) {
+    assert.equal(projectIsolationViolation({ reason, ...paths }), null, `reason ${JSON.stringify(reason)}：不给任何字段`);
+  }
+  // 文字证据读同一份结果：unresolved 原因不再引用路径。
+  const fact = diagnoseFailure([isoEvent({ reason: "file_written_physical_unresolved", ...paths })], "run_iso_bind").evidence[0].fact;
+  assert.ok(!fact.includes("a/b.js") && !fact.includes("destination:"), fact);
+});
+
+test("DX-ISO-14: 读侧显示脱敏与写入侧同一条——精确值与形状脱敏在限长之前、主目录换成 ~、用户名段守卫、双向控制符转义、末次限长", () => {
+  const home = join(tmpdir(), "wao-alice-home");
+  const opts = { env: { PROBE_API_KEY: "placeholder-exact-value-0001" }, homeDir: home };
+  const exact = opts.env.PROBE_API_KEY;
+  const shape = "sk-placeholder0123456789";
+  const outside = (fields) => projectIsolationViolation({ reason: "file_written_lexical_outside", ...fields }, opts);
+
+  // 主目录前缀换成 ~（原样出现的主目录就是泄漏）。
+  const underHome = outside({ reportedPath: join(home, "Documents", "report.txt") });
+  assert.equal(underHome.reportedPath, ["~", "Documents", "report.txt"].join(sep));
+  assert.ok(!underHome.reportedPath.includes("wao-alice-home"));
+  // 用户名出现在主目录前缀之外：整个字段不给；其余字段照常。
+  const guarded = outside({ reportedPath: "ok.txt", resolvedPath: `D:\\backup\\wao-alice-home\\x.txt` });
+  assert.deepEqual(guarded, { reason: "file_written_lexical_outside", reportedPath: "ok.txt" });
+  // 精确值与形状秘密脱敏；先脱敏后限长：跨在截断点上的秘密不留半截。
+  const secret = outside({ reportedPath: `${shape} ${exact}` }).reportedPath;
+  assert.ok(!secret.includes(exact) && !secret.includes(shape), secret);
+  const pad = "p".repeat(ISOLATION_DISPLAY_PATH_MAX_CHARS - 6);
+  const straddleExact = outside({ reportedPath: `${pad} ${exact}` }).reportedPath;
+  assert.ok(!straddleExact.includes(exact.slice(0, 5)), `精确值跨截断点：${straddleExact.slice(-20)}`);
+  const straddleShape = outside({ reportedPath: `${pad} ${shape}` }).reportedPath;
+  assert.ok(!/sk-/.test(straddleShape), `形状秘密跨截断点：${straddleShape.slice(-20)}`);
+  assert.ok(straddleExact.length <= ISOLATION_DISPLAY_PATH_MAX_CHARS && straddleShape.length <= ISOLATION_DISPLAY_PATH_MAX_CHARS);
+  // 双向格式控制符：U+202A–U+202E、U+2066–U+2069、U+200E、U+200F 一个都不留，变成可见转义。
+  const bidiChars = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069", "\u200e", "\u200f"];
+  const bidi = outside({ reportedPath: `a${bidiChars.join("")}b` }).reportedPath;
+  for (const ch of bidiChars) assert.ok(!bidi.includes(ch), `U+${ch.codePointAt(0).toString(16)}`);
+  assert.equal(bidi, "a\\u202a\\u202b\\u202c\\u202d\\u202e\\u2066\\u2067\\u2068\\u2069\\u200e\\u200fb");
+  // 幂等；主目录不明（读不出）→ 路径字段整个不给（证明不了脱敏）。
+  assert.deepEqual(projectIsolationViolation(underHome, opts), underHome);
+  assert.deepEqual(projectIsolationViolation({ reason: "file_written_lexical_outside", reportedPath: "ok.txt" }, { env: {}, homeDir: null }), { reason: "file_written_lexical_outside" });
+  // 共享函数本身：非字符串、空串、缺 redact 或主目录 → null。
+  const redact = createSecretRedactor(opts.env).redactString;
+  for (const bad of [undefined, null, 5, "", {}]) assert.equal(isolationDisplayPath(bad, redact, home), null);
+  assert.equal(isolationDisplayPath("x", null, home), null);
+  assert.equal(isolationDisplayPath("x", redact, null), null);
+  assert.equal(isolationDisplayPath("x", redact, home), "x");
+});
+
+function isoEvent(extra = {}, runId = "run_iso_bind") {
+  return { type: "run.isolation_violation", runId, code: "workdir_escape", eventKind: "file_written", ...extra };
+}
+
+test("DX-ISO-10: isolationViolationDetail binds to the requested runId and the safe code (same predicate as the diagnosis)", () => {
+  const runId = "run_iso_bind";
+  const physical = { reason: "file_written_physical_outside", destination: "temp", reportedPath: "p", resolvedPath: "q", escapedAt: "p" };
+  const events = [
+    isoEvent({ reason: "file_written_lexical_outside", reportedPath: "OTHER_RUN" }, "run_other"),
+    isoEvent(physical),
+  ];
+  assert.deepEqual(isolationViolationDetail(events, runId), physical, "取绑定本 runId 的那条，外 run 的伪事件不抢");
+  assert.equal(diagnoseFailure(events, runId).category, "workdir_escape", "与诊断判定同一条");
+  // 没有合法 expectedRunId → 不读（与内核"不绑定就不消费"同向）。
+  for (const bad of [undefined, null, "", 5]) assert.equal(isolationViolationDetail(events, bad), null);
+  // 事件码不是安全码 / runId 不匹配 / 只有外 run 事件 / 非数组输入 → null，且诊断也不判越界。
+  const wrongCode = [isoEvent({ ...physical, code: "other" })];
+  const onlyOther = [isoEvent(physical, "run_other")];
+  assert.equal(isolationViolationDetail(wrongCode, runId), null);
+  assert.equal(isolationViolationDetail(onlyOther, runId), null);
+  assert.equal(isolationViolationDetail(null, runId), null);
+  assert.notEqual(diagnoseFailure(wrongCode, runId).category, "workdir_escape");
+  assert.notEqual(diagnoseFailure(onlyOther, runId).category, "workdir_escape");
+});
+
+test("DX-ISO-11: historical / reason-less events carry no trustworthy fields → null (category stays workdir_escape)", () => {
+  const events = [isoEvent({})];
+  assert.equal(diagnoseFailure(events, "run_iso_bind").category, "workdir_escape");
+  assert.equal(isolationViolationDetail(events, "run_iso_bind"), null);
+});
+
+test("DX-ISO-12: diagnoseFailure keeps its return shape — no isolationViolation key (CLI `wao run` embeds this object byte-for-byte)", () => {
+  const d = diagnoseFailure([isoEvent({ reason: "file_written_physical_outside", destination: "temp", reportedPath: "p", escapedAt: "p" })], "run_iso_bind");
+  assert.equal(d.category, "workdir_escape");
+  assert.deepEqual(Object.keys(d).sort(), ["category", "code", "evidence"]);
 });

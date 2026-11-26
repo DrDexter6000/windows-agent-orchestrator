@@ -166,6 +166,10 @@ const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
   // 之后追加；kept 载荷 uniqueCommits/reason 闭集，分支名回链 wao/<runId> 约定）。
   "run.worktree_branch_recycled": "worktree_branch_recycled",
   "run.worktree_branch_kept": "worktree_branch_kept",
+  // 第 141b 批：隔离违规事实此前落 [unknown_event]。只补固定标签——路径、目的地、
+  // 逃出层级等细节绝不进活动页（信封条目只有 category/ts/seq/kind 四键），由
+  // run_diagnose 的 isolationViolation 给。
+  "run.isolation_violation": "isolation_violation",
 });
 export const ENVELOPE_ACTIVITY_LABELS = Object.freeze(Object.values(ENVELOPE_TYPE_TO_LABEL));
 
@@ -508,6 +512,31 @@ export function tailOfRedactedText(text, redactor, maxChars) {
   const first = safe.charCodeAt(start);
   if (first >= 0xDC00 && first <= 0xDFFF) start += 1; // 不从代理对的后半个开始
   return { tail: safe.slice(start), truncated: true };
+}
+
+/**
+ * 同一条安全管道的取头形态（第 141 批：Owner 看板的任务书、调研答复与诊断文本）：
+ * exact-secret 脱敏 → 形状脱敏 → 控制字符清洗（LF/TAB 保留）→ 取开头限长（不切开
+ * 代理对）。顺序与 tailOfRedactedText 相同，只有取窗方向不同：脱敏作用在完整原文上，
+ * 然后才取头。totalChars = 清洗后的全文长度（UTF-16 码元），truncated 时调用方据此写明
+ * "截在哪里"。
+ *
+ * 可选的 foldPaths（文本 → 文本）在两层脱敏之后、控制字符清洗与取头之前作用在完整文本上
+ * ——Owner 看板用它把绝对路径折成末段（读模型标题已在用的 foldAbsolutePaths）：路径要在截断之前
+ * 折，否则帽里会留下盘符或目录。
+ *
+ * @param {string} text 完整原始文本
+ * @param {object} redactor createSecretRedactor() 实例
+ * @param {number} maxChars 开头字符上限
+ * @param {((text: string) => string)|null} [foldPaths]
+ * @returns {{text: string, truncated: boolean, totalChars: number}}
+ */
+export function headOfRedactedText(text, redactor, maxChars, foldPaths = null) {
+  if (typeof text !== "string" || text.length === 0) return { text: "", truncated: false, totalChars: 0 };
+  const redacted = redactSecretShapes(redactor.redactString(text));
+  const safe = sanitizeControls(foldPaths === null ? redacted : foldPaths(redacted));
+  if (safe.length <= maxChars) return { text: safe, truncated: false, totalChars: safe.length };
+  return { text: safeSliceUtf16(safe, 0, maxChars), truncated: true, totalChars: safe.length };
 }
 
 // 工具输出里可展示的文本（决定 0073）：字符串原样；文本块数组按序拼接——平铺的

@@ -42,7 +42,7 @@ Output:
 
 ## run_dispatch
 
-Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
+Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. taskType:"image" marks an image-generation task for the Owner dashboard's grouping; it does not affect dispatch. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -65,6 +65,7 @@ Input:
 | executionProfileId | string | no |  |
 | model | string | no |  |
 | reasoning | string | no | enum: minimal \| low \| medium \| high \| xhigh \| max |
+| taskType | string | no | enum: image |
 
 Output:
 
@@ -315,6 +316,7 @@ Output:
 | signalEventTypes | array<string> | yes |  |
 | signalCount | integer | yes |  |
 | signalsTruncated | boolean | yes |  |
+| isolationViolation | object | no |  |
 | availableDrilldowns | array<object> | yes |  |
 | semanticNotes | array<object> | yes |  |
 

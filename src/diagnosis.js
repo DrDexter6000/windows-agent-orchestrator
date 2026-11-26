@@ -68,10 +68,14 @@
 //
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
+
 import { findState, TERMINAL_STATES, STATE_CHANGE_REASON, PROCESS_MISSING_CONFIRMED_TYPE } from "./transcript.js";
 import { boundReportScope } from "./metrics.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { isObservedVitalSign } from "./runEvent.js";
+import { createSecretRedactor, redactSecretShapes } from "./secretRedaction.js";
 import { escapeControlChars, safeSliceUtf16 } from "./safeText.js";
 import { PROVIDER_SESSION_NOT_FOUND_ERROR } from "./backends/parsers/claudeCode.js";
 
@@ -303,34 +307,239 @@ function factForIsolationViolation(reason, errorCode, event = {}) {
     fact = `${fact} (filesystem error code: ${errorCode})`;
   }
   if (knownReason && (reason.endsWith("_lexical_outside") || reason.endsWith("_physical_outside"))) {
-    const detail = isolationOutsideDetail(event, { physical: reason.endsWith("_physical_outside") });
+    const detail = isolationOutsideDetail(event);
     if (detail.length > 0) fact = `${fact} (${detail.join("; ")})`;
   }
   return fact;
 }
 
-// Display-side re-sanitization for the TD-373 outside-write fields: escape
-// control characters again, bound again to the same shared limit, and never
-// echo a non-string. The persisted values were already redacted; this is the
-// read-side "untrusted text" pass.
-function isolationDisplayText(value) {
-  if (typeof value !== "string" || value.length === 0) return null;
-  return safeSliceUtf16(escapeControlChars(value), 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+// ===== TD-373: redacted display form for the outside-write fields ===============
+//
+// ONE function for reportedPath / resolvedPath / escapedAt, shared by the write
+// side (runManager persists with it) and the read side (projectIsolationViolation
+// re-runs it on whatever the transcript holds: persisted text is UNTRUSTED here),
+// in this order:
+//   1. redact (exact values) → redactSecretShapes (shapes)
+//   2. user-home prefix → "~" after a comparison normalization: separators
+//      unified, `\\?\` / `\\?\UNC\` stripped, `.` segments removed; native,
+//      mixed-separator and MSYS drive forms all match. Only a LEADING home
+//      prefix is replaced.
+//   2b. Username leak guard: after normalization/home replacement, if the
+//      home's last path segment (the user name) still appears as a complete
+//      path segment anywhere (case-insensitive; Win32 trailing dots/spaces
+//      folded), the WHOLE field is omitted — we cannot prove the redaction.
+//   3. control characters escaped (the repository's shared escapeControlChars)
+//      plus the Unicode bidirectional formatting controls (they reorder how a
+//      path is DISPLAYED, so a spoofed path could read as another one)
+//   4. UTF-16-safe slice to the shared limit (the repository's safeSliceUtf16)
+//   5. redact + redactSecretShapes again on the final string
+//   6. UTF-16-safe slice AGAIN after the final redaction (markers added in step
+//      5 may lengthen the string past the limit).
+// The function is idempotent: an already processed value passes through unchanged.
+function _normalizeHomeCompareParts(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
+  let normalized = text;
+  if (process.platform === "win32") {
+    // MSYS drive form (/c/Users/...) before unifying separators.
+    normalized = normalized.replace(/^\/([A-Za-z])(?=\/|$)/, (match, drive) => `${drive.toUpperCase()}:`);
+    normalized = normalized.replaceAll("/", "\\");
+  }
+  normalized = normalized.replace(/^\\\\\?\\UNC\\/i, "\\\\");
+  normalized = normalized.replace(/^\\\\\?\\/i, "");
+  return normalized
+    .split(/[\\/]+/)
+    .filter((part) => part.length > 0 && part !== ".");
 }
 
-function isolationOutsideDetail(event, { physical = false } = {}) {
-  if (!event || typeof event !== "object" || Array.isArray(event)) return [];
-  const out = [];
-  if (typeof event.destination === "string" && ISOLATION_DESTINATIONS.includes(event.destination)) {
-    out.push(`destination: ${event.destination}`);
+function _homeCompareParts(homeDir) {
+  return _normalizeHomeCompareParts(resolve(homeDir));
+}
+
+function _partsStartWith(parts, prefix) {
+  if (!Array.isArray(parts) || !Array.isArray(prefix) || prefix.length === 0) return false;
+  if (parts.length < prefix.length) return false;
+  const insensitive = process.platform === "win32";
+  for (let index = 0; index < prefix.length; index += 1) {
+    const left = insensitive ? parts[index].toLowerCase() : parts[index];
+    const right = insensitive ? prefix[index].toLowerCase() : prefix[index];
+    if (left !== right) return false;
   }
-  const reportedPath = isolationDisplayText(event.reportedPath);
-  if (reportedPath !== null) out.push(`worker-reported path: ${reportedPath}`);
-  const resolvedPath = isolationDisplayText(event.resolvedPath);
-  if (resolvedPath !== null) out.push(`resolved path: ${resolvedPath}`);
-  const escapedAt = physical ? isolationDisplayText(event.escapedAt) : null;
-  if (escapedAt !== null) out.push(`escaped at: ${escapedAt}`);
+  return true;
+}
+
+function _replaceHomePrefix(text, homeDir) {
+  if (typeof text !== "string" || typeof homeDir !== "string") return text;
+  const homeParts = _homeCompareParts(homeDir);
+  const parts = _normalizeHomeCompareParts(text);
+  if (!_partsStartWith(parts, homeParts)) return text;
+  const rest = parts.slice(homeParts.length).join(sep);
+  return rest.length > 0 ? `~${sep}${rest}` : "~";
+}
+
+// Win32 name identity for the user-name guard: an ADS/stream suffix starts at
+// the first colon (`Alice::$INDEX_ALLOCATION` is the Alice directory), and
+// trailing dots/spaces are ignored by the OS (`Alice.` is `Alice`).
+function _segmentIdentity(segment) {
+  const colon = segment.indexOf(":");
+  const baseName = colon >= 0 ? segment.slice(0, colon) : segment;
+  return baseName.replace(/[ .]+$/, "");
+}
+
+function _containsHomeUserNameSegment(text, homeDir) {
+  if (typeof text !== "string" || typeof homeDir !== "string") return false;
+  const homeParts = _homeCompareParts(homeDir);
+  const userName = homeParts.at(-1);
+  // A drive-root home (`C:\`) has no meaningful user segment; never let `C:`
+  // cause every path on that drive to be omitted.
+  if (typeof userName !== "string" || userName.length === 0 || /^[A-Za-z]:$/.test(userName)) return false;
+  const wanted = userName.toLowerCase();
+  return _normalizeHomeCompareParts(text).some((part) => {
+    if (part === "." || part === "..") return false;
+    return _segmentIdentity(part).toLowerCase() === wanted;
+  });
+}
+
+// Unicode bidirectional formatting controls: U+202A–U+202E, U+2066–U+2069, U+200E, U+200F.
+const BIDI_CONTROL_RE = /[\u202a-\u202e\u2066-\u2069\u200e\u200f]/g;
+
+function _escapeDisplayControls(text) {
+  return escapeControlChars(text).replace(
+    BIDI_CONTROL_RE,
+    (ch) => `\\u${ch.codePointAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+function _finishIsolationDisplayPath(prepared, redact, homeDir) {
+  const homeReplaced = _replaceHomePrefix(prepared, homeDir);
+  // The user-name guard runs on the already normalized/replaced value: if an
+  // equivalent spelling still exposes the user name as a whole segment, the
+  // caller omits the field entirely.
+  if (_containsHomeUserNameSegment(homeReplaced, homeDir)) return null;
+  const controlsEscaped = _escapeDisplayControls(homeReplaced);
+  const bounded = safeSliceUtf16(controlsEscaped, 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+  const redactedAgain = redactSecretShapes(redact(bounded));
+  const finalText = safeSliceUtf16(redactedAgain, 0, ISOLATION_DISPLAY_PATH_MAX_CHARS);
+  // Re-run the guard on the FINAL text: control-character escaping can turn a
+  // raw `Alice<TAB>` segment into `Alice\t`, and the escape backslash then acts
+  // as a path separator for the segment check, making the user name a complete
+  // segment in the persisted text. Same for markers added by the final
+  // redaction pass.
+  if (_containsHomeUserNameSegment(finalText, homeDir)) return null;
+  return finalText;
+}
+
+/**
+ * The redacted display form of one outside-write path field (see the block
+ * comment above). Returns null for a non-string, an empty string, or when the
+ * user-name guard cannot prove the redaction (the caller omits the field).
+ *
+ * @param {unknown} rawText
+ * @param {(text: string) => string} redact — exact-value redaction (a redactor's redactString)
+ * @param {string|null} homeDir — the user home directory; null/unknown → null (fail closed)
+ * @returns {string|null}
+ */
+export function isolationDisplayPath(rawText, redact, homeDir) {
+  if (typeof rawText !== "string" || rawText.length === 0) return null;
+  if (typeof redact !== "function" || typeof homeDir !== "string" || homeDir.length === 0) return null;
+  const prepared = redactSecretShapes(redact(rawText));
+  return _finishIsolationDisplayPath(prepared, redact, homeDir);
+}
+
+function _safeHomedir() {
+  try {
+    const home = homedir();
+    return typeof home === "string" && home.length > 0 ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 第 141b 批：隔离违规的机读面（MCP run_diagnose 的 `isolationViolation`）。
+ * 输入是一条 run.isolation_violation 事件，或服务层给出的同名五字段对象——读侧
+ * 一律当不可信文本，逐字段过同一道清理：
+ *   - reason、destination 只认闭集成员（ISOLATION_VIOLATION_REASONS /
+ *     ISOLATION_DESTINATIONS），闭集外与非字符串不回显；
+ *   - destination 与两个路径字段只在（闭集内的）reason 以 `_lexical_outside` 或
+ *     `_physical_outside` 结尾时给——写入侧也只在这两类原因下记录它们；缺失、未知、
+ *     相关性失败、物理位置无法确认（`*_physical_unresolved`）的原因说不清"是否越界"，
+ *     带着路径出去会被读成已确认越界；
+ *   - escapedAt 再收窄一级：只在 reason 以 `_physical_outside` 结尾时给——词法越界
+ *     没有"逃出的那一级"；
+ *   - reportedPath、resolvedPath、escapedAt 读侧一律当不可信文本，过写入侧同一条显示
+ *     脱敏（isolationDisplayPath）：精确值与形状脱敏、主目录换成 ~、用户名段守卫
+ *     （证明不了就整字段不给）、控制字符与 Unicode 双向格式控制符转义、末次限长；
+ *     非字符串与空串不回显。精确值取 options.env（缺省 process.env）。
+ * 一个可信字段都没有 → null（调用方不带这个键）；其余键一律丢弃。清理幂等：
+ * 已处理的值再过一遍不变，所以服务层与 MCP 边界各过一次无副作用。文字证据
+ * （factForIsolationViolation）读同一份结果，两个面不会各清各的。
+ *
+ * @param {unknown} raw
+ * @param {{env?: object, homeDir?: string|null}} [options]
+ * @returns {{reason?: string, destination?: string, reportedPath?: string, resolvedPath?: string, escapedAt?: string}|null}
+ */
+export function projectIsolationViolation(raw, { env = process.env, homeDir = _safeHomedir() } = {}) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out = {};
+  const reason = typeof raw.reason === "string" && ISOLATION_VIOLATION_REASONS.includes(raw.reason)
+    ? raw.reason
+    : null;
+  if (reason !== null) out.reason = reason;
+  const outside = reason !== null && (reason.endsWith("_lexical_outside") || reason.endsWith("_physical_outside"));
+  if (!outside) return Object.keys(out).length > 0 ? out : null;
+  if (typeof raw.destination === "string" && ISOLATION_DESTINATIONS.includes(raw.destination)) {
+    out.destination = raw.destination;
+  }
+  const { redactString } = createSecretRedactor(env);
+  const display = (value) => isolationDisplayPath(value, redactString, homeDir);
+  const reportedPath = display(raw.reportedPath);
+  if (reportedPath !== null) out.reportedPath = reportedPath;
+  const resolvedPath = display(raw.resolvedPath);
+  if (resolvedPath !== null) out.resolvedPath = resolvedPath;
+  const escapedAt = reason.endsWith("_physical_outside") ? display(raw.escapedAt) : null;
+  if (escapedAt !== null) out.escapedAt = escapedAt;
   return out;
+}
+
+// 文字证据：同一份清理结果按固定顺序拼成 "key: value" 片段。
+function isolationOutsideDetail(event) {
+  const p = projectIsolationViolation(event) ?? {};
+  const out = [];
+  if (p.destination !== undefined) out.push(`destination: ${p.destination}`);
+  if (p.reportedPath !== undefined) out.push(`worker-reported path: ${p.reportedPath}`);
+  if (p.resolvedPath !== undefined) out.push(`resolved path: ${p.resolvedPath}`);
+  if (p.escapedAt !== undefined) out.push(`escaped at: ${p.escapedAt}`);
+  return out;
+}
+
+// 内核判定"这条运行越界"的唯一谓词：事件类型、绑定本 runId、安全码 workdir_escape。
+// diagnoseFailureInner 与 isolationViolationDetail 共用，两处永不各自判定。
+function findBoundIsolationViolation(evs, expectedRunId) {
+  return evs.find(
+    (e) => e.type === "run.isolation_violation"
+      && e.runId === expectedRunId
+      && e.code === "workdir_escape",
+  );
+}
+
+/**
+ * 第 141b 批：与 diagnoseFailure 判为 workdir_escape 同一条绑定事件的机读事实
+ * （同一 runId 绑定与 boundReportScope 读法，见 diagnoseFailureInner）。没有合法
+ * expectedRunId、没有绑定本 runId 的 workdir_escape 事件、或事件上没有可信字段 → null。
+ * 只供 MCP run_diagnose 的 `isolationViolation`；diagnoseFailure 的返回形状不变
+ * （`wao run` 失败输出里嵌的 diagnosis 对象逐字节不变）。
+ *
+ * @param {Array} events
+ * @param {string} [expectedRunId]
+ * @param {{env?: object, homeDir?: string|null}} [options] — 同 projectIsolationViolation
+ * @returns {ReturnType<typeof projectIsolationViolation>}
+ */
+export function isolationViolationDetail(events, expectedRunId, options) {
+  if (typeof expectedRunId !== "string" || expectedRunId.length === 0) return null;
+  const raw = Array.isArray(events) ? events : [];
+  const evs = boundReportScope(raw, expectedRunId) ?? raw;
+  const event = findBoundIsolationViolation(evs, expectedRunId);
+  return event ? projectIsolationViolation(event, options) : null;
 }
 
 // Provider access denial facts that classify as provider_auth even when they
@@ -761,11 +970,7 @@ function diagnoseFailureInner(events, expectedRunId) {
   // unknown value is NOT this diagnosis — the safe-code check keeps the signal
   // type-bound, matching the readiness projection's safe closed set.
   const isolationViolation = hasValidExpectedRunId
-    ? evs.find(
-      (e) => e.type === "run.isolation_violation"
-        && e.runId === expectedRunId
-        && e.code === "workdir_escape",
-    )
+    ? findBoundIsolationViolation(evs, expectedRunId)
     : undefined;
   if (isolationViolation) {
     // M12-14: the fact wording is reason-aware. Only an exact closed-set

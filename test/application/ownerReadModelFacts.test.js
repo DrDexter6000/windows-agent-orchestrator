@@ -1940,10 +1940,11 @@ test("会审：Q1 两席一致、分裂、一席缺结论、一席转录读不�
       createdAt: iso(NOW - 3000),
       reviewedRunId: null,
       q1Declared: true,
+      declaredFields: { Q1: [...OWNER_CONSULT_Q1_VALUES] },
       seats: [
-        { agentId: "seat_a1", runId: "run_seat_a1", runState: "completed", q1: "PASS" },
-        { agentId: "seat_b1", runId: "run_seat_b1", runState: "completed", q1: "PASS" },
-        { agentId: "seat_c1", runId: "run_seat_c1", runState: "completed", q1: "PASS" },
+        { agentId: "seat_a1", runId: "run_seat_a1", runState: "completed", q1: "PASS", replied: true },
+        { agentId: "seat_b1", runId: "run_seat_b1", runState: "completed", q1: "PASS", replied: true },
+        { agentId: "seat_c1", runId: "run_seat_c1", runState: "completed", q1: "PASS", replied: true },
       ],
     }, "标题形、裸编号形、加粗形三种写法都取到；只给结论值，不给一致 / 分歧这类结论词");
     assert.deepEqual(consultOf(snap, "consult_20261124120000002bbbbbb").seats.map((x) => x.q1), ["PASS", "FIX_FIRST"], "分裂：各给各的值");
@@ -1951,14 +1952,14 @@ test("会审：Q1 两席一致、分裂、一席缺结论、一席转录读不�
     const broken = consultOf(snap, "consult_20261124120000004dddddd");
     assert.equal(broken.reviewedRunId, "run_under_review");
     assert.deepEqual(broken.seats, [
-      { agentId: "seat_a4", runId: "run_seat_a4", runState: "completed", q1: "PASS" },
-      { agentId: "seat_b4", runId: "run_seat_b4", runState: "missing", q1: null }, // 转录读不出
-      { agentId: "seat_c4", runId: "run_seat_c9", runState: "missing", q1: null }, // 本运行目录里没有
-      { agentId: "seat_d4", runId: "run_seat_d4", runState: "running", q1: "FIX_FIRST" }, // 还在跑：给当下的观察
+      { agentId: "seat_a4", runId: "run_seat_a4", runState: "completed", q1: "PASS", replied: true },
+      { agentId: "seat_b4", runId: "run_seat_b4", runState: "missing", q1: null, replied: null }, // 转录读不出：有没有答复说不清
+      { agentId: "seat_c4", runId: "run_seat_c9", runState: "missing", q1: null, replied: null }, // 本运行目录里没有
+      { agentId: "seat_d4", runId: "run_seat_d4", runState: "running", q1: "FIX_FIRST", replied: true }, // 还在跑：给当下的观察
     ]);
     assert.deepEqual(consultOf(snap, "consult_20261124120000000eeeeee"), {
       consultId: "consult_20261124120000000eeeeee", projectSlug: s.alpha.slug, createdAt: null, reviewedRunId: null,
-      q1Declared: true, seats: [],
+      q1Declared: true, declaredFields: { Q1: [...OWNER_CONSULT_Q1_VALUES] }, seats: [],
     }, "时间读不出如实为 null");
 
     const text = JSON.stringify(snap);
@@ -1971,6 +1972,32 @@ test("会审：Q1 两席一致、分裂、一席缺结论、一席转录读不�
   }
 });
 
+test("会审：declaredFields 进快照——只留 Qn 键下的非空字符串候选、保持声明顺序与原样（多行候选也原样）；超出上界或没有声明 → null", async () => {
+  const s = makeConsultStore();
+  try {
+    const dir = s.consultsDir;
+    const decl = (consultId, declaredFields) => writeConsult(dir, consultId, { declaredFields, seats: [] });
+    decl("consult_20261124140000001aaaaaa", { Q2: ["第一行\n第二行", "B", "", 7], Q1: ["PASS"], other: ["x"], Q3: [], Q4: "nope" });
+    decl("consult_20261124140000002bbbbbb", undefined);
+    decl("consult_20261124140000003cccccc", { Q1: ["x".repeat(1025)] });
+    decl("consult_20261124140000004dddddd", { Q1: Array.from({ length: 65 }, (_, i) => `v${i}`) });
+    decl("consult_20261124140000005eeeeee", Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`Q${i + 1}`, ["a"]])));
+    decl("consult_20261124140000006ffffff", { Q1: ["x".repeat(1024)] });
+    const model = createOwnerReadModel({ runDir: s.runDir });
+    await model.refresh();
+    const snap = model.snapshot({ now: NOW });
+    const of = (id) => consultOf(snap, id).declaredFields;
+    assert.deepEqual(of("consult_20261124140000001aaaaaa"), { Q2: ["第一行\n第二行", "B"], Q1: ["PASS"] }, "非 Qn 键、空候选、非字符串候选都丢；顺序与换行原样");
+    assert.deepEqual(Object.keys(of("consult_20261124140000001aaaaaa")), ["Q2", "Q1"], "声明顺序保持（后缀的行序由它决定）");
+    assert.equal(of("consult_20261124140000002bbbbbb"), null, "没有声明");
+    assert.equal(of("consult_20261124140000003cccccc"), null, "候选超 1024 字符：不留（读侧据此重建的后缀对不上，任务书保留全文）");
+    assert.equal(of("consult_20261124140000004dddddd"), null, "一个键下候选超 64 个");
+    assert.equal(of("consult_20261124140000005eeeeee"), null, "声明键超 32 个");
+    assert.deepEqual(of("consult_20261124140000006ffffff"), { Q1: ["x".repeat(1024)] }, "恰好等于上界：留");
+  } finally {
+    s.cleanup();
+  }
+});
 test("会审：记录没声明 Q1 → 不算；Q1 声明的是别的候选值 → 不是结论题；派发未成立的席位如实给", async () => {
   const s = makeConsultStore();
   try {
@@ -1997,21 +2024,21 @@ test("会审：记录没声明 Q1 → 不算；Q1 声明的是别的候选值 �
     };
     assert.deepEqual(pick("consult_20261124130000001aaaaaa"), {
       q1Declared: false,
-      seats: [{ agentId: "seat_a1", runId: "run_seat_a1", runState: "completed", q1: null }],
-    }, "没声明 Q1：回复里写了 PASS 也不算");
+      seats: [{ agentId: "seat_a1", runId: "run_seat_a1", runState: "completed", q1: null, replied: true }],
+    }, "没声明 Q1：回复里写了 PASS 也不算（有答复这一项照给）");
     assert.deepEqual(pick("consult_20261124130000002bbbbbb"), {
       q1Declared: false,
-      seats: [{ agentId: "seat_a2", runId: "run_seat_a2", runState: "completed", q1: null }],
+      seats: [{ agentId: "seat_a2", runId: "run_seat_a2", runState: "completed", q1: null, replied: true }],
     }, "只声明了 Q2");
     assert.deepEqual(pick("consult_20261124130000003cccccc"), {
       q1Declared: false,
-      seats: [{ agentId: "seat_a3", runId: "run_seat_a3", runState: "completed", q1: null }],
+      seats: [{ agentId: "seat_a3", runId: "run_seat_a3", runState: "completed", q1: null, replied: true }],
     }, "Q1 声明的是方案字母：取到了也不进快照");
     assert.deepEqual(pick("consult_20261124130000004dddddd"), {
       q1Declared: true,
       seats: [
-        { agentId: "seat_a4", runId: null, runState: "dispatch_failed", q1: null },
-        { agentId: null, runId: "run_seat_x", runState: "completed", q1: null }, // agentId 不合形状：不算这一席
+        { agentId: "seat_a4", runId: null, runState: "dispatch_failed", q1: null, replied: null },
+        { agentId: null, runId: "run_seat_x", runState: "completed", q1: null, replied: null }, // agentId 不合形状：不算这一席
       ],
     });
   } finally {
@@ -2141,8 +2168,8 @@ test("会审：席位回答读失败 → 这一席按 missing 给且不缓存，
     await model.refresh();
     const during = consultOf(model.snapshot({ now: NOW }), "consult_20261124170000001aaaaaa");
     assert.deepEqual(during.seats, [
-      { agentId: "seat_a", runId: "run_seat_a", runState: "completed", q1: "PASS" },
-      { agentId: "seat_b", runId: "run_seat_b", runState: "missing", q1: null }, // 读失败：与 rerenderConsultFromRecord 同口径
+      { agentId: "seat_a", runId: "run_seat_a", runState: "completed", q1: "PASS", replied: true },
+      { agentId: "seat_b", runId: "run_seat_b", runState: "missing", q1: null, replied: null }, // 读失败：与 rerenderConsultFromRecord 同口径
     ], "席位回答读不出 → 这一席 missing，不缓存");
 
     // 文件没变：失败没有缓存，下一轮重读并恢复。
@@ -2389,8 +2416,13 @@ test("快照：返回的会审对象是这次新建的——改返回值不再�
       createdAt: iso(T0),
       reviewedRunId: null,
       q1Declared: true,
-      seats: [{ agentId: "seat_a", runId: "run_seat_a", runState: "completed", q1: "PASS" }],
+      declaredFields: { Q1: [...OWNER_CONSULT_Q1_VALUES] },
+      seats: [{ agentId: "seat_a", runId: "run_seat_a", runState: "completed", q1: "PASS", replied: true }],
     }], "改返回值不污染缓存");
+    // 嵌套的 declaredFields 也是每次新建的：改返回值不污染之后的快照。
+    first.consults[0].declaredFields.Q1.push("INJECTED");
+    first.consults[0].declaredFields.Q9 = ["X"];
+    assert.deepEqual(model.snapshot({ now: NOW }).consults[0].declaredFields, { Q1: [...OWNER_CONSULT_Q1_VALUES] });
     assert.notEqual(second.consults[0], first.consults[0]);
     assert.notEqual(second.consults[0].seats[0], first.consults[0].seats[0]);
   } finally {
@@ -2517,7 +2549,7 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
     });
     const RUN_KEYS = [
       "agentId", "availability", "capacity", "delivery", "deliveryRequested", "failure", "lastEffectAt", "lastProcessActiveAt",
-      "lastVitalAt", "laneId", "legalDecision", "lineageRootConflict", "lineageRootRunId", "supersessionUndeterminable", "liveness",
+      "lastHeartbeatAt", "lastVitalAt", "laneId", "legalDecision", "lineageRootConflict", "lineageRootRunId", "supersessionUndeterminable", "liveness",
       "parentRunId", "project", "quietSince", "readOnly", "retryOf", "roleId", "runId", "stage", "stageSince", "startedAt",
       "state", "supersededByRunId", "taskType", "terminal", "terminalAt", "title", "titleBasis", "typeBasis",
     ].sort();
@@ -2542,8 +2574,8 @@ test("快照无路径：遍历覆盖全部新增字段——项目 key、工作�
       if (run.capacity !== null) assert.deepEqual(Object.keys(run.capacity).sort(), ["code", "observedAt"]);
     }
     for (const consult of snap.consults) {
-      assert.deepEqual(Object.keys(consult).sort(), ["consultId", "createdAt", "projectSlug", "q1Declared", "reviewedRunId", "seats"]);
-      for (const row of consult.seats) assert.deepEqual(Object.keys(row).sort(), ["agentId", "q1", "runId", "runState"]);
+      assert.deepEqual(Object.keys(consult).sort(), ["consultId", "createdAt", "declaredFields", "projectSlug", "q1Declared", "reviewedRunId", "seats"]);
+      for (const row of consult.seats) assert.deepEqual(Object.keys(row).sort(), ["agentId", "q1", "replied", "runId", "runState"]);
     }
 
     const { keys, strings } = collect(snap);

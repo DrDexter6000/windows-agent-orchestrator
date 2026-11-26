@@ -193,6 +193,21 @@ export function ownerLaneKey(run) {
   return agentId !== null && agentId.length > 0 ? agentId : null;
 }
 
+/**
+ * 卡片标题：续修运行（lineageRootRunId 不是自己）用谱系根的标题作主标题、本轮标题作
+ * 副标题；根不在快照里（或根没有标题）就只用本轮标题。Workers 列表与单个 worker 详情
+ * （第 141 批）共用这一份。
+ * @param {object} run — 快照里的运行行
+ * @param {Map<string, object>} runsById — 快照里的运行（按 runId）
+ * @returns {{title: string|null, subtitle: string|null}}
+ */
+export function ownerRunTitles(run, runsById) {
+  const own = text(run.title);
+  const rootId = text(run.lineageRootRunId);
+  const rootTitle = rootId !== null && rootId !== run.runId ? text(runsById.get(rootId)?.title) : null;
+  return { title: rootTitle ?? own, subtitle: rootTitle === null ? null : own };
+}
+
 /** 一条证据：快照还没有事件号，seq 一律 null。 */
 const evidenceOf = (runId, at) => ({ runId, at: text(at), seq: null });
 
@@ -616,14 +631,10 @@ export function selectOwnerWorkers(snapshot, attention, { now, project = null } 
   for (const run of runs) {
     if (project !== null && slugOf(run) !== project) continue;
     if (run.terminal !== false && !flagged.has(run.runId) && !withinWindow(msOf(run.terminalAt), now, OWNER_ATTENTION_WINDOW_MS)) continue;
-    const own = text(run.title);
-    const rootId = text(run.lineageRootRunId);
-    const rootTitle = rootId !== null && rootId !== run.runId ? text(runsById.get(rootId)?.title) : null;
     rows.push({
       run,
       laneKey: ownerLaneKey(run),
-      title: rootTitle ?? own,
-      subtitle: rootTitle === null ? null : own,
+      ...ownerRunTitles(run, runsById),
       attentionIds: [...(attached.get(run.runId) ?? [])],
     });
   }

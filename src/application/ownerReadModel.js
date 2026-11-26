@@ -91,8 +91,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile as fsReadFile, readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { readFile as fsReadFile, readdir as fsReaddir, realpath as fsRealpath, stat as fsStat } from "node:fs/promises";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 
 import {
   listProjectRecords,
@@ -123,7 +123,7 @@ import {
 } from "../diagnosis.js";
 import { PACKAGING_FAILURE_CODES } from "../deliveryFailureCodes.js";
 import { boundReportScope } from "../metrics.js";
-import { redactSecretShapes } from "../secretRedaction.js";
+import { createSecretRedactor, redactSecretShapes } from "../secretRedaction.js";
 import { ID_RE, isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 import {
@@ -228,12 +228,17 @@ function truncateHead(text, maxChars) {
 //   - 段与段之间的分隔符是一个或多个 `\` 或 `/`（贴 JSON 时常见的转义重复分隔符
 //     `D:\\projects\\…`、`/home//secret/…` 按同一个分隔符处理）；
 //   - 不满足就回到旧读法：路径到第一个空白为止（最后一段/文件名也到空白为止）；
-//   - 宁可多折，不可漏目录，但不能越过文件名吞掉后面的句子。
+//   - 宁可多折，不可漏目录，但不能越过文件名吞掉后面的句子；
+//   - 规则只认"开头是盘符、MSYS 盘符（/d/…）、UNC 前缀"的写法，外加行首或空白后的 POSIX 绝对
+//     路径；不按任意斜杠去折（A/B、1/2、and/or、URL、src/a.js 都不是路径）。
 const PATH_SEGMENT_CHAR = "[^\\s\"'<>|，。；：、！？（）【】《》「」“”‘’—…\\\\/]+";
 // 「后面跟着空格的词」的尾部不能像文件名：`.md` / `.jsonl` 之类。
 const WORD_END_NOT_FILENAME = "(?<!\\.[A-Za-z0-9]{1,8})";
-// 目录段：单个词，或至多 3 个以单个空格相连的词（前两个词后面跟空格，不能像文件名）。
-const PATH_DIR_SEGMENT = `(?:${PATH_SEGMENT_CHAR}|${PATH_SEGMENT_CHAR}(?:${WORD_END_NOT_FILENAME}[ ]${PATH_SEGMENT_CHAR}){1,2})`;
+// 目录段：单个词，或至多 3 个以单个空格相连的词（前两个词后面跟空格，不能像文件名）。空格后的
+// 词不能以 `-` 起头（那是命令行旗标）、也不能是另一个盘符路径的开头（`X:\`）：否则
+// `--cwd=/d/p/x --out=C:\tmp\a.json` 会被当成一个带空格的目录。
+const WORD_STARTS_NEW_TOKEN = "(?!-|[A-Za-z]:[\\\\/])";
+const PATH_DIR_SEGMENT = `(?:${PATH_SEGMENT_CHAR}|${PATH_SEGMENT_CHAR}(?:${WORD_END_NOT_FILENAME}[ ]${WORD_STARTS_NEW_TOKEN}${PATH_SEGMENT_CHAR}){1,2})`;
 // 段与段之间是一个或多个 `\` 或 `/`（提示词里贴 JSON 时常见转义重复的分隔符）；
 // 最后一段到空白为止。
 const PATH_TAIL = `(?:${PATH_DIR_SEGMENT}[\\\\/]+)*${PATH_SEGMENT_CHAR}`;
@@ -249,6 +254,16 @@ const UNC_PATH_RE = new RegExp(`(\\\\\\\\${PATH_TAIL})`, "g");
 const POSIX_PREFIX = `(?:^|[\\s(\\[（【{]|(?:^|[\\s(\\[（【{])["'])`;
 const POSIX_PATH_RE = new RegExp(`(${POSIX_PREFIX})(\\/{1,}${PATH_TAIL})`, "g");
 
+// 加引号的完整路径（命令行、JSON 里最常见）：引号后紧跟盘符 / UNC / MSYS 盘符，到**配对的**
+// 收尾引号为止整段是路径——目录里有几个空格、点号、撇号都不用猜（收尾引号后面必须是边界：
+// 行尾、空白、半角或全角标点）。收尾引号找不到就不匹配，回到下面不加引号的规则。
+const QUOTED_PATH_RE = /(^|[^A-Za-z0-9_])(["'])((?:[A-Za-z]:[\\/]+|\\\\|\/[A-Za-z]\/)(?:(?!\2)[^\r\n]){0,1000}?)\2(?=$|[\s,;:)\]}>，。；：、！？）】》」”])/g;
+// 参数值里的 MSYS 盘符路径：`--cwd=/d/projects/x`、`CWD=/d/projects/x`。只认 `--flag=` 与全大写
+// 变量名，且第一段必须是单个字母（盘符）——`?next=/d/x`、`key=value/other` 不折。盘符与 UNC 路径
+// 跟在 `=` 后面本来就能被上面的规则认出（`=` 不是词字符）。
+const FLAG_PREFIX = "(?:--?[A-Za-z][A-Za-z0-9_.-]*|[A-Z][A-Z0-9_]*)=";
+const MSYS_PARAM_PATH_RE = new RegExp(`((?:^|[\\s(\\[（【{])${FLAG_PREFIX})(\\/[A-Za-z]\\/${PATH_TAIL})`, "g");
+
 /** 路径的最后一段（末尾分隔符不算）；拆不出段时为空串。 */
 function lastPathSegment(path) {
   const segments = String(path).split(/[\\/]+/).filter((segment) => segment.length > 0);
@@ -260,8 +275,10 @@ function lastPathSegment(path) {
  * 相对路径、普通斜杠词（wao/run_x、Q1/Q2）与 URL（https://…）不动；词字符后面的
  * 撇号不算路径前导。先折路径再做控制字符清理与限长。
  */
-function foldAbsolutePaths(text) {
+export function foldAbsolutePaths(text) {
   return text
+    .replace(QUOTED_PATH_RE, (match, lead, quote, path) => `${lead}${quote}…/${lastPathSegment(path)}${quote}`)
+    .replace(MSYS_PARAM_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`)
     .replace(DRIVE_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`)
     .replace(UNC_PATH_RE, (match, path) => `…/${lastPathSegment(path)}`)
     .replace(POSIX_PATH_RE, (match, prefix, path) => `${prefix}…/${lastPathSegment(path)}`);
@@ -273,17 +290,23 @@ function foldAbsolutePaths(text) {
  * 共用。顺序不能反：先截断会把跨在截断点上的秘密形状切掉半截，剩下的半段匹配不到
  * 整段规则，脱敏失效；路径折在限长之前，帽里永远不会出现盘符或目录。
  * 加工后为空 → null。
+ *
+ * redactString 是环境里秘密值的精确脱敏（createSecretRedactor 的 redactString）：它在形状
+ * 脱敏之前作用在完整文本上（顺序见 secretRedaction.js），所以跨在标题上限处的秘密也先被
+ * 替换、再截断。缺省不做精确脱敏（纯函数的直接调用方）；读模型一律传入。
  */
-function safeDisplayText(text) {
+function safeDisplayText(text, redactString = IDENTITY) {
   if (typeof text !== "string") return null;
-  const folded = redactSecretShapes(text).replace(WHITESPACE_RUN_RE, (run) => (/[\r\n\t]/.test(run) ? " " : run));
+  const folded = redactSecretShapes(redactString(text)).replace(WHITESPACE_RUN_RE, (run) => (/[\r\n\t]/.test(run) ? " " : run));
   const safe = truncateHead(sanitizeControls(foldAbsolutePaths(folded)).trim(), OWNER_TITLE_MAX_CHARS);
   return safe.length > 0 ? safe : null;
 }
 
+const IDENTITY = (text) => text;
+
 /** 取标题并加工（规则见 deriveOwnerTitleFacts）。 */
-function finishTitle(text, titleBasis) {
-  return { title: safeDisplayText(text), titleBasis };
+function finishTitle(text, titleBasis, redactString) {
+  return { title: safeDisplayText(text, redactString), titleBasis };
 }
 
 /**
@@ -310,12 +333,16 @@ function isStructuralLine(line) {
  * 是"任务书 + 视角片段 + 分隔线 + 固定合同"，第一个非空行总在任务书里。
  * 纯函数，零 I/O。
  *
+ * redactString：环境里秘密值的精确脱敏，作用在**整份**任务正文上、先于取行与截断（含换行的
+ * 秘密也能整段替换）；缺省不做精确脱敏。
+ *
  * @param {unknown} promptText
+ * @param {(text: string) => string} [redactString]
  * @returns {{title: string|null, titleBasis: string}}
  */
-export function deriveOwnerTitleFacts(promptText) {
+export function deriveOwnerTitleFacts(promptText, redactString = IDENTITY) {
   if (typeof promptText !== "string" || promptText.length === 0) return { title: null, titleBasis: "none" };
-  for (const line of promptText.split(LINE_BREAK_RE)) {
+  for (const line of redactString(promptText).split(LINE_BREAK_RE)) {
     if (line.trim().length === 0 || isStructuralLine(line)) continue;
     const heading = HEADING_RE.exec(line);
     if (heading !== null) {
@@ -332,10 +359,11 @@ export function deriveOwnerTitleFacts(promptText) {
  * 标题：任务正文的第一个非空行（是 ATX 标题则去掉 # 记号），经安全链加工。
  * 没有可取的行 → null。纯函数；规则见 deriveOwnerTitleFacts。
  * @param {unknown} promptText
+ * @param {(text: string) => string} [redactString]
  * @returns {string|null}
  */
-export function deriveOwnerTitle(promptText) {
-  return deriveOwnerTitleFacts(promptText).title;
+export function deriveOwnerTitle(promptText, redactString) {
+  return deriveOwnerTitleFacts(promptText, redactString).title;
 }
 
 // ===== 任务类型 =====
@@ -598,6 +626,28 @@ function archiveMonthEndMs(month) {
   return Date.UTC(year, monthNumber, 1) - 1;
 }
 
+/** 状态与它的终态依据事件（extractFacts 与 liveDeliveryFacts 共用同一个口径）。 */
+function stateOfScope(scope) {
+  const evidence = findStateEvidence(scope);
+  const state = RUN_STATES.includes(evidence.state) ? evidence.state : "unknown";
+  const terminal = TERMINAL_STATES.includes(state);
+  return { state, terminal, terminalEvent: terminal ? scope[evidence.index] ?? null : null };
+}
+
+/**
+ * 对一份**请求当刻**读到的转录现算这个运行的交付事实（第 141 批：单 worker 详情用）。
+ * 与快照里 delivery 的来源是同一个提取（deliveryFacts），所以详情的交付轴可以和它的交付物
+ * 取同一代事实，而不是快照的上一代。没请求交付 → null。结果交给 projectDelivery 投影。
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ */
+export function liveDeliveryFacts(events, runId) {
+  const scope = boundReportScope(events, runId) ?? events;
+  const { state, terminalEvent } = stateOfScope(scope);
+  return deliveryWasRequested(events, runId) ? deliveryFacts(events, runId, state, terminalEvent) : null;
+}
+
 /**
  * 从一份转录的事件里提取这个运行的事实（全部与时间无关；时效结论不在这里）。
  * 绑定口径同 runs list / runQuietAdvisory：boundReportScope 收窄到该 runId 的信封
@@ -606,19 +656,16 @@ function archiveMonthEndMs(month) {
  * @param {object[]} events — 已确认每条都是对象的解析结果
  * @param {string} runId — 文件名给出的权威 runId（已过 isValidRunId）
  */
-function extractFacts(events, runId) {
+function extractFacts(events, runId, redactString) {
   const scope = boundReportScope(events, runId) ?? events;
   const first = scope[0] ?? null;
   const started = scope.find((e) => e.type === "run.started") ?? null;
   const submitted = findFirstBound(events, "run.background_submitted", runId) ?? null;
   const promptEvent = findLatestBound(events, "prompt.sent", runId);
-  const { title, titleBasis } = deriveOwnerTitleFacts(promptEvent?.prompt);
+  const { title, titleBasis } = deriveOwnerTitleFacts(promptEvent?.prompt, redactString);
 
   // state 与 terminalAt 取同一条事件：findStateEvidence 给出状态与它的依据事件。
-  const evidence = findStateEvidence(scope);
-  const state = RUN_STATES.includes(evidence.state) ? evidence.state : "unknown";
-  const terminal = TERMINAL_STATES.includes(state);
-  const terminalEvent = terminal ? scope[evidence.index] ?? null : null;
+  const { state, terminal, terminalEvent } = stateOfScope(scope);
 
   // 阶段只取不随时间变的 phase 与起点；年龄在发布快照时按同一个 now 现算。
   const stage = projectExecutionStage({ events: scope }, { runId, nowFn: () => 0 });
@@ -677,6 +724,12 @@ function extractFacts(events, runId) {
 
 const toBytes = (raw) => (Buffer.isBuffer(raw) ? raw : Buffer.from(raw));
 
+/** child 在 root 之内（段边界；win32 大小写由 path.relative 折叠）；root 本身不算。两个都应是 realpath。 */
+function isInsideDir(root, child) {
+  const rel = relative(root, child);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
 /**
  * 一份转录的原始字节 → 事件。只解析到最后一个换行为止（保留那个 LF）：其后没有
  * 换行结尾的尾部片段是还没写完的半行，忽略（写完后文件身份变化，下一轮会重读）。
@@ -695,8 +748,8 @@ function eventsOf(bytes) {
 }
 
 /** 一份转录的原始字节 → 事实（解析口径见 eventsOf）。 */
-function factsOf(bytes, runId) {
-  return extractFacts(eventsOf(bytes), runId);
+function factsOf(bytes, runId, redactString) {
+  return extractFacts(eventsOf(bytes), runId, redactString);
 }
 
 /** 文件身份（bigint stat 的四个字段，转成字符串比较）。 */
@@ -765,6 +818,33 @@ function projectSlugOf(run) {
   return run.facts !== null ? run.facts.factSlug ?? safeSlug(run.primaryBucket) : safeSlug(run.primaryBucket);
 }
 
+// 会审组记录里 declaredFields 的上界（记录是磁盘上可手改的）：超出就不留（null）——读侧据此重建
+// 的后缀对不上，任务书保留全文，不会错剥。
+const DECLARED_FIELDS_MAX_KEYS = 32;
+const DECLARED_FIELDS_MAX_VALUES = 64;
+const DECLARED_FIELDS_MAX_VALUE_CHARS = 1024;
+
+/**
+ * 记录里的结论字段声明：只留 Qn 键下的非空字符串候选，**保持声明顺序与原样**（候选里的换行
+ * 也原样）——与 consultService 的 buildDeclaredFieldsContract 同一个取法，所以按它重建出来的
+ * 后缀与写入端追加的逐字节相同。没有声明、不是对象、或超出上界 → null。
+ */
+function boundedDeclaredFields(declared) {
+  if (declared === null || typeof declared !== "object" || Array.isArray(declared)) return null;
+  const out = {};
+  let keys = 0;
+  for (const key of Object.keys(declared)) {
+    if (!/^Q\d+$/.test(key) || !Array.isArray(declared[key])) continue;
+    const values = declared[key].filter((value) => typeof value === "string" && value.length > 0);
+    if (values.length === 0) continue;
+    keys += 1;
+    if (keys > DECLARED_FIELDS_MAX_KEYS || values.length > DECLARED_FIELDS_MAX_VALUES
+      || values.some((value) => value.length > DECLARED_FIELDS_MAX_VALUE_CHARS)) return null;
+    out[key] = values;
+  }
+  return keys === 0 ? null : out;
+}
+
 /** 组记录里可以照抄进快照的席位状态（其余记录值不采信）。 */
 const SEAT_RUN_STATES = Object.freeze([...RUN_STATES, "dispatch_failed", "missing"]);
 
@@ -773,7 +853,7 @@ const SEAT_RUN_STATES = Object.freeze([...RUN_STATES, "dispatch_failed", "missin
  * 观测到的分支集合；没有可用的观测（仓库 unknown、还没观测过、项目定不了）就是
  * undefined，branchPresent 如实给 null。
  */
-function projectDelivery(runId, delivery, branches) {
+export function projectDelivery(runId, delivery, branches) {
   return {
     settlement: { status: delivery.settlement.status, reason: delivery.settlement.reason },
     commit: delivery.commit,
@@ -808,7 +888,12 @@ function projectConsult(value) {
     createdAt: value.createdAt,
     reviewedRunId: value.reviewedRunId,
     q1Declared: value.q1Declared,
-    seats: value.seats.map((row) => ({ agentId: row.agentId, runId: row.runId, runState: row.runState, q1: row.q1 })),
+    // 写入端追加在席位 prompt 末尾的结论字段声明（Owner 看板据此精确重建并剥离固定合同后缀；
+    // 只用于字符串精确匹配，从不输出）。每次快照新建对象。
+    declaredFields: value.declaredFields === null ? null : Object.fromEntries(
+      Object.entries(value.declaredFields).map(([key, values]) => [key, [...values]]),
+    ),
+    seats: value.seats.map((row) => ({ agentId: row.agentId, runId: row.runId, runState: row.runState, q1: row.q1, replied: row.replied })),
   };
 }
 
@@ -831,10 +916,16 @@ const STAGE_DISPLAY = Object.freeze({
  *   `stat(path)` → bigint stat、`listFiles(runDir, { strict })` → 转录清单、
  *   `listArchiveFiles(runDir)` → 归档面 `{ files, skipped }`（缺省
  *   listArchiveTranscriptFiles）、`listDir(dir)` → 文件名数组（会审组记录目录）、
- *   `execGit(args, cwd)` → stdout（只读分支枚举，同步或异步返回值都行）
- * @returns {{refresh: Function, snapshot: Function, resolveRun: Function}}
+ *   `execGit(args, cwd)` → stdout（只读分支枚举，同步或异步返回值都行）、
+ *   `realpath(path)` → 真实路径（readRunEvents 证明转录确实在运行目录内）
+ * @param {object} [input.env] — 精确脱敏用的环境（缺省 process.env）：标题与项目名进快照前先
+ *   把环境里的秘密值整段替换（形状脱敏之前、截断之前）
+ * @returns {{refresh: Function, snapshot: Function, resolveRun: Function,
+ *   readRunEvents: Function, projectRepoRoot: Function}} readRunEvents / projectRepoRoot
+ *   是第 141 批给服务端的两个只读入口（单 worker 详情与产物接口）：前者按 resolveRun 的
+ *   授权读一个运行当下的转录事件，后者给项目仓库根——都不进快照。
  */
-export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {} } = {}) {
+export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200, io = {}, env } = {}) {
   if (typeof runDir !== "string" || runDir.length === 0) {
     throw new Error("createOwnerReadModel: runDir is required");
   }
@@ -847,6 +938,8 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   const listArchiveFiles = io.listArchiveFiles ?? listArchiveTranscriptFiles;
   const listDir = io.listDir ?? fsReaddir;
   const execGit = io.execGit ?? execGitReadOnly;
+  const realpath = io.realpath ?? fsRealpath;
+  const { redactString } = createSecretRedactor(env ?? process.env);
 
   // path → { runId, bucket, identity: {size, mtimeNs, ctimeNs, ino}|null, hash, facts,
   //   roots, trustedRoots }（identity 为 null 或 hash / facts 为 null = 那一次读不到，
@@ -870,6 +963,9 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
   // 席位转录 path → { signature, q1Key, q1 }：按"席位转录身份 + 记录声明的 Q1 候选"
   // 缓存的 Q1 值（只缓存算出来的值，不缓存回答原文；读失败不缓存）。
   let seatQ1 = new Map();
+  // slug → 项目仓库的主工作树根（null = 多个 key 指向同一个 slug）。只给服务端读 Git 对象
+  // 用（projectRepoRoot），不进快照。
+  let projectKeys = new Map();
   // slug → "available" | "unknown"：这一轮该项目会审目录有没有列出来。
   let consultProjectStatus = new Map();
   // slug → { key, repo, observedAtMs, branches: Set<runId>|null }（分支观测，至多每
@@ -927,7 +1023,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     const nextProjectNames = new Map(
       listProjectRecords(runDir)
         .filter((r) => r.slug !== null)
-        .map((r) => [r.slug, safeDisplayText(r.displayName)]),
+        .map((r) => [r.slug, safeDisplayText(r.displayName, redactString)]),
     );
 
     // ① 先 stat（读之前取身份：读到的新于 stat 时下一轮会重读，不会漏）。
@@ -987,7 +1083,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
         const twin = earlier
           .map((path) => nextFiles.get(path))
           .find((record) => record !== undefined && record.hash === hash && record.facts !== null);
-        const facts = twin !== undefined ? twin.facts : factsOf(bytes, entry.runId);
+        const facts = twin !== undefined ? twin.facts : factsOf(bytes, entry.runId, redactString);
         nextFiles.set(entry.path, {
           runId: entry.runId, bucket: entry.bucket, identity, hash, facts, roots: facts.lineageRoots, trustedRoots: true,
         });
@@ -1052,6 +1148,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     fileIndex = nextFiles;
     runIndex = nextRuns;
     projectNames = nextProjectNames;
+    projectKeys = nextKeys;
     archiveLineage = lineage.archiveCache;
     lineageDerived = lineage.derived;
     consultIndex = consults.index;
@@ -1484,6 +1581,7 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       q1Candidates: Array.isArray(declared?.Q1)
         ? declared.Q1.filter((value) => typeof value === "string")
         : null,
+      declaredFields: boundedDeclaredFields(declared),
       seats: seats.map((seat) => ({
         agentId: isValidCanonicalAgentId(seat.agentId) ? seat.agentId : null,
         runId: isValidRunId(seat.runId) ? seat.runId : null,
@@ -1521,18 +1619,24 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     for (const seat of seats) {
       let runState = seat.claimsRun ? "missing" : seat.recordedState;
       let q1Value = null;
+      // 有没有收到答复（最终助手文本非空）：与席位运行状态、Q1 各自独立的一项事实；读不到
+      // 席位转录就说不清（null）。"几席已到"= 已到终态且收到答复，由看板详情按这三项算。
+      let replied = null;
       if (seat.located !== null && seat.located.availability === "ok") {
         const run = runs.get(seat.runId);
         runState = run === undefined ? "unknown" : run.facts.state;
-        if (q1 !== null && seat.agentId !== null) {
-          const answer = await seatQ1Of({ seat, q1, files, read, nextSeatQ1 });
+        if (seat.agentId !== null) {
+          const answer = await seatAnswerOf({ seat, q1, files, read, nextSeatQ1 });
           // 席位转录这一轮读不出：与 rerenderConsultFromRecord 同一口径——这一席按
           // missing 给，且不缓存（下一轮重读）。
           if (!answer.readable) runState = "missing";
-          else q1Value = answer.q1;
+          else {
+            q1Value = answer.q1;
+            replied = answer.replied;
+          }
         }
       }
-      rows.push({ agentId: seat.agentId, runId: seat.runId, runState, q1: q1Value });
+      rows.push({ agentId: seat.agentId, runId: seat.runId, runState, q1: q1Value, replied });
     }
     return {
       consultId: spec.consultId,
@@ -1540,34 +1644,41 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       createdAt: spec.createdAt,
       reviewedRunId: spec.reviewedRunId,
       q1Declared,
+      declaredFields: spec.declaredFields,
       seats: rows,
     };
   }
 
   /**
-   * 席位的 Q1 值（取文与 observeSeatRun 同一个函数）。只缓存算出来的 Q1：键是席位
-   * 转录的文件身份（签名）+ 记录声明的 Q1 候选；读失败不缓存，下一轮重读。回答原文
-   * 不留在内存里。
+   * 席位的答复事实（取文与 observeSeatRun 同一个函数）：replied = 最终助手文本非空；
+   * q1 = 记录声明了 Q1 时算出的结论（没声明 → null）。只缓存算出来的值：键是席位转录的
+   * 文件身份（签名）+ 记录声明的 Q1 候选；读失败不缓存，下一轮重读。回答原文不留在内存里。
    */
-  async function seatQ1Of({ seat, q1, files, read, nextSeatQ1 }) {
+  async function seatAnswerOf({ seat, q1, files, read, nextSeatQ1 }) {
     const path = seat.located.transcriptPath;
     const signature = signatureOf([path], files);
-    // 先看这一轮刚算出的（同一席出现在几场会审里时只读一次），再看上一轮留下的缓存。
+    const q1Key = q1 === null ? "" : q1.key;
+    // 先看这一轮刚算出的（同一席出现在几场会审里时只读一次），再看上一轮留下的缓存。replied 只取决于
+    // 转录文件身份；没声明 Q1 时只要 replied，所以同一份转录的缓存（不论当时按哪组候选算过 Q1）都可用。
     const cached = nextSeatQ1.get(path) ?? seatQ1.get(path);
-    if (cached !== undefined && cached.signature === signature && cached.q1Key === q1.key) {
+    if (cached !== undefined && cached.signature === signature && (q1 === null || cached.q1Key === q1Key)) {
       nextSeatQ1.set(path, cached);
-      return { readable: true, q1: cached.q1 };
+      return { readable: true, q1: q1 === null ? null : cached.q1, replied: cached.replied };
     }
     let text;
     try {
       text = await extractFinalAssistantText(eventsOf(toBytes(await read(path))), { runId: seat.runId, env: {} });
     } catch {
-      return { readable: false, q1: null };
+      return { readable: false, q1: null, replied: null };
     }
-    const { fieldValues } = compareFields({ seat: attributeReply(text) }, { Q1: q1.candidates });
-    const value = memberOf(OWNER_CONSULT_Q1_VALUES, fieldValues.Q1?.seat);
-    nextSeatQ1.set(path, { signature, q1Key: q1.key, q1: value });
-    return { readable: true, q1: value };
+    let value = null;
+    if (q1 !== null) {
+      const { fieldValues } = compareFields({ seat: attributeReply(text) }, { Q1: q1.candidates });
+      value = memberOf(OWNER_CONSULT_Q1_VALUES, fieldValues.Q1?.seat);
+    }
+    const replied = text.trim().length > 0;
+    nextSeatQ1.set(path, { signature, q1Key, q1: value, replied });
+    return { readable: true, q1: value, replied };
   }
 
   /**
@@ -1731,6 +1842,8 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
       lastEffectAt: iso(f?.lastEffectAtMs ?? null),
       quietSince: iso(f?.quietSinceMs ?? null),
       lastVitalAt: iso(vital.length === 0 ? null : Math.max(...vital)),
+      // 租约心跳单独投影（只取租约；没有心跳证据就是 null）。lastVitalAt 保持"最后体征"的原义。
+      lastHeartbeatAt: iso(heartbeatAtMs),
       lastProcessActiveAt: iso(f?.lastProcessActiveAtMs ?? null),
       retryOf: f?.retryOf ?? null,
       parentRunId: f?.parentRunId ?? null,
@@ -1762,6 +1875,61 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     return locateIn(runIndex, runId);
   }
 
+  /**
+   * 单个运行的转录事件（第 141 批：单 worker 详情与产物接口用）。授权先走 resolveRun
+   * 同一份定位，再在**请求当刻**对盘上的实际文件复核（刷新之间盘上可能变了）：
+   *   - 重新枚举这个运行目录里该 runId 的全部副本（严格枚举，枚举不全就拒绝）；
+   *   - 每个副本都用 realpath 证明确实位于运行目录之内——桶是联接（junction / 符号链接）
+   *     到别处的，读到的就是别人的转录，拒绝；
+   *   - 所有副本都读得出、字节逐一相同（与刷新里 conflict / unreadable 同一口径：内容不同
+   *     或读不出都拒绝，内容相同不算冲突）。
+   * 读取与解析口径同刷新（只到最后一个换行为止，坏行或非对象行就是读不到）。定位不到、
+   * 复核不过、读不出、解析失败一律 null——不回显原因。事件是这一刻读到的，可能比最近一次
+   * 发布的快照新。
+   *
+   * @param {unknown} runId
+   * @returns {Promise<object[]|null>}
+   */
+  async function readRunEvents(runId) {
+    if (resolveRun(runId) === null) return null;
+    try {
+      // 与刷新同一个文件名口径（isRunTranscriptName + 去掉 .jsonl 得 runId），不另拼文件名。
+      const copies = listFiles(runDir, { strict: true })
+        .filter((entry) => isRunTranscriptName(entry.name) && entry.name.slice(0, -".jsonl".length) === runId);
+      if (copies.length === 0) return null;
+      const root = await realpath(runDir);
+      let first = null;
+      let firstHash = null;
+      for (const { path } of copies) {
+        if (!isInsideDir(root, await realpath(path))) return null;
+        const bytes = toBytes(await readFile(path));
+        const hash = createHash("sha256").update(bytes).digest("hex");
+        if (first === null) {
+          first = bytes;
+          firstHash = hash;
+        } else if (hash !== firstHash) {
+          return null;
+        }
+      }
+      return eventsOf(first);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 项目仓库的主工作树根（.project.json 的 key），只给服务端读 Git 对象用，从不进快照。
+   * slug 不认识、或多个 key 指向同一个 slug（说不清是哪个仓库）→ null。首次 refresh()
+   * 完成前一律 null。
+   *
+   * @param {unknown} slug
+   * @returns {string|null}
+   */
+  function projectRepoRoot(slug) {
+    const key = typeof slug === "string" ? projectKeys.get(slug) : undefined;
+    return typeof key === "string" && key.length > 0 ? key : null;
+  }
+
   /** resolveRun 的定位逻辑，对任意一份运行索引求值（刷新中途的会审席位定位用新索引）。 */
   function locateIn(index, runId) {
     if (!isValidRunId(runId)) return null;
@@ -1772,5 +1940,5 @@ export function createOwnerReadModel({ runDir, nowFn = Date.now, batchSize = 200
     return { runId, availability: run.availability, transcriptPath: run.primaryPath, bucket: run.primaryBucket };
   }
 
-  return { refresh, snapshot, resolveRun };
+  return { refresh, snapshot, resolveRun, readRunEvents, projectRepoRoot };
 }

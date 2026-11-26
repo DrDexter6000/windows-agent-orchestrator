@@ -1129,3 +1129,45 @@ test("TD-354: run.error 在活动页是 envelope kind=error（不再是 unknown_
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
+
+// =====================================================================
+// 第 141b 批：run.isolation_violation 此前在活动页显示为 [unknown_event]（TD-354 同款
+// 漏分类）。按既有闭集补固定标签 isolation_violation；活动页只出标签，不带路径等
+// 细节——路径/目的地/逃出层级由 run_diagnose 的 isolationViolation 给。
+// =====================================================================
+test("141b-ACT-1: run.isolation_violation 在活动页是 envelope kind=isolation_violation（不再是 unknown_event），不带任何路径", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-141b-act-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-141b-act-rd-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_141b_activity";
+    const LEAK = "C:\\Users\\owner\\outside\\evil-141b.js";
+    seedTranscript(runDir, runId, {
+      workspaceCwd: dir,
+      extraEvents: [{
+        type: "run.isolation_violation", code: "workdir_escape", eventKind: "file_written",
+        reason: "file_written_physical_outside", destination: "temp",
+        reportedPath: "linked/evil-141b.js", resolvedPath: LEAK, escapedAt: "linked",
+        ts: "2026-08-02T00:05:00.000Z", seq: 6, runId, agentId: "coder_low",
+      }],
+    });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId, order: "asc" } });
+      assert.equal(res.isError, undefined, `call succeeds（实测：${res.content?.[0]?.text ?? ""}）`);
+      const sc = res.structuredContent;
+      const entry = sc.entries.find((e) => e.category === "envelope");
+      assert.deepEqual(entry, {
+        category: "envelope", ts: "2026-08-02T00:05:00.000Z", seq: 6, kind: "isolation_violation",
+      }, "投影为信封固定标签（恰四键）");
+      assert.equal(sc.counts.other, 0, "不再计入未知事件");
+      assert.equal(sc.counts.envelope, 1);
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("[unknown_event]"), "不再是未知事件");
+      for (const leak of ["evil-141b", "owner", "linked", "reportedPath", "resolvedPath", "escapedAt", "file_written_physical_outside", "workdir_escape"]) {
+        assert.ok(!dumped.includes(leak), `细节不进活动页：${leak}`);
+      }
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});

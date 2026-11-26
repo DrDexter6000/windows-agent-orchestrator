@@ -150,9 +150,9 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 
 `run_diagnose` 让 MCP host 诊断一个 run 的失败原因分类。它与 CLI `runs diagnose` 共用同一 application service，不 shell-out CLI。只读：不追加 transcript event、不修改 terminal state、不给处方或建议。
 
-输入：`runId`，可选 `expectedWorkspaceRoot`（给了就证明并核验归属，错根或证明不过返回固定拒绝、不回显路径；省略按 `runId` 直读）。`runDir`/`raw`/`includeEvidence`/`recommend`/`retry`/`worker`/`strategy` 等是 server-owned，模型不能传。参数与形状见 [docs/surface/mcp-tools.md](../surface/mcp-tools.md)。
+输入：`runId`，可选 `expectedWorkspaceRoot`（给了就核验归属，不过即固定拒绝、不回显路径；省略按 `runId` 直读）。`runDir`、`raw`、`includeEvidence` 等是 server-owned，模型不能传。参数与形状见 [docs/surface/mcp-tools.md](../surface/mcp-tools.md)。
 
-`category` 是闭集 enum，含 `provider_capacity` 与 delivery worktree 越界的 `workdir_escape`。`signalEventTypes` 只保留 evidence 的 event type：最多 8 条，每条 ≤64 字符，异常映射为 `unknown`。绝不返回 raw fact/error/detail/reason/check name/command/tool payload/path/timestamp/prompt/PID/sessionId/provider stderr/环境变量，也绝不返回 recommendation/advice/retry/nextStep。失败返回固定 `run_diagnose failed`。
+`category` 是闭集 enum，含 `provider_capacity` 与 delivery worktree 越界的 `workdir_escape`。`signalEventTypes` 只保留 evidence 的 event type：最多 8 条，每条 ≤64 字符，异常映射为 `unknown`。绝不返回原始事实与错误文本、命令、路径、提示词、进程与会话标识、provider stderr 或环境变量，也绝不返回 recommendation/advice/retry/nextStep。例外：`workdir_escape` 时可带 `isolationViolation`（闭集原因与去向，越界才带脱敏路径）。失败返回固定 `run_diagnose failed`。
 
 诊断码 `code` 是可空闭集字段，按类别配对校验：
 
