@@ -187,3 +187,5 @@
 | TD-348 | 第 92 批之前派发的 deepseek-acp 运行取不出本机 pid，runner 死后 settle 门 5 拒于 `session_ambiguous`，运行永远停在非终态 | 第 148 批：门 5 取不出 pid 时，本机开机晚于该运行最后可见活动即放行（`session_rebooted`）；落地后结算了 d2-domain 的 run_20261109074759649pcpi1m |
 | TD-372 | 写后隔离检查把在工作树里建了又删的文件判成越界（`file_written_physical_unresolved`/ENOENT） | 第 148 批：同一 toolCallId、同一原文路径的意图在意图时刻已判树内、无 `..` 段且每段是规范 Win32 段、ENOENT 来自目标本身时放行一次；不发意图的车道见 TD-361 |
 | TD-373 | 隔离违规事件不说拦下了什么，Lead 分不清真越界和误报 | 第 148 批：越界原因记闭集 `destination` 与脱敏的 `reportedPath`、`resolvedPath`、物理越界的 `escapedAt`（Owner 2026-11-25 批准），`wao runs diagnose` 显示（8.3 短名认不出）；MCP 与看板见第 141 批 |
+| TD-374 | `worktree reclaim --apply` 删脏树时只留路径清单，受控改动与未忽略新文件的内容不留 | 第 150 批：删前把受控改动存成暂存、未暂存两层补丁，未忽略新文件存副本（记录的 `dirty/`，上限 256 MiB，失败或超限保留）；树里有 junction 时整棵保留，删树原语改为不跟进链接 |
+| TD-375 | "头指针漂移"在 `runs lineage-close` 与 `worktree reclaim` 两处口径不一 | 第 150 批：共用一个判定（`isTreeHeadDrifted`）：树在 `wao/<runId>` 上且 HEAD 等于分支 tip 才放 |

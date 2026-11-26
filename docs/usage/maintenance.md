@@ -52,7 +52,7 @@ npm run cli -- runs lineage-close --run-id <id> --reason-file <f> [--apply]   # 
 
 清退范围：主检出与每个经核验的关联工作树（在册、同 common git dir、目录在、路径无链接/junction）下各自的 `.wao-worktrees/` 一级 `<runId>` 子目录；嵌套项在计划里记范围证明（父树、common git dir、目标真实路径）。
 
-一律保留的形态（闭集，见计划与命令输出）：事实读不出或身份无法唯一判定（含有树但三处找不到转录、登记目录已不存在、重名或转录声明与登记树不一致；空库普查到树目标时整体拒绝生成计划）；范围外路径（源工作树、关联工作树本身、符号链接/junction、外仓 worktree）；运行中（非终态/近期 worker 或 WAO 事件/新鲜心跳；Lead 的裁决、谱系关闭与收集不算）；交付未收口（验证或补验证未出结果）；复用线系未闭合；未裁决（已打包未决——已被取代的祖先除外——或树脏）；头指针漂移；嵌套保留；只读 run 留下的私有克隆（`private_clone`，TD-326）。已并入 main 的分支不做引用检查（提交仍从 main 可达）。已裁决或线系已关的脏树按放弃处理（计划标注"删除即丢弃未提交内容"）。runs/ 转录不动——清扫走上方 prune --archive 通道，两套清退互不越界。
+一律保留的形态（闭集，见计划与命令输出）：事实读不出或身份无法唯一判定；范围外路径（源工作树、关联工作树本身、符号链接/junction、外仓 worktree）；运行中（非终态/近期 worker 或 WAO 事件/新鲜心跳；Lead 的裁决、谱系关闭与收集不算）；交付未收口；复用线系未闭合；未裁决（已打包未决——已被取代的祖先除外——或树脏）；头指针漂移；嵌套保留；只读 run 留下的私有克隆（`private_clone`）。已并入 main 的分支不做引用检查（提交仍从 main 可达）。已裁决或线系已关的脏树删前存补丁与未忽略新文件的副本（记录的 `dirty/`），被忽略的文件不存，计划仍标"删除即丢弃未提交内容"；备份失败、超 256 MiB、树里有目录链接时保留。runs/ 转录不动——清扫走上方 prune --archive 通道，两套清退互不越界。
 
 ## daemon 与自愈（无人值守长跑）
 
@@ -130,11 +130,11 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 ## worktree 清理失败（Permission denied）
 
-Windows 文件锁问题。上了锁（`git worktree lock`）的树 WAO 一律不删，确要删先 `git worktree unlock`。WAO 已内置 fallback（rmSync + 定向清本树登记；无仓库级 prune——与并发 `worktree add` 有竞争）。若仍有残留，先确认此刻没有 WAO 派发在进行、`runs list` 也无非终态（前台 `run` 先建工作树、后写首条转录，建树那一刻 `runs list` 看不到它——防的就是上面那处竞争），再手工清：
+Windows 文件锁问题。上了锁（`git worktree lock`）的树 WAO 一律不删，确要删先 `git worktree unlock`。WAO 已内置 fallback（rmSync + 定向清本树登记；无仓库级 prune——与并发 `worktree add` 有竞争）。若仍有残留，先确认此刻没有 WAO 派发在进行、`runs list` 也无非终态（前台 `run` 先建工作树、后写首条转录，建树那一刻 `runs list` 看不到它——防的就是上面那处竞争），再手工清（不用 git 的 `--force`，它会跟进 junction 删树外文件）：
 
 ```powershell
 git worktree prune --expire 10.minutes
-git worktree remove --force .wao-worktrees/<runId>
+wao worktree remove .wao-worktrees/<runId>
 ```
 
 只读 run 的私有克隆不在 worktree 登记里，上面两条与 `wao worktree remove` 都不删它。直接删目录之前确认三件事：`git -C <克隆> rev-list --all HEAD | git -C <源仓> cat-file --batch-check` 两条命令都没有报错，输出里没有 `missing` 行（有就是源仓缺的提交；它连 stash 也查，比决定 0102 的自动检查更保守）；`git -C <克隆> worktree list` 只列出克隆自己；`git -C <克隆> status --short` 里没有要留的改动（删目录会一并丢掉）。
