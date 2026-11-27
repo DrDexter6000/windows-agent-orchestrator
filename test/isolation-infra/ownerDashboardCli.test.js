@@ -30,6 +30,7 @@ function makeIo(world) {
     sleep: async (ms) => { clock += ms; },
     ensureStateDir: async () => ({ ok: true }),
     verifyStateDir: async () => ({ ok: true }),
+    stateDirPresent: async () => true,
     readInstanceEx: async () => (world.instance == null
       ? { status: "absent" }
       : { status: "present", raw: world.instance, record: world.instance }),

@@ -7,6 +7,8 @@
 //     复用检查用严格相等比对 instance.json 里的 processCreatedAt——不是容差近似。
 //   - listenerPidsOfPort(port) — TCP 监听表（Get-NetTCPConnection -State Listen，
 //     127.0.0.1）里占住这个端口的 pid 集合；探测失败给 null（读作“查不出”，不猜）。
+//     145b 修正一 #7：查无结果（ObjectNotFound）才是真的空表 []；其余错误是 null——
+//     “查询报错”绝不能被读成“没人监听”。
 //   - probeProcessIdentity(pid, processCreatedAt) — 三值：same（活着且创建时间严格
 //     相等）/ gone（pid 不在，或创建时间读得出但对不上=复用）/ unknown（活着但读不出）。
 //
@@ -67,7 +69,46 @@ export async function readProcessCreatedAt(pid, deps = {}) {
 }
 
 /**
- * 占住 127.0.0.1:<port> 监听的 pid 集合；探测失败给 null。
+ * 监听探测的 PowerShell 外壳（导出给测试：把 body 换成一个“必定报错”的查询，就能在
+ * 真实 Windows PowerShell 上验证 catch 的两条分支）。
+ *
+ * 145b 修正一 #7：旧脚本用 `-ErrorAction SilentlyContinue`，查询报错（权限、CIM 故障）
+ * 也退出 0 并输出空哨兵，JS 读成 []，控制器就把“查不出”当成“端口没人监听”。
+ * 现在只有 ObjectNotFound（Get-NetTCPConnection / Get-Item 查无结果的固定错误类别）
+ * 输出空表；其余错误输出 wao-port-error（解析不出 → null）。
+ *
+ * @param {string} body — 成功时输出 `wao-port:<pid...>` 的 PowerShell 片段
+ * @returns {string}
+ */
+export function buildPortProbeScript(body) {
+  return "$ErrorActionPreference='Stop';"
+    + "try {"
+    + body
+    + "} catch {"
+    // 只有“查询确实没有结果”才是空表；任何别的错误都保留为 unknown。
+    + "if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) { 'wao-port:' }"
+    + "else { 'wao-port-error:' }"
+    + "}";
+}
+
+/**
+ * 解析监听探测输出：空表 []、pid 列表、或 null（出错/形状不符）。导出给测试。
+ *
+ * @param {string} stdout
+ * @returns {number[]|null}
+ */
+export function parsePortProbeOutput(stdout) {
+  if (typeof stdout !== "string") return null;
+  const m = /^wao-port:([0-9 ]*)$/m.exec(stdout.trim());
+  if (m === null) return null;
+  const text = m[1].trim();
+  if (text.length === 0) return [];
+  const pids = text.split(/\s+/).map(Number);
+  return pids.every((p) => Number.isInteger(p) && p > 0) ? pids : null;
+}
+
+/**
+ * 占住 127.0.0.1:<port> 监听的 pid 集合；探测失败给 null（绝不当成空表）。
  *
  * @param {number} port — 1..65535
  * @param {object} [deps] — { execFileFn, timeoutMs }
@@ -76,18 +117,14 @@ export async function readProcessCreatedAt(pid, deps = {}) {
 export async function listenerPidsOfPort(port, deps = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   const out = await runPowerShell(
-    "$c=@(Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort "
-    + `${port} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess);`
-    + "'wao-port:' + ((@($c | ForEach-Object { [uint32]$_ })) -join ' ')",
+    buildPortProbeScript(
+      "$c=@(Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort "
+      + `${port} | Select-Object -ExpandProperty OwningProcess);`
+      + "'wao-port:' + ((@($c | ForEach-Object { [uint32]$_ })) -join ' ')",
+    ),
     deps,
   );
-  if (out === null) return null;
-  const m = /^wao-port:([0-9 ]*)$/m.exec(out.trim());
-  if (m === null) return null;
-  const text = m[1].trim();
-  if (text.length === 0) return [];
-  const pids = text.split(/\s+/).map(Number);
-  return pids.every((p) => Number.isInteger(p) && p > 0) ? pids : null;
+  return out === null ? null : parsePortProbeOutput(out);
 }
 
 /**

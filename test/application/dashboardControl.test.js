@@ -13,7 +13,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   launchDashboard,
@@ -21,6 +22,7 @@ import {
   dashboardStop,
   dashboardRestart,
   buildServeCommandLine,
+  defaultControlIo,
   DASHBOARD_CONTROL_ERRORS,
   dashboardControlErrorText,
 } from "../../src/application/dashboardControl.js";
@@ -75,6 +77,7 @@ function makeWorld(overrides = {}) {
     sleep: async (ms) => { w.now += ms; },
     ensureStateDir: async () => ({ ok: true }),
     verifyStateDir: async () => ({ ok: true }),
+    stateDirPresent: async () => true,
     readInstanceEx: async () => {
       if (w.readStatus === "absent") return { status: "absent" };
       if (w.readStatus === "error") return { status: "error" };
@@ -244,6 +247,43 @@ test("buildServeCommandLine: paths are quoted; spaces survive; a double quote re
   }
 });
 
+test("defaultControlIo (145b-fix): the serve child is quoted and its cwd is the INSTALL ROOT (src/'s parent)", async () => {
+  const calls = [];
+  const io = defaultControlIo({
+    wmiBroker: async (input) => { calls.push(input); return { ok: true, pid: 4321 }; },
+  });
+  const out = await io.spawnServe({
+    runDir: "d:/my runs/project",
+    stateRoot: "c:/Users/Some One/AppData/Local/wao/dashboard",
+    generation: "0123456789abcdef",
+    port: 8080,
+    deadline: Date.now() + 20_000,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(calls.length, 1);
+  const installRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  assert.equal(calls[0].cwd.toLowerCase(), installRoot.toLowerCase(), "the child runs from the install root, not src/");
+  assert.ok(calls[0].commandLine.includes('--run-dir "d:/my runs/project"'), "a run dir with spaces survives quoting");
+  assert.ok(
+    calls[0].commandLine.includes('--state-root "c:/Users/Some One/AppData/Local/wao/dashboard"'),
+    "a state root with spaces survives quoting",
+  );
+  assert.match(calls[0].commandLine, /^".*node\.exe"\s+".*cli\.js"\s+dashboard\s+serve\s/, "node and the CLI travel as quoted argv");
+});
+
+test("defaultControlIo (145b-fix): an unquotable path is the fixed path_quote reason, never handed to WMI", async () => {
+  let brokerCalls = 0;
+  const io = defaultControlIo({ wmiBroker: async () => { brokerCalls += 1; return { ok: true, pid: 1 }; } });
+  const out = await io.spawnServe({
+    runDir: 'd:/evil"quote',
+    stateRoot: "c:/state",
+    generation: "0123456789abcdef",
+    deadline: Date.now() + 20_000,
+  });
+  assert.deepEqual(out, { ok: false, reason: "path_quote" });
+  assert.equal(brokerCalls, 0, "no process is created for an unquotable command line");
+});
+
 // ===== 拉起 =====
 
 test("launch: candidate verified then published with the CANDIDATE's build; buildNote is computed, never hardcoded", async () => {
@@ -265,6 +305,51 @@ test("launch: a failed WMI create is wmi_create_failed", async () => {
     () => launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io }),
     (error) => error.code === "wmi_create_failed",
   );
+});
+
+test("launch (145b-fix): an unquotable path is path_quote (a fixed configuration error), not wmi_create_failed", async () => {
+  const { w, io } = makeWorld();
+  io.spawnServe = async () => ({ ok: false, reason: "path_quote" });
+  await assert.rejects(
+    () => launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io }),
+    (error) => error.code === "path_quote",
+  );
+  assert.equal(w.published, 0);
+});
+
+test("locking (145b-fix): the deadline a serve receives IS the deadline of this generation's lock", async () => {
+  const { w, io } = makeWorld();
+  let reads = 0;
+  io.readInstanceEx = async () => {
+    reads += 1;
+    if (reads === 2) w.now += 5_000; // 锁内第二次复用检查耗掉 5 秒
+    return { status: "absent" };
+  };
+  const out = await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io });
+  assert.equal(out.outcome, "launched");
+  assert.equal(
+    w.spawned[0].deadline,
+    w.lock.deadline,
+    "the child is bounded by the lock's deadline — spawn does not invent a later one",
+  );
+  assert.ok(w.spawned[0].deadline < w.now + 20_000, "no fresh 20 s deadline was started at spawn time");
+});
+
+test("locking (145b-fix): a second reuse check that crosses the lock deadline does NOT spawn — it goes back to reuse", async () => {
+  const { w, io } = makeWorld();
+  let reads = 0;
+  io.readInstanceEx = async () => {
+    reads += 1;
+    if (reads === 2) { // 锁内第二次复用检查：一查就跨过这一代锁的截止
+      w.now += 21_000;
+      return { status: "absent" };
+    }
+    if (reads >= 3) return { status: "present", raw: instanceRecord(), record: instanceRecord() };
+    return { status: "absent" };
+  };
+  const out = await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io });
+  assert.equal(out.outcome, "reused");
+  assert.equal(w.spawned.length, 0, "an expired lock never produces a serve process");
 });
 
 test("launch: the child's port_in_use result is reported verbatim and the result file is REMOVED after reading", async () => {
@@ -399,6 +484,7 @@ function realFilesIo(world, stateDir) {
     sleep: async (ms) => { world.now += ms; },
     ensureStateDir: async () => ({ ok: true }),
     verifyStateDir: async () => ({ ok: true }),
+    stateDirPresent: async () => true,
     readInstanceEx: () => readInstanceRecordEx(stateDir),
     publishInstance: (dir, record) => publishInstanceRecord(stateDir, record),
     readCandidate: (dir, gen) => readCandidateRecord(stateDir, gen),
@@ -540,6 +626,20 @@ test("status/stop verify the state dir first — a rejected dir throws before an
   await assert.rejects(() => dashboardStatus({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: wrapped }), (e) => e.code === "state_dir_rejected");
   await assert.rejects(() => dashboardStop({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: wrapped }), (e) => e.code === "state_dir_rejected");
   assert.deepEqual(calls, ["verify", "verify"], "no read, no stop-request write after a rejected dir");
+});
+
+test("status/stop on a NEVER-created state dir say 'no instance' — nothing to verify, read or write", async () => {
+  const calls = [];
+  const io = {
+    ...makeWorld().io,
+    stateDirPresent: async () => false,
+    verifyStateDir: async () => { calls.push("verify"); return { ok: true }; },
+    readInstanceEx: async () => { calls.push("read"); return { status: "absent" }; },
+    writeStopRequest: async () => { calls.push("write"); },
+  };
+  assert.deepEqual(await dashboardStatus({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io }), { present: false });
+  assert.deepEqual(await dashboardStop({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io }), { outcome: "no_instance" });
+  assert.deepEqual(calls, [], "an absent state dir is reported as no instance, never verified/read/written");
 });
 
 test("stop (145b-fix): a vanished record with a LIVE pid waits until timeout — stopped only when the process is truly gone", async () => {

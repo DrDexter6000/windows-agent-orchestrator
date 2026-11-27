@@ -95,16 +95,21 @@ function pidAlive(pid) {
 /** 这个测试文件自己起过的实例 pid（收尾兜底用）。 */
 const startedPids = new Set();
 
-/** 收尾：先试真正的 stop；不行就按 pid 结束自己起的进程并失败。 */
+/** 收尾：先试真正的 stop；还有活着的（含未发布的候选进程）就按 pid 结束并让测试失败。
+ *  修正一 #16：兜底强杀只用来防止泄漏，用到它本身就是红——不能“杀掉了所以绿”。 */
 async function stopEverything(stateDir, stateRootLabel) {
+  for (const pid of collectCandidatePids(stateDir)) startedPids.add(pid);
   const stopped = await runDashboard(["stop", "--state-root", stateRootLabel, "--run-dir", RUN_DIR]);
-  for (const pid of startedPids) {
-    if (pidAlive(pid)) {
-      // 只按记录里取得的具体 pid 结束（本测试自己经命令链起起来的进程）。
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 15_000 });
-      assert.equal(pidAlive(pid), false, `收尾：实例 pid ${pid} 没能停止（已按 pid 结束）`);
-    }
+  const stubborn = [...startedPids].filter((pid) => pidAlive(pid));
+  for (const pid of stubborn) {
+    // 只按记录里取得的具体 pid 结束（本测试自己经命令链起起来的进程）。
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 15_000 });
   }
+  assert.deepEqual(
+    stubborn,
+    [],
+    `收尾需要强杀 pid [${stubborn.join(", ")}] 才算失败：stop 之后它们本该自己退出（已按 pid 结束以免泄漏）`,
+  );
   return stopped;
 }
 

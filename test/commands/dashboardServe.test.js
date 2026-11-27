@@ -125,6 +125,24 @@ test("serve (145b-fix): a FAILED candidate write is a bounded failure — result
   assert.equal(setup.w.closed, 1, "the poll timer never existed — the unified fail path closed the server");
 });
 
+test("serve (145b-fix): a FAILED instance-log write after listen is a bounded failure — result written, closed, exit 1", async (t) => {
+  const setup = world({});
+  let lines = 0;
+  setup.injections.createLoggerFn = () => ({
+    line() {
+      lines += 1;
+      if (lines >= 2) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" }); // 第二行（监听成功之后）起写不进
+    },
+  });
+  t.after(setup.cleanup);
+  await dashboardServeCommand(setup.args, {}, setup.injections);
+  assert.ok(lines >= 2, "the log was actually written to (and failed)");
+  assert.deepEqual(readResult(setup.stateDir), { reason: "serve_error" });
+  assert.deepEqual(setup.w.exits, [1], "exit code 1, exactly once, no throw, no hang");
+  assert.equal(setup.w.closed, 1, "the listening server was closed by the unified failure path");
+  assert.equal(existsSync(join(setup.stateDir, `candidate-${GEN}.json`)), false, "no candidate without a working log");
+});
+
 test("serve (145b-fix): an incomplete codes purge refuses to serve (bounded, result written)", async (t) => {
   const setup = world({});
   setup.injections.purgeFn = async () => ({ ok: false, purged: 2, remaining: 3 });

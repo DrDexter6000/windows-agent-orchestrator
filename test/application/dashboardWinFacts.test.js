@@ -15,6 +15,8 @@ import {
   readProcessCreatedAt,
   listenerPidsOfPort,
   probeProcessIdentity,
+  buildPortProbeScript,
+  parsePortProbeOutput,
 } from "../../src/application/dashboardWinFacts.js";
 
 test("readProcessCreatedAt: two reads of THIS live process are strictly equal and plausible", async () => {
@@ -49,33 +51,58 @@ test("listenerPidsOfPort: a port this test listens on is owned by this pid; a fr
 });
 
 test("listenerPidsOfPort (145b-fix): a failed PROBE is null; only a truly empty listen table is []", async () => {
-    // 注入输出：查询报错（如 0x80041003 / 权限）→ null；ObjectNotFound（查无结果）→ []。
-    const errProbe = (cb) => async (cmd, args, opts, done) => done(null, "wao-port-error:1" + String.fromCharCode(10));
-    assert.equal(await listenerPidsOfPort(8080, { execFileFn: errProbe() }), null, "a probe error is unknown, never 'nobody listening'");
-    const emptyProbe = async (cmd, args, opts, done) => done(null, "wao-port:" + String.fromCharCode(10));
-    assert.deepEqual(await listenerPidsOfPort(8080, { execFileFn: emptyProbe }), [], "ObjectNotFound is a real empty table");
-    const realProbe = async (cmd, args, opts, done) => done(null, "wao-port:123 456" + String.fromCharCode(10));
-    assert.deepEqual(await listenerPidsOfPort(8080, { execFileFn: realProbe }), [123, 456]);
-  });
+  // 两种输出：查询报错（脚本的 catch 走 else 分支）→ null；ObjectNotFound（查无结果）
+  // → 空哨兵 → []。第三种：子进程本身失败 → null。
+  const errorProbe = async (cmd, args, opts, done) => done(null, "wao-port-error:" + String.fromCharCode(10));
+  assert.equal(await listenerPidsOfPort(8080, { execFileFn: errorProbe }), null, "a probe error is unknown, never 'nobody listening'");
+  const emptyProbe = async (cmd, args, opts, done) => done(null, "wao-port:" + String.fromCharCode(10));
+  assert.deepEqual(await listenerPidsOfPort(8080, { execFileFn: emptyProbe }), [], "ObjectNotFound is a real empty table");
+  const realProbe = async (cmd, args, opts, done) => done(null, "wao-port:123 456" + String.fromCharCode(10));
+  assert.deepEqual(await listenerPidsOfPort(8080, { execFileFn: realProbe }), [123, 456]);
+  const failedProbe = async (cmd, args, opts, done) => done(new Error("powershell exited 1"), "");
+  assert.equal(await listenerPidsOfPort(8080, { execFileFn: failedProbe }), null, "a failed subprocess is unknown too");
+});
 
-  test("every powershell child drops PSModulePath from its inherited environment (pwsh-7 parent must not break Get-Acl/CIM)", async () => {
-    const seen = [];
-    const execFileFn = (cmd, args, opts, done) => {
-      seen.push(opts?.env ?? null);
-      done(null, "wao-port:" + String.fromCharCode(10));
-    };
-    process.env.PSModulePath = "C:akepwsh7modules;" + (process.env.PSModulePath ?? "");
-    try {
-      await listenerPidsOfPort(8081, { execFileFn });
-    } finally {
-      delete process.env.PSModulePath;
-    }
-    assert.ok(seen.length >= 1);
-    for (const env of seen) {
-      assert.ok(env !== null, "the child env is constructed explicitly");
-      assert.equal("PSModulePath" in env, false, "PSModulePath is dropped so Windows PowerShell uses its own defaults");
-    }
+test("listener probe wrapper (real PowerShell): only ObjectNotFound is an empty table; another error is unknown", async () => {
+  // 直接跑生产的外壳：ObjectNotFound（查无结果）→ 空表；别的错误 → unknown。
+  // 撤销 #7（回到“任何错误都输出空哨兵”）时，第二条会读成 []，本用例变红。
+  const run = (body) => new Promise((resolve) => {
+    const env = { ...process.env };
+    delete env.PSModulePath; // 与生产子进程同一环境纪律
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", buildPortProbeScript(body)],
+      { windowsHide: true, timeout: 20_000, env },
+      (err, stdout) => resolve(err ? null : String(stdout ?? "")),
+    );
   });
+  const notFound = await run(`$c=@(Get-Item -LiteralPath 'C:\\wao-no-such-path-${process.pid}'); 'wao-port:' + @($c).Count`);
+  assert.deepEqual(parsePortProbeOutput(notFound), [], "ObjectNotFound is a truly empty table");
+  const otherError = await run("[int]::Parse('nope') | Out-Null; 'wao-port:'");
+  assert.equal(parsePortProbeOutput(otherError), null, "any other PowerShell error is unknown, never an empty table");
+  assert.match(String(otherError), /wao-port-error:/, "the error branch emits its own sentinel");
+});
+
+test("every powershell child drops PSModulePath from its inherited environment (pwsh-7 parent must not break Get-Acl/CIM)", async () => {
+  const seen = [];
+  const execFileFn = (cmd, args, opts, done) => {
+    seen.push(opts?.env ?? null);
+    done(null, "wao-port:" + String.fromCharCode(10));
+  };
+  const prev = process.env.PSModulePath;
+  process.env.PSModulePath = "C:\\fake\\pwsh7\\modules;" + (prev ?? "");
+  try {
+    await listenerPidsOfPort(8081, { execFileFn });
+  } finally {
+    if (prev === undefined) delete process.env.PSModulePath;
+    else process.env.PSModulePath = prev;
+  }
+  assert.ok(seen.length >= 1);
+  for (const env of seen) {
+    assert.ok(env !== null, "the child env is constructed explicitly");
+    assert.equal("PSModulePath" in env, false, "PSModulePath is dropped so Windows PowerShell uses its own defaults");
+  }
+});
 
 test("listenerPidsOfPort: an invalid port reads as null without spawning", async () => {
   let spawns = 0;

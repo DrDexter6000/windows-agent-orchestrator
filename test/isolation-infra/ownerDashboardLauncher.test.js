@@ -186,7 +186,7 @@ test("LAUNCHER: the command completes though the fake browser child never exits"
   };
   const out = await dashboardCommand(["--run-dir", dir], { runDir: dir }, {
     controlIo: {
-      now: () => 1_000_000, sleep: async () => {}, ensureStateDir: async () => ({ ok: true }), verifyStateDir: async () => ({ ok: true }),
+      now: () => 1_000_000, sleep: async () => {}, ensureStateDir: async () => ({ ok: true }), verifyStateDir: async () => ({ ok: true }), stateDirPresent: async () => true,
       readInstanceEx: async () => ({ status: "present", raw: instance, record: instance }), publishInstance: async () => {},
       readCandidate: async () => null, readResult: async () => null, removeResult: async () => {},
       createLock: async () => ({ ok: false, lock: null }), readLock: async () => null,

@@ -5,9 +5,10 @@
 //   - instance.json：{ protocol, runDir, pid, processCreatedAt, port, nonce, generation,
 //     build }，先写临时文件再原子改名发布；读取按闭集形状校验，坏形状读作 null
 //     （不猜）。candidate-<g>.json / result-<g>.json / stop-<g>.request 同一纪律。
-//   - launch.lock：wx 独占创建，内容 { generation, deadline }；过期接管 = 原子改名到
-//     launch.lock.stale-<旧代际>，改名成功的那一个接管（双过期接管只有一个赢家）；
-//     锁不主动删除，到期自然失效。
+//   - launch.lock：wx 独占创建（内容先写临时文件再 linkSync 发布，读者永远看不到半写的锁），
+//     内容 { generation, deadline }；过期接管 = 按内容核对的原子移除（removeFileWhen：
+//     改名到唯一 staging、读回确认是预期那一代才删），双过期接管只有一个赢家；锁不主动
+//     删除，到期自然失效。
 //   - instance.log：每代重写（构造即截断），上限 DASHBOARD_INSTANCE_LOG_MAX_BYTES，
 //     到顶写一行固定“日志已截断”后停止追加。绝不记录 URL、请求头、启动码、会话
 //     令牌——调用方（dashboardServe）只喂固定的事件词与数字。
@@ -391,18 +392,12 @@ export const lockFileName = (stateDir) => join(stateDir, LOCK_FILE);
 export const codesDirOf = (stateDir) => join(stateDir, CODES_DIR);
 export const instanceLogFileOf = (stateDir) => join(stateDir, INSTANCE_LOG_FILE);
 
-/** 删除 instance.json（幂等；用于实例确认自己仍是当前代际后的收尾）。 */
-export async function removeInstanceRecord(stateDir) {
-  try {
-    unlinkSync(join(stateDir, INSTANCE_FILE));
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-}
-
-/** instance.json 此刻存在吗（stop 轮询用）。 */
-export function instanceRecordExists(stateDir) {
-  return existsSync(join(stateDir, INSTANCE_FILE));
+/**
+ * 实例目录本身是否存在。status / stop 用它区分“从未建立过状态目录”（如实说没有实例）
+ * 与“目录在、要核对”（ACL 核对不过就拒绝）；只做存在性判断，不读目录内容。
+ */
+export function stateDirPresent(stateDir) {
+  return existsSync(stateDir);
 }
 
 /**

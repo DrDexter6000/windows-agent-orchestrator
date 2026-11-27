@@ -51,6 +51,7 @@ import {
   takeOverStaleLock,
   writeStopRequest,
   codesDirOf,
+  stateDirPresent,
 } from "./dashboardFiles.js";
 import { ensureDashboardStateDir, verifyDashboardStateDir } from "./dashboardAcl.js";
 import { probeProcessIdentity, listenerPidsOfPort } from "./dashboardWinFacts.js";
@@ -218,10 +219,21 @@ export async function launchDashboard({ runDir, stateRoot, port, io }) {
     // 1. 复用检查（不取锁）。
     const settled = await settleReusable(dep, stateDir, await probeReusable(dep, stateDir, runDir, explicitPort));
     if (settled !== null) return settled;
+    // 总预算在复用检查之后再判：一次被推迟的发布仍有机会先复用别人的成功实例。
+    if (dep.now() - overallStart > OVERALL_LAUNCH_BUDGET_MS) throw controlError("launch_failed");
 
     // 2. 启动锁（原子建锁；等待；内容核对的过期接管）。
     const generation = randomBytes(8).toString("hex");
-    let acquired = await dep.createLock(stateDir, generation, dep.now() + DASHBOARD_LAUNCH_DEADLINE_MS);
+    // 修正一 #5：锁的期限要覆盖等候选、核对、发布的全程。每次成功建锁都记下这一代的
+    // 截止，拉起与发布复核都用它——不再在 spawn 时另起一个更晚的期限。
+    let lockDeadline = 0;
+    const acquireLock = async () => {
+      const until = dep.now() + DASHBOARD_LAUNCH_DEADLINE_MS;
+      const result = await dep.createLock(stateDir, generation, until);
+      if (result.ok === true) lockDeadline = until;
+      return result;
+    };
+    let acquired = await acquireLock();
     let lockRotated = false;
     while (!acquired.ok) {
       if (dep.now() - overallStart > OVERALL_LAUNCH_BUDGET_MS) throw controlError("launch_failed");
@@ -230,7 +242,7 @@ export async function launchDashboard({ runDir, stateRoot, port, io }) {
         // 锁文件在但读不出形状（坏锁）：按坏锁接管，再重新竞争。
         await dep.takeOverStale(stateDir, "0000000000000000");
         await dep.sleep(DASHBOARD_LOCK_POLL_MS);
-        acquired = await dep.createLock(stateDir, generation, dep.now() + DASHBOARD_LAUNCH_DEADLINE_MS);
+        acquired = await acquireLock();
         continue;
       }
       // 有界等待：至多到持有者的截止时间；其间反复复用检查（等到了就复用）。
@@ -247,24 +259,34 @@ export async function launchDashboard({ runDir, stateRoot, port, io }) {
       }
       if (lockRotated) {
         lockRotated = false;
-        acquired = await dep.createLock(stateDir, generation, dep.now() + DASHBOARD_LAUNCH_DEADLINE_MS);
+        acquired = await acquireLock();
         continue;
       }
       if (dep.now() - overallStart > LOCK_WAIT_TOTAL_MS) throw controlError("lock_wait_failed");
       // 截止已到：过期接管——内容核对的移除原语，成功的那一个接管，失败者回等待。
       await dep.takeOverStale(stateDir, existing.generation);
       await dep.sleep(DASHBOARD_LOCK_POLL_MS);
-      acquired = await dep.createLock(stateDir, generation, dep.now() + DASHBOARD_LAUNCH_DEADLINE_MS);
+      acquired = await acquireLock();
     }
 
     // 3. 锁内第二次复用检查（拿到锁之前别人可能已发布）。
     const inLock = await settleReusable(dep, stateDir, await probeReusable(dep, stateDir, runDir, explicitPort));
     if (inLock !== null) return inLock;
 
-    // 4. 一个截止时间贯穿等候选、核对与发布（锁的截止即本次拉起的截止）。
-    const deadline = dep.now() + DASHBOARD_LAUNCH_DEADLINE_MS;
+    // 4. 一个截止时间贯穿等候选、核对与发布：就是这一代锁的截止（修正一 #5）。
+    // spawn 前复核：仍在期限之内、并且锁仍是自己这一代；任一不满足就不拉起——
+    // 回到等待与复用检查（这个启动器会按锁的期限自然退出，绝不在过期后还起进程）。
+    const deadline = lockDeadline;
+    const lockNow = await dep.readLock(stateDir);
+    if (dep.now() >= deadline || lockNow === null || lockNow.generation !== generation) {
+      continue;
+    }
     const spawned = await dep.spawnServe({ runDir, stateRoot, generation, port, deadline });
-    if (spawned.ok !== true) throw controlError("wmi_create_failed");
+    if (spawned.ok !== true) {
+      // 路径含 `"` 是配置错误（固定失败码），不是 WMI 故障。
+      if (spawned.reason === "path_quote") throw controlError("path_quote");
+      throw controlError("wmi_create_failed");
+    }
 
     let deferred = false;
     while (dep.now() < deadline) {
@@ -334,6 +356,8 @@ export async function dashboardStatus({ runDir, stateRoot, io }) {
   const dep = { ...defaultControlIo(), ...io };
   const stateDir = stateDirFor(runDir, stateRoot);
   const codesDir = codesDirOf(stateDir);
+  // 状态目录从未建立过：没有实例，也没什么可核对/可读的（如实说“没有”）。
+  if (await dep.stateDirPresent(stateDir) !== true) return { present: false };
   const verified = await dep.verifyStateDir(stateRoot, stateDir, codesDir);
   if (verified.ok !== true) throw controlError("state_dir_rejected");
   const probe = await probeReusable(dep, stateDir, runDir, undefined);
@@ -367,6 +391,8 @@ export async function dashboardStop({ runDir, stateRoot, io }) {
   const dep = { ...defaultControlIo(), ...io };
   const stateDir = stateDirFor(runDir, stateRoot);
   const codesDir = codesDirOf(stateDir);
+  // 状态目录从未建立过：没有实例可停，也不该往不存在的目录写停机请求。
+  if (await dep.stateDirPresent(stateDir) !== true) return { outcome: "no_instance" };
   const verified = await dep.verifyStateDir(stateRoot, stateDir, codesDir);
   if (verified.ok !== true) throw controlError("state_dir_rejected");
   const read = await dep.readInstanceEx(stateDir);
@@ -422,7 +448,10 @@ function defaultCliJsPath() {
  */
 export function defaultControlIo(overrides = {}) {
   const cliJs = defaultCliJsPath();
-  const installRoot = resolve(dirname(cliJs)); // src/ 的上一级
+  // 安装根 = src/ 的上一级（从 cli.js 的位置推）；WMI 子进程的工作目录就是它。
+  const installRoot = resolve(dirname(cliJs), "..");
+  // 测试缝：WMI 创建层可注入（验证命令行与工作目录，不真起进程）。
+  const wmiBroker = typeof overrides.wmiBroker === "function" ? overrides.wmiBroker : defaultWmiSpawnBroker;
   return {
     now: Date.now,
     // 这里的定时器必须保持引用：启动器等锁/等候选时事件循环里只剩这一个等待，
@@ -439,6 +468,7 @@ export function defaultControlIo(overrides = {}) {
     readLock: readLaunchLock,
     takeOverStale: takeOverStaleLock,
     writeStopRequest,
+    stateDirPresent,
     probeIdentity: probeProcessIdentity,
     listenerPids: listenerPidsOfPort,
     async health(port) {
@@ -465,8 +495,8 @@ export function defaultControlIo(overrides = {}) {
         ...(Number.isInteger(port) && port > 0 ? { port } : {}),
         deadline,
       });
-      if (built.ok !== true) return { ok: false, detail: built.reason };
-      const created = await defaultWmiSpawnBroker({
+      if (built.ok !== true) return { ok: false, reason: built.reason }; // path_quote：配置错误，固定失败码
+      const created = await wmiBroker({
         commandLine: built.commandLine,
         cwd: installRoot,
         timeoutMs: Math.max(1, deadline - Date.now()),

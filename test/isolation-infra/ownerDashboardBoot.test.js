@@ -13,6 +13,34 @@ process.env.WAO_ALLOW_NESTED_DISPATCH = "1";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import * as api from "../../src/owner-dashboard/v2/api.js";
+
+/**
+ * app.js 的轮询定时器不会自己停：真实浏览器里随标签页消亡，测试进程不会。
+ * 只清理调用栈属于 v2 页面（app.js）的定时器——不碰 node:test 自己的超时计时器，
+ * 这样整个文件跑完子进程能退出（修正一 #14：否则 test:one 会挂到超时）。
+ */
+function trackPageTimers(t) {
+  const realSetTimeout = globalThis.setTimeout;
+  const ids = new Set();
+  globalThis.setTimeout = function tracked(fn, ms, ...rest) {
+    const id = realSetTimeout.call(globalThis, fn, ms, ...rest);
+    let fromPage = false;
+    try {
+      fromPage = /owner-dashboard[\\/]v2[\\/]app\.js/.test(String(new Error().stack));
+    } catch {
+      fromPage = false;
+    }
+    if (fromPage) ids.add(id);
+    return id;
+  };
+  t.after(() => {
+    globalThis.setTimeout = realSetTimeout;
+    for (const id of ids) clearTimeout(id);
+    ids.clear();
+  });
+}
+
 class FakeNode {
   constructor(tag = "div") {
     this.tag = tag; this.className = ""; this.children = []; this.parent = null;
@@ -123,6 +151,7 @@ async function bootIn(browser) {
 const JSON_OK = (body) => ({ status: 200, ok: true, json: async () => body });
 
 test("boot (real): #code= clears the fragment AND the stored token in the SAME synchronous step, before the exchange settles", async (t) => {
+  trackPageTimers(t);
   const browser = makeBrowser({
     hash: "#code=" + "ab".repeat(32),
     fetchImpl: async (url) => {
@@ -152,6 +181,7 @@ test("boot (real): #code= clears the fragment AND the stored token in the SAME s
 });
 
 test("boot (real): a dead code does not fall back to the old token; the exchange was attempted", async (t) => {
+  trackPageTimers(t);
   const browser = makeBrowser({
     hash: "#code=" + "ab".repeat(32),
     fetchImpl: async (url) => {
@@ -168,6 +198,7 @@ test("boot (real): a dead code does not fall back to the old token; the exchange
 });
 
 test("boot (real): pasting #workers?project=x&code=… into an OPEN page triggers a reload on hashchange", async (t) => {
+  trackPageTimers(t);
   const browser = makeBrowser({
     hash: "#overview",
     fetchImpl: async () => JSON_OK({ status: "ready", counts: {}, projects: [], lanes: [] }),
@@ -183,6 +214,7 @@ test("boot (real): pasting #workers?project=x&code=… into an OPEN page trigger
 });
 
 test("boot (real): a 401 from any data request clears the stored token (api.js single-fetch hook)", async (t) => {
+  trackPageTimers(t);
   const browser = makeBrowser({
     hash: "#token=" + "ee".repeat(32),
     fetchImpl: async () => ({ status: 401, ok: false, json: async () => ({ error: "unauthorized" }) }),
@@ -193,4 +225,25 @@ test("boot (real): a 401 from any data request clears the stored token (api.js s
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(browser.fetches.length >= 1, "data requests left through the single fetch");
   assert.ok(!browser.sessionStorage.getItem("wao_v2_token"), "the 401 answers cleared the stored token");
+});
+
+test("api (145b-fix): a 401 from the detail / Activity / full text / image / stream handshake all clear the stored token", async (t) => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ status: 401, ok: false, json: async () => ({ error: "unauthorized" }) });
+  t.after(() => { globalThis.fetch = realFetch; });
+  const cleared = [];
+  api.bindTokenClear(() => cleared.push("cleared"));
+  t.after(() => api.bindTokenClear(null));
+  const token = "ee".repeat(32);
+  const commit = "f".repeat(40);
+  // 这些出口全都从 api.js 那唯一一处 fetch 走；401 的清理只写在那里。
+  const results = [
+    await api.request(api.workerPath("run_1"), token),
+    await api.request(api.activityPath({ runId: "run_1" }), token),
+    await api.request(api.eventPath({ runId: "run_1", seq: 1, part: "output" }), token),
+    await api.requestImage(api.artifactPath({ runId: "run_1", commit, fileIndex: 0 }), token),
+    await api.readStream(api.streamPath({ runId: "run_1" }), token, { onFrame() {} }),
+  ];
+  for (const result of results) assert.deepEqual(result, { ok: false, reason: "unauthorized" }, "every route reports the fixed 401 outcome");
+  assert.equal(cleared.length, results.length, `every 401 cleared the stored token (cleared ${cleared.length} of ${results.length})`);
 });

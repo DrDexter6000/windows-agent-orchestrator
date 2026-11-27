@@ -172,6 +172,7 @@ function recordingControlIo(seen, instanceRunDir) {
     sleep: async (ms) => { clock += ms; },
     ensureStateDir: async (stateRoot, instanceDir) => { seen.instanceDir = instanceDir; return { ok: true }; },
     verifyStateDir: async () => ({ ok: true }),
+    stateDirPresent: async () => true,
     readInstanceEx: async () => ({ status: "present", raw: instance, record: instance }),
     publishInstance: async () => {},
     readCandidate: async () => null,

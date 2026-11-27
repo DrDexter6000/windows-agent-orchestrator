@@ -107,6 +107,20 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   let sweepTimer = null;
 
   /**
+   * 写一行实例日志；写失败返回 false（绝不把一次日志故障变成未捕获异常）。
+   * 修正一 #8：日志写失败也是启动期失败，要走统一的收尾（写结果、关服务、按退出码退出）。
+   */
+  const say = (text) => {
+    if (logger === null) return false;
+    try {
+      logger.line(text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
    * 统一失败收尾（修正一 #8）：写本代际的失败结果（尽力）、有界关掉已起的服务、按
    * 退出码 1 退出。监听前与监听后的每条失败路径都走这里——不抛错、不挂住。
    */
@@ -117,6 +131,7 @@ export async function dashboardServeCommand(args, config, injections = {}) {
     } catch {
       // 结果写不进（极端）：父进程按超时收口
     }
+    say(`serve failed: ${reason}${note ? ` (${note})` : ""}`);
     log(`serve failed: ${reason}${note ? ` (${note})` : ""}`);
     if (server !== null) {
       await boundedClose();
@@ -124,17 +139,32 @@ export async function dashboardServeCommand(args, config, injections = {}) {
     exitFn(serveExitCode); // 生产：process.exit 不返回；测试缝：返回后命令收口
   };
 
+  /** 启动期的日志：写失败按 serve_error 收口（返回 false 时调用方直接 return）。 */
+  const logOrFail = async (text) => {
+    if (say(text)) return true;
+    await fail("serve_error", "instance log");
+    return false;
+  };
+
   /** 有界关服务：close() 与预算赛跑，到点硬断连接（真正解不开的是在途刷新的等待）。 */
   const boundedClose = async () => {
+    let timer = null;
     const hard = new Promise((resolveHard) => {
-      const timer = setTimeout(() => {
+      // 不 unref：close() 卡在在途刷新上时，事件循环里可能只剩这个定时器——它必须能
+      // 到点把预算用尽这件事落定（否则进程会带着没关完的服务静默退出）。
+      timer = setTimeout(() => {
         try { server.server?.closeAllConnections?.(); } catch { /* 已关 */ }
         resolveHard("budget");
       }, stopBudgetMs);
-      timer.unref?.();
     });
-    const closing = Promise.resolve(server.close()).then(() => "closed", () => "closed");
-    return Promise.race([closing, hard]);
+    const closing = Promise.resolve()
+      .then(() => server.close()) // 同步 throw 也归到 "closed"（关不掉不改变退出路径）
+      .then(() => "closed", () => "closed");
+    try {
+      return await Promise.race([closing, hard]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   };
 
   // 1. 三层状态目录核对（只核对不修改；不过即拒绝）。
@@ -151,13 +181,14 @@ export async function dashboardServeCommand(args, config, injections = {}) {
     await fail("serve_error", "instance log");
     return;
   }
-  logger.line(`serve start generation ${generation} port ${port}`);
+  // 修正一 #8：实例日志写不进去也是启动失败——同一条收尾，不抛错、不挂住。
+  if (!await logOrFail(`serve start generation ${generation} port ${port}`)) return;
 
   // 3. 服务（构造即校验固定静态资源，缺了起不来）。
   try {
     server = createServerFn({ runDir, port, codesDir });
   } catch {
-    logger.line("server construction failed");
+    say("server construction failed");
     await fail("assets_missing");
     return;
   }
@@ -167,20 +198,20 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   try {
     address = await server.listen();
   } catch (error) {
-    logger.line(`listen failed: ${typeof error?.code === "string" ? error.code : "unknown"}`);
+    say(`listen failed: ${typeof error?.code === "string" ? error.code : "unknown"}`);
     await fail(error?.code === "EADDRINUSE" ? "port_in_use" : "listen_failed");
     return;
   }
-  logger.line(`listening port ${address.port}`);
+  if (!await logOrFail(`listening port ${address.port}`)) return;
 
   // 5. 换代清空旧码（上一代没用掉的码，换代后一律不能兑换；清不完就失败）。
   const purged = await purgeFn(codesDir);
   if (purged.ok !== true) {
-    logger.line(`codes purge incomplete: ${purged.remaining} left`);
+    say(`codes purge incomplete: ${purged.remaining} left`);
     await fail("serve_error", "codes purge");
     return;
   }
-  if (purged.purged > 0) logger.line(`codes purged: ${purged.purged}`);
+  if (purged.purged > 0) say(`codes purged: ${purged.purged}`);
 
   // 6. 过期启动码的低频清理（启动时一次 + 每分钟一次，有条数上限）。
   const sweep = () => { sweepExpiredStartCodes(codesDir).catch(() => {}); };
@@ -191,7 +222,7 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   // 7. 候选：创建时间读得出、build 快照读得出才写得出（父进程按候选核对身份）。
   const processCreatedAt = await readCreatedAtFn(process.pid);
   if (typeof processCreatedAt !== "number" || !Number.isFinite(processCreatedAt)) {
-    logger.line("own creation time unreadable");
+    say("own creation time unreadable");
     await fail("serve_error", "creation time");
     return;
   }
@@ -205,11 +236,12 @@ export async function dashboardServeCommand(args, config, injections = {}) {
       build, // 修正一 #11：实际服务的子进程自己报告 build
     });
   } catch (error) {
-    logger.line(`candidate write failed: ${typeof error?.code === "string" ? error.code : "unknown"}`);
+    say(`candidate write failed: ${typeof error?.code === "string" ? error.code : "unknown"}`);
     await fail("serve_error", "candidate write");
     return;
   }
-  logger.line(`candidate written pid ${process.pid}`);
+  // 候选写出之后日志再坏也不该杀掉一个已经能服务的实例：只静默，不再把日志当启动门。
+  say(`candidate written pid ${process.pid}`);
 
   // 8. 代际轮询：截止前没被发布、发布后被替换、或收到对得上的停机请求 → 退出。
   let published = false;
@@ -252,10 +284,10 @@ export async function dashboardServeCommand(args, config, injections = {}) {
     stopping = true;
     if (pollTimer !== null) clearInterval(pollTimer);
     if (sweepTimer !== null) clearInterval(sweepTimer);
-    logger.line(`stopping: ${reason}`);
+    say(`stopping: ${reason}`);
     const outcome = await boundedClose();
     if (outcome === "budget") {
-      logger.line("stop budget exhausted");
+      say("stop budget exhausted");
       serveExitCode = 1;
     } else {
       serveExitCode = code;
@@ -270,7 +302,7 @@ export async function dashboardServeCommand(args, config, injections = {}) {
     } catch {
       // 同上
     }
-    logger.line("stopped");
+    say("stopped");
     exitFn(serveExitCode); // 生产：到此为止；测试缝：返回后落定 stopped
     settleStopped();
   }
