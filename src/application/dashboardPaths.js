@@ -51,6 +51,18 @@ export const DASHBOARD_CHILD_POLL_MS = 200;
 export const DASHBOARD_INSTANCE_POLL_MS = 1000;
 /** 健康探测的超时。 */
 export const DASHBOARD_HEALTH_TIMEOUT_MS = 4_000;
+/**
+ * 启动器发布 instance.json 前，离这一代截止时间至少还要剩多少：子进程一个轮询周期 + 1 秒。
+ * 余量不够就不发布——子进程在截止时看不到发布就会退出，不能把一个正在退出的实例发布出去。
+ */
+export const DASHBOARD_PUBLISH_MARGIN_MS = DASHBOARD_INSTANCE_POLL_MS + 1_000;
+/** 启动器拿到锁之后，一次清理状态目录残余文件的条数上限。 */
+export const DASHBOARD_STATE_SWEEP_MAX = 64;
+/**
+ * 判"远期锁"时留的容差：锁的期限晚于 now + 一代拉起期限 + 这个容差才按已过期处理。
+ * 时钟往回跳不到这么多，别人刚建的锁（期限 = 它的 now + 一代拉起期限）仍是活锁。
+ */
+export const DASHBOARD_LOCK_FUTURE_TOLERANCE_MS = 1_000;
 
 /**
  * 运行目录 → 身份串。抛固定文案的错误当目录不存在或读不出（realpath 失败），

@@ -1,23 +1,30 @@
 // src/commands/dashboardServe.js
 //
-// 第 145b 批（决定 0131 第 2 条；修正一 #8/#11 改定）：常驻看板实例进程
+// 第 145b 批（决定 0131 第 2 条；修正一 #8/#11、修正二 #4/#5/#7 改定）：常驻看板实例进程
 // （`wao dashboard serve`——内部入口，由 `wao dashboard` 经 WMI 创建层拉起）。
 //
 // 生命周期：
 //   - 三层状态目录（根/实例/codes）核对通过后监听；会话存储（内存）与 codes\ 就绪后
-//     /health 回本实例 nonce；写候选之前先**清空** codes\ 的全部旧码与 claim（上一代
-//     没用掉的码，换代后一律不能兑换；有条数上限，清不完按 serve_error 失败）；
+//     /health 回本实例 nonce。启动码绑定代际（码文件内容是签发时核对过的实例代际，服务
+//     只兑换自己代际的码），所以**启动时不碰 codes\**：没被发布的候选不会误伤当前实例
+//     刚发出去的码，上一代没用掉的码换代后自然兑换不了；
 //   - 候选记录端口、pid、nonce、OS 创建时间与**自己加载的 build**（instance.json 记
 //     录的是它，不是父进程的快照）；
-//   - 每秒轮询：截止时间过了还没被发布（迟到的失败者）、或发布后被换成别的代际
-//     （被替换的旧代）→ 收尾退出；发现 nonce 对得上的 stop-<g>.request → 优雅退出；
+//   - 每秒轮询：
+//       · 截止时间到了还没被发布（迟到的失败者）→ 收尾退出，但先**再读一次**记录，确实
+//         不是自己才退出（启动器在截止前一刻发布的，不能因为一次读在发布前就退）；读不出
+//         就下一轮再看，但截止之后一直读不出超过一个拉起期限也退出（不能永远活着）；
+//       · 发布后判定"被替换"只有两种情况：读到别的代际，或**连续两次**确实不存在；
+//         读出错、或读到但内容不认识，都按"下一轮再看"（记录在被别人换写的瞬间读不到是正常的）；
+//       · 发现 nonce 对得上的 stop-<g>.request → 优雅退出；
 //   - 每条失败路径（监听前与监听后）都走同一个收尾：写 result-<g>.json、有界关服务、
 //     按退出码退出——包括读不出自己的创建时间、写候选失败、日志写失败；
 //   - 优雅退出：停接收、先断流、server.close() + closeAllConnections()；close() 与
 //     整体预算 DASHBOARD_STOP_BUDGET_MS 赛跑，**到点无论 close() 是否完成都退出**
 //     （退出码 1；正常停机退出码 0）；最后只在 instance.json 仍是自己代际时按内容
 //     核对地删掉它，并删掉自己这一代的 candidate-<g>.json 与 stop-<g>.request；
-//   - 低频清理过期的启动码（启动时 + 每分钟一次，有条数上限）；
+//   - 过期启动码的低频清理（有条数上限）只在**已发布**之后才开始（发布后一次 + 每分钟
+//     一次）：没被发布的子进程不碰 codes\；
 //   - 不开机自启、不设闲置退出。
 //
 // 已知局限（一句话一条）：
@@ -50,7 +57,7 @@ import {
   codesDirOf,
   instanceLogFileOf,
 } from "../application/dashboardFiles.js";
-import { sweepExpiredStartCodes, purgeAllStartCodes } from "../application/dashboardCodes.js";
+import { sweepExpiredStartCodes } from "../application/dashboardCodes.js";
 import { readProcessCreatedAt } from "../application/dashboardWinFacts.js";
 import { buildSnapshotFromFacts } from "../application/dashboardBuild.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
@@ -64,8 +71,8 @@ const GENERATION_RE = /^[0-9a-f]{16}$/;
  * @param {string[]} args — serve 之后的参数
  * @param {object} config — 进程配置（serve 只用显式参数，不读 config 的路径）
  * @param {object} [injections] — { createServerFn, verifyStateDirFn, readCreatedAtFn, exitFn, log,
- *   stopBudgetMs, writeCandidateFn, createLoggerFn, purgeFn, buildSnapshotFn }（测试缝；
- *   exitFn 缺省是 process.exit）
+ *   stopBudgetMs, writeCandidateFn, createLoggerFn, buildSnapshotFn, readInstanceFn, sweepFn,
+ *   nowFn, pollMs }（测试缝；exitFn 缺省是 process.exit）
  */
 export async function dashboardServeCommand(args, config, injections = {}) {
   const options = parseOptions(args);
@@ -77,8 +84,11 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   const stopBudgetMs = injections.stopBudgetMs ?? DASHBOARD_STOP_BUDGET_MS;
   const writeCandidateFn = injections.writeCandidateFn ?? writeCandidateRecord;
   const createLoggerFn = injections.createLoggerFn ?? createInstanceLogger;
-  const purgeFn = injections.purgeFn ?? purgeAllStartCodes;
   const buildSnapshotFn = injections.buildSnapshotFn ?? (() => buildSnapshotFromFacts(readServerBuildFacts()));
+  const readInstanceFn = injections.readInstanceFn ?? readInstanceRecordEx;
+  const sweepFn = injections.sweepFn ?? sweepExpiredStartCodes;
+  const nowFn = injections.nowFn ?? Date.now;
+  const pollMs = injections.pollMs ?? DASHBOARD_INSTANCE_POLL_MS;
 
   const runDirArg = options.runDir;
   const stateRootArg = options.stateRoot;
@@ -94,7 +104,7 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   }
   const deadline = Number.isInteger(Number(options.deadline)) && Number(options.deadline) > 0
     ? Number(options.deadline)
-    : Date.now() + DASHBOARD_LAUNCH_DEADLINE_MS;
+    : nowFn() + DASHBOARD_LAUNCH_DEADLINE_MS;
 
   const runDir = normalizeRunDir(resolve(runDirArg));
   const stateRoot = resolve(stateRootArg);
@@ -184,9 +194,10 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   // 修正一 #8：实例日志写不进去也是启动失败——同一条收尾，不抛错、不挂住。
   if (!await logOrFail(`serve start generation ${generation} port ${port}`)) return;
 
-  // 3. 服务（构造即校验固定静态资源，缺了起不来）。
+  // 3. 服务（构造即校验固定静态资源，缺了起不来）。码绑定这一代：服务只兑换内容是
+  //    本代际的启动码。
   try {
-    server = createServerFn({ runDir, port, codesDir });
+    server = createServerFn({ runDir, port, codesDir, generation });
   } catch {
     say("server construction failed");
     await fail("assets_missing");
@@ -204,22 +215,8 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   }
   if (!await logOrFail(`listening port ${address.port}`)) return;
 
-  // 5. 换代清空旧码（上一代没用掉的码，换代后一律不能兑换；清不完就失败）。
-  const purged = await purgeFn(codesDir);
-  if (purged.ok !== true) {
-    say(`codes purge incomplete: ${purged.remaining} left`);
-    await fail("serve_error", "codes purge");
-    return;
-  }
-  if (purged.purged > 0) say(`codes purged: ${purged.purged}`);
-
-  // 6. 过期启动码的低频清理（启动时一次 + 每分钟一次，有条数上限）。
-  const sweep = () => { sweepExpiredStartCodes(codesDir).catch(() => {}); };
-  sweep();
-  sweepTimer = setInterval(sweep, DASHBOARD_CODE_SWEEP_INTERVAL_MS);
-  sweepTimer.unref?.();
-
-  // 7. 候选：创建时间读得出、build 快照读得出才写得出（父进程按候选核对身份）。
+  // 5. 候选：创建时间读得出、build 快照读得出才写得出（父进程按候选核对身份）。
+  //    这里不碰 codes\：清理过期启动码是已发布实例的事（见 markPublished）。
   const processCreatedAt = await readCreatedAtFn(process.pid);
   if (typeof processCreatedAt !== "number" || !Number.isFinite(processCreatedAt)) {
     say("own creation time unreadable");
@@ -243,33 +240,77 @@ export async function dashboardServeCommand(args, config, injections = {}) {
   // 候选写出之后日志再坏也不该杀掉一个已经能服务的实例：只静默，不再把日志当启动门。
   say(`candidate written pid ${process.pid}`);
 
-  // 8. 代际轮询：截止前没被发布、发布后被替换、或收到对得上的停机请求 → 退出。
+  // 6. 代际轮询：截止前没被发布、发布后被替换、或收到对得上的停机请求 → 退出。
   let published = false;
   let stopping = false;
+  let polling = false;
   let pollTimer = null;
+  let absentStreak = 0; // 发布后连续"确实不存在"的次数
 
   let settleStopped;
   const stopped = new Promise((resolveStopped) => { settleStopped = resolveStopped; });
 
+  /** 看到自己的发布：此后才开始过期启动码的低频清理（发布后一次 + 每分钟一次）。 */
+  function markPublished() {
+    absentStreak = 0;
+    if (published) return;
+    published = true;
+    const sweep = () => { Promise.resolve().then(() => sweepFn(codesDir)).catch(() => {}); };
+    sweep();
+    sweepTimer = setInterval(sweep, DASHBOARD_CODE_SWEEP_INTERVAL_MS);
+    sweepTimer.unref?.();
+  }
+
+  const isOwn = (read) => read.status === "present" && read.record !== null && read.record.generation === generation;
+
   async function poll() {
-    if (stopping) return;
+    if (stopping || polling) return;
+    polling = true;
     try {
       const stopNonce = await readStopRequest(stateDir, generation);
       if (stopNonce === server.nonce) {
         await gracefulStop("stop-request", 0);
         return;
       }
-      const read = await readInstanceRecordEx(stateDir);
-      if (read.status === "present" && read.record !== null && read.record.generation === generation) published = true;
-      if (!published && Date.now() >= deadline) {
+      const read = await readInstanceFn(stateDir);
+      if (isOwn(read)) {
+        markPublished();
+        return;
+      }
+      if (!published) {
+        if (nowFn() < deadline) return; // 还在等发布：现在"没有"本来就是常态
+        // 截止到了而前面那次读没看到自己的发布：再读一次——启动器可能在截止前一刻刚发布。
+        // 确实不是自己才退出；读不出就下一轮再看——但不能永远看下去：截止之后一直读不出，
+        // 持续超过一个拉起期限，就按"截止未发布"退出（否则这个没被发布的候选会一直活着，
+        // 而且没人能说出它的 pid）。每一次成功的读都会走到上面的两条出口，所以走到这里
+        // 且已超过期限，就说明截止之后每一轮都读不出。
+        const again = await readInstanceFn(stateDir);
+        if (isOwn(again)) {
+          markPublished();
+          return;
+        }
+        if (again.status === "error" && nowFn() - deadline <= DASHBOARD_LAUNCH_DEADLINE_MS) return;
         await gracefulStop("deadline-passed-unpublished", 0);
         return;
       }
-      if (published && (read.status !== "present" || read.record === null || read.record.generation !== generation)) {
-        await gracefulStop("superseded", 0);
+      // 已发布，但记录不是自己的了：
+      if (read.status === "error" || (read.status === "present" && read.record === null)) {
+        // 读出错，或在但内容不认识（外部非原子写到一半等）= 拿不准，下一轮再看（不算"确实
+        // 不存在"，也不算"别的代际"）。活进程配坏记录的收场在 `wao dashboard` 一侧（报 pid）。
+        absentStreak = 0;
+        return;
       }
+      if (read.status === "absent") {
+        // 别人原子换写的瞬间也可能读到"不存在"：连续两次确实不存在才算被替换。
+        absentStreak += 1;
+        if (absentStreak >= 2) await gracefulStop("superseded", 0);
+        return;
+      }
+      await gracefulStop("superseded", 0); // 读到别的代际：被替换了
     } catch {
-      // 一次轮询读失败下一轮再看（文件在换写的瞬间会出现）
+      // 一次轮询读失败下一轮再看
+    } finally {
+      polling = false;
     }
   }
 
@@ -307,7 +348,7 @@ export async function dashboardServeCommand(args, config, injections = {}) {
     settleStopped();
   }
 
-  pollTimer = setInterval(() => { poll(); }, DASHBOARD_INSTANCE_POLL_MS);
+  pollTimer = setInterval(() => { poll(); }, pollMs);
   pollTimer.unref?.();
 
   // 主流程等停机：真实进程由监听句柄与定时器撑着，优雅停机经上面的收口退出。

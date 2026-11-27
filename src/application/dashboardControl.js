@@ -1,19 +1,26 @@
 // src/application/dashboardControl.js
 //
-// 第 145b 批（决定 0131 第 2 条；修正一改定）：`wao dashboard` 的拉起/复用/停机状态机。
+// 第 145b 批（决定 0131 第 2 条；修正一、修正二改定）：`wao dashboard` 的拉起/复用/停机状态机。
 //
 // 流程（先读决策 0131 第 2 条与本批任务书）：
 //   1. 复用检查（不取锁）：instance.json 三态读取（不存在/读不出/在），在的话先取
 //      pid+创建时间判活性，再查协议/形状/runDir/端口归属/health+nonce——全对才复用。
 //      死记录（pid 不在或创建时间对不上）按失效处理、可以拉起覆盖；活而协议不同
 //      拒发码提示 restart；活而形状不对或读不出按"实例无响应"；读不出不拉起。
+//      活进程配形状不对的记录：报"pid N 的看板实例无响应，请先关掉它"，不提示 restart
+//      （stop 写不出停机请求，restart 只会回到同一个错误）。
 //   2. 拉起：原子建锁（临时文件 + linkSync）；他人持锁有界等待（反复复用检查，等到了
 //      就复用，绝不等待结束直接拉起）；等待中发现锁换了代就回到竞争起点，**不拿旧
-//      代际去接管**；锁过期由"内容核对的移除原语"（removeFileWhen）的唯一赢家接管；
-//      拿到锁后第二次复用检查。
+//      代际去接管**；锁过期（期限已到，或期限晚于"现在 + 一代拉起期限 + 1 秒容差"——时钟回拨前签下的）
+//      由"内容核对的移除原语"的唯一赢家接管；任何不符合闭集形状的锁都是坏锁、都可接管；
+//      拿到锁后第二次复用检查，再清理状态目录里不属于当前实例也不属于自己这一代的残余文件。
 //   3. WMI 创建层起 `dashboard serve`（命令行由 buildServeCommandLine 纯函数拼装，
 //      路径值加引号、含 `"` 拒绝拉起）；一个截止时间贯穿等候选、核对与发布；**发布前
-//      复核**（仍在截止内 + 锁仍是自己这一代），不满足就不发布、回到等待与复用检查。
+//      复核**：先读锁（仍是自己这一代）、再看钟，离截止至少还剩"子进程一个轮询周期 + 1 秒"，
+//      不满足就不发布、回到起点（子进程在截止时再读一次记录、没看到发布才退出）；回到起点后先等
+//      旧子进程必然已退出（旧截止 + 一个实例轮询周期 + 停机预算），期间照常复用检查、计入总预算。
+//      发布后删掉消费过的候选；码绑定刚发布的这一代（复用分支绑复用检查读到的那一代）。
+//      **锁用完就删**：发布成功、失败或放弃之后都按自己的代际删掉自己的锁（别人换上的锁不动）。
 //   4. stop：先核对状态目录（不过不写停机请求）；只有旧 pid 确实不在或创建时间对不上
 //      才算"没有实例/已退出"；记录消失、pid 还活着就继续等到超时。restart 在 stop
 //      失败时中止。
@@ -23,6 +30,8 @@
 //   - 145b 之前的前台实例没有 instance.json，这里发现不了也停不了它，要手动关闭。
 //   - 拉起中、尚未发布时运行 stop，会报"没有实例"（实例还没记录可停）。
 //   - 同一账户、管理员、SYSTEM 不防（威胁模型）。
+//   - 发布失败后锁立即释放，未发布的候选还活着时，用户立刻带 --port 重试会报 port_in_use，最多持续
+//     约一个拉起期限（推迟发布这种启动器自己触发的情形已先等旧子进程退出再重试）。
 //
 // 架构契约：不 import src/commands/*、src/mcp/*、MCP SDK 或 zod；不 console、不
 // process.exit。所有外部事实经 io 注入（缺省件在本文件底部组装）。
@@ -38,6 +47,10 @@ import {
   DASHBOARD_LOCK_POLL_MS,
   DASHBOARD_CHILD_POLL_MS,
   DASHBOARD_HEALTH_TIMEOUT_MS,
+  DASHBOARD_PUBLISH_MARGIN_MS,
+  DASHBOARD_LOCK_FUTURE_TOLERANCE_MS,
+  DASHBOARD_INSTANCE_POLL_MS,
+  DASHBOARD_STOP_BUDGET_MS,
   stateDirFor,
 } from "./dashboardPaths.js";
 import {
@@ -46,9 +59,12 @@ import {
   readCandidateRecord,
   readResultRecord,
   removeResultRecord,
+  removeCandidateRecord,
   createLaunchLock,
   readLaunchLock,
   takeOverStaleLock,
+  removeLaunchLockIfGeneration,
+  sweepStateDirLeftovers,
   writeStopRequest,
   codesDirOf,
   stateDirPresent,
@@ -158,20 +174,24 @@ export function buildServeCommandLine({ nodePath, cliJsPath, runDir, stateRoot, 
  */
 async function probeReusable(io, stateDir, runDir, explicitPort) {
   const read = await io.readInstanceEx(stateDir);
-  if (read.status === "absent") return { kind: "none", reason: "absent" };
+  if (read.status === "absent") return { kind: "none", reason: "absent", recordGeneration: null };
   if (read.status === "error") return { kind: "instance_unresponsive", reason: "record-unreadable" };
   const raw = read.raw;
   const pid = raw !== null && Number.isInteger(raw.pid) && raw.pid > 0 ? raw.pid : null;
   const createdAt = raw !== null && typeof raw.processCreatedAt === "number" && Number.isFinite(raw.processCreatedAt)
     ? raw.processCreatedAt
     : null;
-  if (pid === null || createdAt === null) return { kind: "none", reason: "malformed-record" }; // 坏文件按失效（原子发布下只能是坏文件）
+  // 记录里的代际（残余清理不动"当前实例"的文件；读不出就是 null）。
+  const recordGeneration = typeof raw?.generation === "string" && /^[0-9a-f]{16}$/.test(raw.generation) ? raw.generation : null;
+  if (pid === null || createdAt === null) return { kind: "none", reason: "malformed-record", recordGeneration }; // 坏文件按失效（原子发布下只能是坏文件）
   const identity = await io.probeIdentity(pid, createdAt);
-  if (identity === "gone") return { kind: "none", reason: "stale-process" }; // 死记录：可拉起覆盖
+  if (identity === "gone") return { kind: "none", reason: "stale-process", recordGeneration }; // 死记录：可拉起覆盖
   if (identity !== "same") return { kind: "instance_unresponsive", reason: "identity" };
   const protocol = raw.protocol;
   if (protocol !== DASHBOARD_PROTOCOL_VERSION) return { kind: "protocol_incompatible", reason: "protocol" };
-  if (read.record === null) return { kind: "instance_unresponsive", reason: "record-shape" };
+  // 活进程配形状不对的记录：stop 写不出停机请求（没有 nonce/代际），restart 也帮不上——
+  // 如实报出 pid，让人先关掉它（pid 一并带出，供固定文案使用）。
+  if (read.record === null) return { kind: "instance_unresponsive", reason: "record-shape", pid };
   const inst = read.record;
   if (inst.runDir !== runDir) return { kind: "instance_unresponsive", reason: "run-dir" }; // 活实例换了身份：保守拒绝（stop 有出口）
   if (explicitPort !== undefined && explicitPort !== 0 && inst.port !== explicitPort) {
@@ -179,21 +199,42 @@ async function probeReusable(io, stateDir, runDir, explicitPort) {
   }
   const owners = await io.listenerPids(inst.port);
   if (owners === null) return { kind: "instance_unresponsive", reason: "port-probe" };
-  if (!owners.includes(inst.pid)) return { kind: "none", reason: "port-owner" }; // 端口归属对不上：确定失效
+  if (!owners.includes(inst.pid)) return { kind: "none", reason: "port-owner", recordGeneration }; // 端口归属对不上：确定失效
   const health = await io.health(inst.port);
   if (health === null || health.ok !== true) return { kind: "instance_unresponsive", reason: "health" };
   if (health.nonce !== inst.nonce) return { kind: "instance_unresponsive", reason: "nonce" };
   return { kind: "ok", instance: inst };
 }
 
+/**
+ * "活进程配形状不对的记录"的错误：固定文案里只带这个已校验过的整数 pid，并且不提示
+ * restart（restart 的 stop 阶段同样没有 nonce 可写，只会回到同一个错误）。
+ */
+function unresponsiveWithPid(pid) {
+  const error = new Error(`pid ${pid} 的看板实例无响应，请先关掉它（WAO 不会强杀，也没有可用的停机请求）。`);
+  error.code = "instance_unresponsive";
+  error.pid = pid;
+  return error;
+}
+
 /** 复用/报错的公共收口：ok → 签码返回；坏结局照实抛；none → null（调用方继续）。 */
 async function settleReusable(io, stateDir, probe) {
   if (probe.kind === "none") return null;
+  if (probe.reason === "record-shape") throw unresponsiveWithPid(probe.pid);
   if (probe.kind !== "ok") throw controlError(probe.kind);
-  const { code } = await io.issueCode(stateDir);
+  // 码绑定"复用检查读到的这一代"——不是写码时重新读的那一代：之后换了代，新一代按未知码拒收。
+  const { code } = await io.issueCode(stateDir, probe.instance.generation);
   const buildNote = compareDashboardBuild(probe.instance.build, await io.buildSnapshot());
   return { outcome: "reused", port: probe.instance.port, code, buildNote };
 }
+
+/**
+ * 锁已过期：期限已到，或期限晚于"现在 + 一代拉起的期限 + 容差"（时钟回拨前签下的锁，不可信）。
+ * 容差：别人刚建的锁期限 = 它的 now + 一代拉起期限，我们的钟若比它的早了不到容差（时钟往回
+ * 跳了一点），那把活锁不能被误判成远期锁而被接管。
+ */
+const lockExpired = (lock, at) => at >= lock.deadline
+  || lock.deadline > at + DASHBOARD_LAUNCH_DEADLINE_MS + DASHBOARD_LOCK_FUTURE_TOLERANCE_MS;
 
 /**
  * 拉起或复用一个常驻看板实例。
@@ -215,12 +256,21 @@ export async function launchDashboard({ runDir, stateRoot, port, io }) {
   if (dir.ok !== true) throw controlError("state_dir_rejected");
 
   const overallStart = dep.now();
+  // 推迟发布之后，旧子进程（没被发布）要到"旧截止 + 一个实例轮询周期"才发现自己没被发布、再用至多
+  // 一个停机预算关服务退出——在这之前不另起，免得带 --port 的新子进程撞上 WAO 自己的旧子进程
+  // （报 port_in_use，而端口其实被自己人占着）。等待发生在回到起点之后：期间照常复用检查，
+  // 并且受总预算约束。
+  let retryNotBefore = 0;
   for (;;) {
     // 1. 复用检查（不取锁）。
     const settled = await settleReusable(dep, stateDir, await probeReusable(dep, stateDir, runDir, explicitPort));
     if (settled !== null) return settled;
     // 总预算在复用检查之后再判：一次被推迟的发布仍有机会先复用别人的成功实例。
     if (dep.now() - overallStart > OVERALL_LAUNCH_BUDGET_MS) throw controlError("launch_failed");
+    if (dep.now() < retryNotBefore) {
+      await dep.sleep(DASHBOARD_LOCK_POLL_MS);
+      continue; // 回到起点：再做一次复用检查 + 总预算检查，直到旧子进程必然已退出
+    }
 
     // 2. 启动锁（原子建锁；等待；内容核对的过期接管）。
     const generation = randomBytes(8).toString("hex");
@@ -237,16 +287,18 @@ export async function launchDashboard({ runDir, stateRoot, port, io }) {
     let lockRotated = false;
     while (!acquired.ok) {
       if (dep.now() - overallStart > OVERALL_LAUNCH_BUDGET_MS) throw controlError("launch_failed");
-      const existing = acquired.lock; // {generation, deadline} | null（消失/坏形状）
+      const existing = acquired.lock; // {generation, deadline} | null（消失/任何不符合闭集形状的坏锁）
       if (existing === null) {
-        // 锁文件在但读不出形状（坏锁）：按坏锁接管，再重新竞争。
-        await dep.takeOverStale(stateDir, "0000000000000000");
+        // 坏锁（含 `{}`、`[1]`、多一个键……）：只接管坏锁——expectedGeneration 传 null，
+        // 形状合法的锁（哪怕刚被别人换上）一个字节都不动。再重新竞争。
+        await dep.takeOverStale(stateDir, null);
         await dep.sleep(DASHBOARD_LOCK_POLL_MS);
         acquired = await acquireLock();
         continue;
       }
-      // 有界等待：至多到持有者的截止时间；其间反复复用检查（等到了就复用）。
-      while (dep.now() < existing.deadline && dep.now() - overallStart <= LOCK_WAIT_TOTAL_MS) {
+      // 有界等待：至多到持有者的截止时间；其间反复复用检查（等到了就复用）。期限晚于
+      // "现在 + 一代拉起的期限"的锁（时钟回拨前签下的）按已过期处理，不等。
+      while (!lockExpired(existing, dep.now()) && dep.now() - overallStart <= LOCK_WAIT_TOTAL_MS) {
         await dep.sleep(DASHBOARD_LOCK_POLL_MS);
         const probe = await probeReusable(dep, stateDir, runDir, explicitPort);
         const found = await settleReusable(dep, stateDir, probe);
@@ -263,76 +315,109 @@ export async function launchDashboard({ runDir, stateRoot, port, io }) {
         continue;
       }
       if (dep.now() - overallStart > LOCK_WAIT_TOTAL_MS) throw controlError("lock_wait_failed");
-      // 截止已到：过期接管——内容核对的移除原语，成功的那一个接管，失败者回等待。
+      // 锁已过期：过期接管——内容核对的移除原语，成功的那一个接管，失败者回等待。
       await dep.takeOverStale(stateDir, existing.generation);
       await dep.sleep(DASHBOARD_LOCK_POLL_MS);
       acquired = await acquireLock();
     }
 
-    // 3. 锁内第二次复用检查（拿到锁之前别人可能已发布）。
-    const inLock = await settleReusable(dep, stateDir, await probeReusable(dep, stateDir, runDir, explicitPort));
-    if (inLock !== null) return inLock;
+    // 拿到锁之后到离开这一轮（发布成功、失败、放弃）之前都在 try 里：不管怎么离开，
+    // 都按自己的代际删掉自己的锁（别人换上的锁不动）——锁不常驻，系统时间回拨也就不会
+    // 留下一个落在"未来"的死锁。
+    try {
+      // 3. 锁内第二次复用检查（拿到锁之前别人可能已发布）。
+      const lockProbe = await probeReusable(dep, stateDir, runDir, explicitPort);
+      const inLock = await settleReusable(dep, stateDir, lockProbe);
+      if (inLock !== null) return inLock;
 
-    // 4. 一个截止时间贯穿等候选、核对与发布：就是这一代锁的截止（修正一 #5）。
-    // spawn 前复核：仍在期限之内、并且锁仍是自己这一代；任一不满足就不拉起——
-    // 回到等待与复用检查（这个启动器会按锁的期限自然退出，绝不在过期后还起进程）。
-    const deadline = lockDeadline;
-    const lockNow = await dep.readLock(stateDir);
-    if (dep.now() >= deadline || lockNow === null || lockNow.generation !== generation) {
-      continue;
-    }
-    const spawned = await dep.spawnServe({ runDir, stateRoot, generation, port, deadline });
-    if (spawned.ok !== true) {
-      // 路径含 `"` 是配置错误（固定失败码），不是 WMI 故障。
-      if (spawned.reason === "path_quote") throw controlError("path_quote");
-      throw controlError("wmi_create_failed");
-    }
+      // 3b. 清理不属于当前实例、也不属于自己这一代的残余文件（启动器已离开时失败路径留下的
+      //     result-<g>.json、原子写失败留下的 *.tmp-*/*.rm-*/launch.lock.new-*）。尽力而为、
+      //     有条数上限；不递归、不碰 instance.log 与 codes\。
+      try {
+        await dep.sweepLeftovers(stateDir, { keepGenerations: [generation, lockProbe.recordGeneration ?? null] });
+      } catch {
+        // 清不了不影响拉起
+      }
 
-    let deferred = false;
-    while (dep.now() < deadline) {
-      const candidate = await dep.readCandidate(stateDir, generation);
-      if (candidate !== null) {
-        const identity = await dep.probeIdentity(candidate.pid, candidate.processCreatedAt);
-        const owners = await dep.listenerPids(candidate.port);
-        const health = await dep.health(candidate.port);
-        if (identity !== "same" || owners === null || !owners.includes(candidate.pid)
-          || health === null || health.ok !== true || health.nonce !== candidate.nonce) {
-          throw controlError("candidate_mismatch");
-        }
-        // 发布前复核（修正一 #5）：仍在截止内，且锁仍是自己这一代。
-        const stillInTime = dep.now() < deadline;
-        const lock = await dep.readLock(stateDir);
-        const stillMine = lock !== null && lock.generation === generation;
-        if (!stillInTime || !stillMine) {
-          deferred = true; // 不发布：这个子进程没被发布，会在截止后自己退出
-          break;
-        }
-        await dep.publishInstance(stateDir, {
-          protocol: DASHBOARD_PROTOCOL_VERSION,
-          runDir,
-          pid: candidate.pid,
-          processCreatedAt: candidate.processCreatedAt,
-          port: candidate.port,
-          nonce: candidate.nonce,
-          generation,
-          build: candidate.build, // 修正一 #11：记录实际服务的子进程报告的 build
-        });
-        const { code } = await dep.issueCode(stateDir);
-        const buildNote = compareDashboardBuild(candidate.build, await dep.buildSnapshot());
-        return { outcome: "launched", port: candidate.port, code, buildNote };
+      // 4. 一个截止时间贯穿等候选、核对与发布：就是这一代锁的截止（修正一 #5）。
+      // spawn 前复核：仍在期限之内、并且锁仍是自己这一代；任一不满足就不拉起——
+      // 回到等待与复用检查（这个启动器会按锁的期限自然退出，绝不在过期后还起进程）。
+      const deadline = lockDeadline;
+      const lockNow = await dep.readLock(stateDir);
+      if (dep.now() >= deadline || lockNow === null || lockNow.generation !== generation) {
+        await dep.sleep(DASHBOARD_LOCK_POLL_MS);
+        continue;
       }
-      const result = await dep.readResult(stateDir, generation);
-      if (result !== null) {
-        await dep.removeResult(stateDir, generation); // 修正一 #5：读到 result，读后即清
-        throw controlError(RESULT_TO_ERROR[result.reason] ?? "launch_failed");
+      const spawned = await dep.spawnServe({ runDir, stateRoot, generation, port, deadline });
+      if (spawned.ok !== true) {
+        // 路径含 `"` 是配置错误（固定失败码），不是 WMI 故障。
+        if (spawned.reason === "path_quote") throw controlError("path_quote");
+        throw controlError("wmi_create_failed");
       }
-      await dep.sleep(DASHBOARD_CHILD_POLL_MS);
+
+      let deferred = false;
+      while (dep.now() < deadline) {
+        const candidate = await dep.readCandidate(stateDir, generation);
+        if (candidate !== null) {
+          const identity = await dep.probeIdentity(candidate.pid, candidate.processCreatedAt);
+          const owners = await dep.listenerPids(candidate.port);
+          const health = await dep.health(candidate.port);
+          if (identity !== "same" || owners === null || !owners.includes(candidate.pid)
+            || health === null || health.ok !== true || health.nonce !== candidate.nonce) {
+            throw controlError("candidate_mismatch");
+          }
+          // 发布前复核（修正一 #5、修正二 #5）：先读锁（仍是自己这一代），再看时间——
+          // 读锁之后才看钟，离这一代的截止至少还要剩"子进程一个轮询周期 + 1 秒"：子进程
+          // 在截止时再读一次记录、没看到发布就退出，余量不够就把一个正在退出的实例发布出去了。
+          const lock = await dep.readLock(stateDir);
+          const stillMine = lock !== null && lock.generation === generation;
+          const remainingMs = deadline - dep.now();
+          if (!stillMine || remainingMs < DASHBOARD_PUBLISH_MARGIN_MS) {
+            deferred = true; // 不发布：这个子进程没被发布，会在截止后自己退出
+            break;
+          }
+          await dep.publishInstance(stateDir, {
+            protocol: DASHBOARD_PROTOCOL_VERSION,
+            runDir,
+            pid: candidate.pid,
+            processCreatedAt: candidate.processCreatedAt,
+            port: candidate.port,
+            nonce: candidate.nonce,
+            generation,
+            build: candidate.build, // 修正一 #11：记录实际服务的子进程报告的 build
+          });
+          // 候选已经消费完：删掉它（只动这一代的精确名字；删不掉无害，实例退出时也会清）。
+          try {
+            await dep.removeCandidate(stateDir, generation);
+          } catch {
+            // 同上
+          }
+          // 码绑定刚发布的这一代。
+          const { code } = await dep.issueCode(stateDir, generation);
+          const buildNote = compareDashboardBuild(candidate.build, await dep.buildSnapshot());
+          return { outcome: "launched", port: candidate.port, code, buildNote };
+        }
+        const result = await dep.readResult(stateDir, generation);
+        if (result !== null) {
+          await dep.removeResult(stateDir, generation); // 修正一 #5：读到 result，读后即清
+          throw controlError(RESULT_TO_ERROR[result.reason] ?? "launch_failed");
+        }
+        await dep.sleep(DASHBOARD_CHILD_POLL_MS);
+      }
+      if (deferred) {
+        retryNotBefore = deadline + DASHBOARD_INSTANCE_POLL_MS + DASHBOARD_STOP_BUDGET_MS;
+        continue; // 回到起点（先等旧子进程退出，期间照常复用检查）
+      }
+      throw controlError("launch_timeout");
+    } finally {
+      try {
+        await dep.releaseLock(stateDir, generation);
+      } catch {
+        // 删不掉：到期后按过期接管；这里不改变本次结局
+      }
     }
-    if (deferred) continue; // 回到等待与复用检查
-    throw controlError("launch_timeout");
   }
 }
-
 /** 复用检查 reason → status 的中文短语（闭集；不打印启动码与令牌）。 */
 export const STATUS_CHECK_TEXTS = Object.freeze({
   "record-unreadable": "实例记录读不出",
@@ -404,13 +489,16 @@ export async function dashboardStop({ runDir, stateRoot, io }) {
     ? raw.processCreatedAt
     : null;
   if (pid === null || createdAt === null) return { outcome: "no_instance" }; // 坏文件：没有可停的实例
-  const inst = read.record; // 可能 null（形状不合）——停机请求要 nonce/代际，取不到就按无实例
-  if (inst === null || typeof inst.generation !== "string" || typeof inst.nonce !== "string") {
-    return { outcome: "no_instance" };
-  }
+  // 先判活：死记录（pid 不在或创建时间对不上）= 没有可停的实例，不论记录形状好坏。
   const before = await dep.probeIdentity(pid, createdAt);
   if (before === "gone") return { outcome: "no_instance" };
   if (before !== "same") throw controlError("instance_unresponsive");
+  // 活进程但记录形状不对：停机请求要 nonce/代际，写不出——如实报"实例无响应"并带出 pid，
+  // 不写停机请求、不强杀，也不把它说成"没有实例"（那样 restart 会绕回同一个错误）。
+  const inst = read.record;
+  if (inst === null || typeof inst.generation !== "string" || typeof inst.nonce !== "string") {
+    throw unresponsiveWithPid(pid);
+  }
   await dep.writeStopRequest(stateDir, inst.generation, inst.nonce);
   const deadline = dep.now() + DASHBOARD_STOP_WAIT_MS;
   for (;;) {
@@ -467,6 +555,9 @@ export function defaultControlIo(overrides = {}) {
     createLock: createLaunchLock,
     readLock: readLaunchLock,
     takeOverStale: takeOverStaleLock,
+    releaseLock: removeLaunchLockIfGeneration,
+    sweepLeftovers: sweepStateDirLeftovers,
+    removeCandidate: removeCandidateRecord,
     writeStopRequest,
     stateDirPresent,
     probeIdentity: probeProcessIdentity,
@@ -503,8 +594,8 @@ export function defaultControlIo(overrides = {}) {
       });
       return created.ok === true ? { ok: true, pid: created.pid } : { ok: false, detail: created.detail };
     },
-    async issueCode(stateDir) {
-      return issueStartCode(codesDirOf(stateDir));
+    async issueCode(stateDir, generation) {
+      return issueStartCode(codesDirOf(stateDir), generation);
     },
     async buildSnapshot() {
       return buildSnapshotFromFacts(readServerBuildFacts());

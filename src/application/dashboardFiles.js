@@ -7,8 +7,11 @@
 //     （不猜）。candidate-<g>.json / result-<g>.json / stop-<g>.request 同一纪律。
 //   - launch.lock：wx 独占创建（内容先写临时文件再 linkSync 发布，读者永远看不到半写的锁），
 //     内容 { generation, deadline }；过期接管 = 按内容核对的原子移除（removeFileWhen：
-//     改名到唯一 staging、读回确认是预期那一代才删），双过期接管只有一个赢家；锁不主动
-//     删除，到期自然失效。
+//     先读一次，对不上就不碰文件；对得上才改名到唯一 staging、读回再核对、对不上还原），
+//     双过期接管只有一个赢家；任何不符合闭集形状的内容都是坏锁、都可接管；启动器发布成功、
+//     失败或放弃之后按自己的代际删掉自己的锁（removeLaunchLockIfGeneration）。
+//   - 残余文件：启动器拿到锁之后清理认得出名字形状的残余（sweepStateDirLeftovers，有条数
+//     上限、不递归、不碰 instance.log 与 codes\）。
 //   - instance.log：每代重写（构造即截断），上限 DASHBOARD_INSTANCE_LOG_MAX_BYTES，
 //     到顶写一行固定“日志已截断”后停止追加。绝不记录 URL、请求头、启动码、会话
 //     令牌——调用方（dashboardServe）只喂固定的事件词与数字。
@@ -19,9 +22,13 @@
 
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, renameSync, unlinkSync, linkSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, unlinkSync, linkSync, existsSync, readdirSync, lstatSync } from "node:fs";
 
-import { DASHBOARD_INSTANCE_LOG_MAX_BYTES } from "./dashboardPaths.js";
+import {
+  DASHBOARD_INSTANCE_LOG_MAX_BYTES,
+  DASHBOARD_LAUNCH_DEADLINE_MS,
+  DASHBOARD_STATE_SWEEP_MAX,
+} from "./dashboardPaths.js";
 
 export const INSTANCE_FILE = "instance.json";
 export const LOCK_FILE = "launch.lock";
@@ -246,14 +253,7 @@ export async function createLaunchLock(stateDir, generation, deadline) {
   } catch (error) {
     try { unlinkSync(tmp); } catch { /* 已不在 */ }
     if (error?.code !== "EEXIST") throw error;
-    const value = readJsonSync(file);
-    const lock = value !== null && typeof value === "object"
-      && typeof value.generation === "string" && HEX16_RE.test(value.generation)
-      && typeof value.deadline === "number" && Number.isFinite(value.deadline)
-      && Object.keys(value).length === 2
-      ? { generation: value.generation, deadline: value.deadline }
-      : null;
-    return { ok: false, lock };
+    return { ok: false, lock: lockShapeOf(readJsonSync(file)) };
   }
   try { unlinkSync(tmp); } catch { /* link 成功后 tmp 是同一 inode 的另一个名字 */ }
   return { ok: true };
@@ -266,14 +266,7 @@ export async function createLaunchLock(stateDir, generation, deadline) {
  * @returns {Promise<{generation: string, deadline: number}|null>}
  */
 export async function readLaunchLock(stateDir) {
-  const value = readJsonSync(join(stateDir, LOCK_FILE));
-  if (value === null || typeof value !== "object"
-    || typeof value.generation !== "string" || !HEX16_RE.test(value.generation)
-    || typeof value.deadline !== "number" || !Number.isFinite(value.deadline)
-    || Object.keys(value).length !== 2) {
-    return null;
-  }
-  return { generation: value.generation, deadline: value.deadline };
+  return lockShapeOf(readJsonSync(join(stateDir, LOCK_FILE)));
 }
 
 /**
@@ -290,23 +283,34 @@ export async function readLaunchLock(stateDir) {
  * @returns {Promise<boolean>}
  */
 export async function removeFileWhen(file, matches) {
+  // 1. 先读一次：内容对不上就根本不碰文件——活的记录/锁不能为了"看一眼"被挪走，
+  //    否则读者会在挪走与还原之间读到"不存在"（实例据此自杀、第三个启动器趁机建锁）。
+  let peeked;
+  try {
+    peeked = readFileSync(file, "utf8");
+  } catch {
+    return false; // 不在，或读不出：不动
+  }
+  if (!matches(parseJsonOrNull(peeked))) return false;
+  // 2. 对得上才改名拿走；
   const staging = `${file}.rm-${process.pid}-${randomBytes(6).toString("hex")}`;
   try {
     renameSync(file, staging);
   } catch {
     return false; // 不在（或拿不走）
   }
-  let value = null;
+  // 3. 读回再核对一次：读与改名之间被换成别人的新文件才会对不上。
+  let back;
   try {
-    value = JSON.parse(readFileSync(staging, "utf8"));
+    back = readFileSync(staging, "utf8");
   } catch {
-    value = null;
+    back = null; // 读不回来：当成对不上，还原
   }
-  if (matches(value)) {
+  if (back !== null && matches(parseJsonOrNull(back))) {
     try { unlinkSync(staging); } catch { /* 删不掉：唯一名残迹，无害 */ }
     return true;
   }
-  // 别人的新文件：还原它（目标已被占住就放弃——那份内容作废）。
+  // 4. 别人的新文件：还原它（目标已被占住就放弃——那份内容作废）。
   try {
     linkSync(staging, file);
   } catch {
@@ -316,19 +320,39 @@ export async function removeFileWhen(file, matches) {
   return false;
 }
 
+const parseJsonOrNull = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
 /**
- * 过期接管（内容核对版）：锁里仍是预期那一代（或读出来仍是坏形状）才算接管成功。
+ * 闭集锁形状（readLaunchLock / createLaunchLock / 接管谓词共用的唯一判定）：恰好
+ * { generation: 16 位十六进制, deadline: 有限数 }；其余一律返回 null。
+ */
+function lockShapeOf(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (Object.keys(value).length !== 2) return null;
+  if (typeof value.generation !== "string" || !HEX16_RE.test(value.generation)) return null;
+  if (typeof value.deadline !== "number" || !Number.isFinite(value.deadline)) return null;
+  return { generation: value.generation, deadline: value.deadline };
+}
+
+/**
+ * 过期接管（内容核对版）：锁不符合闭集形状（坏锁，任何内容——`{}`、`[1]`、多一个键、
+ * 代际不是 16 位十六进制……）、或锁里仍是预期那一代，才算接管成功。形状合法而代际不同
+ * 的锁一个字节都不动（expectedGeneration 传 null 表示"只接管坏锁"）。
  *
  * @param {string} stateDir
- * @param {string} expectedGeneration — 观察到的旧锁代际
+ * @param {string|null} expectedGeneration — 观察到的旧锁代际；null = 只接管坏锁
  * @returns {Promise<boolean>}
  */
 export async function takeOverStaleLock(stateDir, expectedGeneration) {
   return removeFileWhen(lockFileName(stateDir), (value) => {
-    if (value === null || typeof value !== "object") return true; // 坏形状的锁：可以接管
-    return typeof value.generation === "string" && HEX16_RE.test(value.generation)
-      && typeof value.deadline === "number" && Number.isFinite(value.deadline)
-      && value.generation === expectedGeneration;
+    const lock = lockShapeOf(value);
+    return lock === null || lock.generation === expectedGeneration;
   });
 }
 
@@ -410,6 +434,84 @@ export async function removeResultRecord(stateDir, generation) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
+}
+
+/** 启动器发布成功后，把自己消费掉的 candidate-<g>.json 删掉（只动这一代的精确名字）。 */
+export async function removeCandidateRecord(stateDir, generation) {
+  if (!HEX16_RE.test(generation)) return;
+  try {
+    unlinkSync(join(stateDir, `candidate-${generation}.json`));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+/**
+ * 启动器用完（成功、失败或放弃）后按自己的代际删掉自己的锁：内容核对的移除——
+ * 锁已被换成别的代际就一个字节都不动。
+ */
+export async function removeLaunchLockIfGeneration(stateDir, generation) {
+  return removeFileWhen(lockFileName(stateDir), (value) =>
+    value !== null && typeof value === "object" && value.generation === generation);
+}
+
+const TRANSIENT_SUFFIX = String.raw`\d+-[0-9a-f]{12}`;
+/** 状态目录里认得出名字形状的残余文件。第 1 组是代际（没有代际的形状为空）；transient 为瞬态名。 */
+const LEFTOVER_SHAPES = Object.freeze([
+  { re: /^result-([0-9a-f]{16})\.json$/, transient: false },
+  { re: /^candidate-([0-9a-f]{16})\.json$/, transient: false },
+  { re: /^stop-([0-9a-f]{16})\.request$/, transient: false },
+  { re: new RegExp(`^(?:instance\\.json|(?:result|candidate)-([0-9a-f]{16})\\.json|stop-([0-9a-f]{16})\\.request)\\.tmp-${TRANSIENT_SUFFIX}$`), transient: true },
+  { re: new RegExp(`^(?:instance\\.json|launch\\.lock)\\.rm-${TRANSIENT_SUFFIX}$`), transient: true },
+  { re: new RegExp(`^launch\\.lock\\.new-${TRANSIENT_SUFFIX}$`), transient: true },
+]);
+
+/**
+ * 启动器拿到锁之后清理状态目录里的残余文件（启动器已离开时失败路径留下的
+ * result-<g>.json，以及原子写失败留下的 *.tmp-*、*.rm-*、launch.lock.new-*）：
+ *   - 只删认得出名字形状的普通文件；不递归、不碰目录，也不碰 instance.json、
+ *     launch.lock、instance.log 与 codes\；
+ *   - 带代际的名字，代际在 keepGenerations（当前实例、自己这一代）里的不删；
+ *   - 瞬态名字（*.tmp-*、*.rm-*、launch.lock.new-*）要比 minAgeMs 老才删——很新的那个
+ *     可能是别的启动器正在原子建锁/写文件、或别的进程正处在"改名→读回"之间的中间态；年龄按
+ *     max(mtime, ctime) 算（改名不改 mtime、会刷新 ctime）；
+ *   - 一次至多删 max 个。
+ *
+ * @param {string} stateDir
+ * @param {object} [opts] — { keepGenerations, max, minAgeMs, now }
+ * @returns {Promise<number>} 删除的个数
+ */
+export async function sweepStateDirLeftovers(stateDir, {
+  keepGenerations = [], max = DASHBOARD_STATE_SWEEP_MAX, minAgeMs = DASHBOARD_LAUNCH_DEADLINE_MS, now = Date.now,
+} = {}) {
+  let names;
+  try {
+    names = readdirSync(stateDir);
+  } catch {
+    return 0;
+  }
+  const keep = new Set(keepGenerations.filter((g) => typeof g === "string"));
+  let removed = 0;
+  for (const name of names) {
+    if (removed >= max) break;
+    const shape = LEFTOVER_SHAPES.find((candidate) => candidate.re.test(name));
+    if (shape === undefined) continue;
+    const generation = shape.re.exec(name).slice(1).find((g) => typeof g === "string");
+    if (generation !== undefined && keep.has(generation)) continue;
+    const file = join(stateDir, name);
+    try {
+      const info = lstatSync(file);
+      if (!info.isFile()) continue; // 目录、联接、符号链接：一律不碰
+      // 年龄按 max(mtime, ctime) 算：NTFS 上改名不改 mtime（别的进程的 removeFileWhen 刚把文件改名
+      // 成 *.rm-* 的 staging，mtime 仍是它原来的老时间），但改名会刷新 ctime。
+      if (shape.transient && now() - Math.max(info.mtimeMs, info.ctimeMs) < minAgeMs) continue;
+      unlinkSync(file);
+      removed += 1;
+    } catch {
+      // 读不到或删不掉（并发被别人拿走）：下一轮再说
+    }
+  }
+  return removed;
 }
 
 /**

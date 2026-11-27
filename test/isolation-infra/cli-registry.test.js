@@ -1237,18 +1237,22 @@ test("TD-319: collect 取回失败——原报错 + 指路行恰两行（raw 与
   }
 });
 
-test("TD-319: dashboard 的非 Git 目录拒绝仍是两行，不折成带字面 \\n 的一行", () => {
+test("TD-319 / 145b：dashboard 不再要求 Git 仓库；运行目录不存在时报一行固定错误，分行不是字面的 \\n", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td319-dash-"));
   try {
+    // 决定 0131 第 1 条取消了"目录必须在 Git 仓库里"；现在 dashboard 的固定拒绝只有"运行目录不存在"，
+    // 且命令在拉起任何实例之前就报错（路径不存在）。
+    const missing = join(dir, "absent-runs");
     const result = spawnSync(process.execPath, [
-      "src/cli.js", "dashboard", "--cwd", dir, "--no-open",
+      "src/cli.js", "dashboard", "--run-dir", missing, "--no-open",
     ], { cwd: process.cwd(), encoding: "utf8", timeout: 60000, env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } });
-    assert.notEqual(result.status, 0, "非 Git 目录被拒绝");
+    assert.notEqual(result.status, 0, "运行目录不存在被拒绝");
     const lines = result.stderr.replace(/\r\n/g, "\n").trim().split("\n");
-    assert.equal(lines.length, 2, `两行报错: ${JSON.stringify(lines)}`);
-    assert.ok(lines[0].includes("需要 Git 仓库"), "第一行是拒绝原因");
-    assert.ok(lines[1].includes("--cwd"), "第二行是指路");
-    assert.ok(!result.stderr.includes("\\n"), "分行不是字面的 \\n");
+    assert.equal(lines.length, 1, `一行固定错误: ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].startsWith("运行目录不存在或不可读"), "这一行是固定拒绝原因");
+    assert.ok(!result.stderr.includes("Git"), "不再提 Git 仓库");
+    // 报错里会带路径（Windows 路径里的 \n 开头的目录名也会拼出字面 \n），所以先去掉路径本身再查。
+    assert.ok(!result.stderr.split(missing).join("").includes("\\n"), "分行不是字面的 \\n");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

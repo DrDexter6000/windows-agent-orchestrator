@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +25,7 @@ import * as stream from "../../src/application/ownerWorkerStream.js";
 import * as api from "../../src/owner-dashboard/v2/api.js";
 
 const PORT = 18080;
+const GEN = "0123456789abcdef"; // 本测试里"本实例"的代际
 const HOST = `127.0.0.1:${PORT}`;
 let clock = 2_000_000_000_000; // 一只可拨的钟（每个用例自己重置）
 
@@ -67,9 +68,9 @@ const redeem = (s, code, extraHeaders = {}) => drive(s.handler, {
 test("no Authorization header -> fixed 401 and the file system is never touched", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   const r = await drive(s.handler, { url: "/api/session", headers: { host: HOST } });
   assert.deepEqual([r.status, jsonOf(r)], [401, { error: "unauthorized" }]);
   // 文件系统没被动过：同一个码随后仍然兑换成功。
@@ -80,9 +81,9 @@ test("no Authorization header -> fixed 401 and the file system is never touched"
 test("a malformed code (non-hex / bad scheme / empty) -> 401 without touching the codes dir", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   for (const headers of [
     { authorization: "Bearer not-hex" },
     { authorization: "Bearer NOTHEX0123456789" },
@@ -100,9 +101,9 @@ test("a malformed code (non-hex / bad scheme / empty) -> 401 without touching th
 test("any query parameter at all is the fixed 400 (the code never rides a query string)", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   for (const url of ["/api/session?code=x", "/api/session?x=1", "/api/session?"]) {
     const r = await drive(s.handler, { url, headers: { host: HOST, authorization: `Bearer ${code}` } });
     assert.deepEqual([r.status, jsonOf(r)], [400, { error: "bad_request" }], url);
@@ -112,9 +113,9 @@ test("any query parameter at all is the fixed 400 (the code never rides a query 
 test("strict Host: anything but 127.0.0.1:<this port> is the fixed 401", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   for (const host of [`localhost:${PORT}`, "127.0.0.1:9999", "127.0.0.2:" + PORT, "[::1]:" + PORT, undefined, ""]) {
     const headers = { authorization: `Bearer ${code}` };
     if (host !== undefined) headers.host = host;
@@ -129,11 +130,11 @@ test("strict Host: anything but 127.0.0.1:<this port> is the fixed 401", async (
 test("Sec-Fetch-Site: absent or same-origin passes; anything else is refused", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const sameOrigin = issueStartCode(dir, { now: () => clock });
-  const absent = issueStartCode(dir, { now: () => clock });
-  const cross = issueStartCode(dir, { now: () => clock });
+  const sameOrigin = issueStartCode(dir, GEN, { now: () => clock });
+  const absent = issueStartCode(dir, GEN, { now: () => clock });
+  const cross = issueStartCode(dir, GEN, { now: () => clock });
   assert.equal((await redeem(s, sameOrigin.code, { "sec-fetch-site": "same-origin" })).status, 200);
   assert.equal((await redeem(s, absent.code)).status, 200);
   const refused = await redeem(s, cross.code, { "sec-fetch-site": "cross-site" });
@@ -145,26 +146,26 @@ test("Sec-Fetch-Site: absent or same-origin passes; anything else is refused", a
 test("redemption: unknown code, expired code and a second use are all the fixed 401", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
   assert.equal((await redeem(s, "ab".repeat(32))).status, 401, "unknown code");
-  const stale = issueStartCode(dir, { now: () => clock - 120_000 }); // 2 分钟前签发：已过期
+  const stale = issueStartCode(dir, GEN, { now: () => clock - 120_000 }); // 2 分钟前签发：已过期
   assert.equal((await redeem(s, stale.code)).status, 401, "expired code");
-  const fresh = issueStartCode(dir, { now: () => clock });
+  const fresh = issueStartCode(dir, GEN, { now: () => clock });
   const first = await redeem(s, fresh.code);
   assert.equal(first.status, 200);
   assert.equal((await redeem(s, fresh.code)).status, 401, "one-time: the file is gone");
   // 快到期的边界：59 秒前签发仍可兑换。
-  const edge = issueStartCode(dir, { now: () => clock - 59_000 });
+  const edge = issueStartCode(dir, GEN, { now: () => clock - 59_000 });
   assert.equal((await redeem(s, edge.code)).status, 200);
 });
 
 test("redemption: concurrent requests have exactly one winner", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   const results = await Promise.all(Array.from({ length: 8 }, () => redeem(s, code)));
   assert.equal(results.filter((r) => r.status === 200).length, 1);
   assert.equal(results.filter((r) => r.status === 401).length, 7);
@@ -175,16 +176,16 @@ test("no codesDir configured (foreground / tests) -> always the fixed 401", asyn
   t.after(done);
   const s = makeServer();
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   assert.equal((await redeem(s, code)).status, 401);
 });
 
 test("the issued session token works as a bearer; the process token still works", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const { code } = issueStartCode(dir, { now: () => clock });
+  const { code } = issueStartCode(dir, GEN, { now: () => clock });
   const r = await redeem(s, code);
   const body = jsonOf(r);
   assert.match(body.token, /^[0-9a-f]{64}$/, "the session token is 64 lowercase hex");
@@ -200,25 +201,25 @@ test("the issued session token works as a bearer; the process token still works"
 test("a session dies at its own deadline; later sessions survive", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir });
+  const s = makeServer({ codesDir: dir, generation: GEN });
   t.after(() => s.close());
-  const first = jsonOf(await redeem(s, issueStartCode(dir, { now: () => clock }).code));
+  const first = jsonOf(await redeem(s, issueStartCode(dir, GEN, { now: () => clock }).code));
   clock += 24 * 60 * 60_000 - 1;
   assert.equal((await drive(s.handler, { url: "/api/overview", headers: { authorization: `Bearer ${first.token}` } })).status, 200);
   clock += 1;
   assert.equal((await drive(s.handler, { url: "/api/overview", headers: { authorization: `Bearer ${first.token}` } })).status, 401, "expired at the absolute deadline");
-  const second = jsonOf(await redeem(s, issueStartCode(dir, { now: () => clock }).code));
+  const second = jsonOf(await redeem(s, issueStartCode(dir, GEN, { now: () => clock }).code));
   assert.equal((await drive(s.handler, { url: "/api/overview", headers: { authorization: `Bearer ${second.token}` } })).status, 200);
 });
 
 test("the session cap evicts in issuance order", async (t) => {
   const [dir, done] = codesDir();
   t.after(done);
-  const s = makeServer({ codesDir: dir, sessionMax: 3 });
+  const s = makeServer({ codesDir: dir, generation: GEN, sessionMax: 3 });
   t.after(() => s.close());
   const tokens = [];
   for (let i = 0; i < 4; i += 1) {
-    const body = jsonOf(await redeem(s, issueStartCode(dir, { now: () => clock }).code));
+    const body = jsonOf(await redeem(s, issueStartCode(dir, GEN, { now: () => clock }).code));
     tokens.push(body.token);
   }
   const statusOf = (token) => drive(s.handler, { url: "/api/overview", headers: { authorization: `Bearer ${token}` } });
@@ -251,6 +252,38 @@ function tempWorld() {
   };
 }
 
+/** 一条 availability=ok 的运行行（snapshot 里的形状；时间都相对注入的钟）。 */
+function runRow(at) {
+  return {
+    runId: "run_x",
+    project: null,
+    availability: "ok",
+    state: "running",
+    terminal: false,
+    liveness: "progress",
+    stage: "active",
+    agentId: "glm-pro",
+    laneId: "glm-pro",
+    roleId: "coder",
+    readOnly: false,
+    deliveryRequested: false,
+    title: "run_x",
+    titleBasis: "first_line",
+    taskType: "code",
+    typeBasis: "persisted",
+    startedAt: new Date(at - 60_000).toISOString(),
+    terminalAt: null,
+    stageSince: new Date(at - 60_000).toISOString(),
+    lastEffectAt: new Date(at - 60_000).toISOString(),
+    quietSince: new Date(at - 60_000).toISOString(),
+    lastVitalAt: new Date(at - 30_000).toISOString(),
+    delivery: null,
+    failure: null,
+    consultGroupId: null,
+    consultSeats: null,
+  };
+}
+
 test("REAL ROUTE: an open stream resets (revoked) once its session token expires; the process token never does", async (t) => {
   const world = tempWorld();
   t.after(world.cleanup);
@@ -261,40 +294,14 @@ test("REAL ROUTE: an open stream resets (revoked) once its session token expires
     port: 0,
     sessionTtlMs: 400,
     codesDir: world.codesDir,
+    generation: GEN,
     nowFn: () => clock,
     createReadModelFn: () => ({
       refresh: async () => {},
       snapshot: () => ({
         generatedAt: new Date(clock).toISOString(),
         projects: [],
-        runs: [{
-          runId: "run_x",
-          project: null,
-          availability: "ok",
-          state: "running",
-          terminal: false,
-          liveness: "progress",
-          stage: "active",
-          agentId: "glm-pro",
-          laneId: "glm-pro",
-          roleId: "coder",
-          readOnly: false,
-          deliveryRequested: false,
-          title: "run_x",
-          titleBasis: "first_line",
-          taskType: "code",
-          typeBasis: "persisted",
-          startedAt: new Date(clock - 60_000).toISOString(),
-          terminalAt: null,
-          stageSince: new Date(clock - 60_000).toISOString(),
-          lastEffectAt: new Date(clock - 60_000).toISOString(),
-          quietSince: new Date(clock - 60_000).toISOString(),
-          lastVitalAt: new Date(clock - 30_000).toISOString(),
-          delivery: null,
-          failure: null,
-          consultGroupId: null,
-          consultSeats: null,
-        }],
+        runs: [runRow(clock)],
         consults: [],
       }),
       locateRunTranscript: async () => ({ path: world.transcript, bytes: world.bytes }),
@@ -304,7 +311,7 @@ test("REAL ROUTE: an open stream resets (revoked) once its session token expires
   const addr = await server.listen();
 
   // 兑换一张会话令牌（真路由：签码 → /api/session）。
-  const { code } = issueStartCode(world.codesDir, { now: () => clock });
+  const { code } = issueStartCode(world.codesDir, GEN, { now: () => clock });
   const exchanged = await fetch(`http://127.0.0.1:${addr.port}/api/session`, {
     headers: { host: `127.0.0.1:${addr.port}`, authorization: `Bearer ${code}` },
   });
@@ -358,4 +365,74 @@ test("REAL ROUTE: an open stream resets (revoked) once its session token expires
   clock += 60_000;
   const late = await processStream.readUntil((f) => f.event === "reset", 2500);
   assert.equal(late, null, "the process token never expires");
+});
+
+// ===== 145b 修正二：码绑定代际 + 流握手的真实路由守卫 =====
+
+test("a code issued for ANOTHER generation is the fixed 401 through the route — no claim is left, the issuing generation can still redeem it", async (t) => {
+  const [dir, done] = codesDir();
+  t.after(done);
+  const OTHER = "fedcba9876543210";
+  const s = makeServer({ codesDir: dir, generation: GEN });
+  t.after(() => s.close());
+  const old = issueStartCode(dir, OTHER, { now: () => clock }); // 上一代签发、还没用掉的码
+  const before = readdirSync(dir).sort();
+  const refused = await redeem(s, old.code);
+  assert.deepEqual([refused.status, jsonOf(refused)], [401, { error: "unauthorized" }]);
+  assert.deepEqual(readdirSync(dir).sort(), before, "treated exactly like an unknown code: nothing written, nothing consumed");
+  // 这一代自己签发的码照常兑换；别代的码此刻也还在原处，签发它的那一代仍可兑换。
+  assert.equal((await redeem(s, issueStartCode(dir, GEN, { now: () => clock }).code)).status, 200);
+  const sibling = makeServer({ codesDir: dir, generation: OTHER });
+  t.after(() => sibling.close());
+  assert.equal((await redeem(sibling, old.code)).status, 200, "the generation that issued it still redeems it");
+});
+
+test("the start-code directory needs a valid generation: codesDir without one (or with a malformed one) fails closed at construction", () => {
+  const [dir, done] = codesDir();
+  try {
+    for (const generation of [undefined, "", "xyz", "0123456789ABCDEF", 7]) {
+      assert.throws(() => makeServer({ codesDir: dir, generation }), TypeError, `generation ${String(generation)}`);
+    }
+  } finally {
+    done();
+  }
+});
+
+test("REAL ROUTE: a stream handshake WITHOUT a usable token is the fixed 401 and never reaches the stream hub", async (t) => {
+  const opens = [];
+  let clockNow = Date.now();
+  const server = createOwnerDashboardServer({
+    runDir: "/server/owned/runs",
+    env: {},
+    port: 0,
+    nowFn: () => clockNow,
+    createReadModelFn: () => ({
+      refresh: async () => {},
+      snapshot: () => ({ generatedAt: new Date(clockNow).toISOString(), projects: [], runs: [runRow(clockNow)], consults: [] }),
+    }),
+    // 流枢纽的替身只记录"谁到了这里"：到得了的就 404（与 401 区分）。
+    createWorkerStreamsFn: () => ({
+      full: () => false,
+      open: async (input) => { opens.push(input); return { ok: false, reason: "not_found" }; },
+      closeAll: () => {},
+    }),
+  });
+  t.after(() => server.close());
+  const addr = await server.listen();
+  const url = `http://127.0.0.1:${addr.port}/api/worker/stream?runId=run_x`;
+  const handshake = async (headers) => {
+    const response = await fetch(url, { headers });
+    return [response.status, await response.json()];
+  };
+  const unauthorized = [401, { error: "unauthorized" }];
+  assert.deepEqual(await handshake({}), unauthorized, "no Authorization header at all");
+  assert.deepEqual(await handshake({ authorization: "Bearer" }), unauthorized, "scheme without a token");
+  assert.deepEqual(await handshake({ authorization: "Bearer " }), unauthorized, "an empty token");
+  assert.deepEqual(await handshake({ authorization: "Bearer " + "0".repeat(64) }), unauthorized, "a well-formed token nobody issued");
+  assert.deepEqual(await handshake({ authorization: "Basic " + server.token }), unauthorized, "the right secret under the wrong scheme");
+  assert.deepEqual(opens, [], "none of those handshakes reached the hub: no stream was opened for a missing token");
+  // 对照：进程令牌过了闸，到达枢纽，并且枢纽拿到的就是这条握手的令牌（之后每次复核都用它）。
+  assert.deepEqual(await handshake({ authorization: `Bearer ${server.token}` }), [404, { error: "not_found" }]);
+  assert.equal(opens.length, 1);
+  assert.equal(opens[0].token, server.token, "the hub is handed the handshake's bearer for re-authorization");
 });

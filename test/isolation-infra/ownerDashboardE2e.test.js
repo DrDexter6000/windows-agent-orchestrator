@@ -144,6 +144,9 @@ test("E2E-1 WMI 拉起 + 命令进程退出后仍在服务；E2E-2 复用与兑�
   assert.equal(record.protocol, 1);
   startedPids.add(record.pid);
   assert.ok(pidAlive(record.pid), "the serve process is alive after the launcher exited");
+  // 修正二 #3/#8：启动器用完就删自己的锁、发布后删掉消费过的候选——运行中的状态目录里只有
+  // 实例记录、实例日志与 codes\。
+  assert.deepEqual(readdirSync(STATE_DIR).sort(), ["codes", "instance.json", "instance.log"], "no lock, no candidate, no residue while the instance runs");
   const health = await fetchJson(`http://127.0.0.1:${record.port}/health`);
   assert.deepEqual([health.status, health.body.nonce], [200, record.nonce], "health answers with the recorded nonce");
 
@@ -218,9 +221,8 @@ test("E2E-5 status 如实；stop 优雅退出且 instance.json 被删", async ()
   assert.equal(stop.code, 0, `stop exits 0 (stdout: ${stop.stdout}\nstderr: ${stop.stderr})`);
   assert.ok(!existsSync(join(STATE_DIR, "instance.json")), "instance.json removed by the instance itself");
   assert.equal(pidAlive(record.pid), false, "the serve process exited gracefully");
-  // 修正一 #8：一次拉起加 stop 之后，状态目录只剩 instance.log、launch.lock（如有）与 codes。
-  const leftovers = readdirSync(STATE_DIR).filter((n) => !["instance.log", "launch.lock", "codes"].includes(n));
-  assert.deepEqual(leftovers, [], `no candidate/result/stop/stale residue (got: ${leftovers})`);
+  // 修正一 #8 / 修正二 #3：一次拉起加 stop 之后，状态目录只剩 instance.log 与 codes\（锁不再常驻）。
+  assert.deepEqual(readdirSync(STATE_DIR).sort(), ["codes", "instance.log"], "no lock/candidate/result/stop/stale residue");
 });
 
 test("E2E-6 restart 换新的 pid 与 nonce；旧会话令牌失效", async (t) => {
@@ -252,7 +254,7 @@ test("E2E-6 restart 换新的 pid 与 nonce；旧会话令牌失效", async (t) 
     authorization: `Bearer ${oldToken}`,
   });
   assert.equal(refused.status, 401, "the old session token died with the old instance");
-  // 修正一 #3：上一代签发、没用掉的码，换代后一律不能兑换。
+  // 修正二 #7：码绑定签发时核对过的实例代际——上一代签发、没用掉的码，换代后按未知码拒收。
   const staleExchange = await fetchJson(`http://127.0.0.1:${fresh.port}/api/session`, {
     host: `127.0.0.1:${fresh.port}`,
     authorization: `Bearer ${upUrl.code}`,

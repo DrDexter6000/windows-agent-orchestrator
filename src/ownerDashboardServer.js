@@ -218,8 +218,9 @@ const WORKERS_ROWS_MAX = 500;
 const CONFIG_KEYS = Object.freeze(new Set([
   "runDir", "env", "host", "port", "randomBytesFn", "nowFn", "loadAssetFn",
   "createReadModelFn", "createWorkerStreamsFn", "refreshIntervalMs",
-  // 145b: the one-time start-code directory (persistent mode) and the session-store knobs.
-  "codesDir", "sessionTtlMs", "sessionMax",
+  // 145b: the one-time start-code directory (persistent mode), the instance generation its codes
+  // are bound to, and the session-store knobs.
+  "codesDir", "generation", "sessionTtlMs", "sessionMax",
 ]));
 
 /**
@@ -1166,7 +1167,7 @@ export function createOwnerDashboardServer(config) {
     host = LOOPBACK_HOST, port,
     randomBytesFn, nowFn, loadAssetFn,
     createReadModelFn, createWorkerStreamsFn, refreshIntervalMs,
-    codesDir, sessionTtlMs, sessionMax,
+    codesDir, generation, sessionTtlMs, sessionMax,
   } = config;
 
   // Reject any non-loopback host BEFORE listen.
@@ -1204,6 +1205,12 @@ export function createOwnerDashboardServer(config) {
   if (codesDir !== undefined && (typeof codesDir !== "string" || codesDir.length === 0)) {
     throw new TypeError("invalid codesDir: must be a non-empty string when given");
   }
+  // 145b fix 2: a start code is bound to the instance generation it was issued against; a code
+  // directory without a valid generation could redeem nothing safely, so it fails closed here.
+  if ((codesDir !== undefined || generation !== undefined)
+    && (typeof generation !== "string" || !/^[0-9a-f]{16}$/.test(generation))) {
+    throw new TypeError("invalid generation: 16 lowercase hex chars, required together with codesDir");
+  }
   for (const [name, value] of Object.entries({ sessionTtlMs, sessionMax })) {
     if (value === undefined) continue;
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -1238,7 +1245,7 @@ export function createOwnerDashboardServer(config) {
     }),
     // One start-code redemption probe per request; null when no codesDir is configured
     // (foreground / tests — the route then always answers the fixed 401).
-    redeem: codesDir === undefined ? null : (code) => redeemStartCode(codesDir, code, { now: ctxNow }),
+    redeem: codesDir === undefined ? null : (code) => redeemStartCode(codesDir, code, { generation, now: ctxNow }),
     // Batch 141a: proves a run's delivery objects against its repository (commit type,
     // parent = base, actual changed files = changedFiles, message + author/committer identity)
     // and hands back the per-file line

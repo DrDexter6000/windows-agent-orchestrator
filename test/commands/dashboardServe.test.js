@@ -11,16 +11,22 @@
 //   - 收到对得上的停机请求 → 优雅退出 + 删自己这一代的 candidate 与 stop 请求，
 //     只在记录仍是自己代际时按内容核对地删它；错 nonce 的请求被无视；
 //   - 发布后被换成别的代际（被替换的旧代）→ 退出，新记录保留；
-//   - 候选携带自己加载的 build；写候选之前先清空 codes 的全部旧码。
+//   - 候选携带自己加载的 build；实例启动**不碰 codes\**（没有换代清空）：没被发布的候选不会
+//     误伤当前实例已发出的码，过期/别代的码只由已发布实例的低频清理收走；
+//   - 实例轮询只在"读到别的代际"或"连续两次确实不存在"时判定被替换，读出错下一轮再看；
+//     到截止时刻没看到发布，要再读一次记录确实不是自己才退出（修正二第 4、5 条）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 import { dashboardServeCommand } from "../../src/commands/dashboardServe.js";
-import { normalizeRunDir, stateDirFor } from "../../src/application/dashboardPaths.js";
+import { normalizeRunDir, stateDirFor, DASHBOARD_LAUNCH_DEADLINE_MS } from "../../src/application/dashboardPaths.js";
+import { issueStartCode, redeemStartCode } from "../../src/application/dashboardCodes.js";
+import { codesDirOf } from "../../src/application/dashboardFiles.js";
 
 const GEN = "0123456789abcdef";
 
@@ -143,17 +149,6 @@ test("serve (145b-fix): a FAILED instance-log write after listen is a bounded fa
   assert.equal(existsSync(join(setup.stateDir, `candidate-${GEN}.json`)), false, "no candidate without a working log");
 });
 
-test("serve (145b-fix): an incomplete codes purge refuses to serve (bounded, result written)", async (t) => {
-  const setup = world({});
-  setup.injections.purgeFn = async () => ({ ok: false, purged: 2, remaining: 3 });
-  t.after(setup.cleanup);
-  await dashboardServeCommand(setup.args, {}, setup.injections);
-  assert.deepEqual(readResult(setup.stateDir), { reason: "serve_error" });
-  assert.deepEqual(setup.w.exits, [1]);
-  assert.equal(setup.w.closed, 1);
-  assert.equal(existsSync(join(setup.stateDir, `candidate-${GEN}.json`)), false, "no candidate before a clean codes dir");
-});
-
 test("serve (145b-fix): a stuck server.close() hits the stop-budget hard exit — code 1, no hang", async (t) => {
   const setup = world({});
   const stuckServer = {
@@ -173,25 +168,228 @@ test("serve (145b-fix): a stuck server.close() hits the stop-budget hard exit �
   assert.ok(Date.now() - started < 5000, "bounded: far below the test timeout");
 });
 
-test("serve (145b-fix): the codes dir is PURGED (previous generation's codes die with the generation) before the candidate is written", async (t) => {
+const OTHER_GEN = "fedcba9876543210";
+const NONCE = "ab".repeat(16);
+
+const ownRecord = (setup, extra = {}) => ({
+  protocol: 1, runDir: setup.runDir, pid: process.pid, processCreatedAt: 1_700_000_000_000,
+  port: setup.w.port, nonce: NONCE, generation: GEN, build: { readable: true, srcTree: "f".repeat(40), dirty: false }, ...extra,
+});
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// 有上限的条件等待：条件一成立立刻返回；上限只是机器很忙时的兜底，不是要等的时间。
+async function waitFor(predicate, ms = 15_000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await predicate()) return true;
+    await sleep(10);
+  }
+  return false;
+}
+const candidateUp = (setup) => existsSync(join(setup.stateDir, `candidate-${GEN}.json`));
+const writeStop = (setup) => writeFileSync(join(setup.stateDir, `stop-${GEN}.request`), JSON.stringify({ nonce: NONCE }));
+
+test("serve (145b-fix2): an UNPUBLISHED candidate never touches codes\\ — the live instance's codes stay redeemable (no startup purge), and the server is handed its generation", async (t) => {
   const setup = world({});
-  const order = [];
-  setup.injections.purgeFn = async (dir) => { order.push("purge"); return { ok: true, purged: 1, remaining: 0 }; };
-  let capturedCandidate = null;
-  setup.injections.writeCandidateFn = async (...a) => { order.push("candidate"); capturedCandidate = a[2]; return (await import("../../src/application/dashboardFiles.js")).writeCandidateRecord(...a); };
   t.after(setup.cleanup);
+  setup.injections.pollMs = 25;
+  const codesDir = codesDirOf(setup.stateDir);
+  // 当前实例（另一代）刚发出去的码，以及一张已过期的别代码：一个没被发布的候选两样都不该碰。
+  const live = issueStartCode(codesDir, OTHER_GEN);
+  const expired = issueStartCode(codesDir, OTHER_GEN, { now: () => Date.now() - 10 * 60_000 });
+  const created = [];
+  const original = setup.injections.createServerFn;
+  setup.injections.createServerFn = (input) => { created.push(input); return original(input); };
+  let sweeps = 0;
+  setup.injections.sweepFn = async () => { sweeps += 1; return 0; };
   const hold = holdLoop();
-  const args = [...setup.args, "--deadline", String(Date.now() + 60_000)];
-  const command = dashboardServeCommand(args, {}, setup.injections);
-  await new Promise((r) => setTimeout(r, 300));
-  writeFileSync(join(setup.stateDir, `stop-${GEN}.request`), JSON.stringify({ nonce: "ab".repeat(16) }));
-  await command;
+  await dashboardServeCommand([...setup.args, "--deadline", String(Date.now() + 600)], {}, setup.injections);
   clearInterval(hold);
-  assert.deepEqual(order, ["purge", "candidate"], "purge happens before the candidate exists");
-  assert.ok(capturedCandidate.build && typeof capturedCandidate.build.readable === "boolean", "the candidate carries the serve's own build");
-  assert.equal(existsSync(join(setup.stateDir, `candidate-${GEN}.json`)), false, "the exited instance cleaned its own candidate");
+  assert.deepEqual(setup.w.exits, [0], "the unpublished candidate exited as a late loser");
+  assert.equal(created[0].generation, GEN, "the server is told which generation's codes it may redeem");
+  assert.equal(created[0].codesDir, codesDir);
+  assert.equal(sweeps, 0, "an unpublished candidate never sweeps");
+  assert.ok(existsSync(live.file) && existsSync(expired.file), "codes\\ is exactly as it was: nothing purged, nothing swept");
+  assert.equal(await redeemStartCode(codesDir, live.code, { generation: OTHER_GEN }), true, "the live instance's code still redeems");
 });
 
+test("serve (145b-fix2): the low-frequency code sweep starts only once the instance SEES its own record published", async (t) => {
+  const setup = world({});
+  t.after(setup.cleanup);
+  setup.injections.pollMs = 20;
+  let sweeps = 0;
+  setup.injections.sweepFn = async () => { sweeps += 1; return 0; };
+  const hold = holdLoop();
+  const command = dashboardServeCommand([...setup.args, "--deadline", String(Date.now() + 60_000)], {}, setup.injections);
+  assert.equal(await waitFor(() => candidateUp(setup)), true, "the instance is up and polling");
+  await sleep(100); // 反向断言：给它几个轮询周期的机会去（错误地）清理
+  assert.equal(sweeps, 0, "before publication: no sweep");
+  writeFileSync(join(setup.stateDir, "instance.json"), JSON.stringify(ownRecord(setup)));
+  assert.equal(await waitFor(() => sweeps >= 1), true, "after publication the sweep runs");
+  writeStop(setup);
+  await command;
+  clearInterval(hold);
+  assert.deepEqual(setup.w.exits, [0]);
+});
+
+/** 按脚本回放 instance.json 的读取结果（脚本读完后一律回"自己的记录"）。 */
+function scriptedReads(setup, script) {
+  let at = 0;
+  const own = ownRecord(setup);
+  return {
+    consumed: () => at,
+    fn: async () => {
+      const item = at < script.length ? script[at] : "own";
+      at += 1;
+      if (item === "absent") return { status: "absent" };
+      if (item === "error") return { status: "error" };
+      if (item === "garbled") return { status: "present", raw: null, record: null }; // 在，但内容不认识（外部非原子写到一半等）
+      if (item === "other") { const rec = ownRecord(setup, { generation: "9999888877776666", nonce: "cd".repeat(16) }); return { status: "present", raw: rec, record: rec }; }
+      return { status: "present", raw: own, record: own };
+    },
+  };
+}
+
+async function runScripted(script) {
+  const setup = world({});
+  setup.injections.pollMs = 15;
+  const reads = scriptedReads(setup, script);
+  setup.injections.readInstanceFn = reads.fn;
+  const hold = holdLoop();
+  const command = dashboardServeCommand([...setup.args, "--deadline", String(Date.now() + 60_000)], {}, setup.injections);
+  await waitFor(() => reads.consumed() >= script.length + 6 || setup.w.exits.length > 0);
+  const exitedBeforeStop = [...setup.w.exits];
+  if (exitedBeforeStop.length === 0) writeStop(setup);
+  await command;
+  clearInterval(hold);
+  setup.cleanup();
+  return { exitedBeforeStop, consumed: reads.consumed() };
+}
+
+test("serve (145b-fix2): one absent read — or absent / error / absent — is NOT 'replaced'; only another generation or two CONSECUTIVE absences are", async () => {
+  for (const script of [
+    ["own", "absent", "own", "absent", "own"],
+    ["own", "absent", "error", "absent", "own"],
+    ["own", "error", "error", "error", "own"],
+    ["own", "garbled", "garbled", "garbled", "own"], // 内容不认识 ≠ 别的代际：下一轮再看
+  ]) {
+    const run = await runScripted(script);
+    assert.deepEqual(run.exitedBeforeStop, [], `still serving after ${JSON.stringify(script)}`);
+    assert.ok(run.consumed >= script.length, "the script really ran");
+  }
+  for (const script of [["own", "absent", "absent"], ["own", "other"]]) {
+    const run = await runScripted(script);
+    assert.deepEqual(run.exitedBeforeStop, [0], `replaced (clean exit) after ${JSON.stringify(script)}`);
+  }
+  // 还没被发布时，"不存在"本来就是常态：不判定任何事。
+  const unpublished = await runScripted(["absent", "absent", "absent"]);
+  assert.deepEqual(unpublished.exitedBeforeStop, [], "absence before publication is not a replacement");
+});
+
+test("serve (145b-fix2): at the deadline the instance reads the record ONE MORE time — only a record that is truly not its own makes it exit", async (t) => {
+  const keepAlive = async (secondRead) => {
+    const setup = world({});
+    setup.injections.pollMs = 15;
+    const deadline = Date.now() + 60_000;
+    setup.injections.nowFn = () => deadline + 10; // 钟已过截止
+    let reads = 0;
+    const own = ownRecord(setup);
+    setup.injections.readInstanceFn = async () => {
+      reads += 1;
+      if (reads % 2 === 1) return { status: "absent" }; // 每轮第一次读：还没看到发布
+      return secondRead === "own" ? { status: "present", raw: own, record: own } : { status: secondRead };
+    };
+    const hold = holdLoop();
+    const command = dashboardServeCommand([...setup.args, "--deadline", String(deadline)], {}, setup.injections);
+    // 等到"该发生的事"发生（有上限的条件等待，不靠固定睡眠）：
+    //   要退出的那一支等退出；要活着的两支等到至少两个完整轮询（每轮读两次）之后再断言还活着。
+    if (secondRead === "absent") await waitFor(() => setup.w.exits.length > 0);
+    else await waitFor(() => reads >= 4 || setup.w.exits.length > 0);
+    const alive = setup.w.exits.length === 0;
+    if (alive) writeStop(setup);
+    await command;
+    clearInterval(hold);
+    setup.cleanup();
+    return { alive, reads };
+  };
+  const published = await keepAlive("own");
+  assert.equal(published.alive, true, "a publication that landed just before the deadline keeps the instance alive");
+  assert.ok(published.reads >= 2);
+  const unknown = await keepAlive("error");
+  assert.equal(unknown.alive, true, "an unreadable second read is 'look again next round', not an exit");
+  const gone = await keepAlive("absent");
+  assert.equal(gone.alive, false, "two absent reads at the deadline: truly unpublished, it exits");
+});
+
+/** 一个真子进程，在 ms 毫秒内反复调用 dashboardFiles 的移除原语（旧代的收尾）。 */
+function hammer(dir, fnName, arg, ms) {
+  const filesUrl = new URL("../../src/application/dashboardFiles.js", import.meta.url).href;
+  const script = `
+    import * as files from ${JSON.stringify(filesUrl)};
+    const [dir, fnName, arg, ms] = process.argv.slice(1);
+    const end = Date.now() + Number(ms);
+    let calls = 0;
+    while (Date.now() < end) { await files[fnName](dir, arg); calls += 1; }
+    console.log(calls);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, dir, fnName, arg, String(ms)], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+  let out = "";
+  child.stdout.on("data", (chunk) => { out += chunk; });
+  const done = new Promise((resolve) => {
+    child.once("exit", () => resolve(Number(out.trim()) || 0));
+    child.once("error", () => resolve(0));
+  });
+  return { done, kill: () => { try { child.kill(); } catch { /* 已退出 */ } } };
+}
+
+test("serve (145b-fix2) REAL TWO PROCESSES: an old generation hammering its own cleanup never makes the LIVE instance conclude it was replaced", async (t) => {
+  const setup = world({});
+  t.after(setup.cleanup);
+  setup.injections.pollMs = 10;
+  let sweeps = 0; // 低频清理只在实例看到自己的发布之后才开始——借它观察"轮询已经看到发布"
+  setup.injections.sweepFn = async () => { sweeps += 1; return 0; };
+  const hold = holdLoop();
+  const command = dashboardServeCommand([...setup.args, "--deadline", String(Date.now() + 60_000)], {}, setup.injections);
+  assert.equal(await waitFor(() => candidateUp(setup)), true, "the instance is up");
+  writeFileSync(join(setup.stateDir, "instance.json"), JSON.stringify(ownRecord(setup)));
+  assert.equal(await waitFor(() => sweeps >= 1), true, "the poll has SEEN its own publication");
+  // 另一个真进程：旧代反复收尾（删"自己的"记录——代际对不上，它什么都不该碰）。
+  const old = hammer(setup.stateDir, "removeInstanceRecordIfGeneration", OTHER_GEN, 1800);
+  try {
+    const calls = await old.done;
+    assert.ok(calls > 20, `the other process really hammered (${calls} calls)`);
+    assert.deepEqual(setup.w.exits, [], "the live instance never judged itself replaced while the old generation was cleaning up");
+    assert.equal(readInstance(setup.stateDir)?.generation, GEN, "its record was never taken");
+  } finally {
+    old.kill();
+    writeStop(setup);
+    await command;
+    clearInterval(hold);
+  }
+});
+
+test("serve (145b-fix3): an unpublished candidate whose reads keep failing past the deadline does not live forever — it exits once the failure has lasted a launch deadline", async (t) => {
+  const setup = world({});
+  t.after(setup.cleanup);
+  setup.injections.pollMs = 15;
+  const deadline = Date.now() + 60_000;
+  let clock = deadline + 1_000; // 刚过截止
+  setup.injections.nowFn = () => clock;
+  let reads = 0;
+  setup.injections.readInstanceFn = async () => { reads += 1; return { status: "error" }; }; // 一直读不出
+  const hold = holdLoop();
+  const command = dashboardServeCommand([...setup.args, "--deadline", String(deadline)], {}, setup.injections);
+  try {
+    assert.equal(await waitFor(() => reads >= 6), true, "several polls ran");
+    assert.deepEqual(setup.w.exits, [], "just past the deadline an unreadable record is 'look again next round', not an exit");
+    clock = deadline + DASHBOARD_LAUNCH_DEADLINE_MS + 1; // 读不出已持续超过一个拉起期限
+    assert.equal(await waitFor(() => setup.w.exits.length > 0), true, "it gave up: nobody could ever name this process, so it must not outlive its deadline for good");
+    assert.deepEqual(setup.w.exits, [0], "the same clean 'deadline passed, never published' exit");
+  } finally {
+    if (setup.w.exits.length === 0) writeStop(setup); // 断言失败时也别把进程挂住
+    await command;
+    clearInterval(hold);
+  }
+});
 test("serve: an unpublished generation past its deadline is a late loser — it closes and exits, touching no record", async (t) => {
   const setup = world({});
   t.after(setup.cleanup);
@@ -234,13 +432,16 @@ test("serve: a matching stop request stops it gracefully; its OWN record, candid
 test("serve: once published, being superseded by another generation exits the old one; the NEW record and ITS files survive", async (t) => {
   const setup = world({});
   t.after(setup.cleanup);
+  setup.injections.pollMs = 20;
+  let sweeps = 0; // 低频清理只在实例看到自己的发布之后才开始——借它观察"轮询已经看到发布"
+  setup.injections.sweepFn = async () => { sweeps += 1; return 0; };
   const args = [...setup.args, "--deadline", String(Date.now() + 60_000)];
   const hold = holdLoop();
   const command = dashboardServeCommand(args, {}, setup.injections);
-  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await waitFor(() => candidateUp(setup)), true, "the instance is up");
   const mine = { protocol: 1, runDir: setup.runDir, pid: process.pid, processCreatedAt: 1_700_000_000_000, port: setup.w.port, nonce: "ab".repeat(16), generation: GEN, build: { readable: true, srcTree: "f".repeat(40), dirty: false } };
   writeFileSync(join(setup.stateDir, "instance.json"), JSON.stringify(mine));
-  await new Promise((r) => setTimeout(r, 1500)); // 等一轮轮询先"看到"自己的发布
+  assert.equal(await waitFor(() => sweeps >= 1), true, "the poll has SEEN its own publication before it is replaced");
   writeFileSync(join(setup.stateDir, "instance.json"), JSON.stringify({ ...mine, generation: "9999888877776666", nonce: "cd".repeat(16) }));
   await command;
   clearInterval(hold);

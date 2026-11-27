@@ -33,7 +33,7 @@ function makeIo(world) {
     stateDirPresent: async () => true,
     readInstanceEx: async () => (world.instance == null
       ? { status: "absent" }
-      : { status: "present", raw: world.instance, record: world.instance }),
+      : { status: "present", raw: world.instance, record: world.badShape === true ? null : world.instance }),
     publishInstance: async (dir, record) => { world.published = record; },
     readCandidate: async () => world.candidate ?? null,
     candidateBuild: null,
@@ -45,7 +45,10 @@ function makeIo(world) {
     },
     readLock: async () => world.lock ?? null,
     takeOverStale: async () => false,
-    writeStopRequest: async () => {},
+    releaseLock: async () => true,
+    sweepLeftovers: async () => 0,
+    removeCandidate: async () => {},
+    writeStopRequest: async (dir, generation, nonce) => { (world.stopRequests ??= []).push({ generation, nonce }); },
     probeIdentity: async () => world.identity ?? "same",
     listenerPids: async (port) => {
       const pids = [];
@@ -259,6 +262,52 @@ test("STATUS (145b-fix): prints the reuse-check verdict and names WHICH check fa
   }
 });
 
+// ---- 活进程配形状不对的记录：不绕成死圈（修正二第 9 条） ----
+
+const badShapeWorld = (dir) => ({
+  badShape: true,
+  instance: { protocol: 1, runDir: runDirOf(dir), pid: 42, processCreatedAt: 1, port: 8123, extra: true },
+});
+const closeItFirst = (error) => {
+  assert.match(error.message, /pid 42 的看板实例无响应，请先关掉它/);
+  assert.doesNotMatch(error.message, /restart/, "restart would come back to the very same error");
+  return true;
+};
+
+test("LAUNCH/STOP/RESTART (145b-fix2): a LIVE pid with a malformed record is reported as 'pid N unresponsive, close it first' — never a restart hint, never a stop request", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    for (const argv of [[], ["stop"], ["restart"]]) {
+      const world = badShapeWorld(dir);
+      let spawned = 0;
+      const io = makeIo(world);
+      io.spawnServe = async () => { spawned += 1; return { ok: true, pid: 1 }; };
+      await assert.rejects(
+        dashboardCommand([...argv, "--run-dir", dir, "--no-open"], baseConfig, { controlIo: io, log: () => {} }),
+        closeItFirst,
+        `dashboard ${argv.join(" ")}`,
+      );
+      assert.equal(spawned, 0, "no second instance is started");
+      assert.equal(world.stopRequests, undefined, "no stop request is written");
+    }
+  } finally {
+    done();
+  }
+});
+
+test("STATUS (145b-fix2): a live pid with a malformed record says to close it first — not 'restart'", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const logs = [];
+    await dashboardCommand(["status", "--run-dir", dir], baseConfig, { controlIo: makeIo(badShapeWorld(dir)), log: (s) => logs.push(s) });
+    const text = logs.join("\n");
+    assert.match(text, /pid 42/);
+    assert.match(text, /请先关掉/);
+    assert.doesNotMatch(text, /restart/);
+  } finally {
+    done();
+  }
+});
 test("STOP: timeout reports honestly (no kill, no record deletion) with the fixed lines", async () => {
   const [dir, done] = tempRunDir();
   try {

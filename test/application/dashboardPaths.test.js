@@ -26,6 +26,7 @@ import {
   DASHBOARD_STOP_BUDGET_MS,
   DASHBOARD_STOP_WAIT_MS,
   DASHBOARD_INSTANCE_LOG_MAX_BYTES,
+  DASHBOARD_LOCK_FUTURE_TOLERANCE_MS,
   normalizeRunDir,
   stateDirFor,
   defaultDashboardStateRoot,
@@ -42,6 +43,7 @@ test("constants: the batch-145b protocol and lifetime values are pinned", () => 
   assert.equal(DASHBOARD_STOP_BUDGET_MS, 5_000);
   assert.equal(DASHBOARD_STOP_WAIT_MS, 10_000);
   assert.equal(DASHBOARD_INSTANCE_LOG_MAX_BYTES, 256 * 1024);
+  assert.equal(DASHBOARD_LOCK_FUTURE_TOLERANCE_MS, 1_000);
 });
 
 test("normalizeRunDir: the same directory under four spellings folds to one identity", () => {

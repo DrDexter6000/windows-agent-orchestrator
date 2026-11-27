@@ -26,6 +26,13 @@ import {
 } from "../../src/application/dashboardAcl.js";
 
 const IS_WIN = process.platform === "win32";
+// 父进程环境里有真实的 PS7 模块目录（PSModulePath 含 PowerShell\7）就用它复现真实故障；没有就退回
+// 一个假路径——两种都跑，不因环境不同而跳过；用例名里注明用的是哪一种（只写类别，不写路径值）。
+const REAL_PS7_MODULE_DIR = (process.env.PSModulePath ?? "").split(";").find((p) => /PowerShell[\\/]7/i.test(p));
+const PS7_MODE = REAL_PS7_MODULE_DIR !== undefined
+  ? "PSModulePath: the REAL PS7 module dir of the parent environment"
+  : "PSModulePath: a FAKE PS7-style path (this environment has no PowerShell\\7 module dir)";
+const ps7ModuleDir = () => REAL_PS7_MODULE_DIR ?? "C:\\fake\\pwsh7\\modules";
 const ME = "S-1-5-21-test-me";
 const goodAce = () => ({ allow: true, oi: true, ci: true, inherited: false, mask: FULL_CONTROL_MASK, sid: ME });
 const goodReport = () => ({ reparse: false, protected: true, owner: ME, aces: [goodAce()] });
@@ -86,13 +93,13 @@ test("ensure -> verify: all three layers (root / instance / codes) are built and
   }
 });
 
-test("the child env drops PSModulePath — the chain works under a pwsh-7-style parent environment", async () => {
+test(`the child env drops PSModulePath — the chain works under a pwsh-7-style parent environment (${PS7_MODE})`, async () => {
   if (!IS_WIN) return;
   const [root, inst, codes, done] = freshLayers("wao-dash-acl-ps7-");
   try {
-    // 父进程带一个假的 PS7 模块路径（真实故障形态），ensure/verify 仍要绿。
+    // 父进程带 PS7 的模块路径（真实故障形态；环境里有真的就用真的），ensure/verify 仍要绿。
     const prev = process.env.PSModulePath;
-    process.env.PSModulePath = "C:\\fake\\pwsh7\\modules;" + (prev ?? "");
+    process.env.PSModulePath = `${ps7ModuleDir()};${prev ?? ""}`;
     try {
       assert.deepEqual(await ensureDashboardStateDir(root, inst, codes), { ok: true }, "the .NET read path does not need Get-Acl");
       assert.deepEqual(await verifyDashboardStateDir(root, inst, codes), { ok: true });

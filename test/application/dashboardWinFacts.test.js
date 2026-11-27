@@ -63,9 +63,10 @@ test("listenerPidsOfPort (145b-fix): a failed PROBE is null; only a truly empty 
   assert.equal(await listenerPidsOfPort(8080, { execFileFn: failedProbe }), null, "a failed subprocess is unknown too");
 });
 
-test("listener probe wrapper (real PowerShell): only ObjectNotFound is an empty table; another error is unknown", async () => {
-  // 直接跑生产的外壳：ObjectNotFound（查无结果）→ 空表；别的错误 → unknown。
-  // 撤销 #7（回到“任何错误都输出空哨兵”）时，第二条会读成 []，本用例变红。
+test("listener probe wrapper (real PowerShell): ONLY a real 'no such listener' is an empty table — a missing command, a module that will not load or any other error is unknown", async () => {
+  // 直接跑生产的外壳。PowerShell 把"命令找不到""模块加载失败"和"查无结果"都归在
+  // ObjectNotFound 类别里；只有 FullyQualifiedErrorId 以 CmdletizationQuery_NotFound 开头的
+  // 才是真的"没有这个监听"。撤销第 6 条（按类别判）时，下面第二、三条会读成 []，本用例变红。
   const run = (body) => new Promise((resolve) => {
     const env = { ...process.env };
     delete env.PSModulePath; // 与生产子进程同一环境纪律
@@ -76,21 +77,30 @@ test("listener probe wrapper (real PowerShell): only ObjectNotFound is an empty 
       (err, stdout) => resolve(err ? null : String(stdout ?? "")),
     );
   });
-  const notFound = await run(`$c=@(Get-Item -LiteralPath 'C:\\wao-no-such-path-${process.pid}'); 'wao-port:' + @($c).Count`);
-  assert.deepEqual(parsePortProbeOutput(notFound), [], "ObjectNotFound is a truly empty table");
+  const noSuchListener = await run("$c=@(Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort 1 | Select-Object -ExpandProperty OwningProcess); 'wao-port:' + ((@($c | ForEach-Object { [uint32]$_ })) -join ' ')");
+  assert.deepEqual(parsePortProbeOutput(noSuchListener), [], "Get-NetTCPConnection finding nothing is a truly empty table");
+  const missingCommand = await run("Get-WaoNoSuchCommand -Port 1 | Out-Null; 'wao-port:'");
+  assert.equal(parsePortProbeOutput(missingCommand), null, "a command that does not exist is unknown, never 'nobody listens'");
+  assert.match(String(missingCommand), /wao-port-error:/, "and it takes the error branch");
+  const otherNotFound = await run(`Get-Item -LiteralPath 'C:\\wao-no-such-path-${process.pid}' | Out-Null; 'wao-port:'`);
+  assert.equal(parsePortProbeOutput(otherNotFound), null, "another ObjectNotFound (a path) is not a listener table either");
   const otherError = await run("[int]::Parse('nope') | Out-Null; 'wao-port:'");
-  assert.equal(parsePortProbeOutput(otherError), null, "any other PowerShell error is unknown, never an empty table");
-  assert.match(String(otherError), /wao-port-error:/, "the error branch emits its own sentinel");
+  assert.equal(parsePortProbeOutput(otherError), null, "any other PowerShell error is unknown");
 });
+// 父进程环境里有真实的 PS7 模块目录就用它，没有才退回假路径；两种都跑，名字里注明（不写路径值）。
+const REAL_PS7_MODULE_DIR = (process.env.PSModulePath ?? "").split(";").find((p) => /PowerShell[\\/]7/i.test(p));
+const PS7_MODE = REAL_PS7_MODULE_DIR !== undefined
+  ? "PSModulePath: the REAL PS7 module dir of the parent environment"
+  : "PSModulePath: a FAKE PS7-style path (this environment has no PowerShell\\7 module dir)";
 
-test("every powershell child drops PSModulePath from its inherited environment (pwsh-7 parent must not break Get-Acl/CIM)", async () => {
+test(`every powershell child drops PSModulePath from its inherited environment (pwsh-7 parent must not break Get-Acl/CIM) (${PS7_MODE})`, async () => {
   const seen = [];
   const execFileFn = (cmd, args, opts, done) => {
     seen.push(opts?.env ?? null);
     done(null, "wao-port:" + String.fromCharCode(10));
   };
   const prev = process.env.PSModulePath;
-  process.env.PSModulePath = "C:\\fake\\pwsh7\\modules;" + (prev ?? "");
+  process.env.PSModulePath = `${REAL_PS7_MODULE_DIR ?? "C:\\fake\\pwsh7\\modules"};${prev ?? ""}`;
   try {
     await listenerPidsOfPort(8081, { execFileFn });
   } finally {

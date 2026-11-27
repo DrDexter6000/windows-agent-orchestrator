@@ -4,7 +4,9 @@
 //
 //   - instance.json 先写临时文件再原子改名；读取按闭集形状校验，坏形状读作 null；
 //   - launch.lock：wx 独占创建；他人持有时读回 {generation, deadline}；
-//     过期接管是"原子改名到 launch.lock.stale-<旧代际>"，两个接管者只有一个赢家；
+//     过期接管 = 内容核对的移除（先读、对不上不碰文件；对得上才改名-读回-再核对），任何不符合
+//     闭集形状的内容都是坏锁；启动器用完按自己的代际删自己的锁；真双进程用例钉"读到的
+//     活记录/活锁不会因别人的收尾而短暂消失"；残余文件清理认名字形状、不递归、有上限；
 //   - candidate-/result-/stop- 文件按代际读写；result 原因是闭集；
 //   - instance.log 每代重写、256 KiB 上限、到顶写一行固定"日志已截断"后停止追加。
 //
@@ -12,11 +14,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, utimesSync, renameSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 import {
+  removeLaunchLockIfGeneration,
+  removeCandidateRecord,
+  sweepStateDirLeftovers,
   DASHBOARD_RESULT_REASONS,
   readInstanceRecordEx,
   readInstanceRecord,
@@ -226,6 +232,213 @@ test("removeInstanceRecordIfGeneration: the OLD generation removes only its own 
   }
 });
 
+test("lock takeover (145b-fix2): ANY content that is not the closed lock shape is a bad lock and is taken — {}, [1], an extra key, a non-hex generation", async () => {
+  const [dir, done] = tmpState();
+  try {
+    const badContents = [
+      "{}",
+      "[1]",
+      JSON.stringify({ generation: "0123456789abcdef", deadline: 5, pid: 1 }), // 多一个键
+      JSON.stringify({ generation: "not-hex-not-hex!", deadline: 5 }),            // generation 不是 16 位十六进制
+      JSON.stringify({ generation: "0123456789abcdef", deadline: "soon" }),       // deadline 不是数
+      JSON.stringify({ generation: "0123456789abcdef" }),                         // 少一个键
+      "null",
+      '"a string"',
+    ];
+    for (const content of badContents) {
+      writeFileSync(lockFileName(dir), content);
+      assert.equal(await takeOverStaleLock(dir, null), true, `a bad lock is taken: ${content.slice(0, 50)}`);
+      assert.equal(await readLaunchLock(dir), null, "and it is gone");
+      assert.equal(existsSync(lockFileName(dir)), false);
+    }
+    // 形状合法、代际不同的锁，哪怕调用方不知道代际（null），也一个字节都不动。
+    await createLaunchLock(dir, "1111222233334444", 7000);
+    assert.equal(await takeOverStaleLock(dir, null), false, "a well-formed lock is never taken with an unknown generation");
+    assert.deepEqual(await readLaunchLock(dir), { generation: "1111222233334444", deadline: 7000 });
+  } finally {
+    done();
+  }
+});
+
+test("lock release: a launcher deletes ONLY its own generation's lock", async () => {
+  const [dir, done] = tmpState();
+  try {
+    await createLaunchLock(dir, "1111222233334444", 7000);
+    assert.equal(await removeLaunchLockIfGeneration(dir, GEN), false, "another generation's lock stays");
+    assert.deepEqual(await readLaunchLock(dir), { generation: "1111222233334444", deadline: 7000 });
+    assert.equal(await removeLaunchLockIfGeneration(dir, "1111222233334444"), true, "own lock goes");
+    assert.equal(existsSync(lockFileName(dir)), false);
+    assert.equal(await removeLaunchLockIfGeneration(dir, GEN), false, "nothing to remove");
+    assert.equal(readdirSync(dir).length, 0, "no residue");
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 起一个真子进程，在 ms 毫秒内反复调用 dashboardFiles 的某个移除原语（参数 = 目录、一个代际）。
+ * 与测试进程是两个真进程——文件系统上的时序不是同一进程里的异步交替。
+ */
+function hammer(dir, fnName, arg, ms) {
+  const filesUrl = new URL("../../src/application/dashboardFiles.js", import.meta.url).href;
+  const script = `
+    import * as files from ${JSON.stringify(filesUrl)};
+    const [dir, fnName, arg, ms] = process.argv.slice(1);
+    const end = Date.now() + Number(ms);
+    let calls = 0;
+    while (Date.now() < end) { await files[fnName](dir, arg); calls += 1; }
+    console.log(calls);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, dir, fnName, arg, String(ms)], {
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  let out = "";
+  child.stdout.on("data", (chunk) => { out += chunk; });
+  let finished = false;
+  const done = new Promise((resolve) => {
+    child.once("exit", () => { finished = true; resolve(Number(out.trim()) || 0); });
+    child.once("error", () => { finished = true; resolve(0); });
+  });
+  return { done, isFinished: () => finished, kill: () => { try { child.kill(); } catch { /* 已退出 */ } } };
+}
+
+test("REAL TWO PROCESSES: a takeover attempt with the WRONG generation never moves the lock — a third launcher cannot slip in", async () => {
+  const [dir, done] = tmpState();
+  const holder = "1111222233334444";
+  const third = "5555666677778888";
+  await createLaunchLock(dir, holder, 9_999_999);
+  const other = hammer(dir, "takeOverStaleLock", GEN, 1500); // 预期代际 ≠ 持有者：什么都不该动
+  try {
+    let attempts = 0;
+    let slipped = 0;
+    while (!other.isFinished()) {
+      const result = await createLaunchLock(dir, third, 9_999_999);
+      attempts += 1;
+      if (result.ok === true) { slipped += 1; break; }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(attempts > 20, `the race really ran (${attempts} attempts)`);
+    assert.equal(slipped, 0, "the lock never vanished: no third launcher ever created one");
+    assert.deepEqual(await readLaunchLock(dir), { generation: holder, deadline: 9_999_999 }, "the holder's lock is intact");
+    assert.ok(await other.done > 20, "the other process really hammered");
+  } finally {
+    other.kill();
+    await other.done;
+    done();
+  }
+});
+
+test("REAL TWO PROCESSES: an old generation removing 'its' record never makes the LIVE record vanish for a reader", async () => {
+  const [dir, done] = tmpState();
+  await publishInstanceRecord(dir, RECORD);
+  const other = hammer(dir, "removeInstanceRecordIfGeneration", "9999888877776666", 1500); // 旧代的收尾
+  try {
+    let reads = 0;
+    let absent = 0;
+    let unreadable = 0;
+    while (!other.isFinished()) {
+      const read = await readInstanceRecordEx(dir);
+      reads += 1;
+      if (read.status === "absent") absent += 1;
+      else if (read.status === "error") unreadable += 1;
+      else assert.equal(read.record?.generation, GEN, "every read sees the live generation");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(reads > 20, `the race really ran (${reads} reads)`);
+    assert.equal(absent, 0, "the live record was never even momentarily absent (read first, touch only on a match)");
+    assert.equal(unreadable, 0);
+    assert.ok(await other.done > 20, "the other process really hammered");
+    assert.equal((await readInstanceRecord(dir)).generation, GEN);
+  } finally {
+    other.kill();
+    await other.done;
+    done();
+  }
+});
+
+test("candidate cleanup: the launcher removes the candidate it consumed — own generation only", async () => {
+  const [dir, done] = tmpState();
+  try {
+    const candidate = { port: 1024, pid: 2, nonce: NONCE, processCreatedAt: 3, build: { readable: false, srcTree: null, dirty: null } };
+    await writeCandidateRecord(dir, GEN, candidate);
+    await writeCandidateRecord(dir, "1111222233334444", candidate);
+    await removeCandidateRecord(dir, GEN);
+    await removeCandidateRecord(dir, GEN); // 已不在：不抛
+    assert.equal(await readCandidateRecord(dir, GEN), null);
+    assert.deepEqual(await readCandidateRecord(dir, "1111222233334444"), candidate, "another generation's candidate stays");
+  } finally {
+    done();
+  }
+});
+
+test("sweepStateDirLeftovers: only recognisable residue of OTHER generations goes; instance.log, codes\\, the live files and anything unrecognised stay", async () => {
+  const [dir, done] = tmpState();
+  try {
+    const OLD = "aaaabbbbccccdddd";
+    const OWN = "1111222233334444";
+    const CUR = "9999888877776666";
+    // 老文件不能靠回退 mtime 造（NTFS 上 utimes 会把 ctime 刷成现在，清理按 max(mtime, ctime) 算年龄）：
+    // 改成把清理的"现在"往后拨两分钟，刚写的文件就都成了老文件；"很新"的文件把 mtime 定在清理的现在。
+    const sweepNow = () => Date.now() + 120_000;
+    const put = (name, { fresh = false, content = "x" } = {}) => {
+      writeFileSync(join(dir, name), content);
+      if (fresh) utimesSync(join(dir, name), new Date(sweepNow()), new Date(sweepNow()));
+    };
+    const removable = [
+      `result-${OLD}.json`, `candidate-${OLD}.json`, `stop-${OLD}.request`,
+      "instance.json.tmp-123-0123456789ab", `candidate-${OLD}.json.tmp-1-0123456789ab`, `result-${OLD}.json.tmp-1-0123456789ab`, `stop-${OLD}.request.tmp-1-0123456789ab`,
+      "launch.lock.new-123-0123456789ab", "instance.json.rm-123-0123456789ab", "launch.lock.rm-123-0123456789ab",
+    ];
+    for (const name of removable) put(name);
+    // 留下的：当前实例与自己这一代的文件、活文件、没有认得出形状的名字、还很新的瞬态名字。
+    const kept = [
+      "instance.json", "instance.log", "launch.lock",
+      `result-${OWN}.json`, `candidate-${OWN}.json`, `stop-${OWN}.request`, `candidate-${OWN}.json.tmp-1-0123456789ab`,
+      `result-${CUR}.json`, `candidate-${CUR}.json`, `stop-${CUR}.request`,
+      "result-nothex.json", "notes.txt", "result-" + OLD + ".json.bak", "instance.json.tmp-xyz", "launch.lock.new-1",
+    ];
+    for (const name of kept) put(name);
+    put("launch.lock.new-9-aabbccddeeff", { fresh: true }); // 刚建的瞬态文件：可能是别的启动器正在建锁
+    kept.push("launch.lock.new-9-aabbccddeeff");
+    mkdirSync(join(dir, "codes"));
+    writeFileSync(join(dir, "codes", "a".repeat(64)), "x");
+    mkdirSync(join(dir, `result-${OLD}.json.d`)); // 不递归：目录一律不碰
+    mkdirSync(join(dir, `candidate-${"cccc".repeat(4)}.json`)); // 形状对但它是目录：不碰
+    kept.push("codes", `result-${OLD}.json.d`, `candidate-${"cccc".repeat(4)}.json`);
+
+    const removed = await sweepStateDirLeftovers(dir, { keepGenerations: [OWN, CUR], now: sweepNow });
+    assert.equal(removed, removable.length, "exactly the recognisable residue");
+    assert.deepEqual(readdirSync(dir).sort(), [...kept].sort(), "everything else is untouched");
+    assert.ok(existsSync(join(dir, "codes", "a".repeat(64))), "codes\\ is never entered");
+
+    // 条数有上限。
+    for (let i = 0; i < 5; i += 1) put(`result-${(OLD.slice(0, 15) + i)}.json`);
+    assert.equal(await sweepStateDirLeftovers(dir, { keepGenerations: [OWN, CUR], max: 3, now: sweepNow }), 3, "bounded by max");
+    const left = readdirSync(dir).filter((n) => n.startsWith(`result-${OLD.slice(0, 15)}`) && n.endsWith(".json") && n.length === `result-${OLD}.json`.length);
+    assert.equal(left.length, 2, "the rest waits for the next round");
+  } finally {
+    done();
+  }
+});
+
+test("sweepStateDirLeftovers (145b-fix3): a *.rm-* staging file is protected by its CTIME — NTFS keeps the OLD mtime across a rename", async () => {
+  const [dir, done] = tmpState();
+  try {
+    const record = join(dir, "instance.json");
+    writeFileSync(record, JSON.stringify(RECORD));
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(record, hourAgo, hourAgo); // 一小时前写的记录
+    const staging = join(dir, "instance.json.rm-123-0123456789ab");
+    renameSync(record, staging); // 另一个进程的 removeFileWhen 正处在"改名 → 读回"之间
+    assert.ok(Date.now() - statSync(staging).mtimeMs > 3_000_000, "precondition: the rename kept the old mtime");
+    assert.equal(await sweepStateDirLeftovers(dir), 0, "an mtime-only age check would delete it; the ctime (set by the rename) protects it");
+    assert.ok(existsSync(staging), "the staging file is still there for its owner to read back");
+    assert.equal(await sweepStateDirLeftovers(dir, { now: () => Date.now() + 120_000 }), 1, "once the clock has really moved on it is residue like any other");
+  } finally {
+    done();
+  }
+});
 test("instance log: rewritten each generation, capped, one fixed truncation line, then silence", () => {
   const [dir, done] = tmpState();
   try {

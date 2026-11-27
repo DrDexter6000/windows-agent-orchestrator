@@ -7,8 +7,9 @@
 //     复用检查用严格相等比对 instance.json 里的 processCreatedAt——不是容差近似。
 //   - listenerPidsOfPort(port) — TCP 监听表（Get-NetTCPConnection -State Listen，
 //     127.0.0.1）里占住这个端口的 pid 集合；探测失败给 null（读作“查不出”，不猜）。
-//     145b 修正一 #7：查无结果（ObjectNotFound）才是真的空表 []；其余错误是 null——
-//     “查询报错”绝不能被读成“没人监听”。
+//     145b 修正一 #7 / 修正二 #6：只有“查无结果”（错误编号 CmdletizationQuery_NotFound，
+//     不是 ObjectNotFound 类别——命令找不到、模块加载失败也在那个类别里）才是真的空表 []；
+//     其余错误是 null——“查询报错”绝不能被读成“没人监听”。
 //   - probeProcessIdentity(pid, processCreatedAt) — 三值：same（活着且创建时间严格
 //     相等）/ gone（pid 不在，或创建时间读得出但对不上=复用）/ unknown（活着但读不出）。
 //
@@ -74,8 +75,9 @@ export async function readProcessCreatedAt(pid, deps = {}) {
  *
  * 145b 修正一 #7：旧脚本用 `-ErrorAction SilentlyContinue`，查询报错（权限、CIM 故障）
  * 也退出 0 并输出空哨兵，JS 读成 []，控制器就把“查不出”当成“端口没人监听”。
- * 现在只有 ObjectNotFound（Get-NetTCPConnection / Get-Item 查无结果的固定错误类别）
- * 输出空表；其余错误输出 wao-port-error（解析不出 → null）。
+ * 修正二 #6：现在只有 FullyQualifiedErrorId 以 CmdletizationQuery_NotFound 开头（Get-NetTCPConnection
+ * 查无结果）才输出空表；其余错误（含“命令找不到”“模块加载失败”这类同属 ObjectNotFound
+ * 类别的）输出 wao-port-error（解析不出 → null）。
  *
  * @param {string} body — 成功时输出 `wao-port:<pid...>` 的 PowerShell 片段
  * @returns {string}
@@ -85,8 +87,10 @@ export function buildPortProbeScript(body) {
     + "try {"
     + body
     + "} catch {"
-    // 只有“查询确实没有结果”才是空表；任何别的错误都保留为 unknown。
-    + "if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) { 'wao-port:' }"
+    // 只有“查询确实没有结果”才是空表（Get-NetTCPConnection 查无结果的固定错误编号
+    // CmdletizationQuery_NotFound）；任何别的错误都保留为 unknown。不能按 ObjectNotFound
+    // 类别判：“命令找不到”“模块加载失败”也归在这个类别里。
+    + "if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') { 'wao-port:' }"
     + "else { 'wao-port-error:' }"
     + "}";
 }

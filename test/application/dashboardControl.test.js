@@ -11,7 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,11 +26,16 @@ import {
   DASHBOARD_CONTROL_ERRORS,
   dashboardControlErrorText,
 } from "../../src/application/dashboardControl.js";
-import { normalizeRunDir, stateDirFor } from "../../src/application/dashboardPaths.js";
+import {
+  normalizeRunDir, stateDirFor, DASHBOARD_PUBLISH_MARGIN_MS, DASHBOARD_INSTANCE_POLL_MS, DASHBOARD_LAUNCH_DEADLINE_MS,
+  DASHBOARD_LOCK_FUTURE_TOLERANCE_MS, DASHBOARD_STOP_BUDGET_MS,
+} from "../../src/application/dashboardPaths.js";
 import {
   readInstanceRecordEx, publishInstanceRecord, readCandidateRecord, readResultRecord, removeResultRecord,
   createLaunchLock, readLaunchLock, takeOverStaleLock, writeStopRequest, codesDirOf, lockFileName,
+  removeLaunchLockIfGeneration, removeCandidateRecord, sweepStateDirLeftovers,
 } from "../../src/application/dashboardFiles.js";
+import { issueStartCode, redeemStartCode } from "../../src/application/dashboardCodes.js";
 
 const RUN_DIR = "d:/proj/runs";
 const STATE_ROOT = "c:/state";
@@ -70,6 +75,10 @@ function makeWorld(overrides = {}) {
     buildNow: BUILD,
     spawnDelayMs: 0,
     onSpawn: null,
+    codeGenerations: [], // issueCode 收到的代际（码绑定签发时核对过的代际）
+    released: [],        // releaseLock 收到的代际
+    swept: [],           // sweepLeftovers 收到的参数
+    candidatesRemoved: [],
     ...overrides,
   };
   const io = {
@@ -98,12 +107,19 @@ function makeWorld(overrides = {}) {
       if (w.lock !== null && w.lock.generation === expectedGeneration) { w.lock = null; return true; }
       return false;
     },
+    releaseLock: async (dir, generation) => {
+      w.released.push(generation);
+      if (w.lock !== null && w.lock.generation === generation) { w.lock = null; return true; }
+      return false;
+    },
+    sweepLeftovers: async (dir, opts) => { w.swept.push(opts); return 0; },
+    removeCandidate: async (dir, generation) => { w.candidatesRemoved.push(generation); },
     writeStopRequest: async (dir, generation, nonce) => { w.stopRequests.push({ generation, nonce }); },
     probeIdentity: async (pid) => w.identity[pid] ?? "gone",
     listenerPids: async (port) => w.listeners[port] ?? [],
     health: async (port) => w.healthByPort[port] ?? { ok: false },
     spawnServe: async ({ generation, deadline }) => {
-      w.spawned.push({ generation, deadline });
+      w.spawned.push({ generation, deadline, at: w.now, lock: w.lock === null ? null : { ...w.lock } }); // lock：spawn 那一刻的锁（用完即删，事后看不到）；at：spawn 的时刻
       if (w.onSpawn !== null) await w.onSpawn(generation);
       if (!w.spawnOk) return { ok: false, detail: "WMI ReturnValue=8" };
       w.candidate ??= { port: 9001, pid: 777, nonce: NONCE, processCreatedAt: 1_700_000_001_000, build: BUILD };
@@ -112,9 +128,10 @@ function makeWorld(overrides = {}) {
       w.healthByPort[9001] = { ok: true, nonce: NONCE };
       return { ok: true, pid: 777 };
     },
-    issueCode: async () => {
+    issueCode: async (dir, generation) => {
       const code = `c${w.codes.length}${"0".repeat(61)}`;
       w.codes.push(code);
+      w.codeGenerations.push(generation);
       return { code };
     },
     buildSnapshot: async () => w.buildNow,
@@ -226,12 +243,12 @@ test("reuse: build notes — different tree warns, dirty/unknown stays unknown",
 
 test("buildServeCommandLine: paths are quoted; spaces survive; a double quote refuses (path_quote)", () => {
   const base = { nodePath: "C:/Program Files/node/node.exe", cliJsPath: "D:/wao/src/cli.js", generation: "0123456789abcdef", deadline: 123456 };
-  const ok = buildServeCommandLine({ ...base, runDir: "D:/my runs/data", stateRoot: "C:/Users/Some One/AppData/Local/wao/dashboard", port: 8080 });
+  const ok = buildServeCommandLine({ ...base, runDir: "D:/my runs/data", stateRoot: "C:/Users/<you>/App Data/Local/wao/dashboard", port: 8080 });
   assert.equal(ok.ok, true);
   assert.equal(
     ok.commandLine,
     '"C:/Program Files/node/node.exe" "D:/wao/src/cli.js" dashboard serve '
-    + '--run-dir "D:/my runs/data" --state-root "C:/Users/Some One/AppData/Local/wao/dashboard" '
+    + '--run-dir "D:/my runs/data" --state-root "C:/Users/<you>/App Data/Local/wao/dashboard" '
     + '--generation 0123456789abcdef --deadline 123456 --port 8080',
   );
   const noPort = buildServeCommandLine({ ...base, runDir: "D:/r", stateRoot: "C:/s" });
@@ -254,7 +271,7 @@ test("defaultControlIo (145b-fix): the serve child is quoted and its cwd is the 
   });
   const out = await io.spawnServe({
     runDir: "d:/my runs/project",
-    stateRoot: "c:/Users/Some One/AppData/Local/wao/dashboard",
+    stateRoot: "c:/Users/<you>/App Data/Local/wao/dashboard",
     generation: "0123456789abcdef",
     port: 8080,
     deadline: Date.now() + 20_000,
@@ -265,7 +282,7 @@ test("defaultControlIo (145b-fix): the serve child is quoted and its cwd is the 
   assert.equal(calls[0].cwd.toLowerCase(), installRoot.toLowerCase(), "the child runs from the install root, not src/");
   assert.ok(calls[0].commandLine.includes('--run-dir "d:/my runs/project"'), "a run dir with spaces survives quoting");
   assert.ok(
-    calls[0].commandLine.includes('--state-root "c:/Users/Some One/AppData/Local/wao/dashboard"'),
+    calls[0].commandLine.includes('--state-root "c:/Users/<you>/App Data/Local/wao/dashboard"'),
     "a state root with spaces survives quoting",
   );
   assert.match(calls[0].commandLine, /^".*node\.exe"\s+".*cli\.js"\s+dashboard\s+serve\s/, "node and the CLI travel as quoted argv");
@@ -329,7 +346,7 @@ test("locking (145b-fix): the deadline a serve receives IS the deadline of this 
   assert.equal(out.outcome, "launched");
   assert.equal(
     w.spawned[0].deadline,
-    w.lock.deadline,
+    w.spawned[0].lock.deadline,
     "the child is bounded by the lock's deadline — spawn does not invent a later one",
   );
   assert.ok(w.spawned[0].deadline < w.now + 20_000, "no fresh 20 s deadline was started at spawn time");
@@ -422,7 +439,7 @@ test("lock: the second reuse check inside the lock catches an instance that appe
 });
 
 test("lock: someone else holds an unexpired lock -> bounded wait, reuse when the instance appears, never launch-after-wait", async () => {
-  const { w, io } = makeWorld({ lock: { generation: "bbbbbbbbbbbbbbbb", deadline: 1_060_000 } });
+  const { w, io } = makeWorld({ lock: { generation: "bbbbbbbbbbbbbbbb", deadline: 1_015_000 } }); // 活锁：期限不超过 now + 一代拉起期限
   io.spawnServe = async () => { throw new Error("must not spawn while waiting"); };
   const realSleep = io.sleep;
   io.sleep = async (ms) => {
@@ -443,7 +460,8 @@ test("lock: an expired lock is taken over by the content-verified winner, who th
   const out = await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io });
   assert.equal(out.outcome, "launched");
   assert.ok(launched(w));
-  assert.equal(w.lock.generation, w.spawned[0].generation, "the winner's own lock is live");
+  assert.equal(w.spawned[0].lock.generation, w.spawned[0].generation, "the winner spawned under its OWN live lock");
+  assert.equal(w.lock, null, "and released it afterwards");
 });
 
 test("lock (145b-fix): a rotated lock during the wait is NOT taken over with the stale generation", async () => {
@@ -493,6 +511,9 @@ function realFilesIo(world, stateDir) {
     createLock: (dir, gen, dl) => createLaunchLock(stateDir, gen, dl),
     readLock: () => readLaunchLock(stateDir),
     takeOverStale: (dir, gen) => takeOverStaleLock(stateDir, gen),
+    releaseLock: (dir, gen) => removeLaunchLockIfGeneration(stateDir, gen),
+    sweepLeftovers: (dir, opts) => sweepStateDirLeftovers(stateDir, { ...opts, now: () => world.wall ?? Date.now() }),
+    removeCandidate: (dir, gen) => removeCandidateRecord(stateDir, gen),
     writeStopRequest: (dir, gen, nonce) => writeStopRequest(stateDir, gen, nonce),
     probeIdentity: async (pid) => world.identity[pid] ?? "gone",
     listenerPids: async (port) => (world.listeners[port] ?? []),
@@ -508,7 +529,10 @@ function realFilesIo(world, stateDir) {
       writeFileSync(join(stateDir, `candidate-${generation}.json`), JSON.stringify(candidate));
       return { ok: true, pid };
     },
-    issueCode: async () => ({ code: "0f".repeat(32) }),
+    issueCode: async (dir, generation) => {
+      world.codeGenerations?.push(generation);
+      return issueStartCode(codesDirOf(stateDir), generation, { now: () => world.wall ?? Date.now() });
+    },
     buildSnapshot: async () => BUILD,
   };
 }
@@ -590,6 +614,321 @@ test("REAL FILES: publication re-checks the lock — a lock stolen before public
   }
 });
 
+// ===== 修正二：坏锁形状、锁用完要删、过远的期限按过期、截止余量、码绑定代际、残余清理 =====
+
+const stateOf = (base) => {
+  const stateRoot = join(base, "state");
+  const stateDir = stateDirFor(RUN_DIR, stateRoot);
+  mkdirSync(stateDir, { recursive: true });
+  return { stateRoot, stateDir };
+};
+
+test("REAL FILES (145b-fix2): a lock that is not the closed shape — {} / [1] / an extra key / a non-hex generation — is taken over and the launch goes through (no spin until launch_failed)", async () => {
+  const bad = [
+    "{}",
+    "[1]",
+    JSON.stringify({ generation: "0123456789abcdef", deadline: 5, pid: 1 }),
+    JSON.stringify({ generation: "NOT-HEX-GENERATE", deadline: 5 }),
+    JSON.stringify({ generation: "0123456789abcdef", deadline: "later" }),
+  ];
+  for (const content of bad) {
+    const base = mkdtempSync(join(tmpdir(), "wao-dash-badlock-"));
+    try {
+      const { stateRoot, stateDir } = stateOf(base);
+      writeFileSync(lockFileName(stateDir), content);
+      const world = { now: 1_000_000, spawned: [], onSpawn: null, identity: {}, listeners: {}, health: {} };
+      const out = await launchDashboard({ runDir: RUN_DIR, stateRoot, io: realFilesIo(world, stateDir) });
+      assert.equal(out.outcome, "launched", `a bad lock (${content.slice(0, 40)}) never wedges the launcher`);
+      assert.equal(world.spawned.length, 1);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("REAL FILES (145b-fix2): the launcher deletes its own lock after publishing, after a failure and after abandoning — and never another generation's lock", async () => {
+  const base = mkdtempSync(join(tmpdir(), "wao-dash-release-"));
+  try {
+    const { stateRoot, stateDir } = stateOf(base);
+    // 成功：发布后锁没了。
+    const ok = { now: 1_000_000, spawned: [], onSpawn: null, identity: {}, listeners: {}, health: {} };
+    assert.equal((await launchDashboard({ runDir: RUN_DIR, stateRoot, io: realFilesIo(ok, stateDir) })).outcome, "launched");
+    assert.equal(existsSync(lockFileName(stateDir)), false, "published: the lock is released");
+
+    // 失败：子进程报告 port_in_use，启动器抛错，锁也没了。
+    rmSync(join(stateDir, "instance.json"), { force: true });
+    const failed = { now: 2_000_000, spawned: [], onSpawn: null, identity: {}, listeners: {}, health: {} };
+    const failIo = realFilesIo(failed, stateDir);
+    failIo.spawnServe = async ({ generation }) => {
+      failed.spawned.push(generation);
+      writeFileSync(join(stateDir, `result-${generation}.json`), JSON.stringify({ reason: "port_in_use" }));
+      return { ok: true, pid: 1 };
+    };
+    await assert.rejects(() => launchDashboard({ runDir: RUN_DIR, stateRoot, io: failIo }), (e) => e.code === "port_in_use");
+    assert.equal(existsSync(lockFileName(stateDir)), false, "failed: the lock is released too");
+
+    // 放弃（发布前锁已被别人接管）：别人的锁原样保留，最后自己的重试成功并清掉自己的锁。
+    rmSync(join(stateDir, "instance.json"), { force: true });
+    const stolen = { now: 3_000_000, spawned: [], identity: {}, listeners: {}, health: {} };
+    const stolenIo = realFilesIo(stolen, stateDir);
+    let thief = null;
+    stolen.onSpawn = async () => {
+      stolen.onSpawn = null;
+      thief = { generation: "eeeeeeeeeeeeeeee", deadline: stolen.now + 1 };
+      writeFileSync(lockFileName(stateDir), JSON.stringify(thief)); // 别人偷换了锁（期限很近）
+    };
+    const realSleep = stolenIo.sleep;
+    let thiefStillThereAtFirstDefer = null;
+    stolenIo.sleep = async (ms) => {
+      if (thiefStillThereAtFirstDefer === null && thief !== null) thiefStillThereAtFirstDefer = (await readLaunchLock(stateDir))?.generation === "eeeeeeeeeeeeeeee";
+      await realSleep(ms);
+    };
+    assert.equal((await launchDashboard({ runDir: RUN_DIR, stateRoot, io: stolenIo })).outcome, "launched");
+    assert.equal(thiefStillThereAtFirstDefer, true, "the abandoning launcher never deleted the foreign lock");
+    assert.equal(existsSync(lockFileName(stateDir)), false, "and the final winner released its own");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+/** 状态目录里躺着别人的活锁（代际不同、期限 = 现在 + offsetMs），启动器要拉起：返回假时钟走过了多久。 */
+async function launchedUnderForeignLock(offsetMs) {
+  const base = mkdtempSync(join(tmpdir(), "wao-dash-future-"));
+  try {
+    const { stateRoot, stateDir } = stateOf(base);
+    const world = { now: 5_000_000, spawned: [], onSpawn: null, identity: {}, listeners: {}, health: {} };
+    writeFileSync(lockFileName(stateDir), JSON.stringify({ generation: "bbbbbbbbbbbbbbbb", deadline: world.now + offsetMs }));
+    const out = await launchDashboard({ runDir: RUN_DIR, stateRoot, io: realFilesIo(world, stateDir) });
+    assert.equal(out.outcome, "launched");
+    return world.now - 5_000_000;
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+test("REAL FILES (145b-fix2/3): a lock whose deadline is beyond now + the launch deadline + a 1 s tolerance (a clock set back) counts as EXPIRED; anything within is a live lock", async () => {
+  assert.equal(DASHBOARD_LOCK_FUTURE_TOLERANCE_MS, 1_000);
+  // 回拨前签下的锁：期限落在"当前时间 + 1 小时"——立刻接管，不等一小时。
+  assert.ok(await launchedUnderForeignLock(3_600_000) < DASHBOARD_LAUNCH_DEADLINE_MS, "taken over at once instead of waiting an hour");
+  // 边界：别人刚建的锁（期限 = 它的 now + 一代拉起期限）即使我们的钟比它的钟早了 1 秒以内，仍是活锁。
+  assert.ok(await launchedUnderForeignLock(DASHBOARD_LAUNCH_DEADLINE_MS) >= DASHBOARD_LAUNCH_DEADLINE_MS, "exactly now + deadline: a live lock, waited out");
+  const edge = DASHBOARD_LAUNCH_DEADLINE_MS + DASHBOARD_LOCK_FUTURE_TOLERANCE_MS;
+  assert.ok(await launchedUnderForeignLock(edge) >= edge, "a clock that jumped back by up to the tolerance does not turn a fresh lock into a 'future' lock");
+  assert.ok(await launchedUnderForeignLock(edge + 1) < DASHBOARD_LAUNCH_DEADLINE_MS, "one millisecond beyond the tolerance: expired, taken over at once");
+});
+test("REAL FILES (145b-fix2): a failed launch then a second launch leaves ONLY instance.json, instance.log and codes\\ — no result / candidate / tmp / rm / lock.new residue", async () => {
+  const base = mkdtempSync(join(tmpdir(), "wao-dash-residue-"));
+  try {
+    const { stateRoot, stateDir } = stateOf(base);
+    mkdirSync(join(stateDir, "codes"));
+    writeFileSync(join(stateDir, "instance.log"), "log\n");
+    // 第一次：候选核对不过（候选 nonce 对不上）→ 失败；"子进程"随后（启动器已走）才写出自己的 result。
+    const first = { now: 1_000_000, spawned: [], onSpawn: null, identity: {}, listeners: {}, health: {} };
+    const firstIo = realFilesIo(first, stateDir);
+    const innerSpawn = firstIo.spawnServe;
+    firstIo.spawnServe = async (input) => {
+      const out = await innerSpawn(input);
+      first.health[9001] = { ok: true, nonce: "ff".repeat(16) }; // 与候选里的 nonce 对不上
+      return out;
+    };
+    await assert.rejects(() => launchDashboard({ runDir: RUN_DIR, stateRoot, io: firstIo }), (e) => e.code === "candidate_mismatch");
+    const g1 = first.spawned[0];
+    writeFileSync(join(stateDir, `result-${g1}.json`), JSON.stringify({ reason: "serve_error" })); // 启动器已离开后才落下的
+    // 原子写失败的瞬态残留（早已没人在用）。老文件不靠回退 mtime 造（utimes 会刷新 ctime，清理按
+    // max(mtime, ctime) 算年龄）——下面第二次拉起把清理用的"现在"（world.wall）往后拨两分钟。
+    for (const name of ["instance.json.tmp-123-0123456789ab", "launch.lock.new-123-0123456789ab", "instance.json.rm-123-0123456789ab", `candidate-${g1}.json.tmp-1-0123456789ab`]) {
+      writeFileSync(join(stateDir, name), "x");
+    }
+    assert.ok(readdirSync(stateDir).length > 3, "the residue is really there");
+    // 第二次：成功。
+    const second = { now: 9_000_000, wall: Date.now() + 120_000, spawned: [], onSpawn: null, identity: {}, listeners: {}, health: {} };
+    assert.equal((await launchDashboard({ runDir: RUN_DIR, stateRoot, io: realFilesIo(second, stateDir) })).outcome, "launched");
+    assert.deepEqual(readdirSync(stateDir).sort(), ["codes", "instance.json", "instance.log"], "nothing but the live files");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("residue sweep (145b-fix2): runs after the lock is held and the second reuse check came back empty; keeps the own and the stale record's generation; a reuse in the lock sweeps nothing", async () => {
+  const { w, io } = makeWorld({ instance: instanceRecord({ generation: "abababababababab" }), identity: {} }); // 死记录
+  const out = await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io });
+  assert.equal(out.outcome, "launched");
+  assert.equal(w.swept.length, 1);
+  assert.deepEqual([...w.swept[0].keepGenerations].sort(), ["abababababababab", w.spawned[0].generation].sort(), "the own generation and the stale record's generation are kept");
+  assert.deepEqual(w.candidatesRemoved, [w.spawned[0].generation], "the candidate the launcher consumed is removed after publishing");
+
+  const reuse = makeWorld({ instance: instanceRecord() });
+  let firstCheck = true;
+  const real = reuse.io.readInstanceEx;
+  reuse.io.readInstanceEx = async (...a) => { if (firstCheck) { firstCheck = false; return { status: "absent" }; } return real(...a); };
+  assert.equal((await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: reuse.io })).outcome, "reused");
+  assert.equal(reuse.w.swept.length, 0, "a launcher that found a live instance in the lock sweeps nothing");
+});
+
+test("locks (145b-fix2): the launcher releases its lock by ITS generation on publish, failure and deferral alike", async () => {
+  const published = makeWorld();
+  await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: published.io });
+  assert.deepEqual(published.w.released, [published.w.spawned[0].generation]);
+  assert.equal(published.w.lock, null);
+
+  const failed = makeWorld();
+  failed.io.spawnServe = async () => { failed.w.result = { reason: "port_in_use" }; return { ok: true, pid: 777 }; };
+  await assert.rejects(() => launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, port: 8080, io: failed.io }));
+  assert.equal(failed.w.released.length, 1, "released on the failure path");
+  assert.equal(failed.w.lock, null);
+
+  const wmi = makeWorld({ spawnOk: false });
+  await assert.rejects(() => launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: wmi.io }), (e) => e.code === "wmi_create_failed");
+  assert.equal(wmi.w.released.length, 1, "released when the process could not even be created");
+  assert.equal(wmi.w.lock, null);
+});
+
+test("publish margin (145b-fix2): the time is checked AFTER the lock read, and a publication needs at least one child poll + 1 s before the deadline", async () => {
+  assert.equal(DASHBOARD_PUBLISH_MARGIN_MS, DASHBOARD_INSTANCE_POLL_MS + 1_000);
+  const shortBy = async (remainingMs) => {
+    const { w, io } = makeWorld();
+    let armed = false;
+    let fired = false;
+    const innerSpawn = io.spawnServe;
+    io.spawnServe = async (...a) => { const out = await innerSpawn(...a); armed = true; return out; };
+    const innerReadLock = io.readLock;
+    io.readLock = async (...a) => {
+      const lock = await innerReadLock(...a);
+      if (armed && !fired) { fired = true; w.now = w.lock.deadline - remainingMs; } // 读锁这一下耗到只剩 remainingMs
+      return lock;
+    };
+    await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io });
+    return w;
+  };
+  const justShort = await shortBy(DASHBOARD_PUBLISH_MARGIN_MS - 1);
+  assert.equal(justShort.spawned.length, 2, "one millisecond short of the margin: NOT published — back to waiting, then a clean second launch");
+  assert.equal(justShort.published, 1, "only the second (comfortable) attempt published");
+  const exactly = await shortBy(DASHBOARD_PUBLISH_MARGIN_MS);
+  assert.equal(exactly.spawned.length, 1, "exactly the margin is enough");
+  assert.equal(exactly.published, 1);
+});
+
+/** 第一次候选就绪时，读锁这一下把假时钟耗到"离截止只剩 remainingMs"——启动器要推迟发布。 */
+function deferringWorld(remainingMs, overrides = {}) {
+  const { w, io } = makeWorld(overrides);
+  let armed = false;
+  let fired = false;
+  const innerSpawn = io.spawnServe;
+  io.spawnServe = async (...a) => { const out = await innerSpawn(...a); armed = true; return out; };
+  const innerReadLock = io.readLock;
+  io.readLock = async (...a) => {
+    const lock = await innerReadLock(...a);
+    if (armed && !fired) { fired = true; w.now = w.lock.deadline - remainingMs; }
+    return lock;
+  };
+  return { w, io };
+}
+
+test("deferred publication (145b-fix3): the launcher first waits for its OWN unpublished child to be gone — no second spawn before old deadline + one instance poll + the stop budget", async () => {
+  const { w, io } = deferringWorld(DASHBOARD_PUBLISH_MARGIN_MS - 1);
+  const out = await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, port: 8080, io });
+  assert.equal(out.outcome, "launched");
+  assert.equal(w.spawned.length, 2, "deferred once, then a clean second launch");
+  const notBefore = w.spawned[0].deadline + DASHBOARD_INSTANCE_POLL_MS + DASHBOARD_STOP_BUDGET_MS;
+  assert.ok(
+    w.spawned[1].at >= notBefore,
+    `the second child (same --port!) starts only after the first one has surely exited: ${w.spawned[1].at} >= ${notBefore}`,
+  );
+});
+
+test("deferred publication (145b-fix3): the wait keeps reuse-checking — an instance that shows up meanwhile is reused, nothing more is spawned", async () => {
+  const { w, io } = deferringWorld(DASHBOARD_PUBLISH_MARGIN_MS - 1);
+  const innerSleep = io.sleep;
+  io.sleep = async (ms) => {
+    await innerSleep(ms);
+    if (w.spawned.length === 1 && w.now >= w.spawned[0].deadline) w.instance = instanceRecord(); // 别的启动器这时发布了一个实例
+  };
+  const out = await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io });
+  assert.equal(out.outcome, "reused");
+  assert.equal(w.spawned.length, 1, "no second child");
+  assert.equal(w.published, 0);
+});
+
+test("deferred publication (145b-fix3): the wait counts against the overall budget — a late deferral ends in launch_failed, not in another spawn", async () => {
+  // 别人的锁一把接一把：我们 ~38.7 s 才拿到锁，这一代截止 ~58.7 s；推迟后要等到截止 + 6 s，超出 60 s 总预算。
+  const { w, io } = deferringWorld(DASHBOARD_PUBLISH_MARGIN_MS - 1, { lock: { generation: "bbbbbbbbbbbbbbbb", deadline: 1_019_000 } });
+  let takeovers = 0;
+  io.takeOverStale = async (dir, expectedGeneration) => {
+    if (w.lock === null || w.lock.generation !== expectedGeneration) return false;
+    takeovers += 1;
+    w.lock = takeovers === 1 ? { generation: "cccccccccccccccc", deadline: w.now + 19_000 } : null; // 另一个启动器抢先建了下一把
+    return true;
+  };
+  await assert.rejects(
+    () => launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io }),
+    (error) => error.code === "launch_failed",
+  );
+  assert.equal(w.spawned.length, 1, "the budget ran out while waiting — no second child was started");
+});
+test("codes (145b-fix2): a launched instance's code is bound to the PUBLISHED generation; a reused one to the generation the reuse check read", async () => {
+  const launchedWorld = makeWorld();
+  await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: launchedWorld.io });
+  assert.deepEqual(launchedWorld.w.codeGenerations, [launchedWorld.w.spawned[0].generation]);
+
+  const reusedWorld = makeWorld({ instance: instanceRecord() });
+  await launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: reusedWorld.io });
+  assert.deepEqual(reusedWorld.w.codeGenerations, [GEN_A]);
+});
+
+test("REAL FILES (145b-fix2): the reuse check read generation A; the record became generation B before the code was written — B refuses the code, A would honour it", async () => {
+  const base = mkdtempSync(join(tmpdir(), "wao-dash-codegen-"));
+  try {
+    const { stateRoot, stateDir } = stateOf(base);
+    const GEN_B = "bbbbbbbbbbbbbbbb";
+    const world = { now: 1_000_000, spawned: [], onSpawn: null, identity: { 4242: "same" }, listeners: { 8123: [4242] }, health: { 8123: { ok: true, nonce: NONCE } }, codeGenerations: [] };
+    await publishInstanceRecord(stateDir, instanceRecord()); // generation A
+    const io = realFilesIo(world, stateDir);
+    const innerHealth = io.health;
+    io.health = async (port) => {
+      const result = await innerHealth(port); // 复用检查最后一项刚过……
+      await publishInstanceRecord(stateDir, instanceRecord({ generation: GEN_B, nonce: "cd".repeat(16) })); // ……记录就换代了
+      return result;
+    };
+    const out = await launchDashboard({ runDir: RUN_DIR, stateRoot, io });
+    assert.equal(out.outcome, "reused");
+    assert.deepEqual(world.codeGenerations, [GEN_A], "the code was bound to what the reuse check READ, not to a later re-read");
+    const codes = codesDirOf(stateDir);
+    assert.equal(await redeemStartCode(codes, out.code, { generation: GEN_B }), false, "the new generation refuses the old generation's code");
+    assert.equal(await redeemStartCode(codes, out.code, { generation: GEN_A }), true, "and it was never consumed by that refusal");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ===== 活进程配坏形状记录：不绕成死圈（修正二第 9 条） =====
+
+test("live process + malformed record (145b-fix2): launch says 'pid N is unresponsive, close it first' (no restart hint); stop and restart say the same and write nothing", async () => {
+  const bad = () => makeWorld({ instance: { ...instanceRecord(), extra: 1 }, recordOverride: null, identity: { 4242: "same" } });
+  const noRestartHint = (error) => {
+    assert.equal(error.code, "instance_unresponsive");
+    assert.match(error.message, /pid 4242/);
+    assert.match(error.message, /请先关掉/);
+    assert.doesNotMatch(error.message, /restart/, "restart would only come back to the same error");
+    return true;
+  };
+  const a = bad();
+  await assert.rejects(() => launchDashboard({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: a.io }), noRestartHint);
+  assert.equal(a.w.spawned.length, 0);
+
+  const b = bad();
+  await assert.rejects(() => dashboardStop({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: b.io }), noRestartHint);
+  assert.equal(b.w.stopRequests.length, 0, "no stop request is written for a record that cannot name a nonce");
+
+  const c = bad();
+  await assert.rejects(() => dashboardRestart({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: c.io }), noRestartHint);
+  assert.equal(c.w.stopRequests.length, 0);
+  assert.equal(c.w.spawned.length, 0, "restart stops at the same error instead of looping or starting a second instance");
+
+  const status = await dashboardStatus({ runDir: RUN_DIR, stateRoot: STATE_ROOT, io: bad().io });
+  assert.equal(status.present, true);
+  assert.equal(status.failedCheck, "record-shape");
+  assert.equal(status.pid, 4242);
+});
 // ===== status / stop / restart =====
 
 test("status: same facts as the reuse check — it names WHICH check failed; no code or token", async () => {

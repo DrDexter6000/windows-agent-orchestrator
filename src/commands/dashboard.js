@@ -12,7 +12,8 @@
 //     命令随即退出——实例常驻，属于这个运行目录。
 //   wao dashboard serve …   内部入口：实例进程本身（dashboardServe.js）
 //   wao dashboard status    pid/端口/启动时间/协议/build（相同|不同|无法确认）/健康
-//   wao dashboard stop      写停机请求，等实例自己退出；超时如实报错，不强杀不删记录
+//   wao dashboard stop      写停机请求，等实例自己退出；超时如实报错，不强杀不删记录；活进程配
+//                           形状不对的记录（写不出停机请求）如实报"pid N 的看板实例无响应，请先关掉它"
 //   wao dashboard restart   先 stop，确认旧代退出才拉起；stop 失败就中止
 //
 // --cwd 只定初始项目筛选（决定 0131 第 1 条）：目录属于运行目录里某个已知项目时，
@@ -192,12 +193,20 @@ async function statusCommand(args, config, injections = {}) {
     return s;
   }
   const startedAt = new Date(s.startedAt);
-  const buildText = s.build === "same" ? "与当前代码相同" : s.build === "different" ? "与当前代码不同（建议 restart）" : "无法确认（建议 restart）";
+  const closeFirst = s.failedCheck === "record-shape" && s.pid !== null; // 见下：这种情形不提示 restart
+  const buildText = s.build === "same"
+    ? "与当前代码相同"
+    : s.build === "different" ? "与当前代码不同（建议 restart）" : closeFirst ? "无法确认" : "无法确认（建议 restart）";
   log(`看板实例：pid ${s.pid}，端口 ${s.port}，启动于 ${Number.isFinite(startedAt.valueOf()) ? startedAt.toISOString() : "unknown"}，协议版本 ${s.protocol}。`);
   // 145b 修正一 #12：健康判定与复用检查同一口径，哪一项没对上如实说。
+  // 活进程配形状不对的记录：restart 的 stop 阶段写不出停机请求，只会回到同一个错误——
+  // 这种情形只提示先关掉进程，不提示 restart（修正二 #9）。
+  const advice = closeFirst
+    ? `请先关掉 pid ${s.pid} 的看板实例`
+    : "建议 wao dashboard restart";
   const healthText = s.health === "ok"
     ? "正常"
-    : `${s.health === "incompatible" ? "协议不兼容" : "无响应"}${s.failedCheck !== null && STATUS_CHECK_TEXTS[s.failedCheck] !== undefined ? `（${STATUS_CHECK_TEXTS[s.failedCheck]}）` : ""}；建议 wao dashboard restart`;
+    : `${s.health === "incompatible" ? "协议不兼容" : "无响应"}${s.failedCheck !== null && STATUS_CHECK_TEXTS[s.failedCheck] !== undefined ? `（${STATUS_CHECK_TEXTS[s.failedCheck]}）` : ""}；${advice}`;
   log(`健康：${healthText}；build：${buildText}。`);
   return s;
 }
@@ -208,7 +217,12 @@ async function stopCommand(args, config, injections = {}) {
   const log = injections.log ?? ((s) => console.log(s));
   const { runDir, stateRoot } = resolveTargets(options, config);
   const io = injections.controlIo ?? defaultControlIo();
-  const out = await dashboardStop({ runDir, stateRoot, io });
+  let out;
+  try {
+    out = await dashboardStop({ runDir, stateRoot, io });
+  } catch (error) {
+    rethrowControlError(error); // 固定文案（含"pid N 的看板实例无响应，请先关掉它"）
+  }
   if (out.outcome === "no_instance") {
     log("没有正在运行的看板实例。");
     return out;
