@@ -22,6 +22,9 @@ npm run cli -- consult run brief.md --seats a,b --fields Q1=A,B
 # 黄牌核查：被审 run 的作者是否在席位清单（advisory，不拦截）
 npm run cli -- consult run brief.md --seats a,b --reviewed-run <runId>
 
+# 接上一场会审（方案会审没有被审 run 时，用它串起同一对象的多轮）
+npm run cli -- consult run brief.md --seats a,b --follows <consultId>
+
 # 从组记录重渲染（只读；扇出后即可读）
 npm run cli -- consult show <consultId> --format json
 
@@ -49,6 +52,8 @@ malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句�
 三块拼接逐字节等于原文；② 标记即提示——闭集字段值不同仅标"字段值不同(Qn)"，
 工具永不输出"一致/分歧"类结论；③ malformed 零自动重发——格式不合格只是观察
 事实，WAO 绝不替 Lead 重问。
+
+**审查口径与轮次（第 155 批，TD-385）**：每席固定会审合同带一句审查口径——以全局为重，边缘或概率极小的问题可以提，但要在条首标【边缘】并写明触发条件与可能性。同一对象的第几轮由 WAO 算：交付会审按被审 run 所在谱系自动计（新旧会审目录合并、按 consultId 去重；新记录落 `lineageRoot`，被审转录读不出时记 `roundMayBeLow`）；`--follows <consultId>`（MCP `follows`）声明"这是那一场的下一轮"，两者取大。第 3 轮起，开始时、结果里与 MCP 回执带一句提醒（Owner 原话）并给出 `round`；只提醒，不阻止，不改结论与退出码。`consult show --seat` / `--out-dir` 与按席分页是原文出口，不带提醒。
 
 **审查会审的结论字段（决定 0128"声明即合同"）**：要每席给出机械可读的结论，
 照抄这套写法——声明闭集字段 `fields: {"Q1": ["PASS","PASS_WITH_NOTES","FIX_FIRST"]}`
