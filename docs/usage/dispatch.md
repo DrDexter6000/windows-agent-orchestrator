@@ -192,6 +192,8 @@ reuse 路由对前任 run 的判定是 runId 绑定读取：`session.created` �
 
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到自然终态（token 闸门 / 等待窗到期通知 / 兜底 abort 都生效——到期不杀），写入共享 transcript。Lead 结束回合前按返回的 `nextStep` 挂好等待，`run_status` 只做即时查询。
 
+**派发结果带 `label` 与 `laneRules`（决定 0134）**：`label` 是 `[<车道>] <任务名>`，给宿主的后台任务命名用（nextStep 末尾"后台任务可命名"），续修也带。`laneRules` 是派发那一刻的 Owner 车道规则原文与此刻各额度池高峰：CLI `run` 派发前打到 stderr、`--format json` 带，MCP `run_dispatch` 回执带，续修不带。只陈列；对照规则发现选错车道，停掉重派。生成出错只让它降级为 `rules: null` 加原因。
+
 ## MCP `run_continue`（Lead 授权修正续跑）
 
 `run_continue` 让 Lead 对一个终态 continuable delivery 续一个修正回合。典型场景：Lead 审阅一个 delivery、发现窄缺陷（如一个漏改的边界条件），显式授权一次修正——WAO 创建新 run/transcript，复用父 run 的 retained worktree，以 `turn:resume` 续同一 provider-native 对话，并打包新的 child delivery。CLI 等价：`wao runs continue <parentRunId> --prompt-file FILE [--delivery-spec-file FILE]`——同一 `continueRun()` 与同一份回执字段（另带 CLI 面 `nextStep`），拒绝给闭集 `rejectionReason`、退出码 1；规格文件同 `run`，省略即继承。

@@ -630,7 +630,7 @@ export function projectLaneProfiles({ lanesDoc, traitsResult, nowMs = Date.now()
       videoInput: entry.multimodal.video,
     });
   }
-    // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。
+  // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。
   const tableIds = new Set(laneList.map((l) => l?.id).filter((x) => typeof x === "string"));
   const omittedLaneIds = (traitsResult.invalidIds ?? []).filter((id) => tableIds.has(id));
   // 156 批（同额度池合并高峰，修正一）：同一 quotaPool 在车道表里（有画像的）**全部**

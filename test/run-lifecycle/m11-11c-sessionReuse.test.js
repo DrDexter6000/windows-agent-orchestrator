@@ -1524,8 +1524,8 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
       // (transcriptPath/leadSession/opaqueUuid/workspace/argv) must never surface.
       assert.deepEqual(
         Object.keys(parsed).sort(),
-        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
-        "only the safe keys: four scalars + additive workspaceProof + additive providerSessionRouting + additive nextStep (decision 0095)",
+        ["accepted", "agentId", "continuable", "label", "laneRules", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "only the safe keys: four scalars + additive workspaceProof + additive providerSessionRouting + additive nextStep (decision 0095) + additive label/laneRules (decision 0134)",
       );
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_mcp3");
@@ -1557,7 +1557,12 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
       assert.ok(!dumped.includes(OPAQUE), "no opaque uuid leak");
       assert.ok(!dumped.includes("leadSession"), "no leadSession key leak");
       assert.ok(!dumped.includes("/secret/run_mcp3"), "no transcript path leak");
-      assert.ok(!dumped.includes("secret-prompt"), "no prompt leak");
+      // Decision 0134: label is the one field allowed to carry prompt-derived
+      // text (the brief's bounded, redacted title, as on the Owner dashboard);
+      // the no-leak guarantee holds once it is stripped.
+      assert.equal(parsed.label, "[researcher] secret-prompt");
+      const withoutLabel = dumped.split(JSON.stringify(parsed.label)).join("").split(parsed.label).join("");
+      assert.ok(!withoutLabel.includes("secret-prompt"), "no prompt leak outside label");
       assert.ok(!dumped.includes("--session-id"), "no argv leak");
       // The raw workspace path is never echoed by the proof (cross-platform
       // forward-slash canonicalization, matching the canonical FR-03 contract).

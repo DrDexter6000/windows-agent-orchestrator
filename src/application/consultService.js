@@ -1502,9 +1502,11 @@ export const CONSULT_PAGE_CAP_BYTES = 12 * 1024;
  * 快照）。laneRules 按「整份回执放得下才带完整原文」处理（修正一）：
  * projectConsultReceipt 用与本帽同一种序列化测量——放得下就带完整规则；放不下
  * 就换成具名降级形 {rules:null, rulesReason:回执容量原因, now:null}（规则原文
- * 指向 lead_preflight 的 lanes.ownerRules）。帽不抬、规则原文不截断；因此带
- * laneRules 也不破帽。schema 上限超界或字段值病态长（laneRules 之外的字段）仍
- * 可破帽（已知未收紧）。 */
+ * 指向 lead_preflight 的 lanes.ownerRules）。帽不抬、规则原文不截断。已知未收紧：
+ * ① 每席都给每问声明字段时，字段键按问重复整段席位 id——合同边界最坏（5 席 ×
+ * 32 字 id × 10 问 × 120 字标题、一字答案）实测约 8.4–8.5 KB，略超帽（第 156 批
+ * 交付会审第二轮；MRC-F2 用短键夹具，没覆盖这一形）；② schema 上限超界或字段值
+ * 病态长（laneRules 之外的字段）也可破帽。两者都远在宿主约 21 KB 截断线之下。 */
 export const CONSULT_RECEIPT_CAP_BYTES = 8 * 1024;
 
 /** 席位正文 sha256（hex）——分页版本锚：跨页拼接时调用方比对每页的

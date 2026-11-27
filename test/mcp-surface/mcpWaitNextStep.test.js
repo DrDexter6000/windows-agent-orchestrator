@@ -554,7 +554,9 @@ test("NS-M7: run_dispatch accepted:true → nextStep（MCP 写法在前、CLI �
       // 第 136 批：MCP 写法在前、CLI 半句在后——半句带这次受理的 runId（MCP 面
       // 唯一落 id 的地方），宿主有后台命令行时一条命令等到收口。
       assert.equal(res.structuredContent.nextStep,
-        "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. If your host has a background shell, you can instead run wao runs wait run_ns_m7_ok --until-settled there; one command waits until settlement.");
+        "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. If your host has a background shell, you can instead run wao runs wait run_ns_m7_ok --until-settled there; one command waits until settlement."
+        // 第 156 批（决定 0134）：末尾挂宿主无关的命名提示，名字就是回执的 label。
+        + " （后台任务可命名 [coder_low] x）");
     } finally {
       await client.close(); await server.close();
     }
@@ -595,7 +597,8 @@ test("NS-M8: run_continue accepted:true → nextStep；拒收不给", async () =
       assert.match(res.structuredContent.nextStep, /keep a wait attached: call run_await_result repeatedly with its default waitMs/);
       // 第 136 批：末尾的 CLI 半句带子运行自己的 runId（不是 parentRunId），只出现一次。
       assert.match(res.structuredContent.nextStep, new RegExp(
-        `wao runs wait run_ns_m8_child --until-settled there; one command waits until settlement\\.$`));
+        // 第 156 批（决定 0134）：CLI 半句之后只多一句命名提示（label 来自续修任务书标题）。
+        `wao runs wait run_ns_m8_child --until-settled there; one command waits until settlement\\. （后台任务可命名 \\[coder_low\\] fix it）$`));
       assert.equal(res.structuredContent.nextStep.split("run_ns_m8_child").length - 1, 1, "runId 只出现在那条 CLI 命令里");
       assert.ok(!res.structuredContent.nextStep.includes("run_ns_m8_parent"), "不带 parentRunId");
     } finally {

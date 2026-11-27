@@ -192,3 +192,4 @@
 | TD-361 | 只发 `file_written`、不发 `write_intent` 的车道（glm/zcode、kimi、codex）写了又删仍判越界 | 第 151 批：三条车道在写入完成前发带 `toolCallId` 的意图（zcode pending/running、kimi 在途轮询、codex `item.started`），`file_written` 报完成帧自己的路径并带同一 id；空路径、无稳定 id、撞 id 不发或不放宽。已知局限：kimi 撞 id 的少数组合只多一条错误结果或仍按同路径放宽 |
 | TD-355 | Owner 看板不是给人看的（11-19 Owner 试用）：行话、无主次、看不到任务与交付、每个项目各起一个、App 重启即停 | 第 140–145b 批：每个运行目录一个跨项目的 `/v2` 看板（Overview / Workers / Attention，中英文，任务书标题、交付、裁决、失败原因、命令内容、实时 Activity），常驻实例与 `status`/`stop`/`restart`；旧界面退役（决定 0131、0132） |
 | TD-385 | 会审只增不收：审查席反复要求修概率极小的边缘漏洞，轮次失控（Owner 11-27） | 第 155 批：席位固定合同加审查口径（边缘项标【边缘】），auditor/researcher 同义；轮次按交付谱系自动计（新旧目录合并、新记录落谱系根）加可选 follows；第 3 轮起提醒 Owner 原话，只提醒不阻止 |
+| TD-384 | 运行没有给人看的名字：宿主后台任务名全靠 Lead 手写（Owner 11-27） | 第 156 批（决定 0134）：派发、续修、会审结果带 `[车道] 任务名` 的 label（标题与看板同源同脱敏，≤80 字），nextStep 末尾提示可用它命名；不写宿主名 |

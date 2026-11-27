@@ -113,5 +113,4 @@
 | TD-381 | `run_diagnose` 的顶层 `state` 原样回显转录里的 `run.state_change.to`：畸形值（如带控制字符的 5,006 字符串）整段通过（第 141 批 sol 会审发现，与新字段无关的旧问题） | 开放 | 下次改诊断或 MCP 状态面时：`state` 只认 `RUN_STATES` 闭集，其余写 `unknown` | src/mcp/server.js src/transcript.js |
 | TD-382 | Owner 看板不显示"言行不符"（worker 自述与转录事实对不上）：正则识别自述误报不可控，Owner 定本期不做 | 开放 | 等 worker 回报有结构化自述字段时再做 | 0131 |
 | TD-383 | 可续谱系根在 `.lineage-reuse` 各留一条槽记录、从不清扫（决定 0133 后每次交付派发都留一条），close/reclaim 每次全量读；派发后 5 分钟内关闭该谱系判忙；另有第 154 批复核余下的槽存储边缘情形（同 runId 并发撤槽、撤槽失败留记录、首次建目录竞态，见决定 0133 已知边界） | 开放 | 槽记录量明显拖慢 close/reclaim，或忙判误挡时再加按终态清扫 | 0133 |
-| TD-384 | 运行没有给人看的名字：宿主的后台任务名（如 Claude Code 的后台等待）全靠 Lead 手写，Owner 要结构化的"[车道] 任务名"。WAO 派发结果与 nextStep 可带一个 `label`（车道 + 任务书标题，标题取法与 Owner 看板同源），宿主自取；不为某个 harness 特化 | 开放 | 第 154 批之后（Owner 11-27 提出） | src/application/runDispatch.js |
 | TD-386 | worker 看不到交付验证命令：WAO 注入的交付合同只带 allowedPaths，任务书写"按交付规格的验证命令逐个跑"时 worker 只能猜范围（第 154、155 批 worker 连说"没看到清单"） | 开放 | 下一批 | src/application/roleContract.js |
