@@ -505,7 +505,11 @@ const RED_23_WIRE = 75492;
 // 第 154 批（带交付的派发缺省可续修，本批任务书授权重冻；additive）：run_dispatch
 // 出参增必填 continuable（boolean）与可选 continuableOff（enum）：78084→78291
 // （实测；Owner 硬顶 94532 内）。desc/hostVisible 冻结线未动。
-const FROZEN_17_WIRE_CEILING = 78291;
+// 第 155 批（会审以全局为重 + 超过 2 轮提醒，本批任务书授权重冻；additive）：run_consult
+// 入参增可选 follows（consultId 形状，"这是哪一场的下一轮"）、出参增可选 round /
+// roundAdvisory（第 3 轮起才带），描述加半句 follows 说明：78291→78507（实测；
+// scripts/measure-mcp-surface.mjs 同口径 fullWire 78325→78541；Owner 硬顶 94532 内）。
+const FROZEN_17_WIRE_CEILING = 78507;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -798,8 +802,13 @@ test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", asyn
 // stripped 载荷内，SHA 如实翻新；desc/hostVisible 冻结线未动。
 // （历史值：9517c289518d2fb44e93a98855d8e59f72a5b2638a1edd58c8f903a097d0d496
 // 为第 153 批后的冻结值。）
+// 第 155 批（会审以全局为重 + 超过 2 轮提醒，本批任务书授权重冻；additive）：run_consult
+// 入参增可选 follows、出参增可选 round/roundAdvisory——inputSchema 与 outputSchema 都在
+// stripped 载荷内，SHA 如实翻新；描述只加半句 follows 说明（不进 stripped 载荷）。
+// （历史值：f8995a0657fe7b1903ea23d270bc95cb222e32fd8f20c58c6bdf22e6dc183592
+// 为第 154 批后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "f8995a0657fe7b1903ea23d270bc95cb222e32fd8f20c58c6bdf22e6dc183592";
+  "0128ed7d9e8c6db524c4d64a963f3c021532684999ac4e3e92d66fbc57de4c67";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。
@@ -931,7 +940,9 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // 第 141b 批（决定 0021 / 0078 手续，Owner 批准本批合理抬高上限）：run_dispatch 描述加
 // 一句 taskType:"image" 的说明（生图任务、给 Owner 看板分类用，不影响派发）：
 // 10189→10296（实测；改动前同口径实测 10183；Owner 硬顶 12347 内）。
-const FROZEN_17_DESC_CEILING = 10296;
+// 第 155 批（本批任务书授权重冻）：run_consult 描述加半句 "follows: prior consultId (next
+// round); "：10296→10334（实测；Owner 硬顶 12347 内）。
+const FROZEN_17_DESC_CEILING = 10334;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：12063→12219（实测；Owner 硬顶 12347 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 描述加一句"回执在有未终态
@@ -963,7 +974,9 @@ const FROZEN_17_DESC_CEILING = 10296;
 // 第 141b 批（决定 0021 / 0078 手续，Owner 批准本批合理抬高上限）：run_dispatch 的
 // taskType 入参字段与描述一句进 hostVisible：20817→20970（实测；改动前同口径实测
 // 20811；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
-const FROZEN_17_HOSTVISIBLE_CEILING = 20970;
+// 第 155 批（本批任务书授权重冻）：run_consult 入参 follows 字段 + 描述半句进 hostVisible：
+// 20970→21103（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
+const FROZEN_17_HOSTVISIBLE_CEILING = 21103;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：23270→23426（实测；hostVisible 无独立硬顶，在 wire 硬顶 94532 内）。
 // 0096（2026-10-30，Owner 批准的批次）：run_consult 的 nextStep 输出字段与描述句

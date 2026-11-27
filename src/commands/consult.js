@@ -4,7 +4,7 @@
 //
 // 命令形状：
 //   consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]...
-//            [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS]
+//            [--fields Q1=A,B]... [--reviewed-run <runId>] [--follows <consultId>] [--wait-timeout MS]
 //            [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]
 //   consult show <consultId> [--seat <agentId> [--out FILE] | --out-dir DIR] [--format json|text] [--cwd DIR] [--run-dir DIR]
 //   consult wait <consultId> [--wait-ms MS | --until-settled] [--format json|text] [--cwd DIR] [--run-dir DIR]
@@ -209,6 +209,8 @@ export function renderCouncilDiffText(result) {
     `席位 ${seatCount} · 预算 ${result.budgetMs}ms · 耗时 ${result.elapsedMs}ms`
     + ` · brief: ${result.brief?.path ?? "（注入原文）"}（sha256 ${String(result.brief?.sha256 ?? "").slice(0, 12)}…）`,
   );
+  // 第 155 批（TD-385）：第 3 轮起一行提醒原文（show/wait/run 共用本渲染）；第 1、2 轮不加。
+  if (typeof result.roundAdvisory === "string") lines.push(result.roundAdvisory);
   for (const q of result.questions) {
     lines.push("");
     lines.push(`Q${q.q} ${q.heading.replace(/^#{1,3}\s*Q\d+\s*/, "").replace(/^Q\d+\s*[.::：]\s*/, "")}`);
@@ -318,6 +320,10 @@ async function consultRunCommand(args, config, deps = {}) {
   if (format !== "text" && format !== "json") {
     throw new Error("--format must be json or text");
   }
+  // 第 155 批（TD-385）：--follows <consultId> 声明"这是那一场的下一轮"（轮次 = 那一场 + 1）。
+  if (options.follows !== undefined && (typeof options.follows !== "string" || options.follows.length === 0)) {
+    throw new Error("--follows expects <consultId> (the consult this one follows)");
+  }
   const run = deps.runConsult ?? runConsult;
   const result = await run({
     briefPath: briefFile,
@@ -327,10 +333,12 @@ async function consultRunCommand(args, config, deps = {}) {
     })),
     ...(Object.keys(declaredFields).length > 0 ? { declaredFields } : {}),
     ...(options.reviewedRun ? { reviewedRunId: options.reviewedRun } : {}),
+    ...(options.follows !== undefined ? { follows: options.follows } : {}),
     ...(options.waitTimeout !== undefined ? { budgetMs: Number(options.waitTimeout) } : {}),
     registryPath: options.registry ?? config?.registry ?? "config/agents.json",
     runDir: options.runDir ?? config?.runDir ?? "runs",
     consultsDir: resolveConsultsDir(options, config),
+    fallbackConsultsDir: legacyConsultsDir(options, config),
     ...(options.cwd ? { cwd: options.cwd } : {}),
     env: process.env,
     // TD-283：席位目标车道带 Owner 暂停说明 → 每席一行 stderr advisory（只提示
@@ -425,6 +433,7 @@ async function consultShowCommand(args, config, deps = {}) {
     record,
     runDir,
     consultsDir: recordDir,
+    lineageDirs: [consultsDir, legacyConsultsDir(options, config)],
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
@@ -544,6 +553,7 @@ async function consultWaitCommand(args, config, deps = {}) {
     record: waited.record,
     runDir,
     consultsDir: waited.consultsDir ?? consultsDir,
+    lineageDirs: [consultsDir, legacyConsultsDir(options, config)],
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
@@ -754,6 +764,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
     record,
     runDir,
     consultsDir: recordDir,
+    lineageDirs: [consultsDir, fallbackConsultsDir],
     ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
     env: process.env,
   });
@@ -770,7 +781,7 @@ async function consultWaitUntilSettledCommand({ consultId, asJson, consultsDir, 
 // TD-319：用法页的行数组是单一事实源——CONSULT_USAGE（join 形，help 打印用）
 // 与未知子命令报错（linesError 显式带出各行，用法页的多行不被当一行转义）同源。
 export const CONSULT_USAGE_LINES = [
-  "consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]",
+  "consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--follows <consultId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]",
   "consult show <consultId> [--seat <agentId> [--out FILE] | --out-dir DIR] [--format json|text] [--cwd DIR] [--run-dir DIR]",
   "consult wait <consultId> [--wait-ms MS | --until-settled] [--format json|text] [--cwd DIR] [--run-dir DIR]",
   "",
@@ -781,6 +792,9 @@ export const CONSULT_USAGE_LINES = [
   "                  Candidates must be non-empty and use only letters, digits, _ and -; a value must stand alone",
   "                  as a word (no letter, digit, _ or - may touch it; at the same position the longest declared",
   "                  value wins). Repeatable flag, but each Q<n> may be declared only once.",
+  "  --follows       this consult is the next round of <consultId> (round = that one + 1); refused if that consult cannot be",
+  "                  read. A delivery review (--reviewed-run) counts rounds on its own lineage automatically; the larger of",
+  "                  the two counts wins. From round 3 on, WAO prints a reminder line (it never blocks).",
   "  --wait-timeout  how long `run` waits for the seats, 180000-600000 ms (default 600000). When it expires the seats",
   "                  keep running. The consult id is printed on stderr as soon as the seats are dispatched:",
   "                  `consult wait <id>` waits again (--wait-ms 180000-600000, default 270000, repeatable),",

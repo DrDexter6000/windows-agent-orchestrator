@@ -10,7 +10,7 @@ Windows Agent Orchestrator PoC
 
 Commands:
   version   # print the WAO version (bare semver from package.json; --version also works)
-  consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审：扇出+收集，各席原文并列呈现，不做语义合成
+  consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--follows <consultId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审：扇出+收集，各席原文并列呈现，不做语义合成
   consult show <consultId> [--seat <agentId> [--out FILE] | --out-dir DIR] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 重渲染一场会审；--seat 取一席完整原文（--out 写进文件）；--out-dir 每席写 DIR/<agentId>.md
   consult wait <consultId> [--wait-ms MS | --until-settled] [--format json|text] [--cwd DIR] [--run-dir DIR]   # 继续等一场已扇出的会审（各席到终态或观察窗到期即返回，可反复调用）；--until-settled 等到每席收口才退出（互斥旗标）
   serve status [--url SERVEURL] [--kimi-home DIR] [--registry FILE]   # kimi-web worker serve 观察面：实例元数据/荚规模/会话计数（零副作用）

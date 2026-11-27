@@ -230,6 +230,8 @@ import {
   // 决定 0128 续修：候选值不合格的创建拒绝——识别后原样回固定文案（点名 Qn，
   // 不回显候选值），其余 pre-dispatch 失败照旧回通用"零派发"文案。
   DeclaredFieldRefusalError,
+  // 第 155 批：follows 指向读不出的会审——识别后原样回具名拒绝文案（零派发）。
+  ConsultFollowsRefusalError,
 } from "../application/consultService.js";
 import { readRegistry } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, DISPATCH_HOLD_MAX_CHARS } from "../dispatchResolution.js";
@@ -1306,6 +1308,8 @@ const RUN_CONSULT_INPUT = z.object({
   // "field value differs" markers only; the tool never concludes.
   fields: z.record(z.string().regex(/^Q\d+$/), z.array(z.string().min(1))).optional(),
   reviewedRunId: z.string().min(1).optional(),
+  // 第 155 批：这是哪一场会审的下一轮（轮次 = 那一场 + 1，第 3 轮起结果带提醒；不阻止）。
+  follows: z.string().min(1).max(128).regex(/^consult_[A-Za-z0-9_-]+$/).optional(),
   // 0051 读模式分页参数：seat 选席（省略=回执重渲染）、page 选页（默认 1）。
   // 仅 read 模式合法——create 模式携带任一 → 固定文案拒绝（派发计数为 0）。
   seat: z.string().min(1).max(128).optional(),
@@ -1373,6 +1377,9 @@ const RUN_CONSULT_OUTPUT = z.object({
   consultId: z.string().min(1),
   // —— receipt 视图（create 成功与 read 无 seat 同形，同一投影函数）——
   recordPath: z.string().optional(),
+  // 第 155 批：第 3 轮起才带（round + 提醒原文）；第 1、2 轮回执与改前逐字节相同。
+  round: z.number().int().positive().optional(),
+  roundAdvisory: z.string().optional(),
   questions: z.array(RUN_CONSULT_QUESTION).optional(),
   brief: RUN_CONSULT_BRIEF_FACT.optional(),
   budgetMs: z.number().int().nonnegative().optional(),
@@ -1435,7 +1442,7 @@ const RUN_CONSULT_DESCRIPTION =
   // 决定 0128 续修（第 131 批）：压缩既有措辞腾字节，加进 fields 审查结论一句；
   // 三条字节帽（desc/hostVisible/wire）一个未抬——本工具描述实测 1152→1139。
   "Convene a multi-seat read-only consult. Create {brief, seats}: brief is INLINE text, " +
-  "never a file path, one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree " +
+  "never a file path, one sub-run per seat; follows: prior consultId (next round); expectedWorkspaceRoot (absolute Git worktree " +
   "top) is required — seats run in it, records in its main worktree; " +
   "waitMs 0..600000 (default " +
   `${RUN_CONSULT_WAIT_DEFAULT_MS}; expiry = observation cutoff only — seats are never killed or ` +
@@ -5256,7 +5263,7 @@ export function createWaoMcpServer({
       const readMode = input.consultId !== undefined;
       const hasCreateField = input.brief !== undefined || input.seats !== undefined
         || input.perspectives !== undefined || input.fields !== undefined
-        || input.reviewedRunId !== undefined;
+        || input.reviewedRunId !== undefined || input.follows !== undefined;
       if (readMode && hasCreateField) {
         return { isError: true, content: [{ type: "text", text: RUN_CONSULT_MODE_TEXT }] };
       }
@@ -5342,6 +5349,7 @@ export function createWaoMcpServer({
             record,
             runDir,
             consultsDir: recordDir,
+            lineageDirs: [recordsDir, legacyRecordsDir],
             env: process.env,
           });
           if (input.seat !== undefined) {
@@ -5524,6 +5532,9 @@ export function createWaoMcpServer({
           })),
           ...(input.fields !== undefined ? { declaredFields: input.fields } : {}),
           ...(input.reviewedRunId !== undefined ? { reviewedRunId: input.reviewedRunId } : {}),
+          ...(input.follows !== undefined ? { follows: input.follows } : {}),
+          // 决定 0111 的旧落点：读 follows 记录、数同谱系会审记录都与状态目录合并。
+          ...(legacyRecordsDir !== undefined ? { fallbackConsultsDir: legacyRecordsDir } : {}),
           budgetMs: input.waitMs,
           // MCP face domain: 0..600000 (0 = fan out + immediate point-in-time
           // snapshot). The service's own default floor (CONSULT_WAIT_MIN_MS,
@@ -5549,7 +5560,7 @@ export function createWaoMcpServer({
       } catch (error) {
         // 决定 0128 续修：候选值不合格的创建拒绝原样回自己的固定文案（点名
         // Qn、说明约束；不含候选值原文——service 层已保证）。
-        if (error instanceof DeclaredFieldRefusalError) {
+        if (error instanceof DeclaredFieldRefusalError || error instanceof ConsultFollowsRefusalError) {
           return { isError: true, content: [{ type: "text", text: error.message }] };
         }
         // Any service/output failure (including an oversized or malformed

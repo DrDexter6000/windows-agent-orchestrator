@@ -536,6 +536,50 @@ test("第 149 批: codex .cmd 带 15 条授权路径的紧样本在预算内", a
   }
 });
 
+// 第 155 批修正二：紧样本的二进制路径 C:\bin\t.cmd 比真实安装短（真实形如 C:\tools\bin\codex.cmd）。
+// 换成更接近真实的路径后，以第 155 批之前的 auditor.md（2894 字节、1322 字符）为基线：改后仍能启动，
+// 且余量不比基线少。基线余量是改动前用同一个 compileInvocation 实测的——在这个样本（15 条 ~80 字符授权路径、
+// ComSpec 钉死、codex 补充条款）上，最长角色正文后面还能再追加多少汉字不超预算：agentId 身份头 55、
+// lane/role 身份头 28。auditor.md 以后再加字，先看这里。
+test("第 155 批: auditor.md 以改动前为基线，在更接近真实安装路径的 codex .cmd 下仍能启动且余量不减", async () => {
+  const { composeDeliveryExecutionContract, composeRoleContractWithIdentity, loadRoleContract } =
+    await import("../../src/application/roleContract.js");
+  const { compileInvocation } = await import("../../src/backends/processBackend.js");
+  const rolesDir = resolve(import.meta.dirname, "../../config/roles");
+  const longest = readdirSync(rolesDir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => ({ id: f.slice(0, -3), body: loadRoleContract(`config/roles/${f}`) }))
+    .sort((a, b) => b.body.length - a.body.length)[0];
+  assert.equal(longest.id, "auditor", "最长角色仍是 auditor（基线针对它）");
+  assert.ok(Buffer.byteLength(longest.body, "utf8") <= 2894, `auditor.md ${Buffer.byteLength(longest.body, "utf8")} 字节不超过改动前的 2894`);
+  const codex = new CodexBackend();
+  const agent = { model: { id: "gpt-5.5" }, reasoning: { effort: "xhigh" } };
+  const paths = Array.from({ length: 15 }, (_, i) => `src/${"d".repeat(71)}/f${String(i).padStart(2, "0")}.js`);
+  const savedComSpec = process.env.ComSpec;
+  process.env.ComSpec = "C:\\Windows\\System32\\cmd.exe";
+  try {
+    for (const [label, identity, baselineMargin] of [
+      ["agentId", undefined, 55],
+      ["lane/role", { laneId: "coder_hq", roleId: longest.id }, 28],
+    ]) {
+      for (const pad of [0, baselineMargin]) {
+        const role = composeRoleContractWithIdentity({
+          roleContract: longest.body + "字".repeat(pad), agentId: "coder_hq", ...(identity ? { identity } : {}),
+        });
+        const roleContract = `${composeDeliveryExecutionContract({ allowedPaths: paths, backendSupplement: codex.deliveryContractSupplement })}\n\n---\n\n${role}`;
+        const builtArgs = getBuildArgs(codex)(agent, { prompt: "p", roleContract });
+        assert.doesNotThrow(
+          () => compileInvocation({ binary: "C:\\tools\\bin\\codex.cmd", builtArgs, platform: "win32" }),
+          `codex .cmd（C:\\tools\\bin\\codex.cmd）${label} 身份头：auditor.md 再追加 ${pad} 个汉字仍在预算内（基线余量 ${baselineMargin}）`,
+        );
+      }
+    }
+  } finally {
+    if (savedComSpec === undefined) delete process.env.ComSpec;
+    else process.env.ComSpec = savedComSpec;
+  }
+});
+
 test("交付合同补齐：新写入边界行与 git 行扩展在场，共用条款在 allowedPaths 段之前", async () => {
   const { composeDeliveryExecutionContract, composeReadOnlyExecutionContract } =
     await import("../../src/application/roleContract.js");

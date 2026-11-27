@@ -586,7 +586,8 @@ test("FLOW-4: 视角片段原样拼接在该席 prompt 尾部（共享内核=bri
     assert.ok(c.prompt.startsWith(briefText), "brief 逐字节内核在前");
     assert.ok(!c.prompt.includes("创建或修改文件"), "文件边界由只读合同管，席位边界不再重复");
   }
-  assert.ok(calls[0].prompt.endsWith("缺证据时报告缺口。"), "无视角席：合同在尾部");
+  // 第 155 批（TD-385）：固定合同末尾带审查口径（以全局为重、边缘情形标【边缘】）。
+  assert.ok(calls[0].prompt.endsWith("边缘或概率极小的情形可以提，但须在该条开头标注【边缘】，并写明触发条件与可能性。"), "无视角席：合同在尾部");
   assert.ok(calls[1].prompt.includes(`\n\n${perspective}\n\n${CONTRACT_MARK}`), "视角片段原样拼接在 brief 与合同之间");
 });
 
@@ -626,7 +627,8 @@ test("FLOW-4b（决定 0128 声明即合同）：有 fields 时每席提示词�
     writeFileFn: async () => {},
     mkdirFn: async () => {},
   }));
-  const noFieldsPrompt = `${briefText}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。`;
+  // 第 155 批（TD-385）：固定句末尾加了审查口径，逐字节钉新全文。
+  const noFieldsPrompt = `${briefText}\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。以全局为重：先报影响正确性、数据安全、可用性和既定约定的问题；边缘或概率极小的情形可以提，但须在该条开头标注【边缘】，并写明触发条件与可能性。`;
   for (const c of bare.calls) {
     assert.ok(!c.prompt.includes(FORMAT_MARK), "无 fields：不出现格式段");
     assert.equal(c.prompt, noFieldsPrompt, "无 fields：prompt 与旧构造逐字节相同");

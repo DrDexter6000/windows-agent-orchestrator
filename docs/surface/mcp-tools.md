@@ -125,7 +125,7 @@ Output:
 
 ## run_consult
 
-Convene a multi-seat read-only consult. Create {brief, seats}: brief is INLINE text, never a file path, one sub-run per seat; expectedWorkspaceRoot (absolute Git worktree top) is required — seats run in it, records in its main worktree; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats are never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts, nextStep when a dispatched seat is not terminal). Review verdicts: declare fields (Q1: PASS/PASS_WITH_NOTES/FIX_FIRST); WAO appends the format line; see fieldValues. Facts only — never synthesizes, merges, ranks or concludes. Read {consultId}: same receipt, ZERO dispatch; {consultId, seat, page?}: ONE page of its final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries the full-text textSha256 — a mismatch means a mid-read change: restart from page 1). expectedWorkspaceRoot also locates the record (default binding). seat/page in create, page without seat, unknown/out-of-range → fixed refusal text.
+Convene a multi-seat read-only consult. Create {brief, seats}: brief is INLINE text, never a file path, one sub-run per seat; follows: prior consultId (next round); expectedWorkspaceRoot (absolute Git worktree top) is required — seats run in it, records in its main worktree; waitMs 0..600000 (default 45000; expiry = observation cutoff only — seats are never killed or re-dispatched); returns a MECHANICAL RECEIPT (no per-seat body text, no excerpts — per-seat runId/state/pages, fieldDiff, independence facts, nextStep when a dispatched seat is not terminal). Review verdicts: declare fields (Q1: PASS/PASS_WITH_NOTES/FIX_FIRST); WAO appends the format line; see fieldValues. Facts only — never synthesizes, merges, ranks or concludes. Read {consultId}: same receipt, ZERO dispatch; {consultId, seat, page?}: ONE page of its final text (page default 1; each page ≤12KiB serialized; pages reassemble byte-exact; every page carries the full-text textSha256 — a mismatch means a mid-read change: restart from page 1). expectedWorkspaceRoot also locates the record (default binding). seat/page in create, page without seat, unknown/out-of-range → fixed refusal text.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -139,6 +139,7 @@ Input:
 | perspectives | array<object> | no |  |
 | fields | object | no |  |
 | reviewedRunId | string | no |  |
+| follows | string | no |  |
 | seat | string | no |  |
 | page | integer | no |  |
 | expectedWorkspaceRoot | string | no |  |
@@ -151,6 +152,8 @@ Output:
 | view | string | yes | enum: receipt \| seatPage |
 | consultId | string | yes |  |
 | recordPath | string | no |  |
+| round | integer | no |  |
+| roundAdvisory | string | no |  |
 | questions | array<object> | no |  |
 | brief | object | no |  |
 | budgetMs | integer | no |  |

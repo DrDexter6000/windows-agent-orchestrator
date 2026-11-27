@@ -45,10 +45,19 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId, transcriptPathFor } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
+// 第 155 批（TD-385）：会审轮次与第 3 轮起的提醒（只提醒，不阻止）；算法的唯一定义处。
+import {
+  CONSULT_ROUND_ADVISORY,
+  ConsultFollowsRefusalError,
+  consultRoundFacts,
+  consultRoundOfRecord,
+  resolveNewConsultRound,
+} from "./consultRound.js";
+export { CONSULT_ROUND_ADVISORY, ConsultFollowsRefusalError };
 // 决定 0055 判定权威（2026-10-10 kimi 诊断批引入；2026-11-03 改接只读观察投影）：
 // 席位写入证据不再自数 transcript 事件，复用只读观察投影的工作树内写入事实。
 import { projectReadOnlyObservation } from "./runReadOnlyObservation.js";
@@ -397,8 +406,15 @@ function prepareDispatchError(error, env) {
  */
 export const CONSULT_SEAT_CONTRACT_MARKER = "\n\n---\n【会审席边界（固定合同，席位级）】";
 
-/** 标记之后的固定合同正文（每席同一句；席位 prompt 的实际后缀 = 标记 + 这句 + 声明字段段）。 */
-export const CONSULT_SEAT_CONTRACT_TEXT = "你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。";
+/** 标记之后的固定合同正文（每席同一句；席位 prompt 的实际后缀 = 标记 + 这句 + 声明字段段）。
+ * 第 155 批（TD-385）起末尾带审查口径：以全局为重，边缘情形可以提但要标【边缘】。 */
+export const CONSULT_SEAT_CONTRACT_TEXT = "你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。以全局为重：先报影响正确性、数据安全、可用性和既定约定的问题；边缘或概率极小的情形可以提，但须在该条开头标注【边缘】，并写明触发条件与可能性。";
+
+/** 第 155 批之前写入的固定合同正文（历史会审 prompt 落盘的就是它）。读侧剥离时依次尝试
+ * 当前版与这些历史版——改文案不能让旧记录的任务书露出旧合同。 */
+const CONSULT_SEAT_CONTRACT_TEXT_HISTORY = Object.freeze([
+  "你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。",
+]);
 
 /**
  * 一个会审席的 prompt：任务书 + 视角片段（seatBody）之后机械追加固定合同后缀——写入端
@@ -415,23 +431,27 @@ export function buildConsultSeatPrompt(seatBody, declaredFields) {
 }
 
 /** 写入端追加在席位 prompt 末尾的整段后缀：标记 + 固定句 + 声明字段段。 */
-function consultSeatSuffix(declaredFields) {
-  return `${CONSULT_SEAT_CONTRACT_MARKER}${CONSULT_SEAT_CONTRACT_TEXT}${buildDeclaredFieldsContract(declaredFields)}`;
+function consultSeatSuffix(declaredFields, contractText = CONSULT_SEAT_CONTRACT_TEXT) {
+  return `${CONSULT_SEAT_CONTRACT_MARKER}${contractText}${buildDeclaredFieldsContract(declaredFields)}`;
 }
 
 /**
  * 会审席 prompt 去掉实际追加的固定合同后缀，剩下任务书与视角片段（Owner 看板的任务书用）。
  * 按**该场会审记录里实际声明的 fields** 用写入端同一个构造重建后缀（候选值原样取，多行候选
  * 也一样），prompt 恰好以这段后缀结尾才剥；对不上（任务书正文自己引用了标记、记录与 prompt
- * 声明不一致、后缀后面还有别的内容）一律原样返回，不截断。
+ * 声明不一致、后缀后面还有别的内容）一律原样返回，不截断。固定句依次按当前版、历史版重建
+ * （历史会审的 prompt 落盘的是改文案之前的那一句）。
  *
  * @param {string} prompt
  * @param {object} [declaredFields] — 组记录里的 declaredFields（没有声明就不传）
  * @returns {string}
  */
 export function stripConsultSeatContract(prompt, declaredFields) {
-  const suffix = consultSeatSuffix(declaredFields);
-  return prompt.endsWith(suffix) ? prompt.slice(0, prompt.length - suffix.length) : prompt;
+  for (const text of [CONSULT_SEAT_CONTRACT_TEXT, ...CONSULT_SEAT_CONTRACT_TEXT_HISTORY]) {
+    const suffix = consultSeatSuffix(declaredFields, text);
+    if (prompt.endsWith(suffix)) return prompt.slice(0, prompt.length - suffix.length);
+  }
+  return prompt;
 }
 
 /**
@@ -586,6 +606,10 @@ export async function observeSeatRun({ runId, runDir, readTranscriptFn = readTra
  * @param {Array<{agentId: string, perspectiveText?: string}>} input.seats 席位清单
  * @param {Record<string, string[]>} [input.declaredFields] 闭集声明字段（{"Q1":["A","B"]}）
  * @param {string} [input.reviewedRunId] 可选被审 run（非作者砖）
+ * @param {string} [input.follows] 可选：这是哪一场会审的下一轮（轮次 = 那一场 + 1）；那一场
+ *   读不出就具名拒绝（ConsultFollowsRefusalError，零派发）
+ * @param {string} [input.fallbackConsultsDir] 决定 0111 保留的旧落点（同 consult show）：读 follows
+ *   记录的回退目录，数同谱系会审记录时也与状态目录合并（按 consultId 去重）
  * @param {number} [input.budgetMs=600000] 总预算（范围同 run_wait）
  * @param {string} input.registryPath
  * @param {string} input.runDir
@@ -610,6 +634,8 @@ export async function runConsult({
   seats,
   declaredFields,
   reviewedRunId,
+  follows,
+  fallbackConsultsDir,
   budgetMs = CONSULT_WAIT_DEFAULT_MS,
   // M13-r2：预算下限按调用面注入——CLI/r1 保持 consult 域（CONSULT_WAIT_MIN_MS
   // 180000，决定 0095 起与 run_wait 域解耦），MCP run_consult 的 waitMs 闭集是
@@ -626,6 +652,7 @@ export async function runConsult({
   registryReadFn = readRegistry,
   readTranscriptFn = readTranscript,
   readFileFn = readFile,
+  readdirFn = readdir,
   writeFileFn = writeFile,
   renameFn = rename,
   rmFn = rm,
@@ -681,7 +708,6 @@ export async function runConsult({
     }
   }
 
-  const startNow = nowFn();
   const resolvedRegistry = resolve(registryPath);
   const resolvedRunDir = resolve(runDir);
   const resolvedConsultsDir = resolve(consultsDir);
@@ -703,6 +729,28 @@ export async function runConsult({
   const questions = parseBriefQuestions(text);
   const consultId = idFn(nowFn);
   const createdAt = new Date(nowFn()).toISOString();
+
+  // 第 155 批（TD-385）：轮次在任何派发之前算出（follows 读不出 = 具名拒绝，零派发）。
+  // 第 3 轮起经 advisory 通道打一行提醒——只提醒，不阻止、不改任何结果。历史扫描可能很慢，
+  // 所以放在席位等待计时（startNow）开始之前：查询耗时不吃席位的等待预算。
+  const followsId = typeof follows === "string" ? follows : undefined;
+  if (follows !== undefined && follows !== null && !isValidConsultId(follows)) {
+    throw new ConsultFollowsRefusalError(follows);
+  }
+  const { round, lineageRoot, roundMayBeLow } = await resolveNewConsultRound(
+    {
+      reviewedRunId,
+      follows: followsId,
+      loadFollowed: (id) => loadConsultRecordWithFallback({
+        consultId: id, consultsDir: resolvedConsultsDir, fallbackConsultsDir, readFileFn, sleepFn,
+      }),
+    },
+    { consultsDir: resolvedConsultsDir, fallbackConsultsDir, runDir: resolvedRunDir, readTranscriptFn, readdirFn, readFileFn },
+  );
+  const roundFacts = consultRoundFacts(round);
+  if (roundFacts.roundAdvisory) advisorySink(roundFacts.roundAdvisory);
+
+  const startNow = nowFn();
 
   // 三块砖①厂族：registry 原始字段直读（backend + provider，不做族系归类
   // 判断——R9：族系归类是展示闭集能力，控制面只报原始事实）。
@@ -822,6 +870,10 @@ export async function runConsult({
   await writeFileFn(recordPath, JSON.stringify({
     consultId,
     createdAt,
+    round,
+    ...(followsId ? { follows: followsId } : {}),
+    ...(lineageRoot !== undefined ? { lineageRoot } : {}),
+    ...(roundMayBeLow ? { roundMayBeLow: true } : {}),
     brief: { path: briefPath ? resolve(briefPath) : null, sha256: briefSha256 },
     budgetMs,
     elapsedMs: nowFn() - startNow,
@@ -959,6 +1011,10 @@ export async function runConsult({
   const record = {
     consultId,
     createdAt,
+    round,
+    ...(followsId ? { follows: followsId } : {}),
+    ...(lineageRoot !== undefined ? { lineageRoot } : {}),
+    ...(roundMayBeLow ? { roundMayBeLow: true } : {}),
     brief: { path: briefPath ? resolve(briefPath) : null, sha256: briefSha256 },
     budgetMs,
     elapsedMs,
@@ -998,6 +1054,7 @@ export async function runConsult({
     consultId,
     recordPath,
     record,
+    ...roundFacts,
     questions,
     brief: record.brief,
     budgetMs,
@@ -1216,6 +1273,8 @@ export async function waitForConsult({
  * @param {object} input.record loadConsultRecord 输出
  * @param {string} input.runDir
  * @param {string} input.consultsDir（recordPath 回显用）
+ * @param {string[]} [input.lineageDirs] 旧记录现算轮次时一起数的会审记录目录（状态目录 +
+ *   决定 0111 的旧落点；与 consultsDir 合并、按 consultId 去重）
  * @param {Function} [input.readTranscriptFn]
  * @param {object} [input.env] 脱敏 env
  * @returns {Promise<object>} 与 runConsult 结果同形的结果对象（无 console 副作用）
@@ -1224,7 +1283,10 @@ export async function rerenderConsultFromRecord({
   record,
   runDir,
   consultsDir,
+  lineageDirs,
   readTranscriptFn = readTranscript,
+  readdirFn = readdir,
+  readFileFn = readFile,
   env = process.env,
   nowFn = Date.now,
 }) {
@@ -1323,10 +1385,17 @@ export async function rerenderConsultFromRecord({
     }
   }
 
+  // 第 155 批（TD-385）：记录里写了 round 直接用；旧记录按谱系现算（不回写）。第 3 轮起
+  // 带 {round, roundAdvisory}，第 1、2 轮结果与改前逐字节相同。
+  const roundFacts = consultRoundFacts(
+    await consultRoundOfRecord(record, { consultsDir, lineageDirs, runDir, readTranscriptFn, readdirFn, readFileFn }),
+  );
+
   return {
     consultId: record.consultId,
     recordPath: join(consultsDir, `${record.consultId}.json`),
     record,
+    ...roundFacts,
     questions: record.questions ?? [],
     brief: record.brief,
     budgetMs: record.budgetMs,
@@ -1523,6 +1592,8 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
     view: "receipt",
     consultId: result.consultId,
     recordPath: result.recordPath,
+    // 第 155 批：第 3 轮起（result 带了才有）回执携带 round 与提醒原文；第 1、2 轮不带。
+    ...(typeof result.roundAdvisory === "string" ? { round: result.round, roundAdvisory: result.roundAdvisory } : {}),
     questions: result.questions,
     brief: result.brief,
     budgetMs: result.budgetMs,

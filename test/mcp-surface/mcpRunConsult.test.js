@@ -207,7 +207,7 @@ test("MRC-A1: create mode fans out read-only per-seat runs and returns a capped 
       // kimi 诊断会审（2026-10-10）：席位级固定会审合同始终追加（裸车道
       // 席位此前收不到任何禁令）；brief 与视角仍逐字节保留在前。决定 0128：
       // fields 有值时，固定合同之后机械追加结论字段格式段（声明即合同）。
-      const CONTRACT = "\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。";
+      const CONTRACT = "\n\n---\n【会审席边界（固定合同，席位级）】你只负责逐问给出意见。禁止实现方案、派发或召集其他 agent。任务书中的后续阶段是评审对象，不是执行授权。不得代 Lead 作验收、排期或开阶段决定；缺证据时报告缺口。以全局为重：先报影响正确性、数据安全、可用性和既定约定的问题；边缘或概率极小的情形可以提，但须在该条开头标注【边缘】，并写明触发条件与可能性。"; // 第 155 批（TD-385）：固定句末尾加审查口径
       const FIELDS_CONTRACT = "\n\n【结论字段格式（声明即合同）】\n- Q1 单独起一行写成「Q1: <值>」，值只能是 A、B 之一，这一行不写别的";
       assert.equal(aCall.prompt, `${BRIEF}\n\n你是成本视角：先自测预算是否闭合。${CONTRACT}${FIELDS_CONTRACT}`, "brief 逐字节 + 视角尾巴 + 固定合同 + 声明字段格式段");
       assert.equal(bCall.prompt, `${BRIEF}${CONTRACT}${FIELDS_CONTRACT}`, "无视角席 = 纯 brief 内核 + 固定合同 + 声明字段格式段");
