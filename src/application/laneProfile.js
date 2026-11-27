@@ -2,10 +2,14 @@
 //
 // 车道画像（schemaVersion 2，决定 0087；costTier/score/ownerRules 见 0097）的
 // 加载、校验、待复核判定与 lead_preflight 紧凑投影。每格带星级与依据
-// （measured/official/owner）；打分身份与车道表不一致，或写了 reviewPending，
-// 即待复核。152 批：车道可声明 peak（服务商高峰时段的结构化事实，北京时间，
+// （measured/official/owner）；打分身份与车道表不一致即待复核（159 批：手写
+// reviewPending 撤——它没有触发条件、负责人与到期日，harness 是否健康由认证
+// 状态说话）。152 批：车道可声明 peak（服务商高峰时段的结构化事实，北京时间，
 // 固定 UTC+8）；"此刻"计算（validPeak/peakNowAt/beijingNowLabel）也在本模块
 // ——WAO 只算"世界现在是什么样"（此刻是否高峰、到几点），不算"该派谁"。
+// 159 批：Owner 规则改按总字数预算把关（合计 ≤1000 字；单条上限=总预算，
+// 与注意事项的单条上限脱钩）——规则每次都要原样带上（laneRules、会审回执、
+// lead_preflight），要守的是总量，不是每一条的长度。
 //
 // 定位与边界（0087 §5；0097 修订）：
 //   - 画像文件名字面量只出现在本模块（隔离守卫 test/registry-roles/laneTraits.test.js
@@ -58,7 +62,7 @@ export const DIMENSION_LABELS = Object.freeze({
 export const RATING_BASES = Object.freeze(["measured", "official", "owner"]);
 
 /** ratingsState 闭集：unrated=七格全未评；current=已评且身份一致无待复核；
- *  review=身份不一致或写了 reviewPending；unknown=车道侧事实不可得。 */
+ *  review=身份不一致；unknown=车道侧事实不可得。 */
 export const RATINGS_STATES = Object.freeze(["unrated", "current", "review", "unknown"]);
 
 /** 紧凑投影的行数上限（防异常膨胀；真实车道表远小于此）。 */
@@ -70,7 +74,7 @@ export const PROJECTION_ROWS_CAP = 16;
 export const CAVEATS_CAP = 6;
 /** 每条注意事项的字符数。 */
 export const CAVEAT_MAX_CHARS = 120;
-/** reviewPending 与投影里每条待复核原因的字符数。 */
+/** 投影里每条待复核原因（身份不一致的原因串）的字符数。 */
 export const REVIEW_REASON_MAX_CHARS = 160;
 /** 投影里待复核原因的条数。 */
 export const REVIEW_REASONS_CAP = 4;
@@ -90,8 +94,11 @@ export const COST_TIER_MAX = 5;
 export const COST_TIER_SCALE_MAX_CHARS = 160;
 /** ownerRules 的条数上限（有序，排在前面的优先）。 */
 export const OWNER_RULES_CAP = 8;
-/** 每条 Owner 规则的字符数（复用注意事项的单条上限）。 */
-export const OWNER_RULE_MAX_CHARS = CAVEAT_MAX_CHARS;
+/** Owner 规则的总字数预算（159 批）：所有规则合计至多 1000 字。规则上限与
+ *  注意事项的上限在此脱钩，不再共用 CAVEAT_MAX_CHARS。 */
+export const OWNER_RULES_TOTAL_MAX_CHARS = 1000;
+/** 单条 Owner 规则的字符数上限（=总预算：单条最长 1000；总量由总预算把关）。 */
+export const OWNER_RULE_MAX_CHARS = OWNER_RULES_TOTAL_MAX_CHARS;
 /** score.label 的字符数（只给同样本的实测格）。 */
 export const SCORE_LABEL_MAX_CHARS = 16;
 /** 投影携带的画像观察条数上限（costTier/ownerRules 降级一类）。 */
@@ -113,9 +120,10 @@ export const WEEKDAY_LABELS = Object.freeze([
  * 只定义这一次：laneRules 的 stderr 行与 `wao lanes` 的表头都引用它。 */
 export const HOLIDAYS_NOTE = "法定节假日不识别，按工作日算";
 
-/** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid。 */
+/** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid（159 批：
+ *  reviewPending 从闭集除名——手写待复核标记退役，再出现按未知键处理）。 */
 const LANE_ENTRY_KEYS = new Set([
-  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier", "quotaPool",
+  "ratings", "ratedAgainst", "cost", "costTier", "quotaPool",
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
   "peak",
 ]);
@@ -370,7 +378,6 @@ export function validateTraitEntry(id, entry) {
   } else if (entry.ratedAgainst !== null) {
     bad.push("ratedAgainst（全未评时必须显式为 null）");
   }
-  if (entry.reviewPending !== undefined && !isStr(entry.reviewPending, 1, REVIEW_REASON_MAX_CHARS)) bad.push("reviewPending");
   if (entry.cost !== null && entry.cost !== undefined && !isStr(entry.cost, 1, COST_MAX_CHARS)) bad.push("cost");
   if (entry.cost === undefined) bad.push("cost");
   // quotaPool（153 批）：可选；给了就必须是 1–40 字的字符串——不合法按现有
@@ -411,7 +418,6 @@ export function validateTraitEntry(id, entry) {
     entry: {
       ratings,
       ratedAgainst: ra,
-      ...(entry.reviewPending !== undefined ? { reviewPending: entry.reviewPending } : {}),
       cost: entry.cost,
       costTier,
       ...(entry.quotaPool !== undefined ? { quotaPool: entry.quotaPool } : {}),
@@ -487,7 +493,11 @@ export function readLaneTraits(explicitPath, readFileFn = null) {
     ? doc.costTierScale
     : null;
   if (costTierScale === null) observations.push("costTierScale 缺失或不合法，按未给（null）处理");
+  // ownerRules（0097 形状；159 批改按总字数预算把关）：条数 ≤OWNER_RULES_CAP；
+  // 每条非空、≤单条上限（=总预算）、无控制字符；所有规则合计 ≤总预算。坏值只
+  // 降级自身 + 一条观察，不连累 traits（与 costTier 同纪律）。
   const ownerRulesValid = Array.isArray(doc.ownerRules) && doc.ownerRules.length <= OWNER_RULES_CAP
+    && doc.ownerRules.reduce((sum, r) => sum + r.length, 0) <= OWNER_RULES_TOTAL_MAX_CHARS
     && doc.ownerRules.every((r) => isStr(r, 1, OWNER_RULE_MAX_CHARS) && !hasControlChars(r));
   const ownerRules = doc.ownerRules === undefined ? [] : (ownerRulesValid ? [...doc.ownerRules] : null);
   if (doc.ownerRules !== undefined && ownerRules === null) observations.push("ownerRules 不合法，置 null（各车道行照常投影）");
@@ -519,17 +529,16 @@ export function buildScaleLine(scale, unratedNote = "null 未评") {
  * @param {object|null} lane config/lanes.json 的车道条目（null/undefined=车道侧
  *   事实不可得——条目缺失或车道表不可读，由调用方在能区分时另行报告）
  * @returns {{state:("unrated"|"current"|"review"|"unknown"), reasons:string[]}}
- *   待复核取"或"：身份不一致或写了 reviewPending 都是 review——删掉
- *   reviewPending 不能消除身份不一致（0087 §2）。
+ *   待复核的唯一来源是身份不一致（159 批：手写 reviewPending 已撤——全未评的
+ *   车道恒 unrated，不参与身份比对）。
  */
 export function ratingsState(entry, lane) {
   if (!isPlainObject(entry) || !isPlainObject(entry.ratings)) {
     return { state: "unknown", reasons: ["画像条目形状不可用——无法判定评分状态"] };
   }
   const anyRated = RATING_DIMENSIONS.some((d) => entry.ratings[d]?.stars !== null && entry.ratings[d]?.stars !== undefined);
-  const pending = typeof entry.reviewPending === "string" && entry.reviewPending.length > 0;
-  // 全未评的车道不参与身份比对，但 reviewPending 照样标待复核。
-  if (!anyRated) return pending ? { state: "review", reasons: [entry.reviewPending] } : { state: "unrated", reasons: [] };
+  // 全未评的车道不参与身份比对（159 批起也没有手写待复核来源）→ 恒 unrated。
+  if (!anyRated) return { state: "unrated", reasons: [] };
   if (!isPlainObject(lane)) {
     return { state: "unknown", reasons: ["车道表条目缺失或不可读——无法比对打分身份"] };
   }
@@ -542,7 +551,6 @@ export function ratingsState(entry, lane) {
     const b = declared[axis];
     if (a !== b) reasons.push(`${axis}：打分时 ${a === null ? "null" : a}，现为 ${b === null ? "null" : b}`);
   }
-  if (pending) reasons.push(entry.reviewPending);
   return reasons.length > 0 ? { state: "review", reasons } : { state: "current", reasons: [] };
 }
 

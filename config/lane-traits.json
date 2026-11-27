@@ -258,7 +258,6 @@
         "providerID": null,
         "effort": "max"
       },
-      "reviewPending": "ZCode 4.0.0（11-22）：认证 conditional、续修冒烟通过；调研、把关少派，沿用旧格；写代码待新版满 10 条交付谱系，按一次落地率核对后解除或改格",
       "costTier": 0.5,
       "peak": { "days": "weekdays", "hours": ["14:00-18:00"], "effect": "非高峰消耗减半" },
       "cost": "GLM Coding Plan 订阅；限时活动：11-24 至 12-24 调用 GLM-5.3-Flash 全天按原抵扣系数的 50% 结算",

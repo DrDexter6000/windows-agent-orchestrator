@@ -111,7 +111,8 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
 
     // 画像轴三态（sol P1-4）：整文件 unreadable/invalid 传染所有车道；否则
     // absent（无键）/ invalid（该车道形状错误）/ present。present 时附评分
-    // 状态与待复核原因（0087：与车道表身份比对 + reviewPending，全文不截断）。
+    // 状态与待复核原因（0087 与车道表身份比对；159 批起待复核只有身份不一致
+    // 这一个来源，全文不截断）。
     let traitsState = "absent";
     let traits = null;
     let profileRating = null;
@@ -204,7 +205,7 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     // 删除（对照表标题已说行序）、panel 删除（会审对抗性是 wao stage 的事，其
     // 帮助自己说明）；"只陈列、不推荐"只在标题行说一次。
     sourceNotes: {
-      profile: "画像=分项星级与依据（measured 是 Lead 实测，owner 是 Owner 输入；实测覆盖到的维度以实测为准，Owner 写明只用手动评分的车道除外）；与车道表身份不一致或写了 reviewPending 即待复核",
+      profile: "画像=分项星级与依据（measured 是 Lead 实测，owner 是 Owner 输入；实测覆盖到的维度以实测为准，Owner 写明只用手动评分的车道除外）；与车道表身份不一致即待复核（159 批：手写待复核标记已撤）",
       certification: "认证=reliability 台账简表口径（不比较 effort，非当前执行画像适用性结论）；无匹配记录的原因未区分：无记录/身份不匹配/台账缺失或不可读",
       readyState: "就绪=环境探测（口径同 wao onboarding；未接线/条目无效=跳过探测）",
       dispatchHold: "暂停说明=车道表 dispatchHold（Owner 原话；只告知不拦截，派发决定权在 Lead）",

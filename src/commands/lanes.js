@@ -204,8 +204,9 @@ function renderLane(row, width, dimensionLabels, evidence) {
       }
     }
     // 153 修正一（会审 FIX_FIRST）：只要有没评的维度就写一行"未评: …"——唯一
-    // 例外是评分状态本身就是"未评"（那一行已写明七格全未评）。七格全没评且写了
-    // reviewPending 时，待复核与全未评两条事实都要在场，不能只剩待复核。
+    // 例外是评分状态本身就是"未评"（那一行已写明七格全未评）。159 批起待复核
+    // 只有身份不一致这一个来源（部分已评 + 待复核时），待复核与未评两条事实
+    // 都要在场，不能只剩待复核。
     if (unratedDims.length > 0 && row.ratingsState !== "unrated") {
       emit("未评", unratedDims.map((d) => dimensionLabels[d]).join("、"));
     }

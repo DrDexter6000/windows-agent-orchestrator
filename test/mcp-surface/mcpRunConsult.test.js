@@ -70,6 +70,8 @@ import { deriveOwnerTitle } from "../../src/application/ownerReadModel.js";
 import { createSecretRedactor } from "../../src/secretRedaction.js";
 import { buildConsultLabel } from "../../src/application/dispatchLabel.js";
 import { RULES_UNAVAILABLE_REASON, RULES_RECEIPT_CAPACITY_REASON } from "../../src/application/laneRules.js";
+// 159 批：预算夹具的数字取自 laneProfile SSOT（经 laneRules 转出同一常量）。
+import { OWNER_RULES_TOTAL_MAX_CHARS, OWNER_RULE_MAX_CHARS } from "../../src/application/laneRules.js";
 
 // ---- harness ----
 
@@ -1004,6 +1006,9 @@ const LANE_RULES_156_CURRENT = laneRulesFixture156(6, 70, 4);
 const LANE_RULES_156_CONFIG_MAX = laneRulesFixture156(8, 120, 16);
 /** 现有真实规模（6 条 × 70–110 字、2 行高峰）。 */
 const LANE_RULES_156_REAL = laneRulesFixture156(6, 110, 2);
+/** 159 批：规则写到总字数预算上限（8 条 × 125 字，合计恰好 1000 字压线；单条
+ *  ≤ 新单条上限——单条不再钉 120）。 */
+const LANE_RULES_159_TOTAL_BUDGET = laneRulesFixture156(8, 125, 4);
 const seatId156 = (i) => (i === 0 ? "s".repeat(32) : "s".repeat(31) + String(i));
 const heading120 = (i) => `问题标题第${i}号`.repeat(18).slice(0, 120);
 const heading70 = (i) => `问题标题第${i}号`.repeat(10);
@@ -1103,6 +1108,27 @@ test("MRC-F1b: 配置上限全量（8 条×120 字 + 16 行高峰）也走同一
   assert.deepEqual(receipt.laneRules,
     { rules: null, rulesReason: RULES_RECEIPT_CAPACITY_REASON, now: null },
     "同一具名容量降级");
+  assert.equal(typeof receipt.nextStep, "string", "未终态席位仍带 nextStep");
+});
+
+// 159 批：Owner 规则改按总字数预算把关（单条上限=总预算 1000）。规则写到预算
+// 压线（8 条 × 125 字，合计 1000）时回执帽的裁决不变：放得下才带原文，放不下
+// 换同一具名容量降级——帽不抬、规则原文不截断（第 156 批修正一的裁决原样）。
+test("MRC-F1c: 规则合计压总字数预算（8 条×125 字=1000，159 批预算上限）→ 回执 ≤8KiB；放不下 → 同一具名容量降级", () => {
+  // 夹具自证（没有自欺）：合计恰好 = 总预算，每条都在单条上限内。
+  const total = LANE_RULES_159_TOTAL_BUDGET.rules.reduce((s, r) => s + r.length, 0);
+  assert.equal(total, OWNER_RULES_TOTAL_MAX_CHARS, `夹具规则合计 ${total} = 总预算`);
+  assert.ok(LANE_RULES_159_TOTAL_BUDGET.rules.every((r) => r.length <= OWNER_RULE_MAX_CHARS),
+    "每条 ≤ 单条上限（=总预算）");
+  const { result, measure } = boundaryFixture156({ laneRules: LANE_RULES_159_TOTAL_BUDGET, withNextStep: true });
+  const receipt = projectConsultReceipt(result, { pageMeasure: measure });
+  const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
+  assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES, `预算压线回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）`);
+  const fullBytes = Buffer.byteLength(JSON.stringify({ ...receipt, laneRules: LANE_RULES_159_TOTAL_BUDGET }), "utf8");
+  assert.ok(fullBytes > CONSULT_RECEIPT_CAP_BYTES, `前提：预算压线规则放不下（实测 ${fullBytes}B）`);
+  assert.deepEqual(receipt.laneRules,
+    { rules: null, rulesReason: RULES_RECEIPT_CAPACITY_REASON, now: null },
+    "放不下时走同一具名容量降级（规则原文指向 lead_preflight 的 lanes.ownerRules）");
   assert.equal(typeof receipt.nextStep, "string", "未终态席位仍带 nextStep");
 });
 

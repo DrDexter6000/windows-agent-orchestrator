@@ -142,9 +142,10 @@ const baseEntry = (over = {}) => ({
 });
 
 /** 夹具车道表：声明序 t1(实测三格带 score，声明了 peak)、t2(全未评)、
- *  t3(带 dispatchHold)、t4(无画像)、t5(写了 reviewPending)。t1 与 registry
- *  四轴一致（current）；t2 全未评（unrated→未评，不是待复核）；t5 待复核
- *  （review）。quotaPools（153 批）：lane id → quotaPool，给了才带该键。 */
+ *  t3(带 dispatchHold)、t4(无画像)、t5(打分身份不一致——159 批起待复核的唯一
+ *  来源)。t1 与 registry 四轴一致（current）；t2 全未评（unrated→未评，不是
+ *  待复核）；t5 待复核（review）。quotaPools（153 批）：lane id → quotaPool，
+ *  给了才带该键。 */
 function makeTableEnv(quotaPools = {}) {
   const pool = (id) => (quotaPools[id] !== undefined ? { quotaPool: quotaPools[id] } : {});
   const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-tbl-"));
@@ -198,7 +199,17 @@ function makeTableEnv(quotaPools = {}) {
         },
         ratedAgainst: { backend: "codex", modelId: "m3", providerID: null, effort: "high" },
       }),
-      t5: baseEntry({ ...pool("t5"), reviewPending: "夹具：换代待复核" }),
+      // 159 批：t5 的待复核来自身份不一致（打分时 m5-old，车道表现为 m5）——
+      // 手写 reviewPending 已撤，夹具改用唯一合法来源。
+      t5: baseEntry({
+        ...pool("t5"),
+        ratings: {
+          code: { stars: 3, basis: "owner", note: "换代前旧档" },
+          research: unrated(), review: unrated(), design: unrated(),
+          longHorizon: unrated(), writing: unrated(), visual: unrated(),
+        },
+        ratedAgainst: { backend: "codex", modelId: "m5-old", providerID: null, effort: "high" },
+      }),
     },
     invalidIds: [], issues: [],
   };
@@ -268,7 +279,7 @@ test("0097 wao lanes：对照表在最前、声明序、四种格写法、暂停
       1, "只有声明了 peak 的车道带此刻状态格，其余都是 —",
     );
     // 状态列：t3 暂停（dispatchHold）、t2 未评（unrated 不写成待复核）、t4 无画像、
-    // t5 待复核（reviewPending）、t1 空。
+    // t5 待复核（打分身份不一致）、t1 空。
     assert.match(t3Row, /暂停/, "dispatchHold → 暂停");
     assert.match(lines[rowIdx("t2")], /未评$/, "ratingsState unrated → 未评");
     assert.ok(!lines[rowIdx("t2")].includes("待复核"), "没评过不写成待复核");
@@ -604,7 +615,7 @@ test("153 wao lanes：默认输出不印出处（evidence/source/sha256），常
   } finally { cleanupDir(dir); }
 });
 
-test("153 wao lanes：没评的维度合成一行；七格全没评只留评分状态行；全没评+待复核两条事实都在（修正一）", async () => {
+test("153 wao lanes：没评的维度合成一行；七格全没评只留评分状态行；部分已评+待复核两条事实都在（修正一）", async () => {
   const { dir, traitsResult } = makeTableEnv();
   try {
     const lines = await runLanesCapture(dir, traitsResult);
@@ -621,12 +632,14 @@ test("153 wao lanes：没评的维度合成一行；七格全没评只留评分�
     // 例外照旧：t1 评分当前不占行。
     const t1Block = text.split("lane t1")[1].split("lane t2")[0];
     assert.ok(!t1Block.includes("评分状态"), "评分状态「当前」不占行");
-    // 修正一（会审 FIX_FIRST）：t5 七格全没评 + reviewPending——待复核原因与
-    // 「未评: 七项」两条事实都要显示，不能只剩待复核。
+    // 修正一（会审 FIX_FIRST）：t5 一格已评 + 身份不一致待复核（159 批起这是
+    // 待复核的唯一来源）——待复核原因与「未评: 六项」两条事实都要显示，不能
+    // 只剩待复核。
     const t5Block = text.split("lane t5")[1];
     assert.ok(t5Block.includes("评分状态: 待复核——"), "待复核照旧写");
-    assert.ok(t5Block.includes("未评: 调研整理、写代码、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
-      "全没评+待复核时未评一行也在场（七项按原顺序）");
+    assert.ok(t5Block.includes("modelId：打分时 m5-old，现为 m5"), "待复核原因=身份不一致串");
+    assert.ok(t5Block.includes("未评: 调研整理、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
+      "部分已评+待复核时未评一行也在场（六项按原顺序）");
   } finally { cleanupDir(dir); }
 });
 
@@ -642,10 +655,10 @@ test("153 wao lanes --evidence：evidence 行、[source:]、sha256 行在场；�
     for (const stillBanned of ["接线: 一致", "注意事项: 无", "评分状态: 当前"]) {
       assert.ok(!text.includes(stillBanned), `--evidence 也不复活常态行（${stillBanned}）`);
     }
-    // 修正一：--evidence 档同样要双事实并存（t5 全没评 + 待复核）。
+    // 修正一：--evidence 档同样要双事实并存（t5 一格已评 + 身份不一致待复核）。
     const t5Evidence = text.split("lane t5")[1];
     assert.ok(t5Evidence.includes("评分状态: 待复核——"), "待复核在场");
-    assert.ok(t5Evidence.includes("未评: 调研整理、写代码、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
+    assert.ok(t5Evidence.includes("未评: 调研整理、抓 bug/把关、方案设计、长程自主、文案、视觉设计"),
       "未评一行在 --evidence 档同样在场");
   } finally { cleanupDir(dir); }
 });

@@ -6,7 +6,7 @@
 //     ratings 少/多键、车道级未知键、星级 0/6、ratedAgainst 与评分状态矛盾、
 //     各长度界、顶层 schemaVersion/scale）；
 //   - ratingsState：四种状态、四轴各自不一致、undefined/null 空值归一不算
-//     不同、reviewPending 并入 reasons、身份不一致而无 reviewPending 仍 review；
+//     不同、159 批起待复核只来自身份不一致（手写 reviewPending 已撤）；
 //   - 投影：行序=lanes.json 声明序、caveats 全部投影、null 原样、未评格不投影、
 //     每格只投影 {stars,basis,n,note} 且超长 note 截断、每行带暂停说明/上下文
 //     窗口/能否看图、invalid 车道省略并回传 id、读失败返回 null；
@@ -190,7 +190,7 @@ test("validateTraitEntry：ratedAgainst 与评分状态矛盾即 invalid", () =>
   assert.equal(validateTraitEntry("x", entryWithRating({}, { backend: "" })).ok, false, "backend 空串");
 });
 
-test("validateTraitEntry：长度界——note/evidence/cost/caveats/reviewPending；positioning 不是车道级键", () => {
+test("validateTraitEntry：长度界——note/evidence/cost/caveats；positioning 不是车道级键", () => {
   assert.equal(validateTraitEntry("x", validEntry({ positioning: "测试定位" })).ok, false,
     "一句定位已并入分项格、cost 与 caveats——出现即未知键");
   assert.equal(validateTraitEntry("x", entryWithRating({ note: "字".repeat(100) })).ok, true);
@@ -200,15 +200,21 @@ test("validateTraitEntry：长度界——note/evidence/cost/caveats/reviewPendi
   assert.equal(validateTraitEntry("x", validEntry({ cost: null })).ok, true, "cost null 合法");
   assert.equal(validateTraitEntry("x", validEntry({ cost: "字".repeat(COST_MAX_CHARS) })).ok, true);
   assert.equal(validateTraitEntry("x", validEntry({ cost: "字".repeat(COST_MAX_CHARS + 1) })).ok, false);
-  assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "待复核" })).ok, true);
-  assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "字".repeat(REVIEW_REASON_MAX_CHARS) })).ok, true);
-  assert.equal(validateTraitEntry("x", validEntry({ reviewPending: "字".repeat(REVIEW_REASON_MAX_CHARS + 1) })).ok, false);
   const caveatsOf = (n) => Array.from({ length: n }, (_, i) => `c${i}`);
   assert.equal(validateTraitEntry("x", validEntry({ caveats: caveatsOf(CAVEATS_CAP) })).ok, true);
   assert.equal(validateTraitEntry("x", validEntry({ caveats: caveatsOf(CAVEATS_CAP + 1) })).ok, false, "caveats 至多 CAVEATS_CAP 条");
   assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(CAVEAT_MAX_CHARS)] })).ok, true);
   assert.equal(validateTraitEntry("x", validEntry({ caveats: ["字".repeat(CAVEAT_MAX_CHARS + 1)] })).ok, false, "单条注意事项超长");
   assert.equal(validateTraitEntry("x", validEntry({ caveats: [] })).ok, true);
+});
+
+// 159 批：手写 reviewPending 撤——待复核只来自 ratedAgainst 与车道表的身份
+// 不一致。画像里再出现该键按现有"未知键 → 该车道 invalid"处理，不另做兼容。
+test("159 validateTraitEntry：reviewPending 键已退役——出现即未知键，该车道 invalid", () => {
+  const v = validateTraitEntry("x", validEntry({ reviewPending: "harness 升级，待重测" }));
+  assert.equal(v.ok, false, "reviewPending 键出现即 invalid（不另做兼容）");
+  assert.ok(v.fields.some((f) => f.includes("未知键 reviewPending")),
+    `fields 点名未知键（实际 ${JSON.stringify(v.fields)}）`);
 });
 
 // 153 批：quotaPool（额度池名）——可选；给了就必须是 1–40 字字符串，否则按
@@ -287,7 +293,7 @@ test("ratingsState：四种状态", () => {
   assert.deepEqual(ratingsState(validated(validEntry()), LANE_A), { state: "unrated", reasons: [] });
   // current：已评且身份一致。
   assert.deepEqual(ratingsState(validated(entryWithRating()), LANE_A), { state: "current", reasons: [] });
-  // review：身份不一致（见下）或 reviewPending（见下）。
+  // review：身份不一致（见下）。159 批起没有手写来源。
   // unknown：车道条目缺失（车道表不可读同形——调用方传不进条目）。
   const u = ratingsState(validated(entryWithRating()), null);
   assert.equal(u.state, "unknown");
@@ -321,26 +327,19 @@ test("ratingsState：一侧缺省（undefined）、另一侧 null 不算不同�
   assert.deepEqual(rs, { state: "current", reasons: [] }, "两侧都归一成 null=一致");
 });
 
-test("ratingsState：reviewPending 原文并入 reasons；身份不一致而无 reviewPending 仍是 review", () => {
+// 159 批：待复核的唯一来源是 ratedAgainst 与车道表的身份不一致——手写
+// reviewPending 已撤（harness 是否健康由认证状态说话，不再挂无触发条件、
+// 无负责人、不到期的自由文本标记）。
+test("159 ratingsState：只有身份不一致才是待复核；全未评恒 unrated（无手写来源）", () => {
   const rs = ratingsState(validated(entryWithRating()), LANE_A);
-  assert.equal(rs.state, "current", "无 reviewPending 且身份一致=current");
-
-  const pending = validEntry({ reviewPending: "harness 升级，实测格待重测" });
-  const rs2 = ratingsState(validated(pending), LANE_A);
-  assert.equal(rs2.state, "review", "全未评只免身份比对，reviewPending 照样待复核");
-  assert.deepEqual(rs2.reasons, ["harness 升级，实测格待重测"]);
-  assert.equal(ratingsState(validated(validEntry()), LANE_A).state, "unrated", "全未评且无 reviewPending=unrated");
-
-  const pendingRated = entryWithRating();
-  pendingRated.reviewPending = "服务端换模型，实测格都是旧数据";
-  const rs3 = ratingsState(validated(pendingRated), LANE_A);
-  assert.equal(rs3.state, "review");
-  assert.deepEqual(rs3.reasons, ["服务端换模型，实测格都是旧数据"], "reviewPending 原文进 reasons");
+  assert.equal(rs.state, "current", "身份一致=current");
+  assert.equal(ratingsState(validated(validEntry()), LANE_A).state, "unrated",
+    "全未评=unrated（待复核不再有手写来源）");
 
   const driftNoPending = entryWithRating({}, { modelId: "m-changed" });
   const rs4 = ratingsState(validated(driftNoPending), LANE_A);
-  assert.equal(rs4.state, "review", "身份不一致没有 reviewPending 仍 review");
-  assert.equal(rs4.reasons.length, 1);
+  assert.equal(rs4.state, "review", "身份不一致=review");
+  assert.deepEqual(rs4.reasons, ["modelId：打分时 m-changed，现为 m1"], "原因=身份不一致串");
 });
 
 // ── 投影 ─────────────────────────────────────────────────────────────────────
@@ -672,11 +671,14 @@ test("MCP 面：只有 lead_preflight 的出参 schema 含画像投影键", asyn
   } finally { cleanupDir(dir); }
 });
 
-test("画像字段上限只在 laneProfile.js 定义一次；改值要有意改这里（0088 修订条）", () => {
+test("画像字段上限只在 laneProfile.js 定义一次；改值要有意改这里（0088 修订条；159 批含规则总预算）", () => {
   assert.deepEqual(
-    { CAVEATS_CAP, CAVEAT_MAX_CHARS, REVIEW_REASON_MAX_CHARS, REVIEW_REASONS_CAP, COST_MAX_CHARS, QUOTA_POOL_MAX_CHARS, PROJECTED_NOTE_MAX_CHARS, SCALE_MAX_CHARS, PROJECTION_ROWS_CAP },
-    { CAVEATS_CAP: 6, CAVEAT_MAX_CHARS: 120, REVIEW_REASON_MAX_CHARS: 160, REVIEW_REASONS_CAP: 4, COST_MAX_CHARS: 200, QUOTA_POOL_MAX_CHARS: 40, PROJECTED_NOTE_MAX_CHARS: 80, SCALE_MAX_CHARS: 240, PROJECTION_ROWS_CAP: 16 },
+    { CAVEATS_CAP, CAVEAT_MAX_CHARS, REVIEW_REASON_MAX_CHARS, REVIEW_REASONS_CAP, COST_MAX_CHARS, QUOTA_POOL_MAX_CHARS, PROJECTED_NOTE_MAX_CHARS, SCALE_MAX_CHARS, PROJECTION_ROWS_CAP, OWNER_RULES_TOTAL_MAX_CHARS },
+    { CAVEATS_CAP: 6, CAVEAT_MAX_CHARS: 120, REVIEW_REASON_MAX_CHARS: 160, REVIEW_REASONS_CAP: 4, COST_MAX_CHARS: 200, QUOTA_POOL_MAX_CHARS: 40, PROJECTED_NOTE_MAX_CHARS: 80, SCALE_MAX_CHARS: 240, PROJECTION_ROWS_CAP: 16, OWNER_RULES_TOTAL_MAX_CHARS: 1000 },
   );
+  // 159 批：单条上限=总预算（规则上限与注意事项的上限脱钩，不再共用 CAVEAT_MAX_CHARS）。
+  assert.equal(OWNER_RULE_MAX_CHARS, OWNER_RULES_TOTAL_MAX_CHARS);
+  assert.notEqual(OWNER_RULE_MAX_CHARS, CAVEAT_MAX_CHARS);
 });
 
 // ── 0097：costTier / score / ownerRules / costTierScale ─────────────────────
@@ -686,6 +688,7 @@ import {
   COST_TIER_SCALE_MAX_CHARS,
   OWNER_RULES_CAP,
   OWNER_RULE_MAX_CHARS,
+  OWNER_RULES_TOTAL_MAX_CHARS,
   SCORE_LABEL_MAX_CHARS,
   SCORED_DIMENSIONS,
   PROJECTION_NOTICES_CAP,
@@ -767,7 +770,7 @@ test("0097 score 校验：measured 带合法 score 通过；形状坏/非 measur
   assert.equal(validateTraitEntry("x", writingPlain).ok, true, "同一格不带 score 照常合法");
 });
 
-test("0097 ownerRules/costTierScale 顶层校验：缺省/合法/坏值", () => {
+test("0097 ownerRules/costTierScale 顶层校验：缺省/合法/坏值；159 批起按总字数预算把关", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-lp-0097-top-"));
   try {
     const p = join(dir, "t.json");
@@ -789,13 +792,31 @@ test("0097 ownerRules/costTierScale 顶层校验：缺省/合法/坏值", () => 
     assert.deepEqual(r.ownerRules, ["规则一", "规则二"]);
     assert.equal(r.costTierScale, "成本档：Owner 给的相对档位，0.5–5，数越小越便宜");
     assert.deepEqual(r.observations, [], "合法时零观察");
-    // 坏 ownerRules（条数超上限/空串/超长/控制字符/非数组）→ null + 一条观察，traits 照常。
+    // 159 批：预算语义——单条不再钉 120：单条 121 字合法；合计恰好压线（1000）
+    // 也合法。夹具规则自造，不钉仓库规则原文。
+    write({ costTierScale: "成本档：Owner 给的相对档位，0.5–5，数越小越便宜", ownerRules: ["字".repeat(121)] });
+    r = readLaneTraits(p);
+    assert.equal(r.state, "ok");
+    assert.deepEqual(r.ownerRules, ["字".repeat(121)], "单条超 120、合计不超总预算 → 合法");
+    assert.deepEqual(r.observations, []);
+    write({
+      costTierScale: "成本档：Owner 给的相对档位，0.5–5，数越小越便宜",
+      ownerRules: ["字".repeat(OWNER_RULES_TOTAL_MAX_CHARS - 1), "一"],
+    });
+    r = readLaneTraits(p);
+    assert.deepEqual(r.ownerRules, ["字".repeat(OWNER_RULES_TOTAL_MAX_CHARS - 1), "一"],
+      "合计恰好 = 总预算 → 合法");
+    assert.deepEqual(r.observations, []);
+    // 坏 ownerRules（条数超上限/空串/超长/控制字符/非数组/合计超总预算）→ null
+    // + 一条观察，traits 照常。
     const badRules = [
       42,
       Array.from({ length: OWNER_RULES_CAP + 1 }, (_, i) => `r${i}`),
       [""],
       ["x".repeat(OWNER_RULE_MAX_CHARS + 1)],
       ["a\u0007b"],
+      // 159 批：每条都在单条上限内、无控制字符，但合计超过总预算 → 降级置 null。
+      Array.from({ length: 2 }, () => "x".repeat(OWNER_RULES_TOTAL_MAX_CHARS / 2 + 1)),
     ];
     // 带上合法的 costTierScale，观察里就只剩 ownerRules 这一条。
     const okScale = "成本档：Owner 给的相对档位，0.5–5，数越小越便宜";

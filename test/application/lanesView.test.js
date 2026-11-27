@@ -170,14 +170,9 @@ test("buildLanesView：画像三态 + v2 行形状（ratingsState/reviewReasons/
   const driftTraitsView = buildLanesView(driftTraitInput);
   assert.equal(driftTraitsView.lanes[1].ratingsState, "review", "ratedAgainst 与声明不一致=待复核");
   assert.deepEqual(driftTraitsView.lanes[1].reviewReasons, ["modelId：打分时 m2，现为 m2x"]);
-  // reviewPending 原文并入。
-  const pendingInput = baseInputs();
-  pendingInput.traitsResult = {
-    state: "ok", path: "t.json", sha256: "b".repeat(64), scale,
-    traits: { l1: { ...validTrait, reviewPending: "换代待重测" } }, invalidIds: [], issues: [],
-  };
-  // 全未评 + reviewPending：只免身份比对，照样待复核。
-  assert.equal(buildLanesView(pendingInput).lanes[0].ratingsState, "review");
+  // 159 批：待复核只有身份不一致这一个来源——手写 reviewPending 已撤，此处
+  // 不再有"全未评 + 手写标记照样待复核"的形状（键本身已按未知键 invalid，
+  // 见 laneProfile.test.js 的 159 用例）。
 
   assert.equal(view.lanes[2].traitsState, "invalid", "形状错误=invalid");
   assert.ok(view.issues.includes("车道 l3 画像形状错误（cost）"),

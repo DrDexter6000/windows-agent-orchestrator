@@ -26,6 +26,7 @@ import {
   projectLaneProfiles,
   OWNER_RULES_CAP,
   OWNER_RULE_MAX_CHARS,
+  OWNER_RULES_TOTAL_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   QUOTA_POOL_MAX_CHARS,
   HOLIDAYS_NOTE,
@@ -34,7 +35,7 @@ import { loadLanesConfig } from "../dispatchResolution.js";
 import { escapeControlChars } from "../safeText.js";
 
 // MCP 出参 schema 派生用的上限（laneProfile SSOT 经本模块转出，不复制第二份数值）。
-export { OWNER_RULES_CAP, OWNER_RULE_MAX_CHARS, PROJECTION_ROWS_CAP, QUOTA_POOL_MAX_CHARS };
+export { OWNER_RULES_CAP, OWNER_RULE_MAX_CHARS, OWNER_RULES_TOTAL_MAX_CHARS, PROJECTION_ROWS_CAP, QUOTA_POOL_MAX_CHARS };
 // 法定节假日口径的文字形式只有一个家（laneProfile，与投影 holidaysRecognized 同处）：
 // 这里 re-export 给渲染侧与测试引用（不是第二份定义）；wao lanes 经 lanesView 取同一常量。
 export { HOLIDAYS_NOTE };

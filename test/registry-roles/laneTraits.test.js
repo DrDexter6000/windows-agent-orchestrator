@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { CAVEATS_CAP, CAVEAT_MAX_CHARS, COST_MAX_CHARS, QUOTA_POOL_MAX_CHARS, REVIEW_REASON_MAX_CHARS } from "../../src/application/laneProfile.js";
+import { CAVEATS_CAP, CAVEAT_MAX_CHARS, COST_MAX_CHARS, QUOTA_POOL_MAX_CHARS, OWNER_RULES_CAP, OWNER_RULE_MAX_CHARS, OWNER_RULES_TOTAL_MAX_CHARS } from "../../src/application/laneProfile.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const read = (rel) => readFileSync(join(ROOT, rel), "utf8");
@@ -32,10 +32,11 @@ const DIMENSIONS = ["research", "code", "review", "design", "longHorizon", "writ
 const BASES = ["measured", "official", "owner"];
 const SOURCE_TOKENS = ["official", "owner", "wire"];
 const LANE_KEYS = new Set([
-  "ratings", "ratedAgainst", "reviewPending", "cost", "costTier",
+  "ratings", "ratedAgainst", "cost", "costTier",
   "quotaPool", // 153 批：额度池名（可选；同名车道共用一份额度）
   "caveats", "contextWindow", "multimodal", "concurrencyNote", "effortNote",
   "peak", // 152 批：服务商高峰时段（可选；北京时间、工作日、法定节假日不识别）
+  // 159 批：reviewPending 撤（手写待复核标记退役）——键从闭集除名，再出现即未知键。
 ]);
 const CELL_KEYS = new Set(["stars", "basis", "n", "note", "evidence", "score"]);
 
@@ -52,10 +53,16 @@ test("0087 ①：lane-traits 结构——schemaVersion 2、键⊆车道键、七
   assert.ok(ids.length >= 8, `应覆盖 ≥8 车道（实际 ${ids.length}）`);
   // 0097：顶层 costTierScale（说明串）与 ownerRules（有序，排在前面的优先）。
   assert.ok(typeof doc.costTierScale === "string" && doc.costTierScale.length > 0, "costTierScale 非空字符串");
-  assert.ok(Array.isArray(doc.ownerRules) && doc.ownerRules.length >= 1 && doc.ownerRules.length <= 8,
-    "ownerRules 1–8 条有序数组");
+  // 159 批：ownerRules 按总字数预算把关——条数 ≤OWNER_RULES_CAP；单条 ≤单条上限
+  // （=总预算）；所有规则合计 ≤总预算。上限从 laneProfile SSOT 取，不写第二份数字。
+  assert.ok(Array.isArray(doc.ownerRules) && doc.ownerRules.length >= 1 && doc.ownerRules.length <= OWNER_RULES_CAP,
+    `ownerRules 1–${OWNER_RULES_CAP} 条有序数组`);
+  const rulesTotal = (doc.ownerRules ?? []).reduce((sum, r) => sum + r.length, 0);
+  assert.ok(rulesTotal <= OWNER_RULES_TOTAL_MAX_CHARS,
+    `ownerRules 合计 ${rulesTotal} 字 ≤ 总预算 ${OWNER_RULES_TOTAL_MAX_CHARS}`);
   for (const rule of doc.ownerRules ?? []) {
-    assert.ok(typeof rule === "string" && rule.length > 0 && rule.length <= 120, "每条 Owner 规则 1–120 字");
+    assert.ok(typeof rule === "string" && rule.length > 0 && rule.length <= OWNER_RULE_MAX_CHARS,
+      `每条 Owner 规则 1–${OWNER_RULE_MAX_CHARS} 字`);
   }
   for (const id of ids) {
     assert.ok(laneIds.has(id), `traits 键 ${id} 不是 lanes.json 车道键`);
@@ -128,7 +135,6 @@ test("0087 ①：lane-traits 结构——schemaVersion 2、键⊆车道键、七
     } else {
       assert.equal(t.ratedAgainst, null, `${id} 全未评时 ratedAgainst 必须显式为 null`);
     }
-    assert.ok(t.reviewPending === undefined || isStr(t.reviewPending, 1, REVIEW_REASON_MAX_CHARS), `${id}.reviewPending 1–${REVIEW_REASON_MAX_CHARS}`);
     assert.ok(t.cost === null || t.cost === undefined || isStr(t.cost, 1, COST_MAX_CHARS), `${id}.cost 1–${COST_MAX_CHARS} 或 null`);
     // 153 批：quotaPool 可选，给了必须 1–40 字符串（上限 SSOT 同一常量）。
     assert.ok(t.quotaPool === undefined || isStr(t.quotaPool, 1, QUOTA_POOL_MAX_CHARS), `${id}.quotaPool 1–${QUOTA_POOL_MAX_CHARS} 或缺席`);
