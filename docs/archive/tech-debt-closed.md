@@ -190,3 +190,4 @@
 | TD-374 | `worktree reclaim --apply` 删脏树时只留路径清单，受控改动与未忽略新文件的内容不留 | 第 150 批：删前把受控改动存成暂存、未暂存两层补丁，未忽略新文件存副本（记录的 `dirty/`，上限 256 MiB，失败或超限保留）；树里有 junction 时整棵保留，删树原语改为不跟进链接 |
 | TD-375 | "头指针漂移"在 `runs lineage-close` 与 `worktree reclaim` 两处口径不一 | 第 150 批：共用一个判定（`isTreeHeadDrifted`）：树在 `wao/<runId>` 上且 HEAD 等于分支 tip 才放 |
 | TD-361 | 只发 `file_written`、不发 `write_intent` 的车道（glm/zcode、kimi、codex）写了又删仍判越界 | 第 151 批：三条车道在写入完成前发带 `toolCallId` 的意图（zcode pending/running、kimi 在途轮询、codex `item.started`），`file_written` 报完成帧自己的路径并带同一 id；空路径、无稳定 id、撞 id 不发或不放宽。已知局限：kimi 撞 id 的少数组合只多一条错误结果或仍按同路径放宽 |
+| TD-355 | Owner 看板不是给人看的（11-19 Owner 试用）：行话、无主次、看不到任务与交付、每个项目各起一个、App 重启即停 | 第 140–145b 批：每个运行目录一个跨项目的 `/v2` 看板（Overview / Workers / Attention，中英文，任务书标题、交付、裁决、失败原因、命令内容、实时 Activity），常驻实例与 `status`/`stop`/`restart`；旧界面退役（决定 0131、0132） |

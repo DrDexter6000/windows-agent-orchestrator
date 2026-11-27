@@ -92,27 +92,30 @@ npm run cli -- daemon stop
 
 ## Owner 本地只读看板
 
-人类 Owner 可在 WAO 仓库入口启动本地网页，而不把完整 worker 活动灌入 Lead context。主用命令需一次性 `npm link`（步骤见 `AGENT_ONBOARDING.md` §4a；`npm link` 后全局 `wao` 的安装根解析见[安装与配置](install.md)的「安装本工具」）：
+人类 Owner 可在任意目录打开本地只读网页，而不把完整 worker 活动灌入 Lead context。主用命令需一次性 `npm link`（步骤见 `AGENT_ONBOARDING.md` §4a；`npm link` 后全局 `wao` 的安装根解析见[安装与配置](install.md)的「安装本工具」）：
 
 ```powershell
-# 在目标 Git 项目内（或任意目录加 --cwd 指向 Git 项目）
-wao dashboard
-wao dashboard --cwd "D:\path with spaces\project"   # 从任意目录启动
-wao dashboard --no-open                             # 启动但不自动打开浏览器
+wao dashboard                                       # 复用本运行目录的常驻实例，没有就拉起，然后打开浏览器
+wao dashboard --cwd "D:\path with spaces\project"   # 打开时预选这个项目
+wao dashboard --no-open                             # 只打印一次性链接
+wao dashboard status                                # 查看实例；stop 停止，restart 重启
 wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 run 目录
 ```
 
 行为契约：
 
-- 目标目录默认是当前目录（`process.cwd()`）；`--cwd` 显式指定。目标必须在某个 Git 仓库内，否则在监听之前失败，并给出可操作提示。看板本身覆盖运行目录里的全部项目（决定 0131）。
+- 每个运行目录一个常驻实例（决定 0131 第 2 条）。`wao dashboard` 先核对已在跑的实例：协议、pid 与创建时间、端口归属、`/health` 的 nonce、运行目录，全对就复用；没有或确定已失效才经 WMI 拉起。命令随即退出，实例留在后台；不开机自启，不闲置退出。看板覆盖运行目录里的全部项目，`--cwd` 指到其中某个已知项目时链接带上项目筛选，不要求 Git 仓库。
 - 经全局 `wao` 调用时，看板读取的 run 目录从受信安装根解析（见[安装与配置](install.md)「安装本工具」一节的受信安装根段），不会静默落到当前目录的 `runs/`；显式 `--run-dir` 照原样使用。
-- 默认在 Windows 默认浏览器打开一次 `http://127.0.0.1:<port>/v2/#token=<64hex>`（URL 只作为结构化 argv 交给系统默认处理器，不经 shell）；`--no-open` 不打开。打开失败只提示，URL 已打印。按 `Ctrl-C` 停止；省略 `--port` 时用临时端口。
-- 已接受的瞬时本机暴露：这个 URL 会打印给 Owner，也会短暂出现在 `rundll32` 子进程的命令行里。服务器只监听 `127.0.0.1`，令牌随进程退出失效，接口只接受带它的只读 GET。
-- `/` 与 `/index.html` 302 到 `/v2/`，旧书签 `/#token=…` 的片段由浏览器带过去。`runs dashboard --web` 已退役（第 145a 批）：带 `--web` 时报固定文案并指向 `wao dashboard`；不带 `--web` 的文本仪表盘不变。
+- 打开的链接是 `http://127.0.0.1:<port>/v2/#code=<一次性码>`（URL 只作为结构化 argv 交给系统默认处理器，不经 shell）。码 60 秒内有效、只能用一次；页面先清掉片段，再凭码换会话令牌（24 小时，实例重启即失效）。过期就再运行一次 `wao dashboard`。`--no-open` 或打开失败时把链接打印一次。
+- `status` 打印 pid、端口、启动时间、协议、build 与健康，不打印码与令牌。`stop` 请实例自己退出，10 秒没退出就如实报错，不强杀、不删记录。`restart` 确认旧实例退出后才拉起。实例运行的代码与当前不同时，`wao dashboard` 提示 restart。
+- 状态放在 `%LOCALAPPDATA%\wao\dashboard\`，目录只许当前用户访问，核对不过就拒绝使用。
+- 已接受的瞬时本机暴露：一次性码会出现在 `rundll32` 打开器的命令行和浏览器的这一条历史里。同一 Windows 账户下的程序不防。
+- 145b 之前用 `wao dashboard` 起的前台看板没有实例记录，新命令看不见也停不了它，关掉那个窗口即可。
+- `/` 与 `/index.html` 302 到 `/v2/`。`runs dashboard --web` 已退役（第 145a 批）：带 `--web` 时报固定文案并指向 `wao dashboard`；不带 `--web` 的文本仪表盘不变。
 
-看板三页：Overview、Workers、Attention，中英文。Workers 的侧栏有 Activity、Deliverable、Brief 三个页签，Activity 经 `/api/worker/stream` 实时接收新事件，连不上时退回 5 秒轮询（决定 0132）。页面只读 `/api/overview|workers|attention|worker|worker/activity|worker/event|worker/stream|artifact`，都是只读事实，不是语义进度判断。
+看板三页：Overview、Workers、Attention，中英文。Workers 的侧栏有 Activity、Deliverable、Brief 三个页签，Activity 经 `/api/worker/stream` 实时接收新事件，连不上时退回 5 秒轮询（决定 0132）。页面经 `/api/session` 兑换启动码，此外只读 `/api/overview|workers|attention|worker|worker/activity|worker/event|worker/stream|artifact`，都是只读事实，不是语义进度判断。
 
-安全边界：loopback + 每进程随机 bearer + GET-only、固定静态资源与 no-store/nosniff/no-referrer/严格 CSP/无 CORS opt-in、页面无 mutation 控件（不会 stop/retry/continue/repackage/decide，也不写 transcript、worktree 或配置）；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。动态文本先脱敏、清控制字符、限长；工作树外的路径不显示（决定 0131 第 3 条）。分层合同见[架构](../02-architecture.md) §1 的可观测性条。
+安全边界：loopback + 会话令牌 + GET-only、固定静态资源与 no-store/nosniff/no-referrer/严格 CSP/无 CORS opt-in、页面无 mutation 控件（不会 stop/retry/continue/repackage/decide，也不写 transcript、worktree 或配置）；启动码只走 URL 片段与兑换请求的 `Authorization` 头，会话令牌只存 `sessionStorage`，都不进 query/server log/localStorage。动态文本先脱敏、清控制字符、限长；工作树外的路径不显示（决定 0131 第 3 条）。分层合同见[架构](../02-architecture.md) §1 的可观测性条。
 
 ## worktree 清理失败（Permission denied）
 

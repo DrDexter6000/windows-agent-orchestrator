@@ -84,7 +84,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 ## 4. 非目标（明确不做）
 
-- ❌ GUI / kanban 看板（headless 优先，未来可由独立 client 叠加）
+- ❌ GUI 控制台 / kanban（headless 优先；Owner 本地只读看板只观察，不派发、不裁决，见决定 0131）
 - ❌ POSIX lane：Windows-native 是差异化定位，不是待偿还的移植债。重看的条件是出现明确的外部 POSIX 需求或第二位需要 POSIX 的贡献者，且 Windows 侧的差异化体验已经固化；改判由 Owner 定。
 - ❌ 云服务 / 远程调度
 - ❌ agent reasoning framework（不实现推理循环、不自己做 LLM 调用、不自动做语义任务分解）
