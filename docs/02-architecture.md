@@ -645,6 +645,8 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 
 **worker 可见的授权清单**：`composeDeliveryExecutionContract({allowedPaths})`（`src/application/roleContract.js`）把 AUTHORIZED WORK SCOPE 块附加到 delivery execution contract——单行 `AUTHORIZED_PATHS_JSON`（`encodeAuthorizedPathsJson` 转义行分隔符与 DEL/C1，恒为一行，路径伪造不了合同字段）逐字节声明 worker 开工前必须看到的精确写路径契约（segment-boundary 大小写敏感匹配 + 越界时 `SCOPE_EXPANSION_REQUIRED` 上报而非编辑）。块只声明 scope，不替换或放松 packaging containment。合同还固定声明：工具写入（含临时文件、探针、scratch，scratch 放 `.wao/runs/`）只落在授权 workspace 内、其余写手段不豁免（测试命令在系统临时目录下建的仓库与文件除外）；不读凭据与密钥库、不枚举环境变量（可用变量并报告是否设置）；已启动的命令收齐输出与退出状态、停掉自起的进程后再作答，停进程只经启动它的工具或按确切 pid，不按模式匹配（runner 命令行带 run id）。续修（resume）轮：claude-code 与 codex 的会话级通道续接时不采用新值，这两个后端声明 `resumeKeepsSessionInstructions`，由 `ProcessBackend` 把本轮的 roleContract 重述在提示词前面（以 `[WAO control plane]` 开头），放宽的 allowedPaths 才到得了 worker；首轮交付合同（带授权清单时）与只读合同的末行预先写明以此开头的重述来自同一控制面、替换此前各份（codex 不让用户消息改写 developer 级指令，没有这句会拒收），只读合同那句还写明不带只读合同的重述当轮不再只读（同一角色先只读、后普通派发会复用原会话）；转录的 `prompt.sent` 仍只记 Lead 的提示词。
 
+**worker 可见的验证清单（第 157 批，TD-386）**：交付运行开始、每轮续修与 resume 重放时，`composeTaskPromptWithDeliveryVerification`（`src/application/roleContract.js`）把本轮生效、WAO 之后要跑的验证命令（`prepareDeliveryRequest` 规范化后，含 profile 展开，setup 在前）以单行 `VERIFICATION_SETUP_COMMANDS_JSON` / `VERIFICATION_COMMANDS_JSON`（与 `AUTHORIZED_PATHS_JSON` 同一编码器）和可选的 `VERIFICATION_TIMEOUT_MS` 接在任务正文末尾。它不进角色合同与交付合同（那两份走命令行、预算紧，且合同哈希钉住续修），不进 `prompt.sent`；派发服务的启动预算预判看加块后的同一正文。命令原文会随正文送到 worker 的模型方：凭据只经环境变量引用，不写进命令。
+
 **两道 containment 门**（时序分明，机械判定，不裁决语义、不自动 stop）：
 
 1. **观察到的**写路径位于 isolated worktree **之外** → `run.isolation_violation(code=workdir_escape)`，在 packaging **之前**转 failed（readiness `isolation_failed`，无 packaging/decision 面）。
