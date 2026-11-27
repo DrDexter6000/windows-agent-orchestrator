@@ -460,6 +460,24 @@ export function composeDeliveryExecutionContract({ allowedPaths, backendSuppleme
 }
 
 /**
+ * 交付运行的最终角色合同：交付合同前置于（已含身份头的）角色合同之前，无角色则
+ * 就是交付合同本身。RunManager.start 与派发服务的启动预算预判共用这一个拼法，
+ * 两处拿到的字节必然一致（预算预判要用 runner 最终交给后端的那份合同）。
+ *
+ * @param {object} input
+ * @param {string|undefined} input.roleContract — composeRoleContractWithIdentity 的结果
+ * @param {string[]} input.allowedPaths — prepareDeliveryRequest 之后的授权路径
+ * @param {string[]} [input.backendSupplement] — 后端声明的交付合同补充条款
+ * @returns {string}
+ */
+export function composeDeliveryRoleContract({ roleContract, allowedPaths, backendSupplement }) {
+  const deliveryContract = composeDeliveryExecutionContract({ allowedPaths, backendSupplement });
+  return roleContract
+    ? `${deliveryContract}\n\n---\n\n${roleContract}`
+    : deliveryContract;
+}
+
+/**
  * 只读执行合同（控制面注入，与 composeDeliveryExecutionContract 同一族）。
  *
  * 只读运行（run_dispatch readOnly / `run --read-only`，会审席位都是）此前没有

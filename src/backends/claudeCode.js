@@ -178,6 +178,13 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // Lead id / workspace / agentId never reach the provider.
   supportsSessionReuse = true;
 
+  // 决定 0133：会话复用只在长期令牌模式下能建立（spawn 对 SESSION_REUSE_REQUIRES_
+  // TOKEN_ERROR 的同一判定——共用 activeOauthTokenValue，不复制逻辑）。task 形如
+  // spawn 的入参，只读 resolvedCredentials；令牌解析不到 = "token_required"。
+  sessionReuseUnavailableReason(task) {
+    return activeOauthTokenValue(task) ? null : "token_required";
+  }
+
   // TD188（2026-09-27）：覆写基类的取回 id 可用性判定为恒 true。claude-code 的
   // 续接 lane 编译的是路由信封里的 opaqueUuid（--resume <uuid>），从不消费
   // 转录取回的 session id——转录里记录的 proc_<pid> spawn 身份因此不是本

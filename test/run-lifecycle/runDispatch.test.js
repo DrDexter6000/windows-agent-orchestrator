@@ -18,6 +18,7 @@ import { resolveTranscriptPath } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
 import { dispatchRun, PROVIDER_SESSION_ROUTING } from "../../src/application/runDispatch.js";
 import { getRunDelivery } from "../../src/application/runDelivery.js";
@@ -36,6 +37,17 @@ function makeSummary(runDir, workers) {
   return runDir;
 }
 
+// 谱系 workspace 要过与 run_continue 同一个 Git 顶层证明（决定 0133）：续修谱系根的
+// 用例需要一个真 Git 仓作为绑定工作区。
+function initGitRepo(dir) {
+  const run = (cmd) => execSync(cmd, { cwd: dir, stdio: "pipe" });
+  run("git init");
+  run("git config user.email t@t.com");
+  run("git config user.name T");
+  writeFileSync(join(dir, "README.md"), "# t\n", "utf8");
+  run("git add -A");
+  run("git commit -m init");
+}
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
@@ -775,7 +787,7 @@ test("M12-25-ROUT-1: ordinary no-reuse dispatch → providerSessionRouting not_u
   } finally { cleanupDir(dir); }
 });
 
-test("M12-25-ROUT-2: ordinary delivery (non-reusable agent) → providerSessionRouting not_used", async () => {
+test("M12-25-ROUT-2 显式: continuable:false delivery (non-reusable agent) → providerSessionRouting not_used", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout2-"));
   const { fakeSpawn } = makeFakeSpawn();
   try {
@@ -783,9 +795,29 @@ test("M12-25-ROUT-2: ordinary delivery (non-reusable agent) → providerSessionR
     const result = await dispatchRun({
       agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"), spawnFn: fakeSpawn,
       delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      continuable: false,
+      backendFor: () => ({ supportsSessionReuse: true }),
     });
     assert.equal(result.accepted, true);
-    assert.equal(result.providerSessionRouting, "not_used", "delivery always starts a fresh backend conversation");
+    assert.equal(result.providerSessionRouting, "not_used", "explicit-off delivery starts a fresh backend conversation");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-25-ROUT-2b 自动: delivery on a capable backend with a bound cwd → providerSessionRouting first_turn_requested", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout2b-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    initGitRepo(dir);
+    const result = await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"), spawnFn: fakeSpawn,
+      cwd: dir,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.continuable, true);
+    assert.equal(result.providerSessionRouting, "first_turn_requested", "auto default roots the lineage (turn:first)");
   } finally { cleanupDir(dir); }
 });
 
@@ -836,6 +868,7 @@ test("M12-25-ROUT-5: continuable delivery root → providerSessionRouting first_
   const { fakeSpawn } = makeFakeSpawn();
   try {
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    initGitRepo(dir);
     const result = await dispatchRun({
       agentId: "coder_low", prompt: "deliver", registryPath, runDir: join(dir, "runs"), spawnFn: fakeSpawn,
       delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },

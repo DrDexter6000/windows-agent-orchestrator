@@ -37,6 +37,7 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, appendFileSync } from "node:fs";
 import { resolveTranscriptPath, listTranscriptsDeep } from "../../src/projectBuckets.js";
 import { tmpdir } from "node:os";
@@ -105,6 +106,17 @@ function makeRegistry(dir, agents) {
   return registryPath;
 }
 
+// 谱系 workspace 要过与 run_continue 同一个 Git 顶层证明（决定 0133）：续修谱系根的
+// 用例需要一个真 Git 仓作为绑定工作区。
+function initGitRepo(dir) {
+  const run = (cmd) => execSync(cmd, { cwd: dir, stdio: "pipe" });
+  run("git init");
+  run("git config user.email t@t.com");
+  run("git config user.name T");
+  writeFileSync(join(dir, "README.md"), "# t\n", "utf8");
+  run("git add -A");
+  run("git commit -m init");
+}
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
@@ -727,7 +739,7 @@ test("M11-11C DISP-4: reusable agent without leadSession ⇒ rejected before tra
   } finally { cleanupDir(dir); }
 });
 
-test("M11-11C DISP-5: delivery dispatch is ALWAYS fresh — no --session-reuse-json even for a reusable agent", async () => {
+test("M11-11C DISP-5 显式: continuable:false delivery dispatch is fresh — no --session-reuse-json even for a reusable agent", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m11c-disp5-"));
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
@@ -737,11 +749,35 @@ test("M11-11C DISP-5: delivery dispatch is ALWAYS fresh — no --session-reuse-j
       registryPath, runDir: join(dir, "runs"), cwd: dir, leadSession: "lead-A",
       spawnFn: fakeSpawn,
       delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      continuable: false,
+      backendFor: () => ({ supportsSessionReuse: true }),
     });
     assert.equal(result.accepted, true);
+    assert.equal(result.continuable, false);
     const argv = calls[0].args;
-    assert.ok(!argv.includes("--session-reuse-json"), "delivery dispatch never reuses a session");
+    assert.ok(!argv.includes("--session-reuse-json"), "explicit-off delivery dispatch never reuses a session");
     assert.ok(argv.includes("--isolate"), "delivery still forces isolate");
+  } finally { cleanupDir(dir); }
+});
+
+test("M11-11C DISP-5b 自动: delivery dispatch of a reusable agent roots a run_lineage (never lead_workspace expert reuse)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m11c-disp5b-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { researcher: reusableClaudeAgent(dir) });
+    initGitRepo(dir);
+    const result = await dispatchRun({
+      agentId: "researcher", prompt: "deliver it",
+      registryPath, runDir: join(dir, "runs"), cwd: dir, leadSession: "lead-A",
+      spawnFn: fakeSpawn,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.continuable, true);
+    const routing = JSON.parse(calls[0].args[calls[0].args.indexOf("--session-reuse-json") + 1]);
+    assert.equal(routing.mode, "run_lineage", "delivery is a lineage root, never an expert-reuse turn");
+    assert.ok(calls[0].args.includes("--isolate"), "delivery still forces isolate");
   } finally { cleanupDir(dir); }
 });
 
@@ -1488,7 +1524,7 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
       // (transcriptPath/leadSession/opaqueUuid/workspace/argv) must never surface.
       assert.deepEqual(
         Object.keys(parsed).sort(),
-        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
         "only the safe keys: four scalars + additive workspaceProof + additive providerSessionRouting + additive nextStep (decision 0095)",
       );
       assert.equal(parsed.accepted, true);

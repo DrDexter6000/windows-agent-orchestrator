@@ -179,6 +179,15 @@ export class ProcessBackend {
   // 默认 false；子类按 wire 事实 opt-in。strict === true 读取，未声明绝不读成支持。
   supportsSessionReuse = false;
 
+  // 决定 0133：声明了 supportsSessionReuse 的后端在【当前环境】里是否真的能建立会话
+  // 复用——null = 可以；否则返回闭集原因串（共享层只读它，不认运行时名）。它与
+  // supportsSessionReuse 是两件事：前者是类的静态声明，这里是环境条件（如令牌）。
+  // 基类缺省 null；只有存在环境前置条件的子类覆写。不是认证能力轴（不进
+  // BACKEND_CAPABILITY_AXES）。调用方：dispatchRun 的缺省（自动）续修判定。
+  sessionReuseUnavailableReason(_task) {
+    return null;
+  }
+
   // TD188（2026-09-27）：backend-owned 的**纯**可用性判定——"这个从转录取回的
   // provider 会话 id，本 backend 能否用它续接"。由 spawn 权威（RunManager.start）
   // 与续接预检（continueRun）经现有 backend 实例调用：不加 factory 分发表、共享

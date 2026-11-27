@@ -43,7 +43,7 @@ Output:
 
 ## run_dispatch
 
-Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions. continuable roots a lineage run_continue can resume for a Lead-authorized correction; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. taskType:"image" marks an image-generation task for the Owner dashboard's grouping; it does not affect dispatch. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
+Dispatch a supervised background run by agentId (or lane + role) + prompt; WAO owns runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git worktree top-level) is this call's target — the default binding is not consulted; expectedGitHead/expectedDirty are optional assertions. delivery is continuable by default (backend permitting); continuable:false disables; correctable (correction-capable backends only) keeps one live process so run_correct can queue an in-flight turn. taskType:"image" marks an image-generation task for the Owner dashboard's grouping; it does not affect dispatch. WAO never infers continuation, correction delivery, scope, retry, or acceptance.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
 
@@ -78,6 +78,8 @@ Output:
 | state | string | yes |  |
 | workspaceProof | object | yes |  |
 | providerSessionRouting | string | yes | enum: not_used \| first_turn_requested \| resume_requested |
+| continuable | boolean | yes |  |
+| continuableOff | string | no | enum: no_workspace \| override \| backend_unsupported \| session_reuse_unavailable \| argv_budget \| lineage_slot_unavailable |
 | nextStep | string | no |  |
 | laneFacts | string | no |  |
 | contractAdvisories | array<object> | no |  |

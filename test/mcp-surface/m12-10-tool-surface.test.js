@@ -502,7 +502,10 @@ const RED_23_WIRE = 75492;
 // 77985→78084（实测；scripts/measure-mcp-surface.mjs 同口径 fullWire=78118，
 // 差 34B 为 JSON-RPC 响应整行 vs JSON.stringify({tools}) 的封套差；Owner 硬顶
 // 94532 内）。描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
-const FROZEN_17_WIRE_CEILING = 78084;
+// 第 154 批（带交付的派发缺省可续修，本批任务书授权重冻；additive）：run_dispatch
+// 出参增必填 continuable（boolean）与可选 continuableOff（enum）：78084→78291
+// （实测；Owner 硬顶 94532 内）。desc/hostVisible 冻结线未动。
+const FROZEN_17_WIRE_CEILING = 78291;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -790,8 +793,13 @@ test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", asyn
 // 描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
 // （历史值：0ecb54632165e40712ef4f9c8c4c21b2f92cd97f7ff00b0a2a893dabaaca0723
 // 为第 152 批后的冻结值。）
+// 第 154 批（带交付的派发缺省可续修，本批任务书授权重冻；additive）：run_dispatch
+// 出参增必填 continuable（boolean）与可选 continuableOff（enum）——outputSchema 在
+// stripped 载荷内，SHA 如实翻新；desc/hostVisible 冻结线未动。
+// （历史值：9517c289518d2fb44e93a98855d8e59f72a5b2638a1edd58c8f903a097d0d496
+// 为第 153 批后的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "9517c289518d2fb44e93a98855d8e59f72a5b2638a1edd58c8f903a097d0d496";
+  "f8995a0657fe7b1903ea23d270bc95cb222e32fd8f20c58c6bdf22e6dc183592";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。

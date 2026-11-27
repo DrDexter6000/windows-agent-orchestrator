@@ -1,15 +1,16 @@
 // test/m12-7-runDispatchContinuable.test.js
 //
-// M12-7: run_dispatch `continuable` opt-in (Task #5 wiring).
+// M12-7: run_dispatch `continuable` (Task #5 wiring).
 //
-// continuable:true (delivery-only) marks a delivery as the ROOT of a continuable
-// lineage: dispatch establishes the lineage provider session (turn:first) so a
-// future Lead-authorized run_continue can resume the SAME provider conversation
-// in the retained worktree. These tests pin:
+// continuable marks a delivery as the ROOT of a continuable lineage: dispatch
+// establishes the lineage provider session (turn:first) so a future
+// Lead-authorized run_continue can resume the SAME provider conversation in the
+// retained worktree. 决定 0133 三态：true 显式开 / false 显式关 / 缺省 = 自动
+// （条件矩阵见 continuableAuto.test.js）。These tests pin:
 //   - the first-turn routing envelope on the runner argv (run_lineage / turn:first
 //     / the deterministic opaque uuid) + the bounded run.session_reuse audit fact;
-//   - continuable omitted/false = byte-compatible ordinary delivery dispatch
-//     (NO lineage routing, NO session_reuse event);
+//   - continuable:false = byte-compatible ordinary delivery dispatch
+//     (NO lineage routing, NO session_reuse event); omitted = auto (DCT-02b);
 //   - continuable is delivery-only (throws before any transcript/fork without one);
 //   - a busy lineage slot refuses before any transcript/fork.
 
@@ -109,7 +110,31 @@ test("M12-7-DCT-01: continuable:true establishes the lineage first turn (argv en
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("M12-7-DCT-02: continuable omitted = ordinary delivery dispatch (no lineage routing, no session_reuse event)", async () => {
+test("M12-7-DCT-02b 自动: continuable omitted + capable backend + bound cwd = lineage root (decision 0133 auto default)", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-dct02b-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const r = await dispatchRun({
+      agentId: "coder_hq",
+      prompt: "do the work",
+      registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      runDir: dir,
+      cwd: repo,
+      delivery: DELIVERY,
+      // continuable intentionally omitted (auto).
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true);
+    assert.equal(r.continuable, true);
+    assert.equal(JSON.parse(argVal(calls, "--session-reuse-json")).mode, "run_lineage");
+    const events = await readTranscript(resolveTranscriptPath(dir, r.runId));
+    assert.equal(findLatest(events, "run.session_reuse").rootRunId, r.runId);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-DCT-02 显式: continuable:false = ordinary delivery dispatch even on a capable backend (no lineage routing, no session_reuse event)", async () => {
   const repo = makeRepo();
   const dir = mkdtempSync(join(tmpdir(), "wao-m127-dct02-"));
   const { fakeSpawn, calls } = makeFakeSpawn();
@@ -121,10 +146,12 @@ test("M12-7-DCT-02: continuable omitted = ordinary delivery dispatch (no lineage
       runDir: dir,
       cwd: repo,
       delivery: DELIVERY,
-      // continuable intentionally omitted (default false).
+      continuable: false,
+      backendFor: () => ({ supportsSessionReuse: true }),
       spawnFn: fakeSpawn,
     });
     assert.equal(r.accepted, true);
+    assert.equal(r.continuable, false);
     // No lineage routing on the runner argv (ordinary delivery dispatch).
     assert.equal(argVal(calls, "--session-reuse-json"), undefined, "no session-reuse routing for ordinary dispatch");
     // No run.session_reuse audit fact.

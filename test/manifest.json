@@ -13,6 +13,7 @@
       "application/laneFactsLine.test.js",
       "application/lanePeak.test.js",
       "application/lineageSupersession.test.js",
+      "application/lineageSlotStore.test.js",
       "application/panelDerivation.test.js",
       "application/serveMaintenance.test.js",
       "application/serveReviveAndHusk.test.js",
@@ -295,7 +296,8 @@
       "delivery/td235ResolveBranch.test.js",
       "delivery/settleDeliveryRecovery.test.js",
       "application/feedbackInbox.test.js",
-      "delivery/runDeliveryReverifyAttempt2.test.js"
+      "delivery/runDeliveryReverifyAttempt2.test.js",
+      "mcp-surface/mcpContinuableAuto.test.js"
     ],
     "worktree": [
       "application/worktreeReclaim.test.js",
@@ -339,7 +341,8 @@
       "delivery/verificationTailCapture.test.js",
       "run-lifecycle/readOnlyDispatch.test.js",
       "run-lifecycle/readOnlyClone.test.js",
-      "delivery/deliveryErrorClass.test.js"
+      "delivery/deliveryErrorClass.test.js",
+      "run-lifecycle/continuableAuto.test.js"
     ],
     "process": [
       "isolation-infra/canonicalRunner.test.js",

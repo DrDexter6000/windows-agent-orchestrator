@@ -47,7 +47,7 @@
 //     never enters argv.
 
 import { createHash } from "node:crypto";
-import { readFile, mkdir, writeFile, rename, open, unlink } from "node:fs/promises";
+import { readFile, mkdir, writeFile, rename, open, unlink, rmdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { TERMINAL_STATES, readTranscript, findState, findLatestBound } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
@@ -331,10 +331,14 @@ const PROVIDER_SESSION_BOUND_DAMAGED_TEXT =
   + "(duplicated, malformed, or inconsistent with the recorded session identity) "
   + "— refusing resume instead of silently starting a fresh provider conversation";
 
-async function readRoutingEntryFile(filePath) {
+// 决定 0133：槽存储用到的文件系统操作收成一个可注入的 io（缺省 node:fs/promises）——
+// 让"写临时文件 / rename / 写锁内容"失败的清理路径可以在测试里确定性地触发。
+const NODE_IO = Object.freeze({ readFile, mkdir, writeFile, rename, open, unlink, rmdir, stat });
+
+async function readRoutingEntryFile(filePath, io = NODE_IO) {
   let raw;
   try {
-    raw = await readFile(filePath, "utf8");
+    raw = await io.readFile(filePath, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
@@ -429,53 +433,127 @@ function assertRoutingEntryUsable(entry, clock) {
  * volume (Windows: MoveFileEx + MOVEFILE_REPLACE_EXISTING), so the target always
  * holds either the previous complete entry or the new complete entry.
  */
-async function writeAtomicEntry(target, entry) {
+async function writeAtomicEntry(target, entry, io = NODE_IO) {
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, JSON.stringify(entry), "utf8");
-  await rename(tmp, target);
+  try {
+    await io.writeFile(tmp, JSON.stringify(entry), "utf8");
+    await io.rename(tmp, target);
+  } catch (error) {
+    // 决定 0133：写到一半或 rename 失败，只清自己的临时文件（目标条目不动）。
+    await io.unlink(tmp).catch(() => {});
+    throw error;
+  }
 }
+
+const LOCK_TIMEOUT_TEXT = "sessionReuse: timed out waiting for routing lock";
 
 /**
  * Acquire a cross-process, per-key file lock. Mirrors the transcript append
  * lock pattern (open wx, retry on EEXIST, stale removal). The lock spans the
  * read-decide-write of resolveReuseTurn so two concurrent dispatches for the
  * same reuse identity cannot both decide "first" and fork concurrently.
+ *
+ * 决定 0133：失败路径不留残留——只清理【自己】建的东西：
+ *   - 自己建的锁文件（写锁内容失败时关句柄并删除）；
+ *   - 自己建的锁目录链（mkdir recursive 返回"第一个新建的目录"，别人先建的不动；
+ *     rmdir 非空即失败、保持原样）。成功路径保持原样（锁目录不删）；失败、或调用方
+ *     用 noWrite(result) 声明"没写任何条目"（如槽忙）时才回收自己建的目录。
+ *   锁目录被别人回收的竞争窗口：open 遇 ENOENT 就重建目录再试。
  */
-async function withKeyLock(store, keyHash, fn) {
-  await mkdir(store.lockDir, { recursive: true });
+async function withKeyLock(store, keyHash, fn, { noWrite } = {}) {
+  const io = store.io ?? NODE_IO;
+  // 只可能由本次调用新建的目录就两个：锁目录和它的上一层（槽目录 store.dir）。先记下
+  // 进来时各自是否已存在；失败时只回收"进来时不存在"的那几个，且 rmdir 非空即失败、
+  // 绝不往更上层走。
+  const existedBefore = async (p) => {
+    try { await io.stat(p); return true; } catch { return false; }
+  };
+  const slotDirExisted = typeof store.dir === "string" ? await existedBefore(store.dir) : true;
+  const lockDirExisted = await existedBefore(store.lockDir);
+  await io.mkdir(store.lockDir, { recursive: true });
+  const cleanupCreatedDirs = async () => {
+    if (!lockDirExisted) await io.rmdir(store.lockDir).catch(() => {});
+    if (!slotDirExisted) await io.rmdir(store.dir).catch(() => {});
+  };
   const lockPath = join(store.lockDir, `${keyHash}.lock`);
   const start = Date.now();
   let handle;
-  while (true) {
-    try {
-      handle = await open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, ts: Date.now() }), "utf8");
-      break;
-    } catch (error) {
-      // Any non-EEXIST error is a real failure (permissions, disk, etc.).
-      if (error?.code !== "EEXIST") throw error;
-      // Best-effort stale removal.
-      try {
-        const raw = await readFile(lockPath, "utf8");
-        const data = JSON.parse(raw);
-        if (Date.now() - Number(data.ts) > LOCK_STALE_MS) {
-          await unlink(lockPath).catch(() => {});
-        }
-      } catch {
-        // If unreadable, let the timeout path decide.
-      }
-      if (Date.now() - start > LOCK_TIMEOUT_MS) {
-        throw new Error(`sessionReuse: timed out waiting for routing lock (key ${keyHash.slice(0, 8)})`);
-      }
-      await new Promise((r) => setTimeout(r, LOCK_POLL_MS));
-    }
-  }
   try {
-    return await fn();
+    while (true) {
+      try {
+        handle = await io.open(lockPath, "wx");
+      } catch (error) {
+        // ENOENT = 锁目录刚被别的持有者回收：重建后重试。EEXIST = 锁被占：等。
+        // 其余是真失败（权限、磁盘……）。
+        if (error?.code === "ENOENT") {
+          if (Date.now() - start > LOCK_TIMEOUT_MS) {
+            throw new Error(`${LOCK_TIMEOUT_TEXT} (key ${keyHash.slice(0, 8)})`);
+          }
+          await io.mkdir(store.lockDir, { recursive: true });
+          continue;
+        }
+        if (error?.code !== "EEXIST") throw error;
+        // Best-effort stale removal.
+        try {
+          const raw = await io.readFile(lockPath, "utf8");
+          const data = JSON.parse(raw);
+          if (Date.now() - Number(data.ts) > LOCK_STALE_MS) {
+            await io.unlink(lockPath).catch(() => {});
+          }
+        } catch {
+          // If unreadable, let the timeout path decide.
+        }
+        if (Date.now() - start > LOCK_TIMEOUT_MS) {
+          throw new Error(`${LOCK_TIMEOUT_TEXT} (key ${keyHash.slice(0, 8)})`);
+        }
+        await new Promise((r) => setTimeout(r, LOCK_POLL_MS));
+        continue;
+      }
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, ts: Date.now() }), "utf8");
+      } catch (error) {
+        // 锁文件是我们刚建的：写内容失败就关句柄、删文件，不留一把没人持有的锁。
+        await handle.close().catch(() => {});
+        await io.unlink(lockPath).catch(() => {});
+        handle = undefined;
+        throw error;
+      }
+      break;
+    }
+  } catch (error) {
+    await cleanupCreatedDirs();
+    throw error;
+  }
+  let result;
+  let failed = true;
+  try {
+    result = await fn();
+    failed = false;
+    return result;
   } finally {
     await handle.close().catch(() => {});
-    await unlink(lockPath).catch(() => {});
+    await io.unlink(lockPath).catch(() => {});
+    if (failed || (typeof noWrite === "function" && noWrite(result))) await cleanupCreatedDirs();
   }
+}
+
+/**
+ * 槽存储失败（文件系统错误、条目损坏、等锁超时）——与编程/校验错误区分开：派发服务的
+ * 自动续修只吞这一类（静默关闭），其余照常抛出。message 与原错误一致。
+ */
+export class LineageSlotStorageError extends Error {
+  constructor(cause) {
+    super(cause?.message ?? "lineage slot storage failure", { cause });
+    this.name = "LineageSlotStorageError";
+    if (typeof cause?.code === "string") this.code = cause.code;
+  }
+}
+
+function isRoutingStorageFailure(error) {
+  if (!error || typeof error !== "object") return false;
+  if (typeof error.syscall === "string") return true; // Node 文件系统错误
+  const message = typeof error.message === "string" ? error.message : "";
+  return message === ROUTING_ENTRY_DAMAGED_TEXT || message.startsWith(LOCK_TIMEOUT_TEXT);
 }
 
 /**
@@ -892,26 +970,31 @@ export function deriveLineageReuseKeyHash(input) {
  * Same §3.6 damage discipline as defaultReuseStore (ENOENT = absent; anything
  * else = damaged = refuse).
  */
-function defaultLineageStore(runDir) {
+// 决定 0133：导出（含可注入 io）只为让槽存储的失败清理路径可测；运行时调用方只用
+// resolveLineageFirstTurn / releaseLineageFirstTurn，缺省走真实文件系统。
+export function createLineageStore(runDir, ioOverrides) {
+  const io = { ...NODE_IO, ...(ioOverrides ?? {}) };
   const dir = join(runDir, ".lineage-reuse");
   const lockDir = join(dir, ".locks");
   return {
     dir,
     lockDir,
+    io,
     async readEntry(keyHash) {
-      return readRoutingEntryFile(join(dir, `${keyHash}.json`));
+      return readRoutingEntryFile(join(dir, `${keyHash}.json`), io);
     },
     async writeEntry(keyHash, entry) {
-      await mkdir(dir, { recursive: true });
-      await writeAtomicEntry(join(dir, `${keyHash}.json`), entry);
+      await io.mkdir(dir, { recursive: true });
+      await writeAtomicEntry(join(dir, `${keyHash}.json`), entry, io);
     },
     async deleteEntry(keyHash) {
-      await unlink(join(dir, `${keyHash}.json`)).catch((error) => {
+      await io.unlink(join(dir, `${keyHash}.json`)).catch((error) => {
         if (error?.code !== "ENOENT") throw error;
       });
     },
   };
 }
+const defaultLineageStore = (runDir) => createLineageStore(runDir);
 
 /**
  * Decide the lineage turn for an INITIAL continuable delivery: always claims
@@ -938,49 +1021,96 @@ export async function resolveLineageFirstTurn({ runDir, runId, workspace, agentI
   const opaqueUuid = deriveLineageOpaqueUuid({ workspace, agentId, rootRunId, laneFingerprint, roleSha256 });
   const routing = { mode: "run_lineage", opaqueUuid };
 
-  return withKeyLock(store, keyHash, async () => {
-    const entry = await store.readEntry(keyHash);
-    // Re-check-3 finding (coder_mm substitute, 2026-09-21) [高]: the same
-    // unconditional temporal validation as resolveReuseTurn — the lineage
-    // resolvers previously had NO future/negative check at all, so a tampered
-    // `.lineage-reuse` entry reclaimed the slot (lineage-first) or resumed a
-    // prior owner (lineage-continuation) with the slot overwritten.
-    if (entry) assertRoutingEntryUsable(entry, clock);
-    if (entry && entry.runId && entry.runId !== runId) {
-      // A prior owner exists for this lineage key. If non-terminal, refuse.
-      const priorPath = resolveTranscriptPath(runDir, entry.runId);
-      let events = [];
-      let exists = true;
-      try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
-      if (exists && events.length > 0) {
-        // R15 (TD-128 findState family): BOUND to the prior slot owner
-        // (entry.runId — the transcript read is that run's file), the same
-        // filter discipline as resolveReuseTurn above. findState is last-wins
-        // over the raw array, so a foreign run.state_change tail used to flip
-        // this first-claim gate (coder_mm probe P6b): a non-terminal prior
-        // owner plus a foreign completed tail read terminal → the lineage slot
-        // was claimed first while the real owner was still in flight (two
-        // drivers on one provider session, Contract 6); a forged running tail
-        // over a terminal owner blocked the claim instead. State now comes
-        // ONLY from the prior owner's own events; a fully pre-envelope owner
-        // transcript projects "pending" → busy (unattributable = in-flight).
-        const state = findState(events.filter((e) => e && e.runId === entry.runId));
-        if (state && !TERMINAL_STATES.includes(state)) {
-          return { kind: "busy", activeRunId: entry.runId };
-        }
-      } else {
-        // No `|| 0` coercion: assertRoutingEntryUsable above already proved the
-        // timestamp is finite and not in the future, so a negative age cannot
-        // reach here (it would have thrown as damage).
-        const age = clock - entry.updatedAt;
-        if (age < STALE_MS) {
-          return { kind: "busy", activeRunId: entry.runId };
+  // 决定 0133：槽存储失败（文件系统错误 / 条目损坏 / 等锁超时）包成
+  // LineageSlotStorageError 抛出（message 不变）——自动续修只静默吞这一类；
+  // 忙不是错误（kind:"busy"），编程/校验错误原样上抛。
+  try {
+    return await withKeyLock(store, keyHash, async () => {
+      const entry = await store.readEntry(keyHash);
+      // Re-check-3 finding (coder_mm substitute, 2026-09-21) [高]: the same
+      // unconditional temporal validation as resolveReuseTurn — the lineage
+      // resolvers previously had NO future/negative check at all, so a tampered
+      // `.lineage-reuse` entry reclaimed the slot (lineage-first) or resumed a
+      // prior owner (lineage-continuation) with the slot overwritten.
+      if (entry) assertRoutingEntryUsable(entry, clock);
+      if (entry && entry.runId && entry.runId !== runId) {
+        // A prior owner exists for this lineage key. If non-terminal, refuse.
+        const priorPath = resolveTranscriptPath(runDir, entry.runId);
+        let events = [];
+        let exists = true;
+        try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
+        if (exists && events.length > 0) {
+          // R15 (TD-128 findState family): BOUND to the prior slot owner
+          // (entry.runId — the transcript read is that run's file), the same
+          // filter discipline as resolveReuseTurn above. findState is last-wins
+          // over the raw array, so a foreign run.state_change tail used to flip
+          // this first-claim gate (coder_mm probe P6b): a non-terminal prior
+          // owner plus a foreign completed tail read terminal → the lineage slot
+          // was claimed first while the real owner was still in flight (two
+          // drivers on one provider session, Contract 6); a forged running tail
+          // over a terminal owner blocked the claim instead. State now comes
+          // ONLY from the prior owner's own events; a fully pre-envelope owner
+          // transcript projects "pending" → busy (unattributable = in-flight).
+          const state = findState(events.filter((e) => e && e.runId === entry.runId));
+          if (state && !TERMINAL_STATES.includes(state)) {
+            return { kind: "busy", activeRunId: entry.runId };
+          }
+        } else {
+          // No `|| 0` coercion: assertRoutingEntryUsable above already proved the
+          // timestamp is finite and not in the future, so a negative age cannot
+          // reach here (it would have thrown as damage).
+          const age = clock - entry.updatedAt;
+          if (age < STALE_MS) {
+            return { kind: "busy", activeRunId: entry.runId };
+          }
         }
       }
+      await store.writeEntry(keyHash, { runId, updatedAt: clock });
+      return {
+        kind: "first",
+        routing: { ...routing, turn: "first" },
+        // Internal rollback token (never crosses the application/MCP boundary):
+        // releaseLineageFirstTurn restores the slot only while it is still ours.
+        claim: { keyHash, runId, previousEntry: entry ?? null },
+      };
+    }, { noWrite: (result) => result.kind === "busy" });
+  } catch (error) {
+    if (isRoutingStorageFailure(error)) throw new LineageSlotStorageError(error);
+    throw error;
+  }
+}
+
+/**
+ * 决定 0133：撤回 resolveLineageFirstTurn 刚写的槽（自动续修在槽写入之后发现开不成时
+ * 用——真实参数检查超限、同 runId 的转录仲裁被拒）。持锁、按内容核对：只有槽当前
+ * 的 runId 仍是自己（claim.runId）才动，且恢复写入前的原条目（没有就删）；别人的
+ * 条目（含并发续修后写入的）一律不碰。
+ *
+ * @param {object} input
+ * @param {string} input.runDir
+ * @param {{keyHash:string, runId:string, previousEntry:object|null}} input.claim
+ * @param {object} [input.reuseStore]
+ * @returns {Promise<boolean>} true when the slot was still ours and was released
+ */
+export async function releaseLineageFirstTurn({ runDir, claim, reuseStore }) {
+  if (!claim || typeof claim !== "object"
+    || typeof claim.keyHash !== "string"
+    || typeof claim.runId !== "string") {
+    throw new Error("sessionReuse: invalid first-turn claim token");
+  }
+  const store = reuseStore ?? defaultLineageStore(runDir);
+  return withKeyLock(store, claim.keyHash, async () => {
+    const current = await store.readEntry(claim.keyHash);
+    if (!current || current.runId !== claim.runId) return false;
+    if (claim.previousEntry && typeof claim.previousEntry.runId === "string") {
+      await store.writeEntry(claim.keyHash, claim.previousEntry);
+    } else if (typeof store.deleteEntry === "function") {
+      await store.deleteEntry(claim.keyHash);
+    } else {
+      return false;
     }
-    await store.writeEntry(keyHash, { runId, updatedAt: clock });
-    return { kind: "first", routing: { ...routing, turn: "first" } };
-  });
+    return true;
+  }, { noWrite: (released) => released === false });
 }
 
 /**

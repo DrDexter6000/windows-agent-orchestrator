@@ -369,6 +369,24 @@ export function resolveRunDirForWrite(runDir, identity, { io } = {}) {
     `bucket slug collision not resolvable after ${candidates.length} hash lengths for key ${identity.key}`);
 }
 
+/**
+ * 新建转录桶目录路径长度的上界（零副作用，与 resolveRunDirForWrite 的命名规则同源）：
+ * 沙箱/草稿/未归属桶名固定，项目桶取最坏情形——保留名 "0-" 前缀 + displayName +
+ * "-" + 全长 64 位哈希。给派发前的命令行预算预判用（预判要在写任何东西之前给出
+ * 保守结论，而真实桶要等 claim 之后才定）。
+ *
+ * @returns {number}
+ */
+export function maxNewTranscriptDirLength(runDir, identity) {
+  const root = projectsDirFor(runDir);
+  if (identity?.kind === "sandbox" || identity?.kind === "scratch" || identity?.kind === "unattributed") {
+    const bucket = identity.kind === "sandbox" ? "_sandbox" : identity.kind === "scratch" ? "_scratch" : "_unattributed";
+    return join(root, bucket).length;
+  }
+  const displayName = typeof identity?.displayName === "string" ? identity.displayName : "";
+  return join(root, `0-${displayName}-${"0".repeat(64)}`).length;
+}
+
 /** basename 助手（避免再引 node:path 的第二个具名导入形状）。 */
 function basename(p) {
   const parts = String(p).replace(/\\/g, "/").split("/");

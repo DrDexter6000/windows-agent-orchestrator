@@ -48,7 +48,7 @@ import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // site; re-exported by runDispatch per the typed-error precedent).
 // R11-1: assertValidReasoningOverride is the same SSOT discipline for the
 // per-dispatch --reasoning effort override (closed REASONING_EFFORTS set).
-import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assertValidReasoningOverride } from "../application/runDispatch.js";
+import { dispatchRun, DeliveryCwdRequiredError, CONTINUABLE_OFF_FOREGROUND, assertValidModelOverride, assertValidReasoningOverride } from "../application/runDispatch.js";
 // M12-7/0114：CLI background continuable 与 MCP 同一能力门——共享工厂构造的
 // backend 实例用于 supportsSessionReuse 判定（构造零副作用）。
 import { backendFor as factoryBackendFor } from "../backends/factory.js";
@@ -123,10 +123,15 @@ export async function loadDeliverySpec(options) {
   return {
     mode: validated.mode,
     allowedPaths: validated.allowedPaths,
-    // 决定 0114：CLI 的 `--background` + delivery spec 顶层 `continuable: true`
+    // 决定 0114：CLI 的 `--background` + delivery spec 顶层 `continuable`
     // 与 MCP `run_dispatch` 的顶层 continuable 同义（delivery-only 谱系根）。
-    // 非布尔 true 不冒充（缺省/畸形一律不建谱系）。
-    ...(parsed.continuable === true ? { continuable: true } : {}),
+    // 决定 0133 三态：true 显式开 / 缺省交给派发服务自动判定 / 其余一律显式关——
+    // 字段只要出现、又不是布尔 true（false、"false"、null、0、"true"……），都按
+    // 关闭处理：以前这些值都等于"不建谱系"，缺省变成"自动"后不能把它们反转成开，
+    // 也不能让现有文件整份被拒。`runs continue` 共用本解析器，下游忽略该字段。
+    ...(parsed.continuable === true
+      ? { continuable: true }
+      : parsed.continuable !== undefined ? { continuable: false } : {}),
     ...(validated.verification.commands.length > 0
       ? { verificationCommands: validated.verification.commands }
       : { verificationUnavailableReason: validated.verification.unavailableReason }),
@@ -211,16 +216,14 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
       readOnly: resolveReadOnlyFlag(options),
       // M9-7A: forward validated delivery request for background delivery runs.
       delivery,
-      // 决定 0114：CLI 的 delivery spec 顶层 continuable 与 MCP 顶层 continuable
-      // 同义——由共享 service 建立 run_lineage 根（delivery-only 由 service 强制）。
-      ...(delivery?.continuable === true
-        ? {
-          continuable: true,
-          // M12-7/0114：continuable 能力门与 MCP 同源——由共享工厂构造的
-          // backend 声明判定 supportsSessionReuse（构造零副作用，不按名分支）。
-          backendFor: (agent) => factoryBackendFor(agent),
-        }
-        : {}),
+      // 决定 0114/0133：CLI 的 delivery spec 顶层 continuable 与 MCP 顶层 continuable
+      // 同义（三态：true / false / 缺省=自动）——由共享 service 建立 run_lineage 根
+      // （delivery-only 由 service 强制）。
+      ...(typeof delivery?.continuable === "boolean" ? { continuable: delivery.continuable } : {}),
+      // M12-7/0114/0133：能力门与 MCP 同源——由共享工厂构造的 backend 声明判定
+      // supportsSessionReuse 与环境条件（构造零副作用，不按名分支）；缺省（自动）
+      // 续修同样靠它，故恒透传。
+      backendFor: (agent) => factoryBackendFor(agent),
       // 0045 W4d：别名派发同样走 lane/role 执行，但身份注记仍是 alias。
       ...(resolvedFrom === "alias" ? { resolvedFrom: "alias" } : {}),
       // R10-A: per-dispatch model override (already shape-gated + certified-
@@ -270,6 +273,8 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
       background: true,
       terminalAccepted: false,
       terminalState: result.terminalState,
+      // 决定 0133：续修回显（所有派发都带；被拒的派发没建成谱系根）。
+      continuable: result.continuable === true,
       note: `not forked: transcript already terminal (${result.terminalState}); wait to settlement: \`wao runs wait ${result.runId} --until-settled\``,
     }, null, 2));
     return;
@@ -279,6 +284,10 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     agentId: result.agentId,
     transcript: result.transcriptPath,
     background: true,
+    // 决定 0133：续修回显。continuable 所有派发都带；缺省（自动）下带交付的派发
+    // 没开成时再带闭集原因 continuableOff（非交付派发、显式关闭不带）。
+    continuable: result.continuable === true,
+    ...(result.continuableOff !== undefined ? { continuableOff: result.continuableOff } : {}),
     // R10-A: echo the EFFECTIVE model ({...(registry model), id: override} —
     // siblings included) so a mistyped model id is visible NOW, not turns
     // later when the provider rejects it. Present only when --model was given
@@ -650,6 +659,13 @@ export async function runCommand(args, config) {
   // discipline as the model field above).
   if (options.reasoning !== undefined && format === "json") {
     waitResult.reasoning = run.agent.reasoning;
+  }
+  // 决定 0133：前台 CLI 不能建谱系——带交付的前台派发在 JSON 里如实回显
+  // continuable:false；规格缺省（自动）时再带 continuableOff:"foreground"
+  // （显式 false 不带；显式 true 已在上方拒绝）。非交付前台派发输出不变。
+  if (delivery && format === "json") {
+    waitResult.continuable = false;
+    if (delivery.continuable === undefined) waitResult.continuableOff = CONTINUABLE_OFF_FOREGROUND;
   }
   if (format === "json") {
     console.log(JSON.stringify(waitResult, null, 2));

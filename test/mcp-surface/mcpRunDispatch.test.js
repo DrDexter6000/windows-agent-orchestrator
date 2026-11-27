@@ -228,7 +228,7 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
       // M11-8B added agentId; M12-6 (FR-03) adds the additive bounded workspaceProof;
       // M12-25 adds additive providerSessionRouting (routing REQUEST truth).
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
         "only runId/agentId/accepted/state + additive workspaceProof + additive providerSessionRouting");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_ok_m92b03");
@@ -626,7 +626,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(captured.requireCertified, false, "certification advisory on delivery runs too (never forced)");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(Object.keys(parsed).sort(),
-      ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+      ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
       "output has agentId (M11-8B) + additive workspaceProof (M12-6) + additive providerSessionRouting (M12-25)");
     } finally {
       await client.close();
@@ -857,7 +857,7 @@ test("M12-25-MCP-ROUT-3: injected dispatcher returning valid routing + leak fiel
       assert.equal(parsed.providerSessionRouting, "not_used", "valid routing threaded through");
       // Only the allowed keys are present — leak fields stripped by the handler + strict parse.
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"]);
+        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"]);
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(OPAQUE), "opaque session id never leaks");
       assert.ok(!dumped.includes("lead-LEAK-mcpr3"), "Lead id never leaks");
@@ -1254,7 +1254,7 @@ test("0097: accepted run_dispatch carries laneFacts (no [wao] prefix); null → 
       assert.equal(parsed.laneFacts, FACTS, "受理回执带同一行文字");
       assert.ok(!parsed.laneFacts.startsWith("[wao] "), "不带 [wao] 前缀（那是 CLI stderr 的形制）");
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "laneFacts", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        ["accepted", "agentId", "continuable", "laneFacts", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
         "键集钉：laneFacts 是唯一新增键");
 
       // 回显失败（fail-open null）→ 键缺省，受理不受影响。
@@ -1624,7 +1624,7 @@ test("147-MCP-1: 超帽 → 受理回执的既有 nextStep 带与 CLI 同一采�
       assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
       assert.ok(!sc.nextStep.includes("npm run hygiene"), "文案不再指向只在 WAO 仓存在的命令");
       assert.deepEqual(Object.keys(sc).sort(),
-        ["accepted", "agentId", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
         "回执键集不变（没加字段、没改 schema）");
       assert.equal(readdirSync(stateDir).length, 1, "提示带出后写入采样状态");
     } finally {

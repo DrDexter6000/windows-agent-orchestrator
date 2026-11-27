@@ -16,7 +16,7 @@ import { createSecretRedactor, redactSecretShapes } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
-import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, composeReadOnlyExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryRoleContract, composeReadOnlyExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
 import { ID_RE } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
@@ -1439,15 +1439,15 @@ export class RunManager {
           `Switch to a backend that declares supportsRoleContract.`
         );
       }
-      const deliveryContract = composeDeliveryExecutionContract({
+      // 决定 0133：拼法收进共享 composeDeliveryRoleContract（派发服务的启动预算
+      // 预判用同一个函数，两处字节一致）。
+      roleContract = composeDeliveryRoleContract({
+        roleContract,
         allowedPaths: deliveryPrepared.allowedPaths,
         // TD-357: backend-declared supplement (codex image-generation cache
         // allowance). Absent on every other backend → byte-identical contract.
         backendSupplement: backend.deliveryContractSupplement,
       });
-      roleContract = roleContract
-        ? `${deliveryContract}\n\n---\n\n${roleContract}`
-        : deliveryContract;
     }
 
     // 只读执行合同（控制面注入）：只读运行（含全部会审席位）不再要求 Lead 在
@@ -1629,6 +1629,10 @@ export class RunManager {
         prompt,
         roleContract,
         ...(sessionReuse ? { sessionReuse, priorProviderSessionId } : {}),
+        // 决定 0133：预检的 argv 要与真实 spawn 一致——可纠偏运行的 spawn 会带上
+        // correctable（claude-code 因此多出 --input-format stream-json），预检不
+        // 带就会放行实际会超限的启动。
+        ...(correctable ? { correctable: true } : {}),
       });
     }
 
@@ -2531,15 +2535,13 @@ export class RunManager {
           `Switch to a backend that declares supportsRoleContract.`
         );
       }
-      const deliveryContract = composeDeliveryExecutionContract({
+      resumeRoleContract = composeDeliveryRoleContract({
+        roleContract: resumeRoleContract,
         allowedPaths: deliveryContext.allowedPaths,
         // TD-357: same backend-declared supplement as the start path, re-derived
         // from the selected backend so a resumed run sees the same contract.
         backendSupplement: backend.deliveryContractSupplement,
       });
-      resumeRoleContract = resumeRoleContract
-        ? `${deliveryContract}\n\n---\n\n${resumeRoleContract}`
-        : deliveryContract;
     }
 
     // 只读 resume 重新前置控制面只读执行合同（M11-8C Gap A 的只读同款）：事实

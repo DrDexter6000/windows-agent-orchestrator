@@ -24,13 +24,14 @@ import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
-import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
+import { resolveReuseTurn, resolveLineageFirstTurn, releaseLineageFirstTurn, deriveLineageOpaqueUuid } from "./sessionReuse.js";
+import { proveWorkspaceRoot } from "./workspaceBinding.js";
 import { identifyProjectFromCwd, productionProjectIo, projectFactFromCwd } from "../projectIdentity.js";
-import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, TranscriptResolutionError } from "../projectBuckets.js";
+import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, claimRunIdForWrite, releaseRunIdClaim, claimAgeMs, maxNewTranscriptDirLength, TranscriptResolutionError } from "../projectBuckets.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
 import { PROMPT_HANDOFF_TIMEOUT_MS, PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs } from "../runnerPrompt.js";
-import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
+import { loadRoleContract, roleContractSha256, composeRoleContractWithIdentity, composeDeliveryRoleContract } from "./roleContract.js";
 import { openRunnerStderrFd, runnerStderrPath } from "./runnerStderr.js";
 // TD-347（第 93 批）：runner 的唯一启动口——Windows 缺省经 WMI 启动桥（不随宿主
 // 重启 MCP 服务而死）；spawnFn 注入 / WAO_RUNNER_LAUNCH=spawn / 非 Windows 走
@@ -276,6 +277,138 @@ function deriveProviderSessionRouting(routing) {
   return "not_used";
 }
 
+// 决定 0133：缺省（自动）续修没开成时的 continuableOff 闭集——只含派发服务会产出的
+// 原因（MCP 输出枚举由它派生），数组顺序即判定的先后：前四项在凭据预检后一次判完
+// （autoContinuableOffReason），argv_budget 在写谱系槽之前预判（lineageLaunchOverBudget），
+// lineage_slot_unavailable 是写槽本身没成（忙或存储故障）。
+// read_only / lead_workspace 不在内：它们与"带交付的派发"互斥在更早处就被拒
+// （ReadOnlyDeliveryConflictError；delivery 恒不走 lead_workspace 复用），到不了
+// 自动判定。CLI 前台不经本服务，原因恒为 CONTINUABLE_OFF_FOREGROUND（前台 CLI
+// 不能建谱系）。
+export const CONTINUABLE_OFF_REASONS = Object.freeze([
+  "no_workspace",
+  "override",
+  "backend_unsupported",
+  "session_reuse_unavailable",
+  "argv_budget",
+  "lineage_slot_unavailable",
+]);
+export const CONTINUABLE_OFF_FOREGROUND = "foreground";
+
+// runner 参数总长的派发前保守上限（Windows 命令行预算之内留余量）。
+const ARGV_MAX_TOTAL = 24000;
+const argvLength = (args) => args.reduce((sum, a) => sum + String(a).length + 1, 0);
+
+/**
+ * 决定 0133：缺省（自动）续修的判定——带交付的派发才会走到这里。返回 null = 开；
+ * 否则返回 CONTINUABLE_OFF_REASONS 的成员（任一条件不满足即静默关闭，不报错）。
+ * 后端能力只读声明（supportsSessionReuse + 环境条件 sessionReuseUnavailableReason），
+ * 不认运行时名。backend 缺省已由调用方回落共享工厂（cwdGateBackend）；只有注入的
+ * 解析器对该后端返回 null、或工厂构造不出时才是 null，按不支持处理（fail-closed，
+ * 与显式 continuable 的 ContinuableBackendUnsupportedError 同口径）。
+ * workspaceRoot：谱系 workspace 的证明结果（与 run_continue 同一个 proveWorkspaceRoot）；
+ * 没有绑定工作区、或证明不过（null）都算 no_workspace。
+ * @returns {string|null}
+ */
+function autoContinuableOffReason({ cwd, workspaceRoot, hasOverride, backend, resolvedCredentials }) {
+  if (typeof cwd !== "string" || cwd.length === 0 || workspaceRoot === null) return "no_workspace";
+  if (hasOverride) return "override";
+  if (!backend || backend.supportsSessionReuse !== true) return "backend_unsupported";
+  const unavailable = typeof backend.sessionReuseUnavailableReason === "function"
+    ? backend.sessionReuseUnavailableReason({ resolvedCredentials })
+    : null;
+  return unavailable === null || unavailable === undefined ? null : "session_reuse_unavailable";
+}
+
+/**
+ * 决定 0133：缺省（自动）续修的两层命令行预算预判——快速路径，在写谱系槽之前先把
+ * 明显放不下的挡掉（不建槽、不留痕）。返回 true = 开了谱系会放不下（调用方静默关闭，
+ * 原因 argv_budget）。【以真实检查为准】：这里的估算（转录目录取上界等）可能低估，
+ * 槽写入之后真实的 runner 参数检查若超限，派发里会撤回自己的槽、用不带谱系的参数
+ * 重建（见 dispatchRun 的 fallBackToOrdinary）。
+ *   1. runner 参数：带上谱系路由 + 身份材料参数，再加转录目录参数（取上界——真实
+ *      桶要等 runId claim 之后才定）后超过 ARGV_MAX_TOTAL；
+ *   2. worker 启动：后端有 preflightInvocation 就带上会话复用参数用后端自己的预检
+ *      再算一遍（与 RunManager.start 的预检同一调用形状，包括 correctable，不复制
+ *      预算逻辑）；只有"不带谱系能过、带谱系过不了"才算谱系引起——不带谱系本来就
+ *      过不了的派发与谱系无关，不归在这里；后端没有预检就跳过这一层。
+ * 副作用：不建目录、不写文件、不留残留；但后端预检在 Windows 上、agent 没配
+ * binary 时会起只读的 `where` 查找进程（带谱系的预检失败后为归因再试一次不带谱系的，
+ * 最多两次）。
+ */
+async function lineageLaunchOverBudget({
+  buildRunnerArgs, routing, material, transcriptDirBound, backend, agent, prompt, roleContract, correctable,
+}) {
+  const transcriptDirArgsLength = "--transcript-dir".length + 1 + transcriptDirBound + 1;
+  if (argvLength(buildRunnerArgs(routing, material)) + transcriptDirArgsLength > ARGV_MAX_TOTAL) {
+    return true;
+  }
+  if (typeof backend.preflightInvocation !== "function") return false;
+  // 与真实 spawn 一致：可纠偏运行 spawn 时带 correctable（claude-code 因此多出
+  // --input-format stream-json），预检也要带，否则会放行实际超限的启动。
+  const spawnShape = correctable ? { correctable: true } : {};
+  try {
+    await backend.preflightInvocation(agent, { prompt, roleContract, sessionReuse: routing, ...spawnShape });
+    return false;
+  } catch {
+    // 下面归因：不带谱系也过不了 → 不是谱系引起。
+  }
+  try {
+    await backend.preflightInvocation(agent, { prompt, roleContract, ...spawnShape });
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 派发前预判用的转录目录路径长度估计：这个 runId 已有转录就取它所在目录（精确），
+ * 否则取新桶的最坏长度（maxNewTranscriptDirLength，与桶命名规则同源；displayName
+ * 最长 40）。只读。注意它不是处处可证的上界——新 run 可能复用同一项目里更早建的、
+ * 更长的桶——所以只作快速路径，真实检查在转录目录定下之后（见 dispatchRun）。
+ */
+function transcriptDirLengthBound(runDir, runId, workspace) {
+  try {
+    return dirname(resolveTranscriptPath(runDir, runId, { forAppend: true })).length;
+  } catch {
+    // 新 run（桶还没定）或解析冲突——真实流程会在后面照常抛，这里只要保守估计。
+  }
+  try {
+    return maxNewTranscriptDirLength(runDir, identifyProjectFromCwd(workspace, productionProjectIo()));
+  } catch {
+    // 身份读不出：按最长的项目桶名估（displayName 上限 40）。
+    return maxNewTranscriptDirLength(runDir, { kind: "project", displayName: "x".repeat(40) });
+  }
+}
+
+/**
+ * runner 起动时交给后端预检的最终角色合同（身份头 + 角色正文 + 交付合同），与
+ * RunManager.start 同一拼法：同样的加载器、composeRoleContractWithIdentity、
+ * composeDeliveryRoleContract（allowedPaths 取与 runner 一致的 prepareDeliveryRequest
+ * 结果）。后端不承载角色注入时 runner 会在更早处拒绝，这里返回 undefined。
+ */
+function composeLaunchRoleContract({
+  agentId, backend, roleShaSource, executedRoleId, resolvedLane, publicDelivery,
+}) {
+  if (backend.supportsRoleContract !== true) return undefined;
+  let roleContract;
+  if (roleShaSource) {
+    const identity = typeof resolvedLane === "string" && typeof executedRoleId === "string"
+      ? { laneId: resolvedLane, roleId: executedRoleId }
+      : undefined;
+    roleContract = composeRoleContractWithIdentity({
+      roleContract: loadRoleContract(roleShaSource),
+      agentId,
+      ...(identity ? { identity } : {}),
+    });
+  }
+  return composeDeliveryRoleContract({
+    roleContract,
+    allowedPaths: prepareDeliveryRequest(publicDelivery).allowedPaths,
+    backendSupplement: backend.deliveryContractSupplement,
+  });
+}
+
 /**
  * Generate a runId in the same format RunManager uses.
  * @returns {string}
@@ -356,15 +489,21 @@ export async function dispatchRun({
   // supplied — expectedGitHead is the model-owned counterpart and is consumed at
   // the MCP boundary. Absent for CLI callers (argv unchanged).
   frozenGitHead,
-  // Server-owned backend capability resolver. Required only for a continuable
-  // root so unsupported runtimes fail before the lineage slot/transcript/fork.
+  // Optional backend resolver (MCP / CLI inject the shared factory wrapper;
+  // absent → the shared factory default). The ONE constructed instance
+  // (cwdGateBackend) serves the cwd gate and the continuable capability checks
+  // — explicit and auto alike — so unsupported runtimes fail (explicit) or turn
+  // auto off (默认) before the lineage slot/transcript/fork. 决定 0133.
   backendFor,
-  // M12-7: Lead opt-in marking this delivery as the root of a continuable
-  // lineage. When true (delivery-only), dispatch establishes the lineage
-  // provider session with turn:first so a future Lead-authorized run_continue
-  // can resume the SAME provider-native conversation in the retained worktree.
-  // Default false = byte-compatible ordinary delivery dispatch.
-  continuable = false,
+  // M12-7: marks this delivery as the root of a continuable lineage: dispatch
+  // establishes the lineage provider session with turn:first so a future
+  // Lead-authorized run_continue can resume the SAME provider-native
+  // conversation in the retained worktree.
+  // 决定 0133 三态：true = 显式开（delivery-only；做不到按具名错误拒绝）；
+  // false = 显式关（不建谱系）；缺省 = 自动——带交付的派发在 autoContinuableOffReason
+  // 全部满足时才开，任一不满足就静默关闭、派发照常（与非续修派发逐字节相同）。
+  // 非布尔值一律按缺省（自动）处理。
+  continuable,
   // M12-16: Lead opt-in marking this run as correctable — a follow-up user turn
   // may be queued to the RUNNING provider process via run_correct (the
   // transcript-backed durable queue the detached runner drains over stdin).
@@ -372,6 +511,9 @@ export async function dispatchRun({
   // below, before any transcript write/fork). Default false = byte-compatible
   // ordinary dispatch (argv/stdin/events unchanged).
   correctable = false,
+  // 决定 0133 测试缝：谱系槽存储（缺省真实 .lineage-reuse；测试注入失败形状的
+  // createLineageStore(runDir, io)）。写槽与撤槽都走它。
+  lineageStore,
   // M11-7: skip the credential preflight (e.g. when the caller already did it
   // and is passing resolvedCredentials). Default false = always check.
   skipCredentialCheck = false,
@@ -601,19 +743,23 @@ export async function dispatchRun({
   const roleShaSource = executedRoleId !== null
     ? `config/roles/${executedRoleId}.md`
     : (agent.systemPrompt || null);
-  const reuseIdentityMaterial = (reuseEligible || continuable)
-    ? {
-        laneFingerprint: laneFingerprintOf({
-          backend: agent.backend,
-          modelId: agent.model?.id ?? null,
-          providerID: agent.model?.providerID ?? null,
-          // 决定 0106：providerKey 维恒为 null（provider 通道退役）。
-          providerKey: null,
-        }),
-        roleSha256: roleShaSource
-          ? roleContractSha256(loadRoleContract(roleShaSource))
-          : "none",
-      }
+  const buildReuseIdentityMaterial = () => ({
+    laneFingerprint: laneFingerprintOf({
+      backend: agent.backend,
+      modelId: agent.model?.id ?? null,
+      providerID: agent.model?.providerID ?? null,
+      // 决定 0106：providerKey 维恒为 null（provider 通道退役）。
+      providerKey: null,
+    }),
+    roleSha256: roleShaSource
+      ? roleContractSha256(loadRoleContract(roleShaSource))
+      : "none",
+  });
+  // 决定 0133：显式 true 与复用专家在此照旧冻结；缺省（自动）续修要等凭据预检、
+  // correctable 资格检查之后才知道开不开，开了再冻结（见下方谱系块；角色合同
+  // 加载出错不盖掉前面的拒绝码）。
+  let reuseIdentityMaterial = (reuseEligible || continuable === true)
+    ? buildReuseIdentityMaterial()
     : {};
   // R10-A: a per-dispatch model override can never ride a provider-session
   // reuse dispatch — EITHER shape. lead_workspace: a resumed expert
@@ -629,7 +775,7 @@ export async function dispatchRun({
   // supplied the model conflict fires first (deterministic; both are refused).
   const hasOverride = (modelOverride !== null && modelOverride !== undefined)
     || (reasoningOverride !== null && reasoningOverride !== undefined);
-  if (hasOverride && (reuseEligible || continuable)) {
+  if (hasOverride && (reuseEligible || continuable === true)) {
     if (modelOverride !== null && modelOverride !== undefined) {
       throw new ModelOverrideConflictError(reuseEligible ? "lead_workspace" : "run_lineage");
     }
@@ -693,6 +839,37 @@ export async function dispatchRun({
     );
   }
 
+  // 决定 0133：续修谱系根的最终判定。显式 true 照旧（下方 continuable 块里按
+  // 具名错误拒绝）；显式 false 不建；缺省（自动）只对带交付的派发判定——凭据预检
+  // 已完成，令牌类环境条件（backend.sessionReuseUnavailableReason）用的就是预检解析
+  // 出的 finalCredentials。能力解析器只读已构造的后端（构造零副作用，不按名分支）。
+  // 自动关闭时 continuableOff 带回闭集原因（回显给调用方）；非交付派发不带。
+  // 能力判定（自动与显式一样）用已构造好的 cwdGateBackend——注入的解析器优先，
+  // 缺省回落共享工厂，不再取决于调用方传没传解析器。
+  const lineageBackend = cwdGateBackend;
+  // 谱系 workspace = 与 run_continue 同一个证明函数（proveWorkspaceRoot：realpath +
+  // git 给出的盘上大小写的 Git 顶层）得出的根——不是 path.resolve 的结果，否则大小写
+  // 不同的写法、junction 路径会让首轮与续修算出不同的 opaque uuid（claude-code 的
+  // --resume 指向一个从未建立的会话）。MCP 传进来的本来就是证明过的根，结果不变。
+  // 证明不过（非 Git 顶层、不存在……）= null：自动按 no_workspace 关闭，显式 true
+  // 用现有的"需要工作区"错误拒绝（见谱系块）。只对可能建谱系的交付派发证明。
+  let lineageWorkspace = null;
+  if (publicDelivery && continuable !== false && typeof cwd === "string" && cwd.length > 0) {
+    try {
+      lineageWorkspace = proveWorkspaceRoot(ownershipCwd ?? cwd).root;
+    } catch {
+      lineageWorkspace = null;
+    }
+  }
+  let lineageRoot = continuable === true;
+  let continuableOff = null;
+  if (typeof continuable !== "boolean" && publicDelivery) {
+    continuableOff = autoContinuableOffReason({
+      cwd, workspaceRoot: lineageWorkspace, hasOverride, backend: lineageBackend, resolvedCredentials: finalCredentials,
+    });
+    lineageRoot = continuableOff === null;
+  }
+
   // M11-11C: expert session reuse — strictly NON-DELIVERY (delivery dispatch
   // always starts a fresh backend conversation). Resolve the reuse turn
   // (first/resume/busy) BEFORE the transcript write or fork. On busy, throw
@@ -752,46 +929,13 @@ export async function dispatchRun({
     }
   }
 
-  // M12-7: continuable delivery = lineage ROOT. Establish the lineage provider
-  // session (turn:first) under the lineage key (canonical workspace + agent +
-  // rootRunId + the lane fingerprint and role sha pinned by THIS dispatch). A
-  // future Lead-authorized run_continue resumes the SAME provider conversation
-  // (turn:resume) against this rootRunId, reusing the retained worktree. The
-  // key carries no Lead session, so a restarted host still resumes it.
-  // Mutually exclusive with lead_workspace above (that gate is
-  // non-delivery-only). Fail-closed: continuable is delivery-only, and a busy
-  // lineage slot refuses before any transcript write or fork.
-  let lineageRootRunId = null;
-  if (continuable) {
-    if (!publicDelivery) {
-      throw new ContinuableDeliveryOnlyError();
-    }
-    if (typeof cwd !== "string" || cwd.length === 0) {
-      throw new Error("dispatchRun: bound workspace (cwd) is required for a continuable delivery");
-    }
-    const continuationBackend = typeof backendFor === "function" ? backendFor(agent) : null;
-    if (!continuationBackend || continuationBackend.supportsSessionReuse !== true) {
-      throw new ContinuableBackendUnsupportedError();
-    }
-    const firstTurn = await resolveLineageFirstTurn({
-      runDir: resolvedRunDir,
-      runId: finalRunId,
-      workspace: cwd,
-      agentId,
-      ...reuseIdentityMaterial,
-      rootRunId: finalRunId,
-    });
-    if (firstTurn.kind === "busy") {
-      throw new ReuseBusyError(firstTurn.activeRunId);
-    }
-    sessionReuseRouting = firstTurn.routing;
-    lineageRootRunId = finalRunId;
-  }
-
   // Construct runner argv BEFORE any transcript write. All static preflight
   // (argv length guard, delivery validation) must happen before a single
   // durable fact is written — otherwise a rejected dispatch leaves an
   // orphaned pending transcript with no owner.
+  // 决定 0133：构造收成 buildRunnerArgs(routing, material)——缺省（自动）续修在写
+  // 谱系槽之前要用它预判"带上谱系参数后放不放得下"，真正的 runnerArgs 在谱系块
+  // 之后用同一个函数构造（不复制）。
   const _execPath = execPath ?? process.execPath;
   // 第 93 批续修 1：启动模块注入缝（缺省真实 launchRunner；测试注入失败形状）。
   const _launchRunner = launchRunnerFn ?? launchRunner;
@@ -802,127 +946,255 @@ export async function dispatchRun({
   // RunManager resolves timeout from agent > config > default internally.
   const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
 
-  const runnerArgs = [
-    _runnerPath,
-    agentId,
-    // 提示词经标准输入交给 runner（见下方 spawn），不进命令行；argv 只带它的摘要。
-    ...promptStdinArgs(prompt),
-    "--run-dir", resolvedRunDir,
-    "--run-id", finalRunId,
-    "--registry", resolvedRegistry,
-    "--poll-interval", String(effectivePollInterval),
-  ];
-  // M10-pre: only pass --wait-timeout when explicitly provided (CLI override).
-  // RunManager resolves from agent.waitTimeout > config.waitTimeout > default.
-  if (waitTimeout !== undefined && waitTimeout !== null) {
-    runnerArgs.push("--wait-timeout", String(waitTimeout));
-  }
-  // M10-pre closeout: thread server-owned global config.waitTimeout to the runner.
-  // This is NOT --wait-timeout (which would become "explicit" in precedence).
-  // The runner sets RunManager config.waitTimeout from this value, so the full
-  // precedence explicit > agent > global > default is preserved in the detached process.
-  if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
-    runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
-  }
-  // TD-198: the runner argv keeps threading the RAW --cwd flag value when one
-  // was given — the runner's RunManager.start normalizes idempotently against
-  // its inherited cwd (the CLI's), and HTTP backends treat
-  // cwd as a REMOTE hint that must not be silently replaced by a locally
-  // resolved path. The ABSOLUTE ownership fact lives in
-  // run.background_submitted.cwd above, not in the argv.
-  if (cwd) runnerArgs.push("--cwd", cwd);
-  // R10-A: thread the per-dispatch model override to the detached runner (the
-  // --cwd pair precedent). Included in the argv-length guard below by
-  // construction (the reduce covers the whole runnerArgs array).
-  if (modelOverride !== null && modelOverride !== undefined) {
-    runnerArgs.push("--model", modelOverride);
-  }
-  // R11-1: thread the per-dispatch reasoning effort override to the detached
-  // runner (the --model pair precedent). Included in the argv-length guard
-  // below by construction. A closed-set member can never start with "--", so
-  // parseSimpleFlags restores the pair exactly.
-  if (reasoningOverride !== null && reasoningOverride !== undefined) {
-    runnerArgs.push("--reasoning", reasoningOverride);
-  }
-  // 0045 W2b：显式车道+角色派发穿线到 detached runner（--model 对先例）。runner
-  // 侧经 dispatchResolution 单一真相重解析（R3 裁定"启动前重查一致性"——CLI 与
-  // runner 起动间 lanes.json/注册表可能已变）；配对完整性由解析器闭集把关。
-  if (resolvedLane !== undefined && resolvedLane !== null) {
-    runnerArgs.push("--lane", resolvedLane);
-  }
-  if (executedRoleId !== null) {
-    runnerArgs.push("--role", executedRoleId);
-  }
-  if (resolvedFrom === "alias") {
-    runnerArgs.push("--resolved-from", "alias");
-  }
-  if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
-  if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
-  if (requireCertified) runnerArgs.push("--require-certified");
-  if (publicDelivery) {
-    runnerArgs.push("--isolate");
-    runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
-  }
-  // Round 4 Bundle B: a read-only declaration forces isolation on the runner
-  // path too (this closes the gap above — the --isolate push used to be
-  // delivery-only, so a non-delivery readOnly dispatch would have reached the
-  // runner unisolated) and threads the declaration as --read-only so
-  // RunManager.start persists the exactly-once declaration fact. Mutually
-  // exclusive with delivery (refused above) — the two blocks never coexist.
-  if (readOnly) {
-    runnerArgs.push("--isolate");
-    runnerArgs.push("--read-only");
-  }
-  // 隔离三态穿线（--isolate→true / --no-isolate→false / 都不给→不传）。
-  // delivery 与 readOnly 已在上方强制 --isolate，此时不再叠加用户旗标
-  //（它们与 --no-isolate 的冲突由 CLI 边界 runCommand 拒绝，这里保持 argv 干净）。
-  if (!publicDelivery && !readOnly) {
-    if (isolate === true) {
+  const buildRunnerArgs = (routing, material) => {
+    const runnerArgs = [
+      _runnerPath,
+      agentId,
+      // 提示词经标准输入交给 runner（见下方 spawn），不进命令行；argv 只带它的摘要。
+      ...promptStdinArgs(prompt),
+      "--run-dir", resolvedRunDir,
+      "--run-id", finalRunId,
+      "--registry", resolvedRegistry,
+      "--poll-interval", String(effectivePollInterval),
+    ];
+    // M10-pre: only pass --wait-timeout when explicitly provided (CLI override).
+    // RunManager resolves from agent.waitTimeout > config.waitTimeout > default.
+    if (waitTimeout !== undefined && waitTimeout !== null) {
+      runnerArgs.push("--wait-timeout", String(waitTimeout));
+    }
+    // M10-pre closeout: thread server-owned global config.waitTimeout to the runner.
+    // This is NOT --wait-timeout (which would become "explicit" in precedence).
+    // The runner sets RunManager config.waitTimeout from this value, so the full
+    // precedence explicit > agent > global > default is preserved in the detached process.
+    if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
+      runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
+    }
+    // TD-198: the runner argv keeps threading the RAW --cwd flag value when one
+    // was given — the runner's RunManager.start normalizes idempotently against
+    // its inherited cwd (the CLI's), and HTTP backends treat
+    // cwd as a REMOTE hint that must not be silently replaced by a locally
+    // resolved path. The ABSOLUTE ownership fact lives in
+    // run.background_submitted.cwd above, not in the argv.
+    if (cwd) runnerArgs.push("--cwd", cwd);
+    // R10-A: thread the per-dispatch model override to the detached runner (the
+    // --cwd pair precedent). Included in the argv-length guard below by
+    // construction (the reduce covers the whole runnerArgs array).
+    if (modelOverride !== null && modelOverride !== undefined) {
+      runnerArgs.push("--model", modelOverride);
+    }
+    // R11-1: thread the per-dispatch reasoning effort override to the detached
+    // runner (the --model pair precedent). Included in the argv-length guard
+    // below by construction. A closed-set member can never start with "--", so
+    // parseSimpleFlags restores the pair exactly.
+    if (reasoningOverride !== null && reasoningOverride !== undefined) {
+      runnerArgs.push("--reasoning", reasoningOverride);
+    }
+    // 0045 W2b：显式车道+角色派发穿线到 detached runner（--model 对先例）。runner
+    // 侧经 dispatchResolution 单一真相重解析（R3 裁定"启动前重查一致性"——CLI 与
+    // runner 起动间 lanes.json/注册表可能已变）；配对完整性由解析器闭集把关。
+    if (resolvedLane !== undefined && resolvedLane !== null) {
+      runnerArgs.push("--lane", resolvedLane);
+    }
+    if (executedRoleId !== null) {
+      runnerArgs.push("--role", executedRoleId);
+    }
+    if (resolvedFrom === "alias") {
+      runnerArgs.push("--resolved-from", "alias");
+    }
+    if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
+    if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
+    if (requireCertified) runnerArgs.push("--require-certified");
+    if (publicDelivery) {
       runnerArgs.push("--isolate");
-    } else if (isolate === false) {
-      runnerArgs.push("--no-isolate");
+      runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
     }
-  }
-  // 标签穿线：--tag key=value 可重复，全部进 argv（runner 侧收齐多值）。
-  if (tags !== undefined && tags !== null) {
-    const tagList = Array.isArray(tags) ? tags : [tags];
-    for (const tag of tagList) {
-      runnerArgs.push("--tag", tag);
+    // Round 4 Bundle B: a read-only declaration forces isolation on the runner
+    // path too (this closes the gap above — the --isolate push used to be
+    // delivery-only, so a non-delivery readOnly dispatch would have reached the
+    // runner unisolated) and threads the declaration as --read-only so
+    // RunManager.start persists the exactly-once declaration fact. Mutually
+    // exclusive with delivery (refused above) — the two blocks never coexist.
+    if (readOnly) {
+      runnerArgs.push("--isolate");
+      runnerArgs.push("--read-only");
     }
-  }
-  // 决定 0131 §5：任务类型交给 runner（--model 对先例）。闭集成员不会以 "--" 开头，
-  // parseSimpleFlags 原样还原这一对；缺席 = argv 不变。
-  if (isPersistableOwnerTaskType(taskType)) {
-    runnerArgs.push("--task-type", taskType);
-  }
-  // M12-6 (P1-A): thread the server-proven frozen HEAD to the detached runner so
-  // RunManager.start can revalidate/pin the base. Server-side argv only (never
-  // returned via MCP); absent for CLI callers.
-  if (frozenGitHead) {
-    runnerArgs.push("--frozen-git-head", frozenGitHead);
-  }
-  // M11-11C: thread the resolved reuse routing to the detached runner. The
-  // payload is opaque ({mode, opaqueUuid, turn[, priorRunId]}) — it carries no
-  // raw Lead id, workspace path, agentId, or provider session id. The resume
-  // turn's priorRunId is a WAO runId (internal handle to the transcript SSOT).
-  // Detached-runner argv is server-side (never returned via MCP); the prompt
-  // already travels the same channel.
-  if (sessionReuseRouting) {
-    runnerArgs.push("--session-reuse-json", JSON.stringify(sessionReuseRouting));
-    // 0045 W3c（R4"runner 钉前比对"）：键材料冻结值随路由穿给 runner——runner
-    // 从注册表重算并比对，不等=注册表在派发与起动间被改，具名 fail-closed。
-    runnerArgs.push("--reuse-material-json", JSON.stringify(reuseIdentityMaterial));
-  }
-  // M12-16: thread correctable to the detached runner so RunManager.start spawns
-  // the child with a piped stdin + the stream-json input format and drains the
-  // correction queue. Server-side argv only (never returned via MCP).
-  if (correctable) {
-    runnerArgs.push("--correctable");
+    // 隔离三态穿线（--isolate→true / --no-isolate→false / 都不给→不传）。
+    // delivery 与 readOnly 已在上方强制 --isolate，此时不再叠加用户旗标
+    //（它们与 --no-isolate 的冲突由 CLI 边界 runCommand 拒绝，这里保持 argv 干净）。
+    if (!publicDelivery && !readOnly) {
+      if (isolate === true) {
+        runnerArgs.push("--isolate");
+      } else if (isolate === false) {
+        runnerArgs.push("--no-isolate");
+      }
+    }
+    // 标签穿线：--tag key=value 可重复，全部进 argv（runner 侧收齐多值）。
+    if (tags !== undefined && tags !== null) {
+      const tagList = Array.isArray(tags) ? tags : [tags];
+      for (const tag of tagList) {
+        runnerArgs.push("--tag", tag);
+      }
+    }
+    // 决定 0131 §5：任务类型交给 runner（--model 对先例）。闭集成员不会以 "--" 开头，
+    // parseSimpleFlags 原样还原这一对；缺席 = argv 不变。
+    if (isPersistableOwnerTaskType(taskType)) {
+      runnerArgs.push("--task-type", taskType);
+    }
+    // M12-6 (P1-A): thread the server-proven frozen HEAD to the detached runner so
+    // RunManager.start can revalidate/pin the base. Server-side argv only (never
+    // returned via MCP); absent for CLI callers.
+    if (frozenGitHead) {
+      runnerArgs.push("--frozen-git-head", frozenGitHead);
+    }
+    // M11-11C: thread the resolved reuse routing to the detached runner. The
+    // payload is opaque ({mode, opaqueUuid, turn[, priorRunId]}) — it carries no
+    // raw Lead id, workspace path, agentId, or provider session id. The resume
+    // turn's priorRunId is a WAO runId (internal handle to the transcript SSOT).
+    // Detached-runner argv is server-side (never returned via MCP); the prompt
+    // already travels the same channel.
+    if (routing) {
+      runnerArgs.push("--session-reuse-json", JSON.stringify(routing));
+      // 0045 W3c（R4"runner 钉前比对"）：键材料冻结值随路由穿给 runner——runner
+      // 从注册表重算并比对，不等=注册表在派发与起动间被改，具名 fail-closed。
+      runnerArgs.push("--reuse-material-json", JSON.stringify(material));
+    }
+    // M12-16: thread correctable to the detached runner so RunManager.start spawns
+    // the child with a piped stdin + the stream-json input format and drains the
+    // correction queue. Server-side argv only (never returned via MCP).
+    if (correctable) {
+      runnerArgs.push("--correctable");
+    }
+    return runnerArgs;
+  };
+
+  // M12-7: continuable delivery = lineage ROOT. Establish the lineage provider
+  // session (turn:first) under the lineage key (canonical workspace + agent +
+  // rootRunId + the lane fingerprint and role sha pinned by THIS dispatch). A
+  // future Lead-authorized run_continue resumes the SAME provider conversation
+  // (turn:resume) against this rootRunId, reusing the retained worktree. The
+  // key carries no Lead session, so a restarted host still resumes it.
+  // Mutually exclusive with lead_workspace above (that gate is
+  // non-delivery-only). 显式 true：delivery-only，忙碌的谱系槽在任何转录写入或
+  // fork 之前拒绝。
+  //
+  // 决定 0133：谱系 workspace 取 lineageWorkspace（上方 proveWorkspaceRoot 证明的根，
+  // 与 run_continue 重算 uuid 的那一份同源），不再用 CLI 传入的原样相对路径或
+  // path.resolve 的结果——两边 opaque uuid 才对得上。
+  //
+  // 缺省（自动）：能力条件已在上方判完；这里先预判命令行预算（lineageLaunchOverBudget，
+  // 快速路径、在写槽之前）再写槽。槽忙或槽存储故障（LineageSlotStorageError——只接这
+  // 一类，编程错误照常抛）静默关闭（lineage_slot_unavailable）。写槽之后若真实的
+  // 参数检查放不下、或同 runId 的转录仲裁被拒，撤回自己的槽（releaseAutoSlot，按内容
+  // 核对只动自己那条）——自动模式绝不能把原本能派的任务变成派不出去，也不留槽记录。
+  // 角色合同冻结放在 correctable 资格检查之后（上方），出错不盖掉原有拒绝码。
+  let lineageRootRunId = null;
+  let slotClaim = null; // 自动模式写下的谱系槽的撤回凭据（显式 true 不撤回，照旧）
+  if (lineageRoot) {
+    if (!publicDelivery) {
+      throw new ContinuableDeliveryOnlyError();
+    }
+    if (typeof cwd !== "string" || cwd.length === 0 || lineageWorkspace === null) {
+      throw new Error("dispatchRun: bound workspace (cwd) is required for a continuable delivery");
+    }
+    if (!lineageBackend || lineageBackend.supportsSessionReuse !== true) {
+      throw new ContinuableBackendUnsupportedError();
+    }
+    const claimLineageSlot = () => resolveLineageFirstTurn({
+      runDir: resolvedRunDir,
+      runId: finalRunId,
+      workspace: lineageWorkspace,
+      agentId,
+      ...reuseIdentityMaterial,
+      rootRunId: finalRunId,
+      reuseStore: lineageStore,
+    });
+    let firstTurn = null;
+    if (continuable === true) {
+      firstTurn = await claimLineageSlot();
+      if (firstTurn.kind === "busy") {
+        throw new ReuseBusyError(firstTurn.activeRunId);
+      }
+    } else {
+      reuseIdentityMaterial = buildReuseIdentityMaterial();
+      const probeRouting = {
+        mode: "run_lineage",
+        opaqueUuid: deriveLineageOpaqueUuid({
+          workspace: lineageWorkspace, agentId, rootRunId: finalRunId, ...reuseIdentityMaterial,
+        }),
+        turn: "first",
+      };
+      if (await lineageLaunchOverBudget({
+        buildRunnerArgs,
+        routing: probeRouting,
+        material: reuseIdentityMaterial,
+        transcriptDirBound: transcriptDirLengthBound(resolvedRunDir, finalRunId, ownershipCwd ?? cwd),
+        backend: lineageBackend,
+        agent,
+        prompt,
+        roleContract: composeLaunchRoleContract({
+          agentId, backend: lineageBackend, roleShaSource, executedRoleId, resolvedLane, publicDelivery,
+        }),
+        correctable,
+      })) {
+        continuableOff = "argv_budget";
+      } else {
+        try {
+          firstTurn = await claimLineageSlot();
+        } catch (error) {
+          if (error?.name !== "LineageSlotStorageError") throw error;
+          firstTurn = null;
+        }
+        if (firstTurn === null || firstTurn.kind === "busy") {
+          firstTurn = null;
+          continuableOff = "lineage_slot_unavailable";
+        } else {
+          slotClaim = firstTurn.claim;
+        }
+      }
+      if (firstTurn === null) {
+        lineageRoot = false;
+        reuseIdentityMaterial = {};
+      }
+    }
+    if (firstTurn !== null) {
+      sessionReuseRouting = firstTurn.routing;
+      lineageRootRunId = finalRunId;
+    }
   }
 
+  // 自动模式写下的槽：撤回（compare-and-restore，只动 runId 是自己的那一条；
+  // 撤回本身出错也不掩盖原路径的结果）。显式 true / 没写槽 = 无操作。
+  const releaseAutoSlot = async () => {
+    if (slotClaim === null) return;
+    const claim = slotClaim;
+    slotClaim = null;
+    try {
+      await releaseLineageFirstTurn({ runDir: resolvedRunDir, claim, reuseStore: lineageStore });
+    } catch {
+      // 撤回尽力而为——槽存储本来就可能是出故障的那一环。
+    }
+  };
+  // 自动模式槽已写、但真实检查发现开不成：撤槽，路由与材料清空，回显关闭原因，
+  // 调用方用不带谱系的参数重建。返回是否发生了回退（显式 true / 没谱系 = false）。
+  const fallBackToOrdinary = async (reason) => {
+    if (slotClaim === null) return false;
+    await releaseAutoSlot();
+    sessionReuseRouting = null;
+    reuseIdentityMaterial = {};
+    lineageRoot = false;
+    lineageRootRunId = null;
+    continuableOff = reason;
+    return true;
+  };
+
+  let runnerArgs = buildRunnerArgs(sessionReuseRouting, reuseIdentityMaterial);
+
   // Conservative total argv length guard — BEFORE transcript write.
-  const ARGV_MAX_TOTAL = 24000;
-  const totalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+  // 决定 0133：真实检查为准——自动谱系把参数撑过上限时，不拒绝派发，回退成普通派发。
+  if (argvLength(runnerArgs) > ARGV_MAX_TOTAL && await fallBackToOrdinary("argv_budget")) {
+    runnerArgs = buildRunnerArgs(null, {});
+  }
+  const totalArgvLen = argvLength(runnerArgs);
   if (totalArgvLen > ARGV_MAX_TOTAL) {
     throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce delivery/scorecard size`);
   }
@@ -945,7 +1217,10 @@ export async function dispatchRun({
     transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
     runnerArgs.push("--transcript-dir", dirname(transcriptPath));
   } catch (e) {
-    if (e?.code !== "transcript-not-found") throw e;
+    if (e?.code !== "transcript-not-found") {
+      await releaseAutoSlot();
+      throw e;
+    }
     const claim = claimRunIdForWrite(resolvedRunDir, finalRunId);
     if (!claim.claimed) {
       // 并发写者正在建同 runId：按既有档重解析一次；仍找不到=如实冲突（附
@@ -957,6 +1232,7 @@ export async function dispatchRun({
         transcriptPath = resolveTranscriptPath(resolvedRunDir, finalRunId, { forAppend: true });
         runnerArgs.push("--transcript-dir", dirname(transcriptPath));
       } catch {
+        await releaseAutoSlot();
         throw new TranscriptResolutionError("transcript-resolution-conflict",
           `runId ${finalRunId} concurrently claimed by another writer (or claim I/O failure — permission/disk) and not resolvable after re-check${claimAgeNote}`);
       }
@@ -972,16 +1248,28 @@ export async function dispatchRun({
         claimed = true;
       } catch (e2) {
         releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
+        await releaseAutoSlot();
         throw e2;
       }
     }
   }
   // 三轮 sol⑥：argv 终检覆盖**所有路径决定分支**（既有档复用分支同样在
   // --transcript-dir 追加后必须复查——只查新建分支曾漏检 24041>24000）。
+  // 决定 0133：这是真实检查（转录目录已定）。自动谱系把它撑过上限时，不拒绝派发：
+  // 撤回自己的槽，用不带谱系的参数（+同一个 --transcript-dir）重建，再按普通派发
+  // 复查——与显式 false 逐字节相同；显式 true 照旧报错。
   {
-    const finalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+    let finalArgvLen = argvLength(runnerArgs);
+    if (finalArgvLen > ARGV_MAX_TOTAL && slotClaim !== null) {
+      const dirArg = runnerArgs[runnerArgs.lastIndexOf("--transcript-dir") + 1];
+      if (await fallBackToOrdinary("argv_budget")) {
+        runnerArgs = [...buildRunnerArgs(null, {}), "--transcript-dir", dirArg];
+        finalArgvLen = argvLength(runnerArgs);
+      }
+    }
     if (finalArgvLen > ARGV_MAX_TOTAL) {
       if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
+      await releaseAutoSlot();
       throw new Error(`runner argv too long after transcript-dir (${finalArgvLen} > ${ARGV_MAX_TOTAL}); reduce delivery/scorecard size`);
     }
   }
@@ -993,6 +1281,7 @@ export async function dispatchRun({
     transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
   } catch (e3) {
     if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
+    await releaseAutoSlot();
     throw e3;
   }
 
@@ -1031,6 +1320,7 @@ export async function dispatchRun({
     });
   } catch (e4) {
     if (claimed) releaseRunIdClaim(resolvedRunDir, finalRunId, { nonce: claimNonce });
+    await releaseAutoSlot();
     throw e4;
   }
 
@@ -1043,6 +1333,8 @@ export async function dispatchRun({
   // and we must NOT fork the detached runner.
   const pendingResult = await transcript.transitionState(null, "pending", STATE_CHANGE_REASON.background_spawned);
   if (!pendingResult.accepted) {
+    // 决定 0133：被拒的派发没 fork、没建成谱系根——自动模式写下的槽撤回（不留记录）。
+    await releaseAutoSlot();
     return {
       accepted: false,
       runId: finalRunId,
@@ -1052,6 +1344,8 @@ export async function dispatchRun({
       terminalState: pendingResult.state,
       // M12-25: a rejected dispatch never requested a provider session.
       providerSessionRouting: "not_used",
+      // 决定 0133：被拒的派发没有建成谱系根。
+      continuable: false,
     };
   }
 
@@ -1159,5 +1453,9 @@ export async function dispatchRun({
     // above. Describes what dispatch requested, never provider success. Exposes
     // only the closed-set value — never the mode, opaque uuid, Lead id, or workspace.
     providerSessionRouting: deriveProviderSessionRouting(sessionReuseRouting),
+    // 决定 0133：这次派发是不是续修谱系根（所有派发都带）；缺省（自动）下带交付的
+    // 派发没开成时再带闭集原因 continuableOff（非交付派发、显式关闭都不带）。
+    continuable: lineageRoot,
+    ...(continuableOff !== null ? { continuableOff } : {}),
   };
 }

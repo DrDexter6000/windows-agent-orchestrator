@@ -53,7 +53,7 @@ import {
 // lead_preflight worker enums derive from this ONE SSOT constant (same wiring
 // pattern as READ_FAILURE_REASONS); no second hand-maintained list can drift.
 import { CERTIFICATION_REASON_CODES } from "../application/certificationReasons.js";
-import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN, REASONING_EFFORTS } from "../application/runDispatch.js";
+import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING, CONTINUABLE_OFF_REASONS, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN, REASONING_EFFORTS } from "../application/runDispatch.js";
 // TD-324（83 批 W2）：归属拒绝固定文案共用的原因清单片段（ownership SSOT 导出，
 // 六类拒绝逐类写）——各工具专属 mismatch 文案拼接它，不再各写一份清单。
 import { WORKSPACE_MISMATCH_REASONS_TEXT } from "../application/runWorkspaceOwnership.js";
@@ -947,12 +947,13 @@ const RUN_DISPATCH_INPUT = z.object({
   expectedGitHead: z.string().regex(EXPECTED_GIT_HEAD_RE).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
-  // M12-7: Lead opt-in marking this delivery as the ROOT of a continuable
-  // lineage. When true (delivery-only — the service enforces that invariant and
-  // a non-delivery continuable collapses to the fixed dispatch error), dispatch
+  // M12-7: marks this delivery as the ROOT of a continuable lineage: dispatch
   // establishes the lineage provider session (turn:first) so a future Lead-
   // authorized run_continue can resume the SAME provider conversation in the
-  // retained worktree. Default false = byte-compatible ordinary delivery.
+  // retained worktree. 决定 0133 三态：true = 显式开（delivery-only——服务强制，
+  // 非交付的 continuable 折成固定派发错误；做不到按具名固定文案拒绝）；false =
+  // 显式关；缺省 = 自动（带交付且条件满足才开，不满足静默关闭、派发照常，回执的
+  // continuable / continuableOff 如实回显）。
   continuable: z.boolean().optional(),
   // M12-16: Lead opt-in marking this run correctable — the detached runner
   // spawns the worker with a piped stdin + stream-json input (one live process)
@@ -1089,6 +1090,10 @@ const RUN_DISPATCH_OUTPUT = z.object({
   state: z.string(),
   workspaceProof: WORKSPACE_PROOF,
   providerSessionRouting: z.enum(PROVIDER_SESSION_ROUTING),
+  // 决定 0133：这次派发是不是续修谱系根（所有派发都带）；缺省（自动）下带交付的
+  // 派发没开成时再带闭集原因（非交付派发、显式关闭不带）。闭集取自派发服务 SSOT。
+  continuable: z.boolean(),
+  continuableOff: z.enum(CONTINUABLE_OFF_REASONS).optional(),
   // 决定 0095：受理成功的后台运行给一句静态模板（结束回合前挂好等待）；
   // accepted:false 不给。
   nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
@@ -1141,8 +1146,8 @@ const RUN_DISPATCH_DESCRIPTION =
   "runner/transcript and returns a runId. expectedWorkspaceRoot (absolute Git " +
   "worktree top-level) is this call's target — the default binding is " +
   "not consulted; expectedGitHead/expectedDirty are optional assertions. " +
-  "continuable roots a lineage run_continue can " +
-  "resume for a Lead-authorized correction; correctable (correction-capable backends only) " +
+  "delivery is continuable by default (backend permitting); continuable:false disables; " +
+  "correctable (correction-capable backends only) " +
   "keeps one live process so run_correct can queue an in-flight turn. taskType:\"image\" " +
   "marks an image-generation task for the Owner dashboard's grouping; it does not affect " +
   "dispatch. WAO never infers continuation, correction delivery, scope, retry, or acceptance.";
@@ -4887,11 +4892,10 @@ export function createWaoMcpServer({
           // profile supplies ONLY verification commands; mode/allowedPaths are the
           // Lead's inline delivery.
           ...(effectiveDelivery ? { delivery: effectiveDelivery } : {}),
-          // M12-7: Lead opt-in. continuable is threaded verbatim (default false
-          // = ordinary delivery). The service enforces delivery-only and a busy
-          // lineage slot refuses before any transcript/fork; those environmental
-          // throws collapse to the fixed dispatch error texts below.
-          ...(continuable ? { continuable: true } : {}),
+          // M12-7 / 决定 0133：continuable 三态原样透传（true 显式开 / false 显式关 /
+          // 缺省 = 服务层自动判定）。服务强制 delivery-only，忙碌的谱系槽位在
+          // 任何转录/fork 之前拒绝；这些环境性抛错折成下方固定派发错误文案。
+          ...(continuable !== undefined ? { continuable } : {}),
           // M12-16: Lead opt-in. correctable is threaded verbatim (default false
           // = ordinary run). The service gates on backend.supportsInFlightCorrection
           // before any side effect; a non-capable backend refuses (zero transcript,
@@ -4933,7 +4937,8 @@ export function createWaoMcpServer({
           // provider sessions before it claims the lineage slot or forks.
           // M12-16: a correctable run must prove the selected backend can queue an
           // in-flight correction before it forks. Both read the declared capability.
-          ...(continuable || correctable ? { backendFor: resolveBackendFor } : {}),
+          // 决定 0133：缺省（自动）续修同样靠它判能力，故恒透传。
+          backendFor: resolveBackendFor,
         });
       } catch (e) {
         // Credential-missing: fixed actionable text (names are safe to surface;
@@ -5083,6 +5088,11 @@ export function createWaoMcpServer({
           // opaque uuid / Lead id / workspace the dispatcher might also return are
           // NEVER forwarded (the handler selects exactly these keys).
           providerSessionRouting: result.providerSessionRouting,
+          // 决定 0133：续修回显。continuable 严格 === true 才算开（缺失/畸形读成
+          // false，不虚报谱系）；continuableOff 只在服务给了闭集原因时带，域外值
+          // 让 enum 失败 → 外层 catch 折成固定派发错误（同 providerSessionRouting）。
+          continuable: result.continuable === true,
+          ...(result.continuableOff !== undefined ? { continuableOff: result.continuableOff } : {}),
           // 决定 0095：受理成功的后台运行附 nextStep（MCP 面模板；第 136 批起
           // 末尾的 CLI 半句带本次受理的 runId）；accepted:false 不给。决定 0129：
           // 有 contractAdvisories 时 nextStep 追加半句（先看提醒，需要就停掉重派）。
