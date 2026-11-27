@@ -1728,12 +1728,12 @@ test("SW 连接总数到上限 → 503 + 固定错误体（在定位之前就挡
   const handed = open.calls[0];
   assert.deepEqual(
     Object.keys(handed).sort(),
-    ["afterSeq", "cursor", "filter", "headers", "res", "runId"],
-    "路由只交这几样：没有令牌、没有读模型、没有服务端路径",
+    ["afterSeq", "cursor", "filter", "headers", "res", "runId", "token"],
+    "路由只交这几样（145b 起含开流 bearer——流要复核会话是否仍有效）：没有读模型、没有服务端路径",
   );
   assert.deepEqual([handed.runId, handed.afterSeq, handed.cursor, handed.filter], [GUARD_RUN, 3, GOOD_CURSOR, "errors"], "参数原样（afterSeq 已是数）");
-  const { res: _res, headers, ...rest } = handed;
-  assert.ok(!JSON.stringify(rest).includes(s2.token), "令牌不进流的参数");
+  assert.equal(handed.token, s2.token, "145b：开流时的 bearer 原样交给流（复核会话用）");
+  const { res: _res, headers } = handed;
   assert.equal(headers["content-type"], "text/event-stream");
   assert.equal(headers["cache-control"], "no-store");
   assert.equal(headers["x-content-type-options"], "nosniff");

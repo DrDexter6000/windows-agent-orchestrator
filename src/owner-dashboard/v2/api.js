@@ -10,10 +10,23 @@
 //   - It is NEVER written to the page, a log or an error. It leaves this module
 //     only as the Authorization header of a request to /api/*.
 //
-// DATA PLANE: the page may read exactly these eight read-only routes; the request
+// START CODE (batch 145b, decision 0131 section 2): a persistent instance hands the page a
+// ONE-TIME start code in the fragment instead of a long-lived token:
+//   - #code=<64 lowercase hex> alone, or as one component of a page fragment
+//     (#workers?project=<slug>&code=<64 hex>) — the page clears the code component FIRST
+//     and synchronously (a project filter sharing the fragment survives), then exchanges
+//     it asynchronously; only a successful exchange leads to any data request.
+//   - The exchange is GET /api/session with the code in the Authorization header (never a
+//     query string), through the same single fetch call; the answer is a session token
+//     stored in sessionStorage under the same key as #token=.
+//   - A failed exchange means the code is dead: the stored token is cleared and the page
+//     shows the fixed "run wao dashboard again" message — it never falls back to an old token.
+//
+// DATA PLANE: the page may read exactly these nine read-only routes; the request
 // functions refuse any other path (and any query that is not the route's own closed,
 // shape-checked key set), and this module holds the only direct network call in the v2
 // code. Every request is a GET with the bearer, never cached, no referrer.
+//   /api/session                                            the one-time start-code exchange
 //   /api/overview /api/workers[?project=] /api/attention   the three list pages
 //   /api/worker?runId=                                     one worker's detail (JSON)
 //   /api/artifact?runId=&commit=&fileIndex=                one delivered image (a blob)
@@ -38,7 +51,7 @@ import { readStored, writeStored } from "./store.js";
 
 export const TOKEN_STORAGE_KEY = "wao_v2_token";
 export const API_PATHS = Object.freeze([
-  "/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact",
+  "/api/session", "/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact",
   "/api/worker/activity", "/api/worker/event", "/api/worker/stream",
 ]);
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -48,6 +61,14 @@ export const STREAM_IDLE_TIMEOUT_MS = 45_000;
 export const STREAM_EVENTS = Object.freeze(["rows", "update", "reset", "end"]);
 
 const TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * 145b 修正一 #14：任一接口 401 都要清掉存储的令牌——处理放进这唯一一处 fetch 的
+ * 401 分支（app.js 在启动时绑定具体怎么清）。清除函数只经 app 注入，本模块不碰
+ * window/storage。
+ */
+let clearStoredToken = null;
+export const bindTokenClear = (fn) => { clearStoredToken = typeof fn === "function" ? fn : null; };
 const TOKEN_FRAGMENT_PREFIX = "#token=";
 /** The stream route: the one data route whose answer is not a single JSON body. */
 const STREAM_PATH = "/api/worker/stream";
@@ -62,6 +83,38 @@ export function parseTokenFromHash(hash) {
 }
 
 export const authorizationHeader = (token) => `Bearer ${token}`;
+
+const CODE_FRAGMENT_PREFIX = "#code=";
+
+/**
+ * 145b：片段里的启动码。三种形态：
+ *   #code=<64hex>                    —— 独占片段（无筛选）
+ *   #<page>?[…&]code=<64hex>[&…]     —— 与页面筛选共处（--cwd 定初始项目筛选时用）
+ *   其它                              —— null（没有码，不动片段）
+ * 返回 { code, remaining }：code 是合法形状的码或 null（形状不对也返回，让调用方清片段）；
+ * remaining 是清掉码之后应保留的片段（独占形态为 ""，共处形态去掉 code 组件）。
+ *
+ * @param {string} hash
+ * @returns {{code: string|null, remaining: string}|null}
+ */
+export function splitCodeFromHash(hash) {
+  if (typeof hash !== "string" || !hash.startsWith("#")) return null;
+  if (hash.startsWith(CODE_FRAGMENT_PREFIX)) {
+    const candidate = hash.slice(CODE_FRAGMENT_PREFIX.length);
+    return { code: isValidToken(candidate) ? candidate : null, remaining: "" };
+  }
+  const cut = hash.indexOf("?");
+  if (cut < 0) return null;
+  const params = new URLSearchParams(hash.slice(cut + 1));
+  if (!params.has("code")) return null;
+  const value = params.get("code");
+  params.delete("code");
+  const rest = params.toString();
+  return {
+    code: isValidToken(value) ? value : null,
+    remaining: rest.length === 0 ? hash.slice(0, cut) : `${hash.slice(0, cut)}?${rest}`,
+  };
+}
 
 /**
  * The token for this page load: from the fragment (stored, fragment cleared), else
@@ -103,6 +156,7 @@ const STREAM_CURSOR_RE = /^1\.[0-9a-f]{16}\.[0-9a-f]{16}\.[0-9a-z]{1,11}\.[0-9a-
 
 /** Per route: the closed query keys, each with its shape and whether it is required. */
 const QUERY_SHAPES = Object.freeze({
+  "/api/session": {},
   "/api/overview": {},
   "/api/workers": { project: { re: SLUG_RE, required: false } },
   "/api/attention": { project: { re: SLUG_RE, required: false } },
@@ -268,19 +322,43 @@ async function get(path, token, accept, signal = null) {
   } catch {
     return { ok: false, reason: "network" };
   }
-  if (response.status === 401) return { ok: false, reason: "unauthorized" };
+  if (response.status === 401) {
+    // 详情、Activity、全文、图片、流的握手与列表轮询共用这一个 401 分支：存储的令牌
+    // 已死，清掉，让重载去要新的启动码。
+    try { clearStoredToken?.(); } catch { /* 存储不可用就只当作没有 */ }
+    return { ok: false, reason: "unauthorized" };
+  }
   if (response.status === 404) return { ok: false, reason: "notFound" };
   if (!response.ok) return { ok: false, reason: "server" };
   return { ok: true, response };
 }
 
 /**
+ * 145b：把一次性启动码换成会话令牌（GET /api/session，码走 Authorization 头，绝不进查询串；
+ * 也走这唯一一处 fetch）。成功 { ok: true, token, expiresAt }；失败 { ok: false, reason }
+ *（reason 同 request 的闭集；形状不对的码在出发前就拒）。
+ */
+export async function exchangeSession(code, signal = null) {
+  if (!isValidToken(code)) return { ok: false, reason: "unauthorized" };
+  const got = await get("/api/session", code, "application/json", timedSignal(signal));
+  if (!got.ok) return got;
+  try {
+    const body = await got.response.json();
+    if (body === null || typeof body !== "object" || !isValidToken(body.token)) {
+      return { ok: false, reason: "server" };
+    }
+    return { ok: true, token: body.token, expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : null };
+  } catch {
+    return { ok: false, reason: "server" };
+  }
+}
+/**
  * GET one of the JSON read routes. The result is { ok: true, body } or { ok: false, reason } with reason
  * one of "unauthorized" | "notFound" | "network" | "server". A route outside the closed set, the
  * image route and the stream route are refused before anything leaves the page.
  */
 export async function request(path, token, signal = null) {
-  if (!isDataPath(path) || path.startsWith("/api/artifact") || path.startsWith(STREAM_PATH)) throw new Error("request: path is not one of the dashboard routes");
+  if (!isDataPath(path) || path.startsWith("/api/artifact") || path.startsWith(STREAM_PATH) || path.startsWith("/api/session")) throw new Error("request: path is not one of the dashboard routes");
   const got = await get(path, token, "application/json", timedSignal(signal));
   if (!got.ok) return got;
   try {

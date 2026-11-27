@@ -1,240 +1,316 @@
 // test/ownerDashboardCli.test.js
 //
-// `runDashboardWeb` — the launcher behind `wao dashboard` (145a: `runs dashboard
-// --web` is retired; this is the only caller left, so the old legacy seams are
-// gone with it).
+// 第 145b 批：`wao dashboard` 命令层（常驻实例启动器与运维出口的 CLI 适配）。
 //
-// The web command is exercised via INJECTION: a fake server factory, a controllable
-// shutdown lifecycle, and a capturing stdout sink. No real socket is bound, no git
-// is run, no registry file is read, and no OS signal is delivered — so startup /
-// fragment / retirement / shutdown are all deterministic.
-//
-// Non-web behavior is byte-compatible (covered by test/cli.test.js); here we
-// only assert the web surface.
+// 经注入 controlIo（假的世界）驱动 launch/status/stop/restart 的对外行为：
+//   - 启动/复用都签发启动码，URL 只进片段（#code=…，或带项目筛选的
+//     #workers?project=…&code=…），绝不进查询串；
+//   - --no-open 或打开失败时 URL 打印一次（只进 stdout）；
+//   - build 三态的提示行；运行目录缺失的固定报错；
+//   - status 如实（不含启动码与令牌）；stop 超时不强杀的文案；restart 中止。
+// 无真实实例、无网络、无浏览器、无 WMI——那些在 ownerDashboardE2e.test.js。
+// `runs dashboard --web` 的退役墓碑仍在此处一行。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
-import { runDashboardWeb, runsDashboardCommand } from "../../src/commands/runs.js";
+import { dashboardCommand } from "../../src/commands/dashboard.js";
+import { runsDashboardCommand } from "../../src/commands/runs.js";
 import { RUNS_DASHBOARD_WEB_RETIRED_MESSAGE } from "../../src/cliHelp.js";
+import { normalizeRunDir } from "../../src/application/dashboardPaths.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-
-// Flush the microtask + macrotask queues so an async function can run until it
-// parks at an injected await (here: lifecycle.wait()).
-const flush = () => new Promise((r) => setImmediate(r));
-
-// Fake server: deterministic token/port, tracks listen + close.
-function makeFakeServer(opts = {}) {
-  const token = opts.token || "ab".repeat(32);
-  const port = opts.port ?? 7654;
-  const self = {
-    token,
-    listenCalled: false,
-    closeCalled: false,
-    listen: async () => { self.listenCalled = true; return { port, host: "127.0.0.1", family: "IPv4" }; },
-    close: async () => { self.closeCalled = true; },
+/** 一个假的世界：controlIo 全可控；world.candidate 决定拉起的候选。时钟随 sleep 前进。 */
+function makeIo(world) {
+  let clock = 1_000_000;
+  return {
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+    ensureStateDir: async () => ({ ok: true }),
+    verifyStateDir: async () => ({ ok: true }),
+    readInstanceEx: async () => (world.instance == null
+      ? { status: "absent" }
+      : { status: "present", raw: world.instance, record: world.instance }),
+    publishInstance: async (dir, record) => { world.published = record; },
+    readCandidate: async () => world.candidate ?? null,
+    candidateBuild: null,
+    readResult: async () => world.result ?? null,
+    removeResult: async () => {},
+    createLock: async (d, g, dl) => {
+      if (world.lock === undefined || world.lock === null) { world.lock = { generation: g, deadline: dl }; return { ok: true }; }
+      return { ok: false, lock: world.lock };
+    },
+    readLock: async () => world.lock ?? null,
+    takeOverStale: async () => false,
+    writeStopRequest: async () => {},
+    probeIdentity: async () => world.identity ?? "same",
+    listenerPids: async (port) => {
+      const pids = [];
+      if (world.candidate != null && port === world.candidate.port) pids.push(world.candidate.pid);
+      if (world.instance != null && port === world.instance.port) pids.push(world.instance.pid);
+      return pids;
+    },
+    health: async (port) => {
+      if (world.candidate != null && port === world.candidate.port) return { ok: true, nonce: world.candidate.nonce };
+      if (world.instance != null && port === world.instance.port) return { ok: true, nonce: world.instance.nonce };
+      return { ok: false };
+    },
+    spawnServe: async ({ generation }) => {
+      world.spawned = generation;
+      world.candidate ??= { port: 9001, pid: 777, nonce: "ab".repeat(16), processCreatedAt: 1_700_000_000_000 };
+      return { ok: true, pid: world.candidate.pid };
+    },
+    issueCode: async () => ({ code: "0f".repeat(32) }),
+    buildSnapshot: async () => world.buildNow ?? { readable: true, srcTree: "f".repeat(40), dirty: false },
   };
-  return self;
 }
 
-// Controllable lifecycle: wait() parks until resolve() is called (the test
-// "delivers the shutdown signal"). No `this` dependency.
-function makeControllableLifecycle() {
-  let resolveWait;
-  const done = new Promise((r) => { resolveWait = r; });
-  return {
-    wait: () => done,
-    resolve: () => resolveWait(),
-    cancel() {},
-  };
+const runDirOf = (dir) => normalizeRunDir(resolve(dir));
+
+function tempRunDir() {
+  const dir = mkdtempSync(join(tmpdir(), "wao-dash-cli-"));
+  mkdirSync(dir, { recursive: true });
+  return [dir, () => rmSync(dir, { recursive: true, force: true })];
 }
 
 const baseConfig = { runDir: "/runs", registry: "config/agents.json" };
 
-// Default injections: minimal fakes that let the command park at lifecycle.wait.
-function defaultInjections(server, lc, extras = {}) {
-  return {
-    createServerFn: () => server,
-    lifecycle: lc,
-    log: () => {},
-    ...extras,
-  };
-}
-
 // =====================================================================
-// STARTUP + FRAGMENT — exactly one URL (token in fragment) + Ctrl-C line
+// LAUNCH — the start-code URL, the open, the print discipline
 // =====================================================================
-test("STARTUP: prints exactly one URL (#token=<64hex>, the /v2/ entry) + Ctrl-C line", async () => {
-  const lc = makeControllableLifecycle();
-  const logs = [];
-  const server = makeFakeServer({ port: 7654, token: "ab".repeat(32) });
-  let created = null;
 
-  const p = runDashboardWeb(
-    { web: true, port: "7654" },
-    baseConfig,
-    {
-      createServerFn: (cfg) => { created = cfg; return server; },
-      lifecycle: lc,
+test("LAUNCH: fresh instance — URL is /v2/#code=<64hex> (fragment only), opener called once, nothing printed", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {};
+    const opened = [];
+    const logs = [];
+    const out = await dashboardCommand(["--run-dir", dir], baseConfig, {
+      controlIo: makeIo(world),
+      openUrlFn: async (url) => { opened.push(url); },
       log: (s) => logs.push(s),
-    },
-  );
-
-  let settled = false;
-  p.then(() => { settled = true; }, () => { settled = true; });
-  await flush();
-
-  // Stays alive until the shutdown signal (parked at lifecycle.wait).
-  assert.equal(settled, false, "stays alive until shutdown signal");
-  assert.equal(server.listenCalled, true, "listened");
-  assert.equal(logs.length, 2, "exactly two log lines (no auto-open / no extra noise)");
-  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:7654\/v2\/#token=[0-9a-f]{64}$/, "URL shape: host:port/v2/#token=<64hex>");
-  assert.ok(logs[0].endsWith("#token=" + "ab".repeat(32)), "token is the server-issued 64-hex");
-  assert.ok(!logs[0].includes("?"), "no query string — token only in fragment");
-  assert.equal(logs[1], "(Ctrl-C to stop)");
-
-  // Server-owned inputs threaded from the ONE remaining caller: the run directory and the port.
-  assert.equal(created.port, 7654);
-  assert.ok(typeof created.runDir === "string" && created.runDir.length > 0);
-
-  // Shutdown: resolving the lifecycle closes the server and the command returns.
-  lc.resolve();
-  await p;
-  assert.equal(settled, true);
-  assert.equal(server.closeCalled, true, "server closed on shutdown");
-});
-
-test("FRAGMENT: default port (ephemeral) — printed URL uses the listen port, not 0", async () => {
-  const lc = makeControllableLifecycle();
-  const logs = [];
-  const server = makeFakeServer({ port: 4321, token: "0".repeat(64) });
-  let created = null;
-  const p = runDashboardWeb(
-    { web: true },
-    baseConfig,
-    {
-      createServerFn: (cfg) => { created = cfg; return server; },
-      lifecycle: lc,
-      log: (s) => logs.push(s),
-    },
-  );
-  await flush();
-  assert.equal(created.port, 0, "no --port → ephemeral (0) sent to the server");
-  assert.match(logs[0], /^http:\/\/127\.0\.0\.1:4321\/v2\/#token=[0-9a-f]{64}$/, "URL uses listen port and the /v2/ entry");
-  lc.resolve();
-  await p;
-});
-
-// =====================================================================
-// RETIRED — `runs dashboard --web` fails with the fixed text (the `wao ask` style)
-// =====================================================================
-test("RETIRED: runs dashboard --web throws the fixed text pointing at wao dashboard (never reaches a server)", async () => {
-  for (const args of [["--web"], ["--web", "--port", "7654"], ["--web", "--watch", "5"], ["--web", "--format", "json"]]) {
-    await assert.rejects(
-      () => runsDashboardCommand(args, baseConfig),
-      (error) => error.message === RUNS_DASHBOARD_WEB_RETIRED_MESSAGE,
-      args.join(" "),
-    );
+    });
+    assert.equal(out.outcome, "launched");
+    assert.deepEqual(opened, [`http://127.0.0.1:9001/v2/#code=${"0f".repeat(32)}`]);
+    assert.ok(!opened[0].includes("?"), "no query string — the code only rides the fragment");
+    assert.ok(!logs.some((l) => l.includes("#code=")), "the URL is NOT printed when the opener worked");
+    assert.ok(logs.some((l) => l.includes("已启动")));
+  } finally {
+    done();
   }
-  assert.match(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE, /runs dashboard --web/);
-  assert.match(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE, /wao dashboard/);
 });
 
-test("RETIRED: the CLI exits non-zero with that text (and prints no URL)", () => {
-  const r = spawnSync(process.execPath, [join(ROOT, "src", "cli.js"), "runs", "dashboard", "--web"], {
-    cwd: ROOT,
-    encoding: "utf8",
-    timeout: 30000,
-  });
-  assert.equal(r.status, 1, `exit code 1 (stderr: ${r.stderr})`);
-  assert.ok(r.stderr.includes(RUNS_DASHBOARD_WEB_RETIRED_MESSAGE), "the fixed text is on stderr");
-  assert.ok(!/http:\/\/127\.0\.0\.1/.test(r.stdout + r.stderr), "no dashboard URL is printed");
-});
-
-// =====================================================================
-// PORT — optional --port must be an integer
-// =====================================================================
-test("PORT: non-integer --port is rejected before the server is created", async () => {
-  const lc = makeControllableLifecycle();
-  let createCalls = 0;
-  await assert.rejects(
-    runDashboardWeb(
-      { web: true, port: "abc" },
-      baseConfig,
-      defaultInjections(makeFakeServer(), lc, {
-        createServerFn: () => { createCalls += 1; return makeFakeServer(); },
-      }),
-    ),
-    /--port must be an integer/i,
-  );
-  assert.equal(createCalls, 0, "no server created on bad port");
-});
-
-// =====================================================================
-// AUTHORITY — the server-owned runDir + explicit port are threaded; no legacy
-// workspace/registry resolution remains (145a: only `wao dashboard` calls this)
-// =====================================================================
-test("AUTHORITY: the server receives the runDir from config and the explicit port; nothing legacy is resolved", async () => {
-  const lc = makeControllableLifecycle();
-  let created = null;
-  const p = runDashboardWeb(
-    { web: true, port: "7654", runDir: "/explicit/runs" },
-    baseConfig,
-    {
-      createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-      // Legacy seams are gone: providing them changes nothing, because nothing reads them.
-      proveWorkspaceFn: () => { throw new Error("must not be called"); },
-      readRegistryFn: async () => { throw new Error("must not be called"); },
-      lifecycle: lc,
+test("LAUNCH: --cwd inside a known project adds the project filter to the fragment", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {};
+    const opened = [];
+    await dashboardCommand(["--run-dir", dir, "--cwd", "D:/proj/shop"], baseConfig, {
+      controlIo: makeIo(world),
+      filterIo: {
+        identifyFn: (cwd) => ({ kind: "project", key: "d:/proj/shop", displayName: "shop" }),
+        bucketIndexFn: () => ({ entries: { "d:/proj/shop": "shop-api" } }),
+      },
+      openUrlFn: async (url) => { opened.push(url); },
       log: () => {},
-    },
-  );
-  await flush();
-  assert.deepEqual(Object.keys(created).sort(), ["port", "runDir"], "exactly the two server-owned inputs remain");
-  assert.equal(created.port, 7654);
-  assert.equal(created.runDir, resolve("/explicit/runs"), "an explicit --run-dir wins over config.runDir (resolved from the caller cwd)");
-  lc.resolve();
-  await p;
+    });
+    assert.deepEqual(opened, [`http://127.0.0.1:9001/v2/#workers?project=shop-api&code=${"0f".repeat(32)}`]);
+  } finally {
+    done();
+  }
 });
 
-test("AUTHORITY: without --run-dir the config runDir is used", async () => {
-  const lc = makeControllableLifecycle();
-  let created = null;
-  const p = runDashboardWeb(
-    { web: true },
-    baseConfig,
-    {
-      createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
-      lifecycle: lc,
+test("LAUNCH: --cwd that maps to no known project opens the unfiltered overview", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {};
+    const opened = [];
+    await dashboardCommand(["--run-dir", dir, "--cwd", "D:/elsewhere"], baseConfig, {
+      controlIo: makeIo(world),
+      filterIo: {
+        identifyFn: () => ({ kind: "unattributed" }),
+        bucketIndexFn: () => ({ entries: {} }),
+      },
+      openUrlFn: async (url) => { opened.push(url); },
       log: () => {},
-    },
+    });
+    assert.match(opened[0], /\/v2\/#code=[0-9a-f]{64}$/);
+  } finally {
+    done();
+  }
+});
+
+test("LAUNCH: --no-open prints the URL exactly once to stdout; reuse prints the build drift lines", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {
+      instance: {
+        protocol: 1, runDir: runDirOf(dir), pid: 42, processCreatedAt: 1, port: 8123,
+        nonce: "ab".repeat(16), generation: "a".repeat(16),
+        build: { readable: true, srcTree: "f".repeat(40), dirty: false },
+      },
+      buildNow: { readable: true, srcTree: "e".repeat(40), dirty: false },
+    };
+    const logs = [];
+    const out = await dashboardCommand(["--run-dir", dir, "--no-open"], baseConfig, {
+      controlIo: makeIo(world),
+      log: (s) => logs.push(s),
+    });
+    assert.equal(out.outcome, "reused");
+    const urlLines = logs.filter((l) => l.includes("#code="));
+    assert.equal(urlLines.length, 1, "the URL is printed exactly once");
+    assert.match(urlLines[0], /^http:\/\/127\.0\.0\.1:8123\/v2\/#code=[0-9a-f]{64}$/);
+    assert.ok(logs.some((l) => l.includes("旧版本代码")));
+    const world2 = { ...world, buildNow: { readable: true, srcTree: "f".repeat(40), dirty: true } };
+    const logs2 = [];
+    await dashboardCommand(["--run-dir", dir, "--no-open"], baseConfig, {
+      controlIo: makeIo(world2),
+      log: (s) => logs2.push(s),
+    });
+    assert.ok(logs2.some((l) => l.includes("无法确认实例版本")));
+  } finally {
+    done();
+  }
+});
+
+test("LAUNCH: a failing opener prints the URL once (stdout) and still completes", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {};
+    const logs = [];
+    const out = await dashboardCommand(["--run-dir", dir], baseConfig, {
+      controlIo: makeIo(world),
+      openUrlFn: async () => { throw new Error("rundll32 missing"); },
+      log: (s) => logs.push(s),
+    });
+    assert.equal(out.outcome, "launched");
+    assert.equal(logs.filter((l) => l.includes("#code=")).length, 1, "printed once");
+    assert.ok(logs.some((l) => l.includes("无法自动打开浏览器")));
+  } finally {
+    done();
+  }
+});
+
+test("LAUNCH: a missing run directory is a fixed error before anything starts", async () => {
+  const missing = join(tmpdir(), "wao-dash-cli-no-such-" + Date.now());
+  let spawned = 0;
+  await assert.rejects(
+    dashboardCommand(["--run-dir", missing], baseConfig, {
+      controlIo: { ...makeIo({}), spawnServe: async () => { spawned += 1; return { ok: true, pid: 1 }; } },
+      log: () => {},
+    }),
+    /运行目录/,
   );
-  await flush();
-  assert.equal(created.runDir, resolve(baseConfig.runDir), "config.runDir resolved for the server");
-  lc.resolve();
-  await p;
+  assert.equal(spawned, 0);
+});
+
+test("LAUNCH: a protocol-incompatible record refuses to issue a code (restart hint)", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {
+      instance: {
+        protocol: 2, runDir: runDirOf(dir), pid: 42, processCreatedAt: 1, port: 8123,
+        nonce: "ab".repeat(16), generation: "a".repeat(16),
+        build: { readable: true, srcTree: "f".repeat(40), dirty: false },
+      },
+    };
+    await assert.rejects(
+      dashboardCommand(["--run-dir", dir], baseConfig, { controlIo: makeIo(world), log: () => {} }),
+      /restart/,
+    );
+  } finally {
+    done();
+  }
 });
 
 // =====================================================================
-// SHUTDOWN — close is called even if the wait rejects (process signal kill)
+// STATUS / STOP / RESTART
 // =====================================================================
-test("SHUTDOWN: server is closed in a finally (runs even if wait rejects)", async () => {
-  const server = makeFakeServer();
-  const lc = {
-    wait: () => Promise.reject(new Error("signal")),
-    cancel() {},
-  };
+
+test("STATUS (145b-fix): prints the reuse-check verdict and names WHICH check failed; never a code or token", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {
+      instance: {
+        protocol: 1, runDir: runDirOf(dir), pid: 42, processCreatedAt: 1_700_000_000_000, port: 8123,
+        nonce: "ab".repeat(16), generation: "a".repeat(16),
+        build: { readable: true, srcTree: "f".repeat(40), dirty: false },
+      },
+    };
+    const logs = [];
+    await dashboardCommand(["status", "--run-dir", dir], baseConfig, {
+      controlIo: makeIo(world),
+      log: (s) => logs.push(s),
+    });
+    const text = logs.join("\n");
+    assert.ok(text.includes("pid 42") && text.includes("端口 8123") && text.includes("协议版本 1"));
+    assert.ok(!/[0-9a-f]{64}/.test(text), "no start code or token in status output");
+    const empty = [];
+    await dashboardCommand(["status", "--run-dir", dir], baseConfig, {
+      controlIo: makeIo({}),
+      log: (s) => empty.push(s),
+    });
+    assert.ok(empty.some((l) => l.includes("没有正在运行的看板实例")));
+  } finally {
+    done();
+  }
+});
+
+test("STOP: timeout reports honestly (no kill, no record deletion) with the fixed lines", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {
+      instance: {
+        protocol: 1, runDir: runDirOf(dir), pid: 42, processCreatedAt: 1, port: 8123,
+        nonce: "ab".repeat(16), generation: "a".repeat(16),
+        build: { readable: true, srcTree: "f".repeat(40), dirty: false },
+      },
+    };
+    const io = makeIo(world);
+    io.probeIdentity = async () => "same"; // 活着不退：等满 STOP_WAIT（注入 sleep 即时返回）
+    await assert.rejects(
+      dashboardCommand(["stop", "--run-dir", dir], baseConfig, { controlIo: io, log: () => {} }),
+      /没有按时退出/,
+    );
+    assert.notEqual(world.instance, null, "the record is kept");
+  } finally {
+    done();
+  }
+});
+
+test("RESTART: aborted when stop fails — no spawn, the fixed stop-failed text", async () => {
+  const [dir, done] = tempRunDir();
+  try {
+    const world = {
+      instance: {
+        protocol: 1, runDir: runDirOf(dir), pid: 42, processCreatedAt: 1, port: 8123,
+        nonce: "ab".repeat(16), generation: "a".repeat(16),
+        build: { readable: true, srcTree: "f".repeat(40), dirty: false },
+      },
+    };
+    const io = makeIo(world);
+    io.probeIdentity = async () => "same";
+    let spawned = 0;
+    io.spawnServe = async () => { spawned += 1; return { ok: true, pid: 1 }; };
+    await assert.rejects(
+      dashboardCommand(["restart", "--run-dir", dir], baseConfig, { controlIo: io, log: () => {} }),
+      /没有按时退出|中止/,
+    );
+    assert.equal(spawned, 0, "restart never starts a second instance when stop failed");
+  } finally {
+    done();
+  }
+});
+
+// =====================================================================
+// RETIRED — `runs dashboard --web` keeps its tombstone
+// =====================================================================
+
+test("RETIRED: runs dashboard --web throws the fixed text and starts nothing", async () => {
   await assert.rejects(
-    runDashboardWeb(
-      { web: true },
-      baseConfig,
-      defaultInjections(server, lc),
-    ),
-    /signal/,
+    () => runsDashboardCommand(["--web"], baseConfig),
+    (error) => error.message === RUNS_DASHBOARD_WEB_RETIRED_MESSAGE,
   );
-  assert.equal(server.closeCalled, true, "close ran in finally despite the rejected wait");
 });

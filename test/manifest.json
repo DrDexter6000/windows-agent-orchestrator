@@ -221,7 +221,16 @@
       "transcript/transcript.test.js",
       "transcript/transitionExpectedLastSeq.test.js",
       "transcript/reverifyMultiChain.test.js",
-      "delivery/mcpRunDeliveryAdoption.test.js"
+      "delivery/mcpRunDeliveryAdoption.test.js",
+      "application/dashboardPaths.test.js",
+      "application/dashboardSession.test.js",
+      "application/dashboardCodes.test.js",
+      "application/dashboardFiles.test.js",
+      "application/dashboardBuild.test.js",
+      "application/dashboardControl.test.js",
+      "isolation-infra/ownerDashboardSession.test.js",
+      "commands/dashboardServe.test.js",
+      "isolation-infra/ownerDashboardBoot.test.js"
     ],
     "git": [
       "delivery/adoptionQuery.test.js",
@@ -374,7 +383,10 @@
       "run-lifecycle/claudeOauthDoctorCheck.test.js",
       "backends/claudeOauthTokenMode.test.js",
       "run-lifecycle/claudeOauthTokenModeDoctor.test.js",
-      "run-lifecycle/certGateDoctorCheck.test.js"
+      "run-lifecycle/certGateDoctorCheck.test.js",
+      "application/dashboardWinFacts.test.js",
+      "application/dashboardAcl.test.js",
+      "isolation-infra/ownerDashboardE2e.test.js"
     ],
     "lock": [
       "migration-0045/backgroundExplicit.test.js",

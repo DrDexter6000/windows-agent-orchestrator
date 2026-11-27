@@ -234,15 +234,16 @@ const DEFAULT_IO = Object.freeze({
  *
  * @param {object} input
  * @param {object} input.readModel — Owner 读模型（locateRunTranscript：授权 + 请求当刻的副本复核）
- * @param {Function} [input.authorize] — `(runId) => boolean`：运行此刻在服务已发布的快照里且是 ok（服务给；
- *   缺省不查这一层，只剩 locateRunTranscript 的复核）。开流后每 OWNER_STREAM_AUTH_MS 问一次
+ * @param {Function} [input.authorize] — `(runId, token?) => boolean`：运行此刻在服务已发布的快照里且是 ok
+ *   （服务给；缺省不查这一层，只剩 locateRunTranscript 的复核）。145b 起第二参是这条流开流时的
+ *   bearer 值（服务端用来复核会话令牌是否仍有效）。开流后每 OWNER_STREAM_AUTH_MS 问一次
  * @param {object} [input.env] — 脱敏用的环境（缺省 process.env）
  * @param {string} [input.generation] — 流代际（服务实例的 nonce，16 位十六进制）；缺省随机
  * @param {object} [input.io] — 注入缝（测试用）：`now()`、`watch(path, onEvent, onError)`、`stat(path)` → bigint stat、
  *   `read(path, position, length)` → 字节
  * @param {object} [input.limits] — 注入缝（测试用）：`limit`、`pagesMax`、`connectionsMax`、`stallMs`、`authMs`、`pollMs`、`endSettleMs`、`lostGraceMs`
  * @returns {{generation: string, size: Function, full: Function, open: Function, closeAll: Function}}
- *   open({ runId, afterSeq, cursor, filter, res, headers }) → { ok: true, connection } |
+ *   open({ runId, afterSeq, cursor, filter, res, headers, token }) → { ok: true, connection } |
  *   { ok: false, reason: "not_found" | "full" | "closed" | "gone" }。ok 为 true 时 200 的响应头已经写出
  *   （游标对不上时：200 + 一帧 reset，已结束）；connection 是给路由与测试的把手：close()、check()（立刻查一轮）。
  */
@@ -527,11 +528,12 @@ export function createWorkerStreams({
     finish(conn, "end", { runId: conn.runId, state: conn.lastState, terminal: true, total: conn.lastTotal });
   }
 
-  /** 开流之后的授权复核：运行还在已发布的快照里且是 ok，副本复核（读模型的定位）也过得去。读不出也算不过。 */
+  /** 开流之后的授权复核：运行还在已发布的快照里且是 ok，副本复核（读模型的定位）也过得去。读不出也算不过。
+   * 145b：开流时的 bearer 一并复核（authorize 的第二参）——会话令牌过期就不过。 */
   async function reauthorize(conn) {
     conn.authAt = now();
     try {
-      if (authorize !== undefined && authorize(conn.runId) !== true) return false;
+      if (authorize !== undefined && authorize(conn.runId, conn.token) !== true) return false;
     } catch {
       return false;
     }
@@ -674,7 +676,7 @@ export function createWorkerStreams({
     }
   }
 
-  async function admit({ runId, afterSeq, cursor, filter, res, headers }) {
+  async function admit({ runId, afterSeq, cursor, filter, res, headers, token }) {
     const located = await locate(runId);
     if (located === null) return { ok: false, reason: "not_found" };
     let whole;
@@ -689,7 +691,7 @@ export function createWorkerStreams({
     if (closed) return { ok: false, reason: "closed" };
     if (res.destroyed === true || res.writableEnded === true) return { ok: false, reason: "gone" };
     const conn = {
-      runId, filter, res,
+      runId, filter, res, token,
       path: located.path, fileId: { dev: fileId.dev, ino: fileId.ino },
       // offset = 整行到了哪里（游标用它）；readOffset = 字节读到了哪里（末尾的半行留在 remainder 里）。
       offset: whole.consumed, readOffset: located.bytes.length, remainder: copyFrom(located.bytes, whole.consumed), events: whole.events,

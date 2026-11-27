@@ -101,6 +101,15 @@ const SUBCOMMAND_SPECS = [
   },
   { command: "serve", module: "src/commands/serve.js", dispatcher: "serveCommand" },
   {
+    command: "dashboard",
+    module: "src/commands/dashboard.js",
+    dispatcher: "dashboardCommand",
+    scanVar: "first",
+    excluded: {
+      serve: "内部入口：常驻实例进程本身，由 wao dashboard 经 WMI 拉起（Notes 内部旗标行点名 dashboard serve），不经人手运行",
+    },
+  },
+  {
     command: "registry",
     module: "src/commands/registry.js",
     dispatcher: "registryCommand",
@@ -209,6 +218,9 @@ test("67a-子命令：分发器字面量 ↔ 帮助行首词双向相等", async
 const INTERNAL_FLAGS = [
   "--run-id",
   "--state-dir",
+  "--state-root",
+  "--generation",
+  "--deadline",
   "--install-root",
   "--example-registry",
   "--reliability-summary",
@@ -227,7 +239,8 @@ const FLAG_MODULE_COMMANDS = {
     "daemon start", "daemon run", "daemon stop", "daemon status",
     "daemon list", "daemon ping", "daemon supervise", "daemon supervisor", "daemon health",
   ],
-  "src/commands/dashboard.js": ["dashboard"],
+  "src/commands/dashboard.js": ["dashboard", "dashboard status", "dashboard stop", "dashboard restart"],
+  "src/commands/dashboardServe.js": ["dashboard"], // 内部入口（serve）；旗标经内部旗标行
   "src/commands/doctor.js": ["wao doctor"],
   "src/commands/feedback.js": ["feedback submit", "feedback list", "feedback show", "feedback close"],
   "src/commands/lanes.js": ["wao lanes"],
@@ -244,7 +257,6 @@ const FLAG_MODULE_COMMANDS = {
     "runs lineage-close", "runs settle", "runs metrics", "runs scorecard",
     "runs dashboard", "runs diagnose", "runs delivery", "runs delivery review",
     "runs delivery reverify", "runs wait", "runs gate", "runs verify-commit",
-    "dashboard", // runDashboardWeb 同时服务顶层 dashboard 启动器（--port/--run-dir）
   ],
   "src/commands/serve.js": ["serve status", "serve sweep", "serve recycle"],
   // shared.js 的解析 helper 被 run/retry/resume/status/tail/collect/stop/

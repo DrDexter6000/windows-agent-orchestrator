@@ -156,8 +156,8 @@ export function countTone(kind, n) {
  *                  before still shows (marked stale) after a disconnect.
  *   failingSinceMs the first failed cycle of the current failure streak (null: not failing)
  *   serverStale    { sinceMs } while the server itself says "stale" / "unavailable", else null
- *   problem        the last problem seen: unauthorized | network | server | unavailable | noToken,
- *                  or null
+ *   problem        the last problem seen: unauthorized | network | server | unavailable | noToken
+ *                  | codeExpired (145b: the one-time start code did not redeem), or null
  * Freshness is NOT stored: freshnessOf derives it from this and the clock.
  */
 export const INITIAL_NET = Object.freeze({

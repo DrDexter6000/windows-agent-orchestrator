@@ -1533,9 +1533,14 @@ test("E12 开流后副本分叉（另一个桶里出现同一个运行的相同�
   assert.ok(!tap.raw.includes("appended after the fork"), "分叉之后的内容没有送出去");
   assert.deepEqual(tap.events, ["rows", "reset"], "没有 update、没有新行");
   await withTimeout(tap.waitFor(() => tap.ended, 3000), 3000, "reset closes the stream");
-  // 服务把自己的发布快照交给流做授权：在快照里且是 ok 才认。
+  // 服务把自己的发布快照交给流做授权：在快照里且是 ok 才认。145b 修正一 #13 起
+  // authorize 是严格的——进程令牌（timingSafeEqual）过、有效会话过、缺 token 一律拒。
   assert.equal(typeof hubInput.authorize, "function", "服务把已发布快照的授权交给流");
-  assert.deepEqual([hubInput.authorize("run_dup"), hubInput.authorize("run_nope")], [true, false]);
+  assert.deepEqual(
+    [hubInput.authorize("run_dup", w.server.token), hubInput.authorize("run_dup"), hubInput.authorize("run_nope", w.server.token)],
+    [true, false, false],
+    "process token passes; an absent token is refused; an unknown run is refused",
+  );
 });
 
 // =====================================================================

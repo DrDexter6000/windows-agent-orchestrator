@@ -454,6 +454,56 @@ test("P8 token: only #token=<64 lowercase hex> is read; stored once; the fragmen
   assert.equal(api.resolveToken({ hash: "", getStorage: () => ({ getItem: () => "bad", setItem() {} }), clearFragment }), null, "a stored value that is not a token is ignored");
 });
 
+test("P8b start code (145b): the fragment forms, the exchange, and the boot order", async (t) => {
+  // 片段形态：独占、与筛选共处、形状不对、没有码。
+  assert.deepEqual(api.splitCodeFromHash("#code=" + TOKEN), { code: TOKEN, remaining: "" });
+  assert.deepEqual(api.splitCodeFromHash("#workers?project=shop-api&code=" + TOKEN), { code: TOKEN, remaining: "#workers?project=shop-api" }, "the project filter survives");
+  assert.deepEqual(api.splitCodeFromHash("#workers?code=" + TOKEN + "&project=shop-api"), { code: TOKEN, remaining: "#workers?project=shop-api" }, "any component position");
+  assert.deepEqual(api.splitCodeFromHash("#code=nope"), { code: null, remaining: "" }, "malformed still reports (so the page clears it)");
+  assert.deepEqual(api.splitCodeFromHash("#workers?project=shop-api&code=zz"), { code: null, remaining: "#workers?project=shop-api" });
+  assert.equal(api.splitCodeFromHash("#workers?project=shop-api"), null, "no code component: the fragment is untouched");
+  assert.equal(api.splitCodeFromHash(""), null);
+  assert.equal(api.splitCodeFromHash(null), null);
+
+  // 兑换：码走 Authorization 头，绝不进 URL；成功换回会话令牌。
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const stub = (fn) => async (url, init) => { calls.push({ url, init }); return fn(); };
+  globalThis.fetch = stub(async () => ({ status: 200, ok: true, json: async () => ({ token: "cd".repeat(32), expiresAt: 123 }) }));
+  assert.deepEqual(await api.exchangeSession(TOKEN), { ok: true, token: "cd".repeat(32), expiresAt: 123 });
+  assert.equal(calls[0].url, "/api/session", "no query string, no code in the URL");
+  assert.equal(calls[0].init.headers.authorization, "Bearer " + TOKEN, "the code rides the Authorization header");
+  assert.equal(calls[0].init.method, "GET");
+  // 失败闭集：401 / 坏体 / 网络错；形状不对的码不出门。
+  globalThis.fetch = stub(async () => ({ status: 401, ok: false }));
+  assert.deepEqual(await api.exchangeSession(TOKEN), { ok: false, reason: "unauthorized" });
+  globalThis.fetch = stub(async () => ({ status: 200, ok: true, json: async () => { throw new Error("bad"); } }));
+  assert.deepEqual(await api.exchangeSession(TOKEN), { ok: false, reason: "server" });
+  globalThis.fetch = stub(async () => ({ status: 200, ok: true, json: async () => ({ token: "nope" }) }));
+  assert.deepEqual(await api.exchangeSession(TOKEN), { ok: false, reason: "server" }, "a body without a token shape is not accepted");
+  globalThis.fetch = stub(async () => { throw new TypeError("offline"); });
+  assert.deepEqual(await api.exchangeSession(TOKEN), { ok: false, reason: "network" });
+  assert.deepEqual(await api.exchangeSession("not-a-code"), { ok: false, reason: "unauthorized" });
+  assert.equal(calls.length, 5, "a malformed code never left the page");
+
+  // boot 顺序（G5 的 145b 延伸）：先清码片段，再兑换，然后才 resolveToken/页面片段。
+  const appCode = codeOf("app.js");
+  assert.ok(appCode.indexOf("splitCodeFromHash(") < appCode.indexOf("exchangeSession("), "the fragment is split (and cleared) before the exchange starts");
+  assert.ok(appCode.indexOf("splitCodeFromHash(") < appCode.indexOf("resolveToken("), "the start code is handled before the token path");
+  assert.ok(appCode.indexOf("await exchangeSession(") !== -1, "the exchange is awaited before any request is built");
+  assert.match(appCode, /codeProblem \?\? "noToken"/, "a dead code shows its own message, not the token-less one");
+  assert.ok(appCode.includes("codeExpired"), "the dead-code problem kind exists in app.js");
+  // 修正一 #14：存储令牌的清除与清片段同一同步步骤（兑换途中的刷新不会读到旧令牌）。
+  assert.ok(appCode.includes('writeStored(session, TOKEN_STORAGE_KEY, "");'), "the stored token is cleared in the same synchronous step as the fragment");
+  // 修正一 #14：401 清令牌在 api.js 那唯一一处 fetch 的 401 分支（含详情/Activity/全文/图片/流握手）。
+  const apiCode = codeOf("api.js");
+  assert.match(apiCode, /response\.status === 401[\s\S]{0,400}clearStoredToken/, "the single fetch 401 branch clears the stored token");
+  assert.match(apiCode, /export const bindTokenClear/, "api.js exposes the binding");
+  assert.match(appCode, /bindTokenClear\(\(\) => [\s\S]{0,80}writeStored\(session, TOKEN_STORAGE_KEY, ""\)/, "app.js binds the concrete clear at boot");
+  assert.doesNotMatch(appCode, /result\.reason === "unauthorized"[\s\S]{0,120}writeStored/, "the poll no longer carries its own duplicate 401 clear");
+});
+
 test("P9 request(): closed route set, bearer header only, outcomes without any server text", async (t) => {
   const calls = [];
   const realFetch = globalThis.fetch;
@@ -481,11 +531,13 @@ test("P9 request(): closed route set, bearer header only, outcomes without any s
   globalThis.fetch = async () => { throw new TypeError("Failed to fetch: http://x/?token=leak"); };
   assert.deepEqual(await api.request("/api/overview", TOKEN), { ok: false, reason: "network" });
   const before = calls.length;
-  for (const path of ["/api/runs", "/api/activity", "/api/worker", "/api/artifact", "/api/overview?x=1", "/api/session", "/", "https://example.com/api/overview", "/api/worker/stream?runId=run_1"]) {
+  for (const path of ["/api/runs", "/api/activity", "/api/worker", "/api/artifact", "/api/overview?x=1", "/", "https://example.com/api/overview", "/api/worker/stream?runId=run_1"]) {
     await assert.rejects(() => api.request(path, TOKEN), /not one of the dashboard routes/, path);
   }
   assert.equal(calls.length, before, "a refused path never reaches the network");
-  assert.deepEqual([...api.API_PATHS], ["/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact", "/api/worker/activity", "/api/worker/event", "/api/worker/stream"]);
+  assert.deepEqual([...api.API_PATHS], ["/api/session", "/api/overview", "/api/workers", "/api/attention", "/api/worker", "/api/artifact", "/api/worker/activity", "/api/worker/event", "/api/worker/stream"]);
+  // 145b: /api/session belongs to the set but only exchangeSession() reads it — request() keeps refusing it.
+  await assert.rejects(() => api.request("/api/session", TOKEN), /not one of the dashboard routes/);
   // Batch 143b: the two Activity routes are now part of the set and go through the same request function.
   globalThis.fetch = reply(200, { status: "ready" });
   assert.deepEqual(await api.request(api.activityPath({ runId: "run_1", filter: "messages" }), TOKEN), { ok: true, body: { status: "ready" } });
@@ -2116,14 +2168,14 @@ const codeOf = (name) => sourceOf(name).replace(/\/\*[\s\S]*?\*\//g, "").replace
 // read-only pages of the same worker transcript and go through the same single request function.
 // Batch 144 (decision 0131 section 4) adds the Activity tab's event stream: read through that same single
 // fetch call too (its reading and the feed's use of the frames are in ownerDashboardV2Activity.test.js).
-test("G1 the page may read ONLY /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact, /api/worker/activity, /api/worker/event, /api/worker/stream", () => {
+test("G1 the page may read ONLY /api/session, /api/overview, /api/workers, /api/attention, /api/worker, /api/artifact, /api/worker/activity, /api/worker/event, /api/worker/stream", () => {
   const found = new Set();
   for (const [, text] of allJs()) for (const m of text.matchAll(/\/api\/([A-Za-z0-9_-]+)(\/[A-Za-z0-9_-]+)?/g)) found.add(m[1] + (m[2] ?? ""));
-  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "worker", "worker/activity", "worker/event", "worker/stream", "workers"], "no other endpoint anywhere in the v2 code");
+  assert.deepEqual([...found].sort(), ["artifact", "attention", "overview", "session", "worker", "worker/activity", "worker/event", "worker/stream", "workers"], "no other endpoint anywhere in the v2 code");
   // No query string is spelled out in code: the only queries are the ones api.js builds for its own closed key sets.
   assert.ok(!/\/api\/[A-Za-z]+\?/.test(allJs().map(([name]) => codeOf(name)).join("\n")), "no query string literal on a data route");
   assert.doesNotMatch(readV2("index.html"), /\/api\//);
-  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/worker", "/api/worker/activity", "/api/worker/event", "/api/worker/stream", "/api/workers"]);
+  assert.deepEqual([...api.API_PATHS].sort(), ["/api/artifact", "/api/attention", "/api/overview", "/api/session", "/api/worker", "/api/worker/activity", "/api/worker/event", "/api/worker/stream", "/api/workers"]);
   // The pages ask for no route outside the set.
   for (const page of model.PAGES) for (const path of [...model.endpointsFor(page), ...model.endpointsFor(page, "shop-api")]) assert.ok(api.isDataPath(path), `${page}: ${path}`);
 });
@@ -2197,6 +2249,8 @@ test("G5 the token never reaches the page, a URL, a log, a message or storage ot
   assert.ok(appCode.indexOf("resolveToken(") < appCode.indexOf("canonical"), "the fragment is cleared before the page fragment is canonicalized");
   // A token link pasted into a tab that already shows the page changes only the fragment: reload to take it.
   assert.match(appCode, /hashchange[\s\S]{0,400}location\.hash\.startsWith\("#token="\)[\s\S]{0,80}location\.reload\(\)/);
+  // 145b 修正一 #14：带项目筛选的 #workers?project=…&code=… 形态粘进已打开页面也重载（splitCodeFromHash 判定）。
+  assert.match(appCode, /hashchange[\s\S]{0,460}splitCodeFromHash\(window\.location\.hash\) !== null[\s\S]{0,60}location\.reload\(\)/);
   // Only the Authorization header carries it: one use, in api.js.
   assert.equal([...codeOf("api.js").matchAll(/authorizationHeader\(/g)].length, 1, "used once, in the request");
   for (const name of V2_JS.filter((n) => n !== "api.js")) assert.doesNotMatch(codeOf(name), /authorizationHeader/, name);

@@ -179,6 +179,8 @@ import { join } from "node:path";
 
 import { isValidRunId } from "./delivery.js";
 import { createOwnerReadModel, OWNER_LIVENESS_VALUES } from "./application/ownerReadModel.js";
+import { createSessionStore } from "./application/dashboardSession.js";
+import { redeemStartCode, CODE_HEX_RE } from "./application/dashboardCodes.js";
 import { deriveOwnerAttention, ownerLanes, selectOwnerWorkers } from "./application/ownerAttention.js";
 import {
   createDeliveryProver,
@@ -210,12 +212,14 @@ const TOKEN_HEX_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 const WORKERS_ROWS_MAX = 500;
 
-// The complete configuration surface (145a): the legacy-only knobs are gone. An unknown key must fail
-// closed — a test or caller that still passes workspaceRoot / knownAgentIds / getOwnerRunsFn /
+// The complete configuration surface (145a + 145b): the legacy-only knobs are gone. An unknown key
+// must fail closed — a test or caller that still passes workspaceRoot / knownAgentIds / getOwnerRunsFn /
 // getOwnerActivityFn / summaryCache / token would otherwise be silently ignored.
 const CONFIG_KEYS = Object.freeze(new Set([
   "runDir", "env", "host", "port", "randomBytesFn", "nowFn", "loadAssetFn",
   "createReadModelFn", "createWorkerStreamsFn", "refreshIntervalMs",
+  // 145b: the one-time start-code directory (persistent mode) and the session-store knobs.
+  "codesDir", "sessionTtlMs", "sessionMax",
 ]));
 
 /**
@@ -248,6 +252,27 @@ function issueToken(randomBytesFn) {
     throw new Error("invalid token");
   }
   return token;
+}
+
+/**
+ * 145b：签发一个 N 字节的十六进制随机串（nonce 一类身份值；不承载凭据语义）。
+ * 与 issueToken 同一注入熵源、同一 fail-closed 纪律：不是 Buffer 或不足 N 字节抛错；
+ * 注入源一次给多过 N 字节（测试的 32 字节定源）取前 N 字节。
+ */
+function issueHex(randomBytesFn, bytes) {
+  const rand = typeof randomBytesFn === "function" ? randomBytesFn : randomBytes;
+  let raw;
+  try {
+    raw = rand(bytes);
+  } catch {
+    throw new Error("invalid random source");
+  }
+  if (!Buffer.isBuffer(raw) && !(raw instanceof Uint8Array)) throw new Error("invalid random source");
+  const buffer = Buffer.from(raw);
+  if (buffer.length < bytes) throw new Error("invalid random source");
+  const out = buffer.subarray(0, bytes).toString("hex");
+  if (out.length !== bytes * 2 || !/^[0-9a-f]+$/.test(out)) throw new Error("invalid random source");
+  return out;
 }
 
 // Fixed safe response bodies. Never raw text, never token, never path.
@@ -417,6 +442,26 @@ function bearerOk(authHeader, expected) {
   const want = Buffer.from(expected);
   if (got.length !== want.length) return false;
   return timingSafeEqual(got, want);
+}
+
+/** The value of a well-formed "Bearer <value>" header, else null (145b: /api/session 与流的复核取值)。 */
+function bearerValue(authHeader) {
+  if (typeof authHeader !== "string") return null;
+  const sp = authHeader.indexOf(" ");
+  if (sp < 0) return null;
+  if (authHeader.slice(0, sp) !== "Bearer") return null;
+  const rest = authHeader.slice(sp + 1);
+  return rest.length === 0 || rest.includes(" ") ? null : rest;
+}
+
+/**
+ * 145b：请求级 bearer 判定——进程令牌（前台/测试）或一个未过期的会话令牌
+ * （常驻模式；timingSafeEqual 逐条扫描，见 dashboardSession）。
+ */
+function ctxAuth(ctx, authHeader) {
+  if (bearerOk(authHeader, ctx.token)) return true;
+  const value = bearerValue(authHeader);
+  return value !== null && ctx.sessions.valid(value);
 }
 
 // Reject unknown keys AND repeated keys (strict, no reflection).
@@ -599,7 +644,7 @@ const READ_MODEL_ROUTES = new Map([
 // loading → the current publication. The bearer is checked FIRST, so an
 // unauthenticated caller learns nothing (not even the loading state).
 function serveReadModelRoute(ctx, req, res, sp, route) {
-  if (!bearerOk(req.headers.authorization, ctx.token)) {
+  if (!ctxAuth(ctx, req.headers.authorization)) {
     return sendJson(res, 401, ERR.unauthorized);
   }
   let project = null;
@@ -680,7 +725,7 @@ function repoRootOf(ctx, run) {
 
 /** Shared prologue of both routes: bearer → closed query. Returns the query, or null once it has answered. */
 function authorizeAndParse(ctx, req, res, sp, parse) {
-  if (!bearerOk(req.headers.authorization, ctx.token)) {
+  if (!ctxAuth(ctx, req.headers.authorization)) {
     sendJson(res, 401, ERR.unauthorized);
     return null;
   }
@@ -821,6 +866,47 @@ async function serveWorkerEvent(ctx, req, res, sp) {
   }
 }
 
+// ===== Batch 145b: /api/session — the one-time start code exchange =====
+//
+// GET /api/session with the start code in the Authorization header (never a query string):
+//   - strict loopback Host (127.0.0.1:<the port this server actually answers on>) and, when the
+//     browser sends Sec-Fetch-Site, same-origin only;
+//   - a missing/malformed header answers the fixed 401 WITHOUT touching the file system;
+//   - exactly ONE file is probed per request (codes\<sha256(code)>): exists, fresh (60 s) and
+//     unlinked atomically → a session token is issued { token, expiresAt }; anything else is
+//     the fixed 401 (concurrent redemptions have exactly one winner);
+//   - any query key at all is the fixed 400 (the closed-parameter rule of every data route).
+// No codesDir configured (foreground / tests): always the fixed 401.
+async function serveSession(ctx, req, res, sp) {
+  const port = ctx.effectivePort();
+  const host = req.headers.host;
+  if (port === null || typeof host !== "string" || host !== `127.0.0.1:${port}`) {
+    return sendJson(res, 401, ERR.unauthorized);
+  }
+  const secFetchSite = req.headers["sec-fetch-site"];
+  if (secFetchSite !== undefined && secFetchSite !== "same-origin") {
+    return sendJson(res, 401, ERR.unauthorized);
+  }
+  const code = bearerValue(req.headers.authorization);
+  if (code === null || !CODE_HEX_RE.test(code)) {
+    return sendJson(res, 401, ERR.unauthorized);
+  }
+  // 有查询串就 400：连一个裸的 “?” 也算（参数闭集是“完全没有查询”）。
+  if (sp.size > 0 || String(req.url ?? "").split("#", 1)[0].includes("?")) {
+    return sendJson(res, 400, ERR.bad_request);
+  }
+  if (ctx.redeem === null) return sendJson(res, 401, ERR.unauthorized);
+  let redeemed = false;
+  try {
+    redeemed = await ctx.redeem(code) === true;
+  } catch {
+    redeemed = false;
+  }
+  if (!redeemed) return sendJson(res, 401, ERR.unauthorized);
+  const session = ctx.sessions.issue();
+  return sendJson(res, 200, { token: session.token, expiresAt: session.expiresAt });
+}
+
 // ===== Batch 144: /api/worker/stream =====
 
 /**
@@ -868,6 +954,9 @@ async function serveWorkerStream(ctx, req, res, sp) {
       runId: query.runId,
       res,
       headers: STREAM_HEADERS,
+      // 145b：这条流开流时的 bearer（进程令牌或某个会话令牌）——开流后的复核除了
+      // 运行与副本，还要核对会话令牌是否仍然有效（过期就 reset(revoked)）。
+      token: bearerValue(req.headers.authorization),
       ...(query.afterSeq !== undefined ? { afterSeq: query.afterSeq } : {}),
       ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
       ...(query.filter !== undefined ? { filter: query.filter } : {}),
@@ -979,8 +1068,13 @@ function createHandler(ctx) {
     }
 
     if (u.pathname === "/health") {
-      return sendJson(res, 200, { status: "ok" });
+      // 145b：health 带上实例 nonce——复用检查用它核对“这个端口上就是记录里那个实例”。
+      // 无凭据、GET、固定形状；nonce 不是秘密。
+      return sendJson(res, 200, { status: "ok", nonce: ctx.nonce });
     }
+
+    // Batch 145b: the one-time start-code exchange (see serveSession).
+    if (u.pathname === "/api/session") return serveSession(ctx, req, res, sp);
 
     // Batch 145a: the retired legacy entry redirects to the one page. No auth (the
     // bearer lives only in the URL fragment, which the browser carries across).
@@ -1072,6 +1166,7 @@ export function createOwnerDashboardServer(config) {
     host = LOOPBACK_HOST, port,
     randomBytesFn, nowFn, loadAssetFn,
     createReadModelFn, createWorkerStreamsFn, refreshIntervalMs,
+    codesDir, sessionTtlMs, sessionMax,
   } = config;
 
   // Reject any non-loopback host BEFORE listen.
@@ -1104,6 +1199,18 @@ export function createOwnerDashboardServer(config) {
     throw new Error(`invalid refreshIntervalMs: must be a positive integer (default ${DEFAULT_REFRESH_INTERVAL_MS})`);
   }
 
+  // Batch 145b: the start-code directory (persistent mode) and the session knobs are validated here
+  // too — BEFORE any asset load or token issuance.
+  if (codesDir !== undefined && (typeof codesDir !== "string" || codesDir.length === 0)) {
+    throw new TypeError("invalid codesDir: must be a non-empty string when given");
+  }
+  for (const [name, value] of Object.entries({ sessionTtlMs, sessionMax })) {
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new TypeError(`invalid ${name}: must be a positive integer`);
+    }
+  }
+
   // Package D: preload the fixed dashboard assets EAGER and FAIL-CLOSED
   // BEFORE the token is issued or any socket opened. A dashboard that cannot
   // serve its own UI never starts. The map is immutable for the server lifetime.
@@ -1114,11 +1221,24 @@ export function createOwnerDashboardServer(config) {
   // removed; only the injectable randomBytesFn entropy source is accepted.
   const issuedToken = issueToken(randomBytesFn);
 
+  const ctxNow = typeof nowFn === "function" ? nowFn : () => Date.now();
   const ctx = {
     env,
     token: issuedToken,
     assets,
-    now: typeof nowFn === "function" ? nowFn : () => Date.now(),
+    now: ctxNow,
+    // Batch 145b: the instance nonce (health identity) and the in-memory session store. The nonce
+    // rides the same injectable entropy source as the token (validated fail-closed, 32 hex).
+    nonce: issueHex(randomBytesFn, 16),
+    sessions: createSessionStore({
+      now: ctxNow,
+      ...(sessionTtlMs !== undefined ? { ttlMs: sessionTtlMs } : {}),
+      ...(sessionMax !== undefined ? { max: sessionMax } : {}),
+      ...(typeof randomBytesFn === "function" ? { randomBytesFn } : {}),
+    }),
+    // One start-code redemption probe per request; null when no codesDir is configured
+    // (foreground / tests — the route then always answers the fixed 401).
+    redeem: codesDir === undefined ? null : (code) => redeemStartCode(codesDir, code, { now: ctxNow }),
     // Batch 141a: proves a run's delivery objects against its repository (commit type,
     // parent = base, actual changed files = changedFiles, message + author/committer identity)
     // and hands back the per-file line
@@ -1143,6 +1263,13 @@ export function createOwnerDashboardServer(config) {
 
   const handler = createHandler(ctx);
   const server = http.createServer(handler);
+  // 145b：/api/session 的严格 Host 核对要“本服务实际应答的端口”：显式端口直接用，
+  // 随机端口（0）在 listening 之后从 address() 读。
+  ctx.effectivePort = () => {
+    if (resolvedPort !== 0) return resolvedPort;
+    const a = server.address();
+    return a && typeof a === "object" && Number.isInteger(a.port) ? a.port : null;
+  };
 
   // ===== Batch 140c: the read model + its refresh chain =====
   //
@@ -1178,12 +1305,19 @@ export function createOwnerDashboardServer(config) {
   // Batch 144: the Activity event streams of this service (the connection cap and closeAll live there).
   ctx.streams = (createWorkerStreamsFn ?? createWorkerStreams)({
     readModel, ...(env !== undefined ? { env } : {}),
+    // 145b 修正一 #13：流的时钟用服务的 nowFn（缺省等价 Date.now；测试可拨钟驱动复核）。
+    io: { now: ctx.now },
     // The stream's re-authorization (every refresh while it is open): the run is still in the published
     // snapshot and still "ok", exactly the check serveWorkerStream makes at the head. The copy check is
-    // the stream's own (readModel.locateRunTranscript).
-    authorize: (runId) => {
+    // the stream's own (readModel.locateRunTranscript). 145b 修正一 #13: the bearer this stream opened
+    // with is re-checked STRICTLY — the process token passes (timingSafeEqual), a live session passes,
+    // EVERYTHING else (null/absent/unknown) is refused; an expired session resets the stream (revoked).
+    authorize: (runId, token) => {
       const pub = ctx.published();
-      return pub !== null && ctx.runsById(pub).get(runId)?.availability === "ok";
+      if (pub === null || ctx.runsById(pub).get(runId)?.availability !== "ok") return false;
+      if (typeof token === "string" && bearerOk(`Bearer ${token}`, ctx.token)) return true;
+      if (typeof token === "string" && ctx.sessions.valid(token)) return true;
+      return false;
     },
   });
 
@@ -1299,6 +1433,7 @@ export function createOwnerDashboardServer(config) {
 
   return {
     token: issuedToken,
+    nonce: ctx.nonce, // 145b：实例身份（/health 回显；复用检查核对）
     handler,
     server,
     refreshNow,

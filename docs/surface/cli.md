@@ -37,7 +37,10 @@ Commands:
   runs metrics <runId>|--summary [--lineage] [--run-dir DIR] [--format json]   # --lineage 列整条续修谱系各轮与自身用量合计；--summary 按自身用量相加（会话累计不重复计）
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
-  dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner dashboard launcher (global wao command; auto-opens browser)
+  dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner 看板：找/拉起本运行目录的常驻实例（自动开浏览器；--cwd 只定初始项目筛选，不再要求 Git 仓库）
+  dashboard status [--run-dir DIR]   # 看板实例状态（pid/端口/启动时间/协议/build/健康；不出启动码与令牌）
+  dashboard stop [--run-dir DIR]   # 优雅停掉本运行目录的看板实例（超时不强杀、不删记录，如实报错）
+  dashboard restart [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]   # 先 stop，确认旧实例退出后才拉起；stop 失败即中止
   runs diagnose <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> [--run-dir DIR] [--cwd DIR] [--format json] [--wait-ms N]   # 交付状态查询（只读，--wait-ms 为有界等待）；--cwd 指定仓库根（缺省 WAO_TARGET_CWD，再当前目录）供主分支 WAO-Adopted-From 采纳查询
   runs delivery <runId> --accept|--reject --reason-file FILE [--run-dir DIR] [--format json]
@@ -98,5 +101,5 @@ Notes:
   - 完整用法与场景说明见使用手册（wao manual 列各页；wao manual <页> <节> 按节读；没有全局 wao 时在安装根 npm run cli -- manual）。
   - run 的逐 flag 说明：run --help（--help 必须紧跟 run 之后）。
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
-  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
+  - 内部旗标（程序穿线/高级覆盖/测试缝；下列用法不写进上方命令行）：--run-id 预先指定 runId（run 前后台；后台派发时由父进程穿给 detached runner）；--state-dir 覆盖 .wao 状态目录（wao init/decision/declare/stage/handoff/doctor 与 runs dashboard；缺省在链接工作树里重定向到主工作树的 .wao、decisions/ 留在工作树——决定 0111；显式给了就按 cwd 解析不重定向）；--state-root 覆盖 dashboard 常驻实例的状态根（缺省 %LOCALAPPDATA%\wao\dashboard，测试/内部穿线用）；--generation/--deadline 只属于内部入口 dashboard serve；--install-root / --example-registry / --reliability-summary 是 wao onboarding 的高级覆盖/测试缝。
 ```

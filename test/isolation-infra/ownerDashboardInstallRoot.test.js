@@ -39,7 +39,8 @@ import {
   resolveConfigPath,
   rebaseConfigPaths,
 } from "../../src/installRoot.js";
-import { dashboardCommand, resolveCanonicalGitRoot } from "../../src/commands/dashboard.js";
+import { dashboardCommand } from "../../src/commands/dashboard.js";
+import { normalizeRunDir, stateDirFor } from "../../src/application/dashboardPaths.js";
 import { rmrfRetry } from "../_rmrfHelper.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -153,68 +154,82 @@ test("RESOLVER: rebaseConfigPaths rebases WAO-owned runDir+registry, leaves abso
 });
 
 // =====================================================================
-// D) DASHBOARD (in-process) — rebased config → install-root runDir/registry;
-//    --cwd stays the workspace; --run-dir NOT rebased.
+// D) DASHBOARD (in-process, 145b) — rebased config → the launcher targets the
+//    install-root runDir; --run-dir explicit is NOT rebased. The fake controlIo
+//    records the instance dir the control layer was asked to use (it derives
+//    from the normalized runDir), so no real instance is ever started.
 // =====================================================================
-test("DASHBOARD: rebased config → the server runDir comes from the install root; --cwd stays the observed Git project", async () => {
+function recordingControlIo(seen, instanceRunDir) {
+  // 只记录控制层要用的实例目录；其余 io 假成一个"完美可复用"的实例（对齐 runDir），
+  // 走完复用分支即收口：不建目录、不取锁、不起实例。
+  let clock = 1_000_000;
+  const instance = {
+    protocol: 1, runDir: instanceRunDir, pid: 777, processCreatedAt: 1, port: 9001,
+    nonce: "ab".repeat(16), generation: "0".repeat(16), build: { readable: true, srcTree: "f".repeat(40), dirty: false },
+  };
+  return {
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+    ensureStateDir: async (stateRoot, instanceDir) => { seen.instanceDir = instanceDir; return { ok: true }; },
+    verifyStateDir: async () => ({ ok: true }),
+    readInstanceEx: async () => ({ status: "present", raw: instance, record: instance }),
+    publishInstance: async () => {},
+    readCandidate: async () => null,
+    readResult: async () => null,
+    removeResult: async () => {},
+    createLock: async () => ({ ok: true }),
+    readLock: async () => null,
+    takeOverStale: async () => false,
+    writeStopRequest: async () => {},
+    probeIdentity: async () => "same",
+    listenerPids: async (port) => (port === 9001 ? [777] : []),
+    health: async (port) => (port === 9001 ? { ok: true, nonce: "ab".repeat(16) } : { ok: false }),
+    spawnServe: async () => ({ ok: true, pid: 777 }),
+    issueCode: async () => ({ code: "0f".repeat(32) }),
+    buildSnapshot: async () => instance.build,
+  };
+}
+
+test("DASHBOARD: rebased config -> the launcher targets the install-root runDir; --cwd no longer needs a Git repo", async () => {
   const install = mkdtempSync(join(tmpdir(), "wao-dash-install-"));
-  const target = makeGitRepo("wao-dash-target-");
+  const target = mkdtempSync(join(tmpdir(), "wao-dash-target-")); // 非 Git 目录也行（145b 起）
   try {
-    // Simulate exactly what loadConfig produces under the global bin: rebase a
-    // base config (relative runDir/registry) against the trusted install root.
-    const config = rebaseConfigPaths(
-      { runDir: "runs", registry: "config/agents.json" },
-      install,
-    );
-    const lc = makeControllableLifecycle();
-    const server = makeFakeServer();
-    let created = null;
-    const p = dashboardCommand(["--cwd", target], config, {
-      gitRootFn: (cwd) => resolveCanonicalGitRoot(cwd),
+    mkdirSync(join(install, "runs"), { recursive: true });
+    const config = rebaseConfigPaths({ runDir: "runs", registry: "config/agents.json" }, install);
+    const seen = {};
+    const stateRoot = join(install, "state-root");
+    await dashboardCommand(["--cwd", target, "--state-root", stateRoot], config, {
+      controlIo: recordingControlIo(seen, normalizeRunDir(join(install, "runs"))),
       openUrlFn: async () => {},
-      createServerFn: (cfg) => { created = cfg; return server; },
-      lifecycle: lc,
       log: () => {},
     });
-    await flush();
-    assert.equal(created.runDir, join(install, "runs"),
-      "runDir resolved from the install root, not the caller cwd");
-    assert.deepEqual(Object.keys(created).sort(), ["port", "runDir"],
-      "the dashboard server takes no workspace root any more (145a: its only reader was the retired list API)");
-    lc.resolve();
-    await p;
+    assert.equal(seen.instanceDir, stateDirFor(normalizeRunDir(join(install, "runs")), stateRoot),
+      "runDir identity comes from the install root, not the caller cwd");
   } finally {
     rmrfRetry(install);
     rmrfRetry(target);
   }
 });
 
-test("DASHBOARD: explicit --run-dir is NOT rebased (stays relative to the caller cwd)", async () => {
+test("DASHBOARD: explicit --run-dir is NOT rebased (resolved against the caller cwd)", async () => {
   const install = mkdtempSync(join(tmpdir(), "wao-dash-rd-install-"));
-  const target = makeGitRepo("wao-dash-rd-target-");
+  const target = mkdtempSync(join(tmpdir(), "wao-dash-rd-target-"));
+  const explicitBase = process.cwd();
   try {
-    const config = rebaseConfigPaths(
-      { runDir: "runs", registry: "config/agents.json" },
-      install,
-    );
-    const lc = makeControllableLifecycle();
-    const server = makeFakeServer();
-    let created = null;
-    const p = dashboardCommand(["--cwd", target, "--run-dir", "explicit/relative/runs"], config, {
-      gitRootFn: (cwd) => resolveCanonicalGitRoot(cwd),
+    mkdirSync(join(explicitBase, "explicit", "relative", "runs"), { recursive: true });
+    mkdirSync(join(install, "runs"), { recursive: true });
+    const config = rebaseConfigPaths({ runDir: "runs", registry: "config/agents.json" }, install);
+    const seen = {};
+    const stateRoot = join(install, "state-root");
+    await dashboardCommand(["--cwd", target, "--run-dir", "explicit/relative/runs", "--state-root", stateRoot], config, {
+      controlIo: recordingControlIo(seen, normalizeRunDir(resolve("explicit/relative/runs"))),
       openUrlFn: async () => {},
-      createServerFn: (cfg) => { created = cfg; return server; },
-      lifecycle: lc,
       log: () => {},
     });
-    await flush();
-    assert.equal(created.runDir, resolve("explicit/relative/runs"),
+    assert.equal(seen.instanceDir, stateDirFor(normalizeRunDir(resolve("explicit/relative/runs")), stateRoot),
       "explicit --run-dir resolved against caller cwd (NOT rebased under install root)");
-    assert.ok(!created.runDir.startsWith(install),
-      "explicit --run-dir never lands under the install root");
-    lc.resolve();
-    await p;
   } finally {
+    rmrfRetry(join(explicitBase, "explicit"));
     rmrfRetry(install);
     rmrfRetry(target);
   }

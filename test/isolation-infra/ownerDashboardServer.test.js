@@ -110,7 +110,9 @@ test("BEARER: correct token → 200; /health needs no token", async () => {
   assert.equal(ok.status, 200);
   const health = await drive(s.handler, { url: "/health" });
   assert.equal(health.status, 200);
-  assert.deepEqual(jsonOf(health), { status: "ok" });
+  // 145b: /health carries the instance nonce (the reuse check compares it).
+  assert.deepEqual(jsonOf(health), { status: "ok", nonce: s.nonce });
+  assert.match(s.nonce, /^[0-9a-f]{32}$/, "the nonce is 32 lowercase hex");
 });
 
 // =====================================================================
@@ -292,10 +294,11 @@ test("TOKEN CONTRACT: issued token is exactly 64 lowercase hex derived from the 
   assert.equal(cd.token, "cd".repeat(32));
   assert.notEqual(ab.token, cd.token);
 
-  // The generator receives the size argument (crypto.randomBytes shape): 32.
-  let observedSize = null;
-  makeServer({ randomBytesFn: (n) => { observedSize = n; return Buffer.alloc(n, 0x01); } });
-  assert.equal(observedSize, 32);
+  // The generator receives the size argument (crypto.randomBytes shape): 32 for the
+  // token and 16 for the instance nonce (145b).
+  const observedSizes = [];
+  makeServer({ randomBytesFn: (n) => { observedSizes.push(n); return Buffer.alloc(32, 0x01); } });
+  assert.deepEqual(observedSizes.slice().sort(), [16, 32]);
 
   // Production default (no injection) → valid shape; two issuances differ.
   const d1 = makeServer();
@@ -361,6 +364,8 @@ test("ownerDashboardServer.js imports exactly the pinned set (node builtins + ap
   // clause span lines, and require the from-path to close the line.
   const sources = [...src.matchAll(/^import\s+(?:[\s\S]*?)\s+from\s+"([^"]+)";$/gm)].map((m) => m[1]).sort();
   assert.deepEqual(sources, [
+    "./application/dashboardCodes.js", // 145b: the one-time start-code redemption (/api/session)
+    "./application/dashboardSession.js", // 145b: the in-memory session store (bearer + stream re-auth)
     "./application/ownerArtifact.js", // 141a: Git object reads (numstat, image bytes) for /api/worker + /api/artifact
     "./application/ownerAttention.js", // 140c: the attention derivation
     "./application/ownerReadModel.js", // 140c: the Owner read model

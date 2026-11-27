@@ -1419,13 +1419,13 @@ test("闭集：交付物的 kind / state / reason 都落在导出的闭集里（
   }
 });
 
-test("路由是闭集：服务源码里的 /api/ 路由恰好是这 8 个（第 145a 批删掉旧界面的 /api/runs 与 /api/activity）；其余 /api/* 固定 404", async () => {
+test("路由是闭集：服务源码里的 /api/ 路由恰好是这 9 个（第 145a 批删掉旧界面的 /api/runs 与 /api/activity；第 145b 批加 /api/session 换启动码）；其余 /api/* 固定 404", async () => {
   const src = readFileSync(join(fileURLToPath(new URL(".", import.meta.url)), "../..", "src", "ownerDashboardServer.js"), "utf8");
   // 第 141c 批：路径允许一级或两级（`/api/worker/activity`）。旧正则只认一级，会让新路由悄悄漏出守卫。
   const declared = new Set([...src.matchAll(/"\/api\/([a-z]+(?:\/[a-z]+)?)"/g)].map((m) => m[1]));
   assert.deepEqual(
     [...declared].sort(),
-    ["artifact", "attention", "overview", "worker", "worker/activity", "worker/event", "worker/stream", "workers"],
+    ["artifact", "attention", "overview", "session", "worker", "worker/activity", "worker/event", "worker/stream", "workers"],
   );
   for (const url of [
     "/api/worker/extra", "/api/artifacts", "/api/Worker", "/api/", "/api/worker/", "/api/worker/activity/x", "/api/worker/Activity",

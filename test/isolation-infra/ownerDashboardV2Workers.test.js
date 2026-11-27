@@ -2191,7 +2191,7 @@ test("G3 the closed request set and the single network call, with the panel's ro
   assert.match(app, /readStream\(streamPath\(query\), token, \{ signal: query\.signal, onFrame: query\.onFrame \}\)/, "the event stream goes through the closed builder too, with the feed's own cancel signal");
   assert.match(app, /request\(path, token\)/, "the list routes come from endpointsFor");
   assert.deepEqual([...codeOf("api.js").matchAll(/(?<![A-Za-z0-9_$.])fetch\s*\(/g)].length, 1, "ONE direct network call in api.js, shared by the JSON, image, Activity and stream requests");
-  assert.equal([...codeOf("api.js").matchAll(/await get\(/g)].length, 3, "...used by exactly those three request functions");
+  assert.equal([...codeOf("api.js").matchAll(/await get\(/g)].length, 4, "...used by exactly those four request functions (145b adds the start-code exchange)");
   const all = ["activity.js", "activityview.js", "app.js", "api.js", "artifacts.js", "detail.js", "model.js", "sidebarview.js", "store.js", "views.js", "workers.js", "workersview.js", "i18n.js"].map((n) => [n, codeOf(n)]);
   for (const [name, code] of all) {
     if (name !== "api.js") assert.doesNotMatch(code, /(?<![A-Za-z0-9_$.])fetch\s*\(/, `${name}: no network call`);

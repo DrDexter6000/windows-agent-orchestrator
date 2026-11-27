@@ -165,7 +165,6 @@ import { createLineageSupersession, declaredLineageRoot, supersessionCandidateGa
 // 第 145a 批：`runs dashboard --web` 退役，runDashboardWeb 只剩 `wao dashboard`
 // 一个调用方——原来只为旧路径保留的"非 Git 目录也能启动"的 fail-soft 分支、
 // 工作区证明与注册表读取随旧界面一起删除。
-import { createOwnerDashboardServer } from "../ownerDashboardServer.js";
 import { proveWorkspaceRoot } from "../application/workspaceBinding.js";
 import { KNOWN_BACKENDS } from "../registry.js";
 // 第 137a 批：三条 CLI 入口委托的服务与其边界常量——与 MCP run_continue /
@@ -2476,95 +2475,6 @@ export async function runsDashboardCommand(args, config) {
     await new Promise(() => {});
     clearInterval(timer);
   }
-}
-
-/**
- * M12-8D / 第 145a 批: launch the local Owner read-only dashboard HTTP boundary and
- * stay alive until SIGINT/SIGTERM. Reuses ownerDashboardServer (the single loopback
- * read-only boundary) — there is no second parser/classifier/redactor here.
- *
- * The ONLY caller is the top-level `wao dashboard` launcher. `runs dashboard --web`
- * is retired, so the legacy-only seams are gone: no fail-soft workspace proof, no
- * registry read, no target-cwd fallback. The strict Git proof lives in the launcher.
- *
- * Server-owned inputs come from the SHARED authorities:
- *   - runDir — config.runDir / an explicit --run-dir (same SSOT as the text dashboard).
- *
- * It prints exactly one URL — http://127.0.0.1:<port>/v2/#token=<64hex> — plus a
- * Ctrl-C line, then blocks until a shutdown signal. It performs NO control
- * action, writes no config, and changes no selection.
- *
- * Every external dependency is injectable so tests cover startup / fragment /
- * shutdown WITHOUT a real socket or signal.
- *
- * @param {object} options — parsed CLI options (port/runDir)
- * @param {object} config — process config (runDir/bypassed registry/stateDir)
- * @param {object} [injections]
- * @param {Function} [injections.createServerFn] — server factory (testing)
- * @param {{wait:Function, cancel?:Function}} [injections.lifecycle] — shutdown waitable (testing)
- * @param {Function} [injections.log] — stdout sink (testing)
- * @param {Function} [injections.afterListen] — advisory post-listen hook,
- *   receives the printed URL (the launcher's auto-open; absent → never opens)
- */
-export async function runDashboardWeb(options, config, injections = {}) {
-  const createServer = injections.createServerFn ?? createOwnerDashboardServer;
-  const lifecycle = injections.lifecycle ?? createProcessLifecycle();
-  const log = injections.log ?? ((s) => console.log(s));
-
-  const runDir = resolve(options.runDir ?? config.runDir);
-
-  // Optional --port: 0 (ephemeral, default) or integer. The server validates the
-  // full 0|1024..65535 range fail-closed; here we only coerce the CLI string.
-  let port = 0;
-  if (options.port !== undefined && options.port !== null && options.port !== true) {
-    const n = Number(options.port);
-    if (!Number.isInteger(n)) throw new Error("--port must be an integer");
-    port = n;
-  }
-
-  const server = createServer({ runDir, port });
-  const addr = await server.listen();
-  // 第 145a 批：默认入口是 /v2/。旧书签的 /#token=… 与 /index.html 由服务端 302 到
-  // /v2/，浏览器跨重定向保留片段，所以长期令牌仍然只走片段、不进查询串与日志。
-  const url = `http://127.0.0.1:${addr.port}/v2/#token=${server.token}`;
-  log(url);
-  log("(Ctrl-C to stop)");
-
-  // M12-8F: advisory post-listen hook — the `wao dashboard` launcher auto-opens
-  // the printed URL here (exactly once) unless --no-open. A failing hook is
-  // ADVISORY: the URL is already printed, so warn concisely and keep serving.
-  if (typeof injections.afterListen === "function") {
-    try {
-      await injections.afterListen(url);
-    } catch (error) {
-      log(`⚠ 无法自动打开浏览器（${error.message}）——请手动打开上面的 URL。`);
-    }
-  }
-
-  // Block until SIGINT/SIGTERM, then close the boundary and return.
-  try {
-    await lifecycle.wait();
-  } finally {
-    if (typeof server.close === "function") await server.close();
-    if (typeof lifecycle.cancel === "function") lifecycle.cancel();
-  }
-}
-
-/**
- * Production shutdown lifecycle: a promise that resolves on SIGINT or SIGTERM.
- * Registering the listeners suppresses Node's default termination so we can
- * close the HTTP boundary cleanly first.
- */
-function createProcessLifecycle() {
-  let resolveWait;
-  const done = new Promise((resolve) => { resolveWait = resolve; });
-  const signals = ["SIGINT", "SIGTERM"];
-  const onSignal = () => resolveWait();
-  for (const sig of signals) process.on(sig, onSignal);
-  return {
-    wait: () => done,
-    cancel() { for (const sig of signals) process.off(sig, onSignal); },
-  };
 }
 
 /**

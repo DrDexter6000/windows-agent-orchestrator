@@ -22,7 +22,10 @@ import {
 } from "./model.js";
 import { LANG_STORAGE_KEY, isLang, resolveLang } from "./i18n.js";
 import { readStored, writeStored } from "./store.js";
-import { activityPath, artifactPath, eventPath, readStream, request, requestImage, resolveToken, streamPath, workerPath } from "./api.js";
+import {
+  TOKEN_STORAGE_KEY, activityPath, artifactPath, bindTokenClear, eventPath, exchangeSession, readStream, request, requestImage,
+  resolveToken, splitCodeFromHash, streamPath, workerPath,
+} from "./api.js";
 import { activeTab, buildSidebar, createDetailFeed, imagesWanted } from "./detail.js";
 import { activityRef, buildActivityView, createActivityFeed } from "./activity.js";
 import { createImageStore } from "./artifacts.js";
@@ -42,18 +45,45 @@ const freshSui = () => ({ tab: null, filesOpen: false, imageOpen: null, copy: nu
 /** The fragment of a page: the Workers page carries its whole view state, the others page + project + section. */
 const fragmentOf = (page, project, section, view) => (page === "workers" ? formatWorkersHash(view) : formatHash(page, project, section));
 
-function boot() {
+async function boot() {
   const topbarEl = document.getElementById("topbar");
   const mainEl = document.getElementById("main");
   const sidebarEl = document.getElementById("sidebar");
   const local = () => window.localStorage;
+  const session = () => window.sessionStorage;
 
-  // 1. Token first: stored, then the fragment is cleared before anything else reads it.
-  const token = resolveToken({
-    hash: window.location.hash,
-    getStorage: () => window.sessionStorage,
-    clearFragment: () => window.history.replaceState(null, "", window.location.pathname + window.location.search),
-  });
+  // 145b 修正一 #14：任一接口 401 的清理统一绑在 api.js 那唯一一处 fetch 上（包括
+  // 详情、Activity、全文、图片与流的握手——它们都从那里走）。
+  bindTokenClear(() => { writeStored(session, TOKEN_STORAGE_KEY, ""); });
+
+  // 1. A start code in the fragment comes FIRST: the code component is cleared synchronously
+  //    (a project filter sharing the fragment survives) AND the stored token is cleared at the
+  //    same moment — a refresh mid-exchange must not fall back to the previous token on the
+  //    next load. The exchange is awaited, and only then does the page build any request. A
+  //    dead code shows the fixed "run wao dashboard again" message.
+  const codeInfo = splitCodeFromHash(window.location.hash);
+  if (codeInfo !== null) {
+    writeStored(session, TOKEN_STORAGE_KEY, "");
+    window.history.replaceState(null, "", window.location.pathname + window.location.search + codeInfo.remaining);
+  }
+  let token = null;
+  let codeProblem = null;
+  if (codeInfo !== null) {
+    const exchanged = codeInfo.code === null ? null : await exchangeSession(codeInfo.code);
+    if (exchanged !== null && exchanged.ok) {
+      token = exchanged.token;
+      writeStored(session, TOKEN_STORAGE_KEY, token);
+    } else {
+      codeProblem = "codeExpired";
+    }
+  } else {
+    // Token next: stored, then the fragment is cleared before anything else reads it.
+    token = resolveToken({
+      hash: window.location.hash,
+      getStorage: session,
+      clearFragment: () => window.history.replaceState(null, "", window.location.pathname + window.location.search),
+    });
+  }
 
   // 2. The page fragment, canonicalized so a refresh lands on the same page.
   const fromHash = parseHash(window.location.hash);
@@ -81,7 +111,7 @@ function boot() {
     focusRun: null,
     // The visible cards in order, from the last draw (what the arrow keys walk through).
     sequence: [],
-    net: token === null ? { ...INITIAL_NET, problem: "noToken" } : INITIAL_NET,
+    net: token === null ? { ...INITIAL_NET, problem: codeProblem ?? "noToken" } : INITIAL_NET,
     ui: freshUi(),
     sui: freshSui(),
   };
@@ -288,6 +318,8 @@ function boot() {
       detail.refresh();
       pollActivity();
       const results = await Promise.all(paths.map((path) => request(path, token)));
+      // 401 的清理在 api.js 的 get() 里统一发生（列表、详情、Activity、全文、图片、流
+      // 握手都从那里走），这里不再各写一份。
       const before = state.net;
       state.net = applyCycle(before, { page, paths, results }, Date.now());
       if (state.net === before && results.every((result) => result.ok)) delayMs = SKIPPED_RETRY_MS;
@@ -459,9 +491,10 @@ function boot() {
   }
 
   window.addEventListener("hashchange", () => {
-    // A new token link pasted into this tab changes only the fragment, which the browser does not
-    // reload for: reload so the boot sequence takes the token and clears the fragment.
-    if (window.location.hash.startsWith("#token=")) {
+    // A new token or start-code link pasted into this tab changes only the fragment, which the
+    // browser does not reload for: reload so the boot sequence takes it and clears the fragment.
+    // 145b 修正一 #14：带项目筛选的 #workers?project=…&code=… 形态也认（splitCodeFromHash）。
+    if (window.location.hash.startsWith("#token=") || splitCodeFromHash(window.location.hash) !== null) {
       window.location.reload();
       return;
     }
