@@ -409,6 +409,24 @@ const SHARED_CLAUSE_SECRETS_AND_ENV =
 const SHARED_CLAUSE_FINISH_COMMANDS =
   "- Do not end your turn while a command you started is still running: wait for it to finish and collect its output and exit status. Stop any server or process you started before you answer; leave nothing running. Stop only processes your own commands started, by the exact process id you got when starting them or via the tool that started them; never match by name, command line or path: this run's WAO supervisor carries the run id on its command line, and stopping it ends your run.";
 
+// 第 157 批（TD-386）：交付验证命令清单——worker 在自己的任务正文末尾看到 WAO 之后要跑的
+// 命令。只陈述事实，不下指令；固定措辞只在这里定义一次，与交付合同同一族。
+//
+// 为什么不放进角色合同/交付合同：那两者走命令行（codex 用 -c developer_instructions，
+// claude-code 用 --append-system-prompt），Windows .cmd 的命令行预算已经很紧；而任务正文
+// 在 codex/claude-code 上走标准输入，在其他后端走各自 API，不受这个限制。另外角色合同
+// 正文有哈希钉住（role_contract_drift），而每一轮的验证命令可能不同。
+//
+// 这一块不进 transcript 的 prompt.sent（那里只记 Lead 的原始任务正文，与角色合同同一
+// 纪律）；它只从 run.started 持久化的交付事实 + 原始正文即可重算出来。
+export const DELIVERY_VERIFICATION_HEADER =
+  "DELIVERY VERIFICATION (WAO control plane): after your turn, WAO runs these commands in your working directory, in this order; the delivery counts as verified only if each one exits 0.";
+
+// 声明了单命令超时（verificationTimeoutMs）时那行的固定尾巴：超时即杀掉该命令并计入失败
+// （deliveryVerification.js 的 setup_timeout / command_timeout 语义）。
+const DELIVERY_VERIFICATION_TIMEOUT_NOTE =
+  "each command is stopped and counts as failed if it runs longer than this";
+
 // TD-352：续修（resume）轮重述交付合同的固定开头。claude-code 与 codex 的会话级通道在
 // resume 时不刷新，后端把本轮合同放进用户消息；codex 不让用户消息改写 developer 级指令，
 // 所以首轮合同里先写明"以此开头的重述来自同一控制面、替换本合同"（下方条款）。
@@ -478,6 +496,42 @@ export function composeDeliveryRoleContract({ roleContract, allowedPaths, backen
 }
 
 /**
+ * 第 157 批（TD-386）：把本轮生效的交付验证命令清单接在 worker 的任务正文末尾。
+ *
+ * 这是这一块的唯一组装点（开始、每次续修、resume 重放、派发服务的命令行预算预判都调用
+ * 它）。输入是 prepareDeliveryRequest 规范化之后的 verification —— 也就是 WAO 之后真正
+ * 要跑的那份（含经 executionProfileId 解析出来的命令；命令顺序即执行顺序：setup 在前、
+ * 断言命令在后）。
+ *
+ * 不加块的情形（prompt 逐字节不变）：没有验证命令（含声明了
+ * verificationUnavailableReason 的交付、没有交付的运行、只读运行——它们都到不了这里带
+ * 命令的 verification），或者 prompt 不是字符串。
+ *
+ * 编码与 AUTHORIZED_PATHS_JSON 同一方式：单行 JSON 数组，命令里的引号、反斜杠、换行与
+ * 控制字符都成为 JSON 转义，既不会破坏这一行的结构，也不会伪造新的字段行。
+ *
+ * @param {string} prompt — Lead 的原始任务正文（本轮用户消息）
+ * @param {{commands?: string[], setupCommands?: string[], verificationTimeoutMs?: number}} [verification]
+ *   prepareDeliveryRequest(...).verification
+ * @returns {string} the task prompt with the fixed verification block appended (or prompt)
+ */
+export function composeTaskPromptWithDeliveryVerification(prompt, verification) {
+  const commands = Array.isArray(verification?.commands) ? verification.commands : [];
+  if (typeof prompt !== "string" || commands.length === 0) return prompt;
+  const setupCommands = Array.isArray(verification?.setupCommands) ? verification.setupCommands : [];
+  const lines = [DELIVERY_VERIFICATION_HEADER];
+  if (setupCommands.length > 0) {
+    lines.push(`- VERIFICATION_SETUP_COMMANDS_JSON: ${encodeContractJsonArray(setupCommands)}`);
+  }
+  lines.push(`- VERIFICATION_COMMANDS_JSON: ${encodeContractJsonArray(commands)}`);
+  if (verification?.verificationTimeoutMs !== undefined) {
+    lines.push(`- VERIFICATION_TIMEOUT_MS: ${verification.verificationTimeoutMs} (${DELIVERY_VERIFICATION_TIMEOUT_NOTE})`);
+  }
+  const block = lines.join("\n");
+  return prompt.length === 0 ? block : `${prompt}\n\n${block}`;
+}
+
+/**
  * 只读执行合同（控制面注入，与 composeDeliveryExecutionContract 同一族）。
  *
  * 只读运行（run_dispatch readOnly / `run --read-only`，会审席位都是）此前没有
@@ -511,25 +565,36 @@ export function composeReadOnlyExecutionContract() {
 }
 
 /**
- * M12-14 Package 1: encode the authorized-paths array as a single-line JSON
- * literal safe to embed verbatim in the delivery contract.
+ * 单行 JSON 数组字面量的唯一编码器（AUTHORIZED_PATHS_JSON 与第 157 批的
+ * VERIFICATION_*_JSON 共用同一种写法）。
  *
  * JSON.stringify escapes C0 (<0x20), the double-quote, and the backslash, but
  * leaves U+2028 / U+2029 (line separators — line terminators that would break
  * the single-line invariant and let a buried directive start a new line),
  * DEL (0x7F), and C1 (0x80-0x9F) as raw code points. None of these carry
- * legitimate path semantics; they are escaped to \uXXXX here so the
- * AUTHORIZED_PATHS_JSON value is always exactly one line and a path can never
- * forge a new contract field. The output round-trips through JSON.parse back
- * to the original array (including spaces, [], colons, quotes, backticks,
- * backslashes, and embedded newlines, which survive as escaped values).
+ * legitimate path/command semantics; they are escaped to \uXXXX here so the
+ * value is always exactly one line and an entry can never forge a new contract
+ * field. The output round-trips through JSON.parse back to the original array
+ * (including spaces, [], colons, quotes, backticks, backslashes, and embedded
+ * newlines, which survive as escaped values).
+ *
+ * @param {string[]} values — the control-plane-prepared array
+ * @returns {string} a single-line JSON literal
+ */
+function encodeContractJsonArray(values) {
+  const raw = JSON.stringify(values);
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u2028\u2029\x7f-\x9f]/g, (ch) =>
+    "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+}
+
+/**
+ * M12-14 Package 1: encode the authorized-paths array as a single-line JSON
+ * literal safe to embed verbatim in the delivery contract.
  *
  * @param {string[]} paths — the control-plane-prepared allowed-paths array
  * @returns {string} a single-line JSON literal
  */
 function encodeAuthorizedPathsJson(paths) {
-  const raw = JSON.stringify(paths);
-  // eslint-disable-next-line no-control-regex
-  return raw.replace(/[\u2028\u2029\x7f-\x9f]/g, (ch) =>
-    "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+  return encodeContractJsonArray(paths);
 }

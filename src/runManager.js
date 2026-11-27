@@ -16,7 +16,7 @@ import { createSecretRedactor, redactSecretShapes } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError, gitChildEnv } from "./delivery.js";
 import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
-import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryRoleContract, composeReadOnlyExecutionContract, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryRoleContract, composeReadOnlyExecutionContract, composeTaskPromptWithDeliveryVerification, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
 import { ID_RE } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
@@ -1409,6 +1409,13 @@ export class RunManager {
       }
     }
 
+    // 第 157 批（TD-386）：本轮任务正文末尾带本轮生效的交付验证命令清单——唯一组装点
+    // （与派发服务的命令行预算预判、resume 重放共用同一个函数）。输入是
+    // prepareDeliveryRequest 规范化之后、WAO 之后真正要跑的那份（含 profile 解析出来的
+    // 命令）。无验证命令 / 无交付 / 只读运行 → 原样返回，正文逐字节不变。
+    // prompt.sent 仍只记 Lead 的原始任务正文（这一块能从 run.started 的交付事实重算）。
+    const taskPrompt = composeTaskPromptWithDeliveryVerification(prompt, deliveryPrepared?.verification);
+
     // M11-8C Package A + M12-14 Package 1: delivery-mode runs ALWAYS inject the
     // control-plane-owned Delivery Execution Contract, even when the agent has no
     // systemPrompt. This forbids the worker from running git mutating commands,
@@ -1626,7 +1633,8 @@ export class RunManager {
     // argv here.
     if (typeof backend.preflightInvocation === "function") {
       await backend.preflightInvocation(agent, {
-        prompt,
+        // 第 157 批：预检看到的正文与真实 spawn 逐字节相同（含验证清单块）。
+        prompt: taskPrompt,
         roleContract,
         ...(sessionReuse ? { sessionReuse, priorProviderSessionId } : {}),
         // 决定 0133：预检的 argv 要与真实 spawn 一致——可纠偏运行的 spawn 会带上
@@ -2135,7 +2143,9 @@ export class RunManager {
     let result;
     try {
       result = await backend.spawn(effectiveAgent, {
-        prompt,
+        // 第 157 批：worker 收到的本轮用户消息末尾带交付验证清单（无验证命令时与
+        // prompt 逐字节相同）；prompt.sent 上一条仍只记 Lead 的原始正文。
+        prompt: taskPrompt,
         roleContract,
         resolvedCredentials,
         // M11-11C: opaque reuse routing → backend compiles --session-id/--resume.
@@ -2282,13 +2292,14 @@ export class RunManager {
       // Transcript says delivery mode but context is malformed/missing — fail closed.
       return null;
     }
+    let resumeDeliveryPrepared = null;
     if (deliveryContext) {
       // Full fail-closed validation: re-validate the delivery request through SSOT,
       // then prove the worktree is still a persistent linked worktree at the correct
       // branch and base commit. This prevents resume from spawning into a stale or
       // missing worktree, or using a corrupted delivery context.
       try {
-        prepareDeliveryRequest({
+        resumeDeliveryPrepared = prepareDeliveryRequest({
           mode: deliveryContext.mode,
           allowedPaths: deliveryContext.allowedPaths,
           ...(deliveryContext.verificationCommands
@@ -2600,6 +2611,13 @@ export class RunManager {
       const promptEvent = findLatestBound(events, "prompt.sent", runId);
       if (!promptEvent?.prompt) return null;
       const originalSessionId = session.backendSessionId;
+      // 第 157 批（TD-386）：resume 重放同一份任务正文，验证清单按本 run 持久化的交付
+      // 事实重新组装（同一个函数；无交付/无验证命令 → 正文逐字节不变）。prompt.sent
+      // 里仍只有 Lead 的原始正文，这一块不落盘。
+      const resumeTaskPrompt = composeTaskPromptWithDeliveryVerification(
+        promptEvent.prompt,
+        resumeDeliveryPrepared?.verification,
+      );
       // R7-C (C-5): same capability-gated cwd existence assert as start (layer
       // 2) — the replay re-spawn is a LOCAL OS spawn with cwd: agent.cwd
       // (non-delivery runs: the run.started.cwd merged via getAgent; delivery
@@ -2621,7 +2639,7 @@ export class RunManager {
       // early gate, not a byte-identity guarantee); spawn rechecks authoritatively.
       if (typeof backend.preflightInvocation === "function") {
         await backend.preflightInvocation(agent, {
-          prompt: promptEvent.prompt,
+          prompt: resumeTaskPrompt,
           roleContract: resumeRoleContract,
           ...(deliveryContext ? { deliveryMode: true } : {}),
         });
@@ -2638,7 +2656,7 @@ export class RunManager {
       let newResult;
       try {
         newResult = await backend.spawn(spawnAgent, {
-          prompt: promptEvent.prompt,
+          prompt: resumeTaskPrompt,
           roleContract: resumeRoleContract,
           resolvedCredentials: resumeResolvedCredentials,
           ...(deliveryContext ? { deliveryMode: true } : {}),

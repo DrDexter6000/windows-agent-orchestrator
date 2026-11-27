@@ -31,7 +31,7 @@ import { resolveRunDirForWrite, projectFactForWrite, resolveTranscriptPath, clai
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
 import { effectiveSessionReuse } from "../dispatchResolution.js";
 import { PROMPT_HANDOFF_TIMEOUT_MS, PROMPT_HANDOFF_TIMEOUT_TEXT, promptStdinArgs } from "../runnerPrompt.js";
-import { loadRoleContract, roleContractSha256, composeRoleContractWithIdentity, composeDeliveryRoleContract } from "./roleContract.js";
+import { loadRoleContract, roleContractSha256, composeRoleContractWithIdentity, composeDeliveryRoleContract, composeTaskPromptWithDeliveryVerification } from "./roleContract.js";
 import { openRunnerStderrFd, runnerStderrPath } from "./runnerStderr.js";
 // TD-347（第 93 批）：runner 的唯一启动口——Windows 缺省经 WMI 启动桥（不随宿主
 // 重启 MCP 服务而死）；spawnFn 注入 / WAO_RUNNER_LAUNCH=spawn / 非 Windows 走
@@ -679,6 +679,12 @@ export async function dispatchRun({
       : {}),
   } : null;
 
+  // 第 157 批（TD-386）：runner 交给后端的最终任务正文 = Lead 的原始正文 + 本轮生效的
+  // 验证清单块（同一个组装函数，开始/续修/resume 与这里字节一致）。提示词放命令行的
+  // 后端会把这份正文编译进 argv，所以下面的启动预算预判必须看到加块之后的该正文——
+  // 用原始正文会低估，放行一个真实启动必拒的派发。prompt.sent / 转录不记这一块。
+  const taskPrompt = composeTaskPromptWithDeliveryVerification(prompt, validatedDelivery?.verification);
+
   const resolvedRunDir = resolve(runDir);
   const resolvedRegistry = resolve(registryPath);
 
@@ -1130,7 +1136,8 @@ export async function dispatchRun({
         transcriptDirBound: transcriptDirLengthBound(resolvedRunDir, finalRunId, ownershipCwd ?? cwd),
         backend: lineageBackend,
         agent,
-        prompt,
+        // 第 157 批：预判看到 runner 交给后端的最终正文（含验证清单块）。
+        prompt: taskPrompt,
         roleContract: composeLaunchRoleContract({
           agentId, backend: lineageBackend, roleShaSource, executedRoleId, resolvedLane, publicDelivery,
         }),

@@ -347,7 +347,8 @@
       "run-lifecycle/readOnlyDispatch.test.js",
       "run-lifecycle/readOnlyClone.test.js",
       "delivery/deliveryErrorClass.test.js",
-      "run-lifecycle/continuableAuto.test.js"
+      "run-lifecycle/continuableAuto.test.js",
+      "run-lifecycle/b157-deliveryVerificationPrompt.test.js"
     ],
     "process": [
       "isolation-infra/canonicalRunner.test.js",
