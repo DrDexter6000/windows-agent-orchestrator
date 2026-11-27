@@ -3,7 +3,7 @@
 - 日期：2026-11-04
 - 状态：accepted
 - 来源：Owner 2026-11-04："continuable和run_continue是我非常看重的能力……我不认为这是lead agent的问题，我把它看作wao的引导和提示不足的问题，应予解决"；同日预先授权 SKILL.md 按需扩限。方案会审 consult_2026110416480107605yuyn（sol、deepseek-flash 均 FIX_FIRST，已吸收）与复核 consult_20261104170452630g1o6mq（sol PASS_WITH_NOTES）；交付会审 consult_202611041854448687uky1l（sol FIX_FIRST、deepseek-flash PASS_WITH_NOTES），必改项经 `run_continue` 交回原 worker 续修。
-- 关系：用 M12-7 的续谱（`continuable` + `run_continue`）；修订 0095 第 3 条（`nextStep` 出现位置）。
+- 关系：用 M12-7 的续谱（`continuable` + `run_continue`）；修订 0095 第 3 条（`nextStep` 出现位置）。2026-11-27 修订：第 3 条（默认值不变）由决定 0133 取代。
 
 ## 背景
 
