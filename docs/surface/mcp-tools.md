@@ -80,8 +80,10 @@ Output:
 | providerSessionRouting | string | yes | enum: not_used \| first_turn_requested \| resume_requested |
 | continuable | boolean | yes |  |
 | continuableOff | string | no | enum: no_workspace \| override \| backend_unsupported \| session_reuse_unavailable \| argv_budget \| lineage_slot_unavailable |
+| label | string | no |  |
 | nextStep | string | no |  |
 | laneFacts | string | no |  |
+| laneRules | object | no |  |
 | contractAdvisories | array<object> | no |  |
 
 ## run_dispatch_contract_check
@@ -154,6 +156,8 @@ Output:
 | recordPath | string | no |  |
 | round | integer | no |  |
 | roundAdvisory | string | no |  |
+| label | string | no |  |
+| laneRules | object | no |  |
 | questions | array<object> | no |  |
 | brief | object | no |  |
 | budgetMs | integer | no |  |
@@ -202,6 +206,7 @@ Output:
 | rootRunId | string\|null | yes |  |
 | state | string\|null | yes |  |
 | rejectionReason | string\|null | yes | enum: malformed_input \| invalid_delivery \| parent_not_found \| parent_not_terminal \| parent_accepted \| lineage_closed \| not_continuable \| no_provider_session \| workspace_mismatch \| no_delivery \| worker_configuration_changed \| role_contract_drift \| legacy_dispatch_continuable_unsupported \| unsupported_backend \| missing_worktree \| worktree_drift \| continuation_scope_incomplete \| busy |
+| label | string | no |  |
 | nextStep | string | no |  |
 | inheritedChangedPaths | array<string>\|null | no |  |
 | inheritedChangedCount | integer\|null | no |  |

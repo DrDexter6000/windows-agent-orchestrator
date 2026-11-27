@@ -106,6 +106,8 @@ function legacyRecord(consultId, createdAt, reviewedRunId, extra = {}) {
 let idCounter = 0;
 const nextId = () => `consult_20261127${String(++idCounter).padStart(8, "0")}r155`;
 
+const RULES_BLOCK = ["以下为 Owner 原文（车道规则，按声明顺序）：", "1. 夹具规则"];
+
 function makeServiceInput(world, calls) {
   return {
     briefText: "任务书\n\n## Q1 可行吗\n",
@@ -118,6 +120,9 @@ function makeServiceInput(world, calls) {
     env: {},
     registryReadFn: async () => ({ getAgent: () => ({ backend: "codex", cwd: "." }), listAgents: () => [] }),
     lanesDocFn: () => null,
+    // 第 156 批：规则块与每席车道事实行注入夹具（不读真实画像；车道事实行恒缺省）。
+    laneRulesFn: () => ({ rules: ["夹具规则"], now: null }),
+    laneFactsLineFn: () => null,
     idFn: nextId,
     dispatchFn: async (input) => {
       calls.push(input);
@@ -226,7 +231,9 @@ test("R155-B1: 交付会审——同一谱系第 1、2、3 轮；跨谱系不串
     // 另一条谱系：自己从第 1 轮数起，不被 A 谱系的会审串号；再审同一运行才累加。
     const x1 = await consult(world, { reviewedRunId: "run_other_x" });
     assert.equal(recordOnDisk(world, x1.result.consultId).round, 1);
-    assert.ok(!("round" in x1.result) && x1.advisories.length === 0);
+    // 第 156 批：advisory 通道恒有规则块两行（夹具）；跨谱系第 1 轮无轮次提醒。
+    assert.ok(!("round" in x1.result));
+    assert.deepEqual(x1.advisories, RULES_BLOCK);
     const x2 = await consult(world, { reviewedRunId: "run_other_x" });
     assert.equal(recordOnDisk(world, x2.result.consultId).round, 2);
     // 被审运行转录读不出：按自己是根，只会少算（不报错、不影响会审）。
@@ -401,7 +408,8 @@ test("R155-C1: consult run——第 3 轮起 stderr 开头一行 + 结果里一�
     assert.equal(third.errLines.filter((l) => l === ADVISORY).length, 1, "stderr 恰一行");
     assert.ok(third.errLines.some((l) => l.startsWith("[consult] consult_") && l.includes("started")), "之后才是扇出提示");
     assert.equal(third.out.split("\n").filter((l) => l === ADVISORY).length, 1, "结果里恰一行原文");
-    assert.equal(third.out.split("\n")[2], ADVISORY, "紧跟头部两行");
+    // 第 156 批：文本面首行是 label 行——提醒在 label 与渲染头部两行之后（第 4 行）。
+    assert.equal(third.out.split("\n")[3], ADVISORY, "紧跟 label 行与头部两行");
   } finally {
     cleanup(world);
   }
@@ -482,8 +490,8 @@ test("R155-C4: 提醒不改退出码、结论与席位派发（同一输入第 2
     const exitBefore = process.exitCode;
     const second = await consult(world, { declaredFields: fields, follows: (await consult(world)).result.consultId });
     const third = await consult(world, { declaredFields: fields, follows: second.result.consultId });
-    assert.equal(second.advisories.length, 0);
-    assert.deepEqual(third.advisories, [ADVISORY]);
+    assert.deepEqual(second.advisories, RULES_BLOCK, "第 2 轮：只有规则块（156 批）");
+    assert.deepEqual(third.advisories, [ADVISORY, ...RULES_BLOCK], "第 3 轮：轮次提醒在前、规则块在后");
     assert.equal(process.exitCode, exitBefore, "退出码不变");
     assert.equal(third.calls.length, second.calls.length, "席位派发数相同");
     assert.deepEqual(third.calls.map((c) => c.agentId), second.calls.map((c) => c.agentId));
@@ -545,7 +553,7 @@ test("R155-D1: 旧目录里的同谱系会审记录也算进轮次（两个目�
     const merged = await consult(world, { reviewedRunId: "run_cont_f2", fallbackConsultsDir: world.legacyDir });
     // （上一条 blind 自己也是同谱系的一场，已落在状态目录：两份旧记录 + blind = 3，本次第 4 轮。）
     assert.equal(merged.result.round, 4);
-    assert.deepEqual(merged.advisories, [ADVISORY]);
+    assert.deepEqual(merged.advisories, [ADVISORY, ...RULES_BLOCK]);
     // 同一份记录两个目录里都有：只数一次。
     writeRecord(world, legacyRecord("consult_20261001000000000olda1", "2026-10-01T00:00:00.000Z", "run_root_f", { round: 1 }));
     const deduped = await consult(world, { reviewedRunId: "run_root_f", fallbackConsultsDir: world.legacyDir });
@@ -631,7 +639,7 @@ test("R155-D3: 新记录写 lineageRoot——被审转录之后被删，同谱�
     rmSync(join(world.runDir, "run_cont_i1.jsonl"));
     const c3 = await consult(world, { reviewedRunId: "run_cont_i2" });
     assert.equal(c3.result.round, 3);
-    assert.deepEqual(c3.advisories, [ADVISORY]);
+    assert.deepEqual(c3.advisories, [ADVISORY, ...RULES_BLOCK]);
     assert.ok(!("roundMayBeLow" in c3.result.record));
   } finally {
     cleanup(world);

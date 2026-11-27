@@ -342,8 +342,12 @@ async function consultRunCommand(args, config, deps = {}) {
     ...(options.cwd ? { cwd: options.cwd } : {}),
     env: process.env,
     // TD-283：席位目标车道带 Owner 暂停说明 → 每席一行 stderr advisory（只提示
-    // 不拦截，派发照常进行）。
+    // 不拦截，派发照常进行）。第 156 批：规则块与每席车道事实行走同一通道。
     advisorySink: (line) => console.error(line),
+    // 第 156 批：laneRules 构造与车道事实行的测试缝（同 loadLanesConfigFn 模式；
+    // 缺省=服务内单一构造/单一实现——CLI 不拼装内容）。
+    ...(config?.laneRulesFn ? { laneRulesFn: config.laneRulesFn } : {}),
+    ...(config?.laneFactsLineFn ? { laneFactsLineFn: config.laneFactsLineFn } : {}),
     // 车道表：非默认 --registry 时停用（防跨绑，规则同 run 命令），席位解析与
     // 暂停提示都不读它；config.lanesDocFn 是测试缝。
     lanesDocFn: () => lanesDocForCall(options, config, config?.lanesDocFn),
@@ -363,6 +367,11 @@ async function consultRunCommand(args, config, deps = {}) {
   if (format === "json") {
     console.log(JSON.stringify(nextStep === null ? result : { ...result, nextStep }, null, 2));
     return;
+  }
+  // 第 156 批（TD-384）：文本面带一行 label（[席位A+席位B] 任务书标题——与
+  // run 文本面的 `label: …` 行同一形制；JSON 面经 result.label 携带）。
+  if (typeof result.label === "string" && result.label.length > 0) {
+    console.log(`label: ${result.label}`);
   }
   console.log(renderCouncilDiffText(result));
   printConsultNextStep(nextStep);

@@ -37,6 +37,11 @@ import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveRea
 import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 // 0097 §4：派发时回显所选车道一行事实（只陈列非推荐；fail-open——null 不打印）。
 import { laneFactsLine } from "../application/laneFactsLine.js";
+// 第 156 批：laneRules（Owner 车道规则原文 + 此刻高峰快照——stderr 行与 JSON
+// 字段同源）与 label（[车道] 任务名，TD-384）。单一构造/渲染；依赖边由
+// test/registry-roles/laneTraits.test.js 钉。
+import { buildLaneRules, renderLaneRulesLines } from "../application/laneRules.js";
+import { buildDispatchLabel, appendLabelHint } from "../application/dispatchLabel.js";
 import { readRegistry } from "../registry.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
@@ -183,7 +188,7 @@ export async function loadScorecardFromTranscript(transcriptPath, runId = null) 
 // P2（M7）→ M9-2A：fork detached runner 托管一个 background run。
 // 派发逻辑已提取到共享 application service (dispatchRun)；本函数只负责 CLI 适配——
 // 选项整理 + 把 service 结构化结果映射到既有 JSON 输出契约（不变）。
-async function spawnBackgroundRunner(agentId, options, config, delivery, resolvedFrom) {
+async function spawnBackgroundRunner(agentId, options, config, delivery, resolvedFrom, laneRules = null) {
   if (options.scorecardRules) {
     parseScorecardRules(options.scorecardRules, options.scorecardRulesSource);
   }
@@ -284,6 +289,15 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     agentId: result.agentId,
     transcript: result.transcriptPath,
     background: true,
+    // 第 156 批（TD-384）：[<车道>] <任务名>——宿主后台任务的结构化名字（取不到
+    // 标题退回 runId）；note 末尾的命名短提示与之同源。
+    ...(() => {
+      const label = buildDispatchLabel({ lane: agentId, prompt: options.prompt ?? "", fallbackId: result.runId });
+      return label == null ? {} : { label };
+    })(),
+    // 第 156 批：Owner 规则原文 + 此刻高峰快照（与 stderr 同一构造；失败只降级
+    // 该字段）。与 laneFacts 不同，它进 JSON——Lead 筛 JSON 时规则不再被滤掉。
+    ...(laneRules != null ? { laneRules } : {}),
     // 决定 0133：续修回显。continuable 所有派发都带；缺省（自动）下带交付的派发
     // 没开成时再带闭集原因 continuableOff（非交付派发、显式关闭不带）。
     continuable: result.continuable === true,
@@ -297,7 +311,10 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     // effort: override}) under the same advisory discipline. Present only
     // when --reasoning was given (ordinary dispatches stay byte-identical).
     ...(result.effectiveReasoning ? { reasoning: result.effectiveReasoning } : {}),
-    note: "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Wait to settlement: `wao runs wait <runId> --until-settled`.",
+    note: appendLabelHint(
+      "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Wait to settlement: `wao runs wait <runId> --until-settled`.",
+      buildDispatchLabel({ lane: agentId, prompt: options.prompt ?? "", fallbackId: result.runId }),
+    ),
   }, null, 2));
 }
 
@@ -419,6 +436,9 @@ export async function runCommand(args, config) {
   let dispatchHoldLine = null;
   // 0097 §4：所选车道一行事实（解析块内取，块外打印；fail-open）。
   let laneFactsText = null;
+  // 第 156 批：Owner 车道规则原文 + 此刻高峰快照（解析块内取，块外打印；构造
+  // 失败自降级为"不可用"行——fail-degrade，绝不阻塞派发）。laneRulesFn：测试缝。
+  let laneRules = null;
   const wantsLaneRole = options.lane !== undefined || options.role !== undefined;
   // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名）。原 A-1 顺序
   // （prompt 校验先于注册表解析）保持：无 prompt 时先拒绝，不触发解析。
@@ -533,6 +553,9 @@ export async function runCommand(args, config) {
     // --registry 时表停用，回显随之缺省）。画像读失败返回 null，不打印。
     // laneFactsLineFn：测试缝（夹具注入；生产路径缺省真实实现）。
     laneFactsText = (config?.laneFactsLineFn ?? laneFactsLine)(holdLaneId, { lanesDoc });
+    // 第 156 批：规则块与车道事实行同源同表（非默认 --registry 时表停用，
+    // laneRules 随之降级为"不可用"行——与 laneFacts 缺席同一纪律）。
+    laneRules = (config?.laneRulesFn ?? buildLaneRules)({ lanesDoc });
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   // （已在解析块前提前加载 earlyDelivery——此处复用同一结果，不二次读盘。）
@@ -568,6 +591,9 @@ export async function runCommand(args, config) {
   // TD-283：目标车道带 Owner 暂停说明 → stderr 一行 advisory（dispatchResource-
   // Advisory 同款纪律：只提示、不拦截、不改退出码、不污染 stdout 管道）。
   if (dispatchHoldLine) console.error(dispatchHoldLine);
+  // 第 156 批：Owner 车道规则原文 + 此刻各额度池高峰（先规则块后车道行——与会审
+  // stderr 的顺序一致；同款 advisory 纪律，每条一行；降级时恰一行"不可用"）。
+  for (const line of renderLaneRulesLines(laneRules)) console.error(`[wao] ${line}`);
   // 0097 §4：派发那一刻（前台与后台都在这里分岔前）往 stderr 打所选车道一行
   // 事实（只陈列，不是推荐；同款 advisory 纪律，fail-open——null 不打印）。
   if (laneFactsText) console.error(`[wao] ${laneFactsText}`);
@@ -585,13 +611,15 @@ export async function runCommand(args, config) {
   if (options.background) {
     options.prompt = await loadPrompt(options);
     await loadScorecardRules(options);
-    return spawnBackgroundRunner(agentId, options, config, delivery, resolvedTarget?.source);
+    return spawnBackgroundRunner(agentId, options, config, delivery, resolvedTarget?.source, laneRules);
   }
   options.wait = true;
   await loadScorecardRules(options);
+  // 第 156 批：prompt 只读一次——manager.start 与 label（[车道] 任务名）同源。
+  const promptText = await loadPrompt(options);
   const manager = newRunManager(config);
   const run = await manager.start(agentId, {
-    prompt: await loadPrompt(options),
+    prompt: promptText,
     registry: options.registry,
     runDir: options.runDir,
     tags: options.tag,
@@ -639,6 +667,14 @@ export async function runCommand(args, config) {
     if (options.reasoning !== undefined) parts.push(`reasoning: ${JSON.stringify(run.agent.reasoning)}`);
     console.log(`effective ${parts.join(", ")}`);
   }
+  // 第 156 批（TD-384）：文本格式带一行 label（start 后 runId 已知，取不到标题
+  // 退回 runId）；JSON 面不重复（label 归 --background 的 JSON 与 MCP 回执）。
+  if (format !== "json") {
+    const fgLabel = buildDispatchLabel({
+      lane: agentId, prompt: promptText, fallbackId: run.transcript.context.runId,
+    });
+    if (fgLabel != null) console.log(`label: ${fgLabel}`);
+  }
   const waitResult = await runAndWait(run, options);
   // P4 决策A：scorecard 从 transcript 的 scorecard.checked 事件取（runManager 无论通过/失败都落盘）。
   // TD-53 修复：注入前置于格式分支之前——原 json 分支 early-return 在注入之前，丢字段。
@@ -666,6 +702,11 @@ export async function runCommand(args, config) {
   if (delivery && format === "json") {
     waitResult.continuable = false;
     if (delivery.continuable === undefined) waitResult.continuableOff = CONTINUABLE_OFF_FOREGROUND;
+  }
+  // 第 156 批：前台 JSON 同样带 laneRules（任务书的"--format json 的结果里也带"；
+  // 派发时点已打到 stderr，这里是结果侧的同一份）。
+  if (format === "json" && laneRules != null) {
+    waitResult.laneRules = laneRules;
   }
   if (format === "json") {
     console.log(JSON.stringify(waitResult, null, 2));

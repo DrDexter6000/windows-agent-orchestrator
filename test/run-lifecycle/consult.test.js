@@ -1978,10 +1978,11 @@ test("组记录收尾：改名换不上去时退回就地覆盖并清掉临时�
 
 // ── TD-283：席位目标车道带 Owner 暂停说明 → 每席一行 advisory（不拦截） ────────
 
-test("TD-283: 会审席位目标是带 dispatchHold 的车道 → advisorySink 每席一行；其余席位零行", async () => {
+test("TD-283: 会审席位目标是带 dispatchHold 的车道 → 每席一行；第 156 批另有规则块与车道事实行", async () => {
   const { laneDispatchHold } = await import("../../src/dispatchResolution.js");
   // 夹具车道表（lanesDocFn 测试缝注入——不读真实 config/lanes.json，解除暂停
-  // 改表后这里不红；Owner 原话不抄第二份）。
+  // 改表后这里不红；Owner 原话不抄第二份）。第 156 批：laneRules/laneFactsLine
+  // 同为注入夹具（不读真实画像）。
   const lanesDoc = {
     ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
     lanes: [
@@ -2008,13 +2009,81 @@ test("TD-283: 会审席位目标是带 dispatchHold 的车道 → advisorySink �
     mkdirFn: async () => {},
     lanesDocFn: () => lanesDoc,
     advisorySink: (line) => advisories.push(line),
+    // 156 批夹具：规则块（渲染两条）+ 每席车道事实行（只有 held-lane 给一行）。
+    laneRulesFn: () => ({ rules: ["夹具规则甲", "夹具规则乙"], now: null }),
+    laneFactsLineFn: (laneId) => (laneId === heldLane.id ? `所选车道事实（只陈列，不是推荐）：${laneId} · 夹具` : null),
   }));
   assert.equal(calls.length, 2, "两席都照常派发（advisory 不拦截）");
   assert.equal(result.seats.filter((s) => s.runState === "completed").length, 2, "派发照常完成");
-  assert.equal(advisories.length, 1, "恰一行（只有带说明的席位）");
-  assert.ok(advisories[0].startsWith(`[wao] advisory: lane ${heldLane.id} dispatchHold=`), "advisory 行形制同资源计数行");
-  assert.ok(advisories[0].includes(laneDispatchHold(lanesDoc, heldLane.id)), "夹具说明原文入行");
-  assert.ok(advisories[0].includes("照常进行"), "文案明示派发照常进行");
+  // 第 156 批顺序钉：规则块在先（开始时一次），每席 hold 行 + 车道事实行随后。
+  assert.equal(advisories.length, 5, "规则块 3 行 + 带说明席位的 hold/事实各一行；其余席位零行");
+  assert.deepEqual(advisories.slice(0, 3), [
+    "以下为 Owner 原文（车道规则，按声明顺序）：",
+    "1. 夹具规则甲",
+    "2. 夹具规则乙",
+  ], "规则块每条一行、只此一次");
+  assert.ok(advisories[3].startsWith(`[wao] advisory: lane ${heldLane.id} dispatchHold=`), "advisory 行形制同资源计数行");
+  assert.ok(advisories[3].includes(laneDispatchHold(lanesDoc, heldLane.id)), "夹具说明原文入行");
+  assert.ok(advisories[3].includes("照常进行"), "文案明示派发照常进行");
+  assert.equal(advisories[4], `所选车道事实（只陈列，不是推荐）：${heldLane.id} · 夹具`, "席位车道事实行紧跟 hold 行");
+});
+
+// ── 第 156 批：会审 label（席位列表）与 laneRules（结果携带、记录持久、回放） ──
+
+test("156: 会审 label 进结果与组记录；laneRules 进结果（创建时点快照）；读取模式经记录回放 label", async () => {
+  const writes = [];
+  const FAKE_RULES = { rules: ["夹具规则甲"], now: { beijing: "周四 15:00", holidaysRecognized: false, peaks: [] } };
+  const { dispatchFn } = makeDispatchStub();
+  const { readTranscriptFn } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: 意见\n" })],
+    ["run_stub_seat_b", makeTranscript("run_stub_seat_b", { finalText: "Q1: 意见\n" })],
+  ]));
+  const input = baseInput({
+    briefText: "# 第 156 批方案会审\n\nQ1: ……\n",
+    seats: [{ agentId: "seat_a" }, { agentId: "seat_b" }],
+    dispatchFn,
+    readTranscriptFn,
+    writeFileFn: async (p, data) => { writes.push({ p: String(p), data }); },
+    laneRulesFn: () => FAKE_RULES,
+  });
+  const result = await runConsult(input);
+  assert.equal(result.label, "[seat_a+seat_b] 第 156 批方案会审", "席位列表 label（标题取法与看板同源）");
+  assert.deepEqual(result.laneRules, FAKE_RULES, "laneRules 上结果（单一构造产物原样）");
+  // 组记录持久 label（扇出与收尾两份都带）；读取模式据此回放。
+  assert.ok(writes.length >= 2, "扇出与收尾各落一次盘");
+  for (const w of writes) {
+    const doc = JSON.parse(w.data);
+    assert.equal(doc.label, "[seat_a+seat_b] 第 156 批方案会审", `${w.p}: 记录带 label`);
+    assert.equal("laneRules" in doc, false, "laneRules 不持久（创建时点快照只在结果上）");
+  }
+  const { rerenderConsultFromRecord } = await import("../../src/application/consultService.js");
+  const record = JSON.parse(writes[writes.length - 1].data);
+  const reread = await rerenderConsultFromRecord({
+    record, runDir: input.runDir, consultsDir: input.consultsDir, lineageDirs: [], readTranscriptFn,
+  });
+  assert.equal(reread.label, "[seat_a+seat_b] 第 156 批方案会审", "读取模式经记录回放 label");
+  assert.equal("laneRules" in reread, false, "读取模式不带 laneRules（时点快照归创建）");
+});
+
+test("156: 取不到标题的会审 label 退回 consultId；laneRulesFn 抛错 → 会审照常、字段降级", async () => {
+  const FAKE_RULES = { rules: null, rulesReason: "ownerRules 缺失、不合法、为空或读取失败", now: null };
+  const { dispatchFn } = makeDispatchStub();
+  const { readTranscriptFn } = makeTranscriptStub(new Map([
+    ["run_stub_seat_a", makeTranscript("run_stub_seat_a", { finalText: "Q1: 意见\n" })],
+  ]));
+  const result = await runConsult(baseInput({
+    briefText: "---\n***\n", // 只有分隔线——取不出标题行
+    seats: [{ agentId: "seat_a" }],
+    dispatchFn,
+    readTranscriptFn,
+    writeFileFn: async () => {},
+    laneRulesFn: () => { throw new Error("boom"); },
+    advisorySink: () => {},
+  }));
+  // consultId 由 fake clock 决定——只钉形状：`[seat_a] consult_…`。
+  assert.match(result.label, /^\[seat_a\] consult_\S+$/, "无标题退回 consultId");
+  assert.deepEqual(result.laneRules, FAKE_RULES, "构造抛错 → 降级形（会审照常受理完成）");
+  assert.equal(result.seats.filter((s) => s.runState === "completed").length, 1, "席位照常收口");
 });
 
 test("TD-283 consult run：默认注册表 → 服务拿到车道表；非默认 --registry → 停用的空表", async () => {

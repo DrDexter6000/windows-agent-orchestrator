@@ -203,8 +203,9 @@ test("M12-7-MRC-M4: service threaded with bound workspace + requireCertified (no
       assert.equal(typeof call.backendFor, "function", "backend capability resolver threaded");
 
       const parsed = r.structuredContent;
+      // 第 156 批：受理回执增 label；laneRules 有意不带（车道随谱系固定）。
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "continuation", "nextStep", "parentRunId", "rejectionReason", "rootRunId", "runId", "state"],
+        ["accepted", "agentId", "continuation", "label", "nextStep", "parentRunId", "rejectionReason", "rootRunId", "runId", "state"],
         "strict output keys only");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_child_ok");
@@ -497,9 +498,11 @@ test("0130-MRC-1: delivery omitted → handler does NOT enforce inline verificat
       // 受理回执写明这次用的是继承来的合同（nextStep 半句，无新增 wire 字段）。
       assert.match(parsed.nextStep, /Delivery contract inherited from the parent run\./);
       // 第 136 批：CLI 半句带子运行自己的 runId（不是 parentRunId），排在"继承合同"
-      // 那半句之前。
-      assert.match(parsed.nextStep, new RegExp(
-        `wao runs wait ${parsed.runId} --until-settled there; one command waits until settlement\\. Delivery contract inherited from the parent run\\.$`));
+      // 那半句之前。第 156 批：命名短提示（后台任务可命名 <label>）挂最末。
+      assert.ok(parsed.nextStep.endsWith(
+        `wao runs wait ${parsed.runId} --until-settled there; one command waits until settlement. `
+        + `Delivery contract inherited from the parent run. （后台任务可命名 ${parsed.label}）`),
+      `继承后缀 + 命名短提示在末尾: ${parsed.nextStep}`);
       assert.ok(!parsed.nextStep.includes(parsed.parentRunId), "不带 parentRunId");
       // Explicit-delivery receipts do NOT carry the clause.
       const r2 = await client.callTool({
@@ -508,8 +511,10 @@ test("0130-MRC-1: delivery omitted → handler does NOT enforce inline verificat
       });
       assert.equal(r2.structuredContent.accepted, true);
       assert.ok(!r2.structuredContent.nextStep.includes("inherited"), "explicit delivery keeps the plain nextStep");
-      assert.match(r2.structuredContent.nextStep, new RegExp(
-        `wao runs wait ${r2.structuredContent.runId} --until-settled there; one command waits until settlement\\.$`));
+      assert.ok(r2.structuredContent.nextStep.endsWith(
+        `wao runs wait ${r2.structuredContent.runId} --until-settled there; one command waits until settlement.`
+        + ` （后台任务可命名 ${r2.structuredContent.label}）`),
+      `显式合同：无继承半句、命名短提示在末尾: ${r2.structuredContent.nextStep}`);
     } finally { await client.close(); await server.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
@@ -545,12 +550,13 @@ test("136-L3: 长子 runId 的续修（delivery 省略、继承合同后缀）�
         assert.ok(!r.structuredContent.nextStep.includes("run_parent_ok"), "不带 parentRunId");
         return r.structuredContent.nextStep;
       };
-      // 140 字符：整句放得下——CLI 半句（带子运行自己的 runId）在前，继承后缀在后。
+      // 140 字符：整句 479——第 156 批的命名短提示放不下，只丢提示（原句不变）。
       assert.equal(await call(id140),
         `${base} If your host has a background shell, you can instead run wao runs wait ${id140} --until-settled there; one command waits until settlement. Delivery contract inherited from the parent run.`);
-      // 150 与 156 字符：整句放不下——不加 CLI 半句，MCP 写法与继承后缀照旧。
+      // 150 与 156 字符：整句放不下 CLI 半句——MCP 写法与继承后缀照旧，命名短
+      // 提示放得下、挂最末（第 156 批）。
       for (const id of [id150, id156]) {
-        assert.equal(await call(id), `${base} Delivery contract inherited from the parent run.`);
+        assert.equal(await call(id), `${base} Delivery contract inherited from the parent run. （后台任务可命名 [coder_hq] correct the bug）`);
       }
     } finally { await client.close(); await server.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
@@ -666,7 +672,8 @@ test("0130-续修5: invalid_delivery on an omitted (inherited) contract carries 
 test("137a-MRC: MCP 回执 = 应用层 projectContinueOutcome + 按面的 nextStep（受理、每个拒绝码、累计范围事实、继承合同 guidance）", async () => {
   const { projectContinueOutcome, CONTINUE_REJECTION_REASONS, CONTINUE_INHERITED_DELIVERY_NOTE } =
     await import("../../src/application/runContinue.js");
-  const { buildNextStep } = await import("../../src/application/runNextStep.js");
+  const { buildNextStep, NEXT_STEP_MAX_LEN } = await import("../../src/application/runNextStep.js");
+  const { buildDispatchLabel, appendLabelHint } = await import("../../src/application/dispatchLabel.js");
   const dir = makeGitDir("m137a-mrc-proj-");
   try {
     writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
@@ -715,12 +722,17 @@ test("137a-MRC: MCP 回执 = 应用层 projectContinueOutcome + 按面的 nextSt
         const expected = {
           ...projectContinueOutcome(rawValue, c.delivery),
           ...(rawValue.accepted
-            ? {
-                nextStep: buildNextStep({
+            ? (() => {
+              // 第 156 批：受理回执带 label；nextStep 末尾挂命名短提示（同一实现）。
+              const label = buildDispatchLabel({ lane: rawValue.agentId, prompt: "fix", fallbackId: rawValue.runId });
+              return {
+                ...(label != null ? { label } : {}),
+                nextStep: appendLabelHint(buildNextStep({
                   surface: "mcp", situation: "dispatch_accepted", runId: rawValue.runId,
                   suffix: c.delivery === undefined ? CONTINUE_INHERITED_DELIVERY_NOTE : "",
-                }),
-              }
+                }), label, NEXT_STEP_MAX_LEN),
+              };
+            })()
             : {}),
         };
         assert.deepEqual(r.structuredContent, expected, `${c.label}: structuredContent 就是共享投影 + nextStep`);

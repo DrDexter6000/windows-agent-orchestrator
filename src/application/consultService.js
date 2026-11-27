@@ -64,6 +64,14 @@ import { projectReadOnlyObservation } from "./runReadOnlyObservation.js";
 // 决定 0096：有未终态席位时回执带 MCP 面 nextStep（模板与长度上限的家在
 // runNextStep.js，本模块只提供席位判定并转交）。
 import { buildNextStep } from "./runNextStep.js";
+// 第 156 批：会审结果带 label（[席位A+席位B] 任务书标题——与 Owner 看板同一取
+// 法）与 laneRules（Owner 规则原文 + 此刻高峰快照；CLI 面经 advisorySink 打
+// stderr 的那几行也来自同一构造/渲染）。画像只经 laneProfile 的投影——本模块
+// 不直接引用 laneProfile（依赖边由 test/registry-roles/laneTraits.test.js 钉：
+// laneRules/laneFactsLine ← 本模块）。
+import { buildLaneRules, degradedLaneRules, renderLaneRulesLines } from "./laneRules.js";
+import { buildConsultLabel } from "./dispatchLabel.js";
+import { laneFactsLine } from "./laneFactsLine.js";
 
 function listRoleLibrarySync() { return listRoleLibrary(); }
 
@@ -663,10 +671,16 @@ export async function runConsult({
   onFanOut,
   // TD-283：席位派发 advisory 下沉（服务层零 console——CLI 注入 console.error，
   // MCP 面缺省 no-op）。每席目标车道带 Owner 暂停说明时恰一行，只提示不拦截。
+  // 第 156 批：Owner 规则原文 + 此刻高峰（开始时一次）与每席一行所选车道事实
+  // 也走同一通道——MCP 面不注入 sink，天然零输出（其回执带结构化字段）。
   advisorySink = () => {},
   // 车道表读取面：席位别名解析与 TD-283 暂停提示共用。CLI 在非默认 --registry
   // 时传入停用的空表（防跨绑，规则同 run 命令）；测试注入夹具；缺省真实表。
   lanesDocFn = loadLanesConfig,
+  // 第 156 批：laneRules 构造与每席车道事实行的测试缝（缺省=单一构造/单一实现；
+  // 注入夹具，测试不读真实画像）。
+  laneRulesFn = buildLaneRules,
+  laneFactsLineFn = laneFactsLine,
 }) {
   if (!Array.isArray(seats) || seats.length === 0) {
     throw new Error("runConsult: seats is required (at least one seat)");
@@ -768,6 +782,20 @@ export async function runConsult({
   // 空表（防跨绑，规则同 run 命令）；读不到 = null（解析透传、无提示）。
   let consultLanesDoc = null;
   try { consultLanesDoc = lanesDocFn(); } catch { consultLanesDoc = null; }
+  // 第 156 批：会审 label（[席位A+席位B] 任务书标题；取不到退 consultId）与
+  // laneRules（Owner 规则原文 + 此刻高峰快照）。label 随组记录持久（读取模式经
+  // 记录回放）；laneRules 是创建时点的快照，只在结果上携带、不持久。开始时经
+  // advisory 通道打一次（规则每条一行 + 此刻；MCP 面的 sink 是 no-op，零输出）。
+  const label = buildConsultLabel({ seats: seatIds, brief: text, fallbackId: consultId });
+  // 构造那一跳的意外抛错（生产实现不会抛；防注入/未来改动）只降级本字段——
+  // 会审照常扇出（与 run_dispatch 受理回执同一纪律）。
+  let laneRules;
+  try {
+    laneRules = laneRulesFn({ ...(consultLanesDoc ? { lanesDoc: consultLanesDoc } : {}) });
+  } catch {
+    laneRules = degradedLaneRules();
+  }
+  for (const line of renderLaneRulesLines(laneRules)) advisorySink(line);
   let consultRegistryAgents = {};
   try {
     consultRegistryAgents = registry ? Object.fromEntries(registry.listAgents().map((a) => [a.id, a])) : {};
@@ -831,6 +859,14 @@ export async function runConsult({
         const holdLine = dispatchHoldAdvisoryLine(dispatchAgentId, laneDispatchHold(consultLanesDoc, dispatchAgentId));
         if (holdLine) advisorySink(holdLine);
       }
+      // 第 156 批：每席一行所选车道事实（laneFactsLine 同一实现，fail-open——
+      // 返回 null 不打印；车道不在画像/表停用都静默）。
+      {
+        const seatFacts = laneFactsLineFn(dispatchAgentId, {
+          ...(consultLanesDoc ? { lanesDoc: consultLanesDoc } : {}),
+        });
+        if (seatFacts) advisorySink(seatFacts);
+      }
       const seatPolicy = seatPolicies.get(seat.agentId);
       const result = await dispatchFn({
         agentId: dispatchAgentId,
@@ -870,6 +906,8 @@ export async function runConsult({
   await writeFileFn(recordPath, JSON.stringify({
     consultId,
     createdAt,
+    // 第 156 批：会审 label（扇出时算好；读取模式经记录回放，不再重算）。
+    ...(label != null ? { label } : {}),
     round,
     ...(followsId ? { follows: followsId } : {}),
     ...(lineageRoot !== undefined ? { lineageRoot } : {}),
@@ -1011,6 +1049,8 @@ export async function runConsult({
   const record = {
     consultId,
     createdAt,
+    // 第 156 批：会审 label 随记录持久（与扇出落盘那份同一字段）。
+    ...(label != null ? { label } : {}),
     round,
     ...(followsId ? { follows: followsId } : {}),
     ...(lineageRoot !== undefined ? { lineageRoot } : {}),
@@ -1055,6 +1095,9 @@ export async function runConsult({
     recordPath,
     record,
     ...roundFacts,
+    // 第 156 批：label（与记录同一份）与 laneRules（创建时点快照，不持久）。
+    ...(label != null ? { label } : {}),
+    laneRules,
     questions,
     brief: record.brief,
     budgetMs,
@@ -1396,6 +1439,9 @@ export async function rerenderConsultFromRecord({
     recordPath: join(consultsDir, `${record.consultId}.json`),
     record,
     ...roundFacts,
+    // 第 156 批：读取模式经记录回放 label（旧记录没有该字段 → 键缺省，不重算——
+    // 任务书原文不在记录里，重算只会得到 consultId 回退形，不如如实缺省）。
+    ...(typeof record.label === "string" && record.label.length > 0 ? { label: record.label } : {}),
     questions: record.questions ?? [],
     brief: record.brief,
     budgetMs: record.budgetMs,
@@ -1594,6 +1640,10 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
     recordPath: result.recordPath,
     // 第 155 批：第 3 轮起（result 带了才有）回执携带 round 与提醒原文；第 1、2 轮不带。
     ...(typeof result.roundAdvisory === "string" ? { round: result.round, roundAdvisory: result.roundAdvisory } : {}),
+    // 第 156 批：会审 label（创建与读取都经 result 携带；旧记录缺 → 键缺省）与
+    // laneRules（创建时点快照；读取路径 result 不带 → 键缺省）。
+    ...(typeof result.label === "string" && result.label.length > 0 ? { label: result.label } : {}),
+    ...(result.laneRules != null ? { laneRules: result.laneRules } : {}),
     questions: result.questions,
     brief: result.brief,
     budgetMs: result.budgetMs,

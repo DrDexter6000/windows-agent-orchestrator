@@ -228,7 +228,7 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
       // M11-8B added agentId; M12-6 (FR-03) adds the additive bounded workspaceProof;
       // M12-25 adds additive providerSessionRouting (routing REQUEST truth).
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        ["accepted", "agentId", "continuable", "label", "laneRules", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
         "only runId/agentId/accepted/state + additive workspaceProof + additive providerSessionRouting");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_ok_m92b03");
@@ -250,9 +250,15 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
       assert.equal(parsed.workspaceProof.source, "call_target");
 
       // No leaks.
-      const dumped = JSON.stringify(res);
+      // 第 156 批（TD-384）：label 有意携带任务书标题的有界安全投影（≤80、脱敏、
+      // 清控制字符——与 Owner 看板同一取法；prompt 是调用方本call刚提交的，无信息
+      // 不对称），是唯一允许 prompt 派生文本的字段；防泄漏断言剥掉 label 后仍成立。
+      assert.equal(parsed.label, "[x] secret-prompt-value", "label=标题的有界投影（唯一 prompt 派生字段）");
+      const dumped = JSON.stringify(res)
+        .split(JSON.stringify(parsed.label)).join("")
+        .split(parsed.label).join("");
       assert.ok(!dumped.includes("/secret/runs"), "no transcriptPath leak");
-      assert.ok(!dumped.includes("secret-prompt-value"), "no prompt leak");
+      assert.ok(!dumped.includes("secret-prompt-value"), "no prompt leak（label 之外零回显）");
       assert.ok(!dumped.includes("argv"), "no argv leak");
       // M12-6 (FR-03): the workspace proof must NOT echo the absolute workspace
       // root (forward-slash canonicalized form included for cross-platform safety).
@@ -626,7 +632,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(captured.requireCertified, false, "certification advisory on delivery runs too (never forced)");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(Object.keys(parsed).sort(),
-      ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+      ["accepted", "agentId", "continuable", "label", "laneRules", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
       "output has agentId (M11-8B) + additive workspaceProof (M12-6) + additive providerSessionRouting (M12-25)");
     } finally {
       await client.close();
@@ -857,7 +863,7 @@ test("M12-25-MCP-ROUT-3: injected dispatcher returning valid routing + leak fiel
       assert.equal(parsed.providerSessionRouting, "not_used", "valid routing threaded through");
       // Only the allowed keys are present — leak fields stripped by the handler + strict parse.
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"]);
+        ["accepted", "agentId", "continuable", "label", "laneRules", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"]);
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(OPAQUE), "opaque session id never leaks");
       assert.ok(!dumped.includes("lead-LEAK-mcpr3"), "Lead id never leaks");
@@ -1223,6 +1229,11 @@ test("TD-319: run_dispatch 选择器拒绝经包装层上 wire——多行文本
 });
 
 // ---------------------------------------------------------------------
+// 第 156 批：laneRules（Owner 规则原文 + 此刻高峰快照）与 label 的降级/序列化钉。
+// 夹具纪律：注入 laneRulesFn 夹具——不读真实画像、不钉仓库 6 条规则原文。
+// ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
 // 0097 §4: accepted dispatch carries the additive optional laneFacts field
 // (the selected lane's one-line facts, verbatim from laneFactsLine — facts
 // only, never a recommendation). Not accepted → absent. run_continue does
@@ -1230,6 +1241,103 @@ test("TD-319: run_dispatch 选择器拒绝经包装层上 wire——多行文本
 // laneFacts key, so its output validation would reject one. Here we pin the
 // run_dispatch side only.
 // ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// 第 156 批：laneRules（Owner 规则原文 + 此刻高峰快照）与 label 的降级/序列化钉。
+// 夹具纪律：注入 laneRulesFn 夹具——不读真实画像、不钉仓库 6 条规则原文。
+// ---------------------------------------------------------------------
+
+test("156: laneRules 只序列化（注入夹具原样上 wire）；构造抛错 → 受理照常、只该字段降级", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-rules-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const FAKE_RULES = {
+      rules: ["夹具规则一", "夹具规则二"],
+      now: { beijing: "周四 15:00", holidaysRecognized: false, peaks: [] },
+    };
+    const fakeDispatch = async () => ({
+      accepted: true, runId: "run_156_rules", agentId: "x", state: "pending",
+      providerSessionRouting: "not_used",
+    });
+    // 1) 构造产物原样上 wire（出口只做序列化，不拼装）。
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+      laneRulesFn: () => FAKE_RULES,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir } });
+      assert.equal(res.isError, undefined, "受理成功");
+      assert.deepEqual(res.structuredContent.laneRules, FAKE_RULES, "夹具 laneRules 原样上 wire");
+    } finally { await client.close(); await server.close(); }
+
+    // 2) 构造抛错 → 绝不把受理折成错误回执；字段降级为 rules:null + 固定原因。
+    const serverBoom = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+      laneRulesFn: () => { throw new Error("laneRules boom"); },
+    });
+    const clientBoom = await buildInMemoryClient(serverBoom);
+    try {
+      const res = await clientBoom.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir } });
+      assert.equal(res.isError, undefined, "构造抛错 → 受理照常（不是 run_dispatch failed）");
+      assert.equal(res.structuredContent.laneRules.rules, null, "rules:null");
+      assert.equal(res.structuredContent.laneRules.rulesReason, "ownerRules 缺失、不合法、为空或读取失败", "固定原因串");
+      assert.equal(res.structuredContent.laneRules.now, null, "now:null");
+    } finally { await clientBoom.close(); await serverBoom.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+test("156: label 取法与 Owner 看板同源（标题去 # 记号）；无标题退回 runId；未受理不带", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-label-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const fakeDispatch = async () => ({
+      accepted: true, runId: "run_156_label", agentId: "x", state: "pending",
+      providerSessionRouting: "not_used",
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+      laneRulesFn: () => ({ rules: null, rulesReason: "ownerRules 缺失、不合法、为空或读取失败", now: null }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const titled = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "x", prompt: "# 修登录超时\n\n正文", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(titled.structuredContent.label, "[x] 修登录超时", "标题去 # 记号（与看板同源）");
+      const bare = await client.callTool({
+        name: "run_dispatch",
+        // 只有分隔线——第一行不可取（INPUT schema 要求 prompt 非空）。
+        arguments: { agentId: "x", prompt: "---", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(bare.structuredContent.label, "[x] run_156_label", "无标题退回 runId");
+      // 未受理（accepted:false）→ 不带 label/laneRules/nextStep。
+      const serverRefused = createWaoMcpServer({
+        registryPath, runDir: "/server/runs", workspaceRoot: dir,
+        dispatchRunFn: async () => ({ accepted: false, runId: "run_156_no", agentId: "x", state: "refused", providerSessionRouting: "not_used" }),
+      });
+      const clientRefused = await buildInMemoryClient(serverRefused);
+      try {
+        const refused = await clientRefused.callTool({
+          name: "run_dispatch",
+          arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir },
+        });
+        const parsedRefused = JSON.parse(refused.content.find((b) => b.type === "text").text);
+        assert.equal(parsedRefused.accepted, false);
+        for (const key of ["label", "laneRules", "nextStep"]) {
+          assert.equal(key in parsedRefused, false, `未受理不带 ${key}`);
+        }
+      } finally { await clientRefused.close(); await serverRefused.close(); }
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
 
 test("0097: accepted run_dispatch carries laneFacts (no [wao] prefix); null → key absent; not accepted → absent", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-0097-facts-"));
@@ -1254,8 +1362,8 @@ test("0097: accepted run_dispatch carries laneFacts (no [wao] prefix); null → 
       assert.equal(parsed.laneFacts, FACTS, "受理回执带同一行文字");
       assert.ok(!parsed.laneFacts.startsWith("[wao] "), "不带 [wao] 前缀（那是 CLI stderr 的形制）");
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "continuable", "laneFacts", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
-        "键集钉：laneFacts 是唯一新增键");
+        ["accepted", "agentId", "continuable", "label", "laneFacts", "laneRules", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "键集钉：laneFacts/label/laneRules 是第 156 批前后的全部新增键");
 
       // 回显失败（fail-open null）→ 键缺省，受理不受影响。
       const serverNull = createWaoMcpServer({
@@ -1485,7 +1593,11 @@ test("136-L1: 150 字符 runId + contractAdvisories → dispatcher 恰好一次�
   assert.ok(Array.isArray(sc.contractAdvisories) && sc.contractAdvisories.length > 0, "回执带 contractAdvisories");
   assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
   assert.match(sc.nextStep, /^Background run accepted\. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles\./);
-  assert.match(sc.nextStep, /Review contractAdvisories in this receipt first; stop and re-dispatch if needed\.$/);
+  // 第 156 批：提醒之后是命名短提示（后台任务可命名 <label>）——150 字符 runId
+  // 下整句仍 ≤480，提示放得下。
+  assert.ok(sc.nextStep.endsWith(
+    "Review contractAdvisories in this receipt first; stop and re-dispatch if needed."
+    + ` （后台任务可命名 ${sc.label}）`), `提醒在、其后是命名短提示：${sc.nextStep}`);
   assert.ok(!sc.nextStep.includes("wao runs wait"), "整句放不下——不加 CLI 半句");
 });
 
@@ -1498,8 +1610,11 @@ test("136-L2: 120 字符 runId（kimi 复现的长度）+ contractAdvisories →
   const sc = res.structuredContent;
   assert.equal(sc.accepted, true);
   assert.ok(Array.isArray(sc.contractAdvisories) && sc.contractAdvisories.length > 0, "回执带 contractAdvisories");
+  // 第 156 批：nextStep 末尾再挂命名短提示（后台任务可命名 <label>；label 同时
+  // 在回执字段里）——放不下只丢提示，这里 150 字符 runId 放得下。
   assert.equal(sc.nextStep,
-    "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. Review contractAdvisories in this receipt first; stop and re-dispatch if needed.");
+    "Background run accepted. Before ending the turn, keep a wait attached: call run_await_result repeatedly with its default waitMs on this run until it settles. Review contractAdvisories in this receipt first; stop and re-dispatch if needed."
+    + ` （后台任务可命名 ${sc.label}）`);
   assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
 });
 
@@ -1619,12 +1734,14 @@ test("147-MCP-1: 超帽 → 受理回执的既有 nextStep 带与 CLI 同一采�
       );
       const sc = res.structuredContent;
       const advisory = ADVISORY_LINE(2, BRANCH_CAP + 1);
-      assert.ok(sc.nextStep.endsWith(` ${advisory}`), `既有 nextStep 末尾承载同一行: ${sc.nextStep}`);
+      // 第 156 批：资源提示之后是命名短提示（后台任务可命名 <label>，最末）。
+      assert.ok(sc.nextStep.includes(` ${advisory}`), `既有 nextStep 承载同一行: ${sc.nextStep}`);
+      assert.ok(sc.nextStep.endsWith(` （后台任务可命名 ${sc.label}）`), `命名短提示在最末: ${sc.nextStep}`);
       assert.ok(sc.nextStep.startsWith(DISPATCH_ACCEPTED_BASE), "MCP 等待模板不变，提示追加在后");
       assert.ok(sc.nextStep.length <= 480, `整句 ${sc.nextStep.length} ≤ 480`);
       assert.ok(!sc.nextStep.includes("npm run hygiene"), "文案不再指向只在 WAO 仓存在的命令");
       assert.deepEqual(Object.keys(sc).sort(),
-        ["accepted", "agentId", "continuable", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        ["accepted", "agentId", "continuable", "label", "laneRules", "nextStep", "providerSessionRouting", "runId", "state", "workspaceProof"],
         "回执键集不变（没加字段、没改 schema）");
       assert.equal(readdirSync(stateDir).length, 1, "提示带出后写入采样状态");
     } finally {
@@ -1674,9 +1791,11 @@ test("147-MCP-2: 帽内且与上次一致 → 采样返回 null，第二次受�
         arguments: { agentId: "coder_low", prompt: "x", expectedWorkspaceRoot: dir },
       });
       assert.equal(second.isError, undefined, "第二次受理成功");
+      // 第 156 批：资源提示静默，命名短提示（后台任务可命名 <label>）仍是最末一段。
       assert.equal(second.structuredContent.nextStep, DISPATCH_ACCEPTED_BASE
         + " If your host has a background shell, you can instead run wao runs wait run_147_mcp2_2 --until-settled "
-        + "there; one command waits until settlement.",
+        + "there; one command waits until settlement."
+        + ` （后台任务可命名 ${second.structuredContent.label}）`,
       "帽内且计数与上次一致 → 静默（与 CLI 同一规则，handler 不另写一份）");
       assert.doesNotMatch(second.structuredContent.nextStep, /\[wao\] advisory/, "第二次不带提示");
     } finally {
@@ -1718,7 +1837,8 @@ test("147-MCP-3: 提示采样抛错 → 只省略提示，派发照常受理（f
       assert.equal(sc.accepted, true);
       assert.equal(sc.nextStep, DISPATCH_ACCEPTED_BASE
         + " If your host has a background shell, you can instead run wao runs wait run_147_mcp3 --until-settled "
-        + "there; one command waits until settlement.");
+        + "there; one command waits until settlement."
+        + ` （后台任务可命名 ${sc.label}）`);
       assert.ok(!JSON.stringify(res).includes("blew up"), "不回显提示计算的错误原文");
     } finally {
       await client.close();

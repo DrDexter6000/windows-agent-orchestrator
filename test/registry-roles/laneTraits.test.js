@@ -181,14 +181,17 @@ export function literalOffenders(files) {
 }
 
 /** 导入边扫描（纯函数）：解析相对 import 边，违规引用目标 = 违规。
- *  允许边（0087 §5；0097 修订）：laneProfile ← lanesView/leadPreflight/
- *  laneFactsLine；laneFactsLine ← commands/run.js、mcp/server.js；lanesView ←
- *  commands/lanes.js；lanes ← commands/wao.js；leadPreflight ← mcp/server.js
- *  （聚合器这一跳同守）。 */
+ *  允许边（0087 §5；0097 修订；156 批再修）：laneProfile ← lanesView/
+ *  leadPreflight/laneFactsLine/laneRules；laneFactsLine ← commands/run.js、
+ *  mcp/server.js、application/consultService.js（会审每席一行车道事实）；
+ *  laneRules（156 批：laneRules 字段单一构造）← commands/run.js、mcp/server.js、
+ *  application/consultService.js；lanesView ← commands/lanes.js；lanes ←
+ *  commands/wao.js；leadPreflight ← mcp/server.js（聚合器这一跳同守）。 */
 export function importEdgeOffenders(files) {
   const ALLOWED_IMPORTERS = {
-    "src/application/laneProfile.js": new Set(["src/application/lanesView.js", "src/application/leadPreflight.js", "src/application/laneFactsLine.js"]),
-    "src/application/laneFactsLine.js": new Set(["src/commands/run.js", "src/mcp/server.js"]),
+    "src/application/laneProfile.js": new Set(["src/application/lanesView.js", "src/application/leadPreflight.js", "src/application/laneFactsLine.js", "src/application/laneRules.js"]),
+    "src/application/laneFactsLine.js": new Set(["src/commands/run.js", "src/mcp/server.js", "src/application/consultService.js"]),
+    "src/application/laneRules.js": new Set(["src/commands/run.js", "src/mcp/server.js", "src/application/consultService.js"]),
     "src/application/lanesView.js": new Set(["src/commands/lanes.js"]),
     "src/commands/lanes.js": new Set(["src/commands/wao.js"]),
     "src/application/leadPreflight.js": new Set(["src/mcp/server.js"]),
@@ -244,18 +247,25 @@ test("0087 隔离钉反例（夹具合成清单——不触 src/）：白名单�
     { path: "src/application/lanesView.js", content: "import { readLaneTraits } from './laneProfile.js';" },
     { path: "src/application/leadPreflight.js", content: "import { projectLaneProfiles } from './laneProfile.js';" },
     { path: "src/application/laneFactsLine.js", content: "import { readLaneTraits } from './laneProfile.js';" },
+    // 156 批：laneRules（laneRules 字段单一构造）引用 laneProfile；三个出口引用它；
+    // consultService 引用 laneFactsLine（每席一行车道事实）。
+    { path: "src/application/laneRules.js", content: "import { projectLaneProfiles } from './laneProfile.js';" },
+    { path: "src/commands/run.js", content: "import { laneFactsLine } from '../application/laneFactsLine.js';\nimport { buildLaneRules } from '../application/laneRules.js';" },
+    { path: "src/mcp/server.js", content: "import { aggregateLeadPreflight } from '../application/leadPreflight.js';\nimport { laneFactsLine } from '../application/laneFactsLine.js';\nimport { buildLaneRules } from '../application/laneRules.js';" },
+    { path: "src/application/consultService.js", content: "import { laneFactsLine } from './laneFactsLine.js';\nimport { buildLaneRules } from './laneRules.js';" },
     { path: "src/commands/lanes.js", content: "import { buildLanesView } from '../application/lanesView.js';" },
     { path: "src/commands/wao.js", content: "import { lanesCommand } from './lanes.js';" },
-    { path: "src/mcp/server.js", content: "import { aggregateLeadPreflight } from '../application/leadPreflight.js';\nimport { laneFactsLine } from '../application/laneFactsLine.js';" },
-    { path: "src/commands/run.js", content: "import { laneFactsLine } from '../application/laneFactsLine.js';" },
     // 反例 1：白名单外文件出现画像文件名字面量。
     { path: "src/runManager.js", content: "// reads config/lane-traits.json\nexport const x = 1;" },
     // 反例 2：派发解析面引用画像加载模块（无字面量——字面钉抓不住，导入边钉必须红）。
     { path: "src/dispatchResolution.js", content: "import { readLaneTraits } from './application/laneProfile.js';" },
     // 反例 3：应用服务（非 server）引用 preflight 聚合器——聚合器这一跳同守。
     { path: "src/application/runDispatch.js", content: "import { aggregateLeadPreflight } from './leadPreflight.js';" },
-    // 反例 4（0097）：laneFactsLine 被白名单外的面引用（会审/门禁等）。
-    { path: "src/application/consultService.js", content: "import { laneFactsLine } from './laneFactsLine.js';" },
+    // 反例 4（0097）：laneFactsLine 被白名单外的面引用（门禁等——156 批起
+    // consultService 是合法引用方，反例换别的面）。
+    { path: "src/application/runStop.js", content: "import { laneFactsLine } from './laneFactsLine.js';" },
+    // 反例 5（156 批）：laneRules 构造被白名单外的面引用（出口自己拼装就是违规）。
+    { path: "src/commands/consult.js", content: "import { buildLaneRules } from '../application/laneRules.js';" },
   ];
   const lit = literalOffenders(fixtures);
   assert.ok(lit.includes("src/runManager.js"), "白名单外字面引用被抓");
@@ -263,6 +273,7 @@ test("0087 隔离钉反例（夹具合成清单——不触 src/）：白名单�
   const edges = importEdgeOffenders(fixtures);
   assert.ok(edges.includes("src/dispatchResolution.js → src/application/laneProfile.js"), "派发路径间接引入被抓");
   assert.ok(edges.includes("src/application/runDispatch.js → src/application/leadPreflight.js"), "聚合器被 server 之外引用被抓");
-  assert.ok(edges.includes("src/application/consultService.js → src/application/laneFactsLine.js"), "laneFactsLine 被白名单外面引用被抓");
-  assert.equal(edges.length, 3, "合法边（含 laneFactsLine 两条新边）零误报");
+  assert.ok(edges.includes("src/application/runStop.js → src/application/laneFactsLine.js"), "laneFactsLine 被白名单外面引用被抓");
+  assert.ok(edges.includes("src/commands/consult.js → src/application/laneRules.js"), "laneRules 被白名单外面引用被抓（出口不得自己拼装）");
+  assert.equal(edges.length, 4, "合法边（含 156 批 laneRules 三出口边）零误报");
 });

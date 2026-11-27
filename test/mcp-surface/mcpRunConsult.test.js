@@ -976,13 +976,36 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
 // F — receipt capacity boundary (pure projection; body independence)
 // =====================================================================
 
+// 第 156 批：label（≤80 字）与 laneRules 的诚实最坏形（F1/F2 共用）。规则按
+// 当前 Owner 规则体量（6 条 × ~70 字中文 ≈ 现配置 420 字总量级，kimi/sol 会审
+// 实测原文 889B/JSON ~1KB）+ 4 行高峰（2 池合并行 + 2 逐车道行）。0097 配置
+// 上限全量（8 条 × 120 字 + 16 行高峰，实测仅 laneRules 一块即 ~5KB）单独可
+// 破帽——与"schema 上限超界或字段值病态长可破帽（已知未收紧）"同一口径；
+// 帽不为此抬。
+const LABEL_156_WORST = `[${"席".repeat(20)}+${"席".repeat(20)}] ${"题".repeat(37)}…`; // 恰 80 字
+const PEAK_NOW_156 = { state: "off_peak", until: "2026-11-26T18:00:00+08:00", untilLocal: "周五 09:00" };
+const LANE_RULES_156_WORST = {
+  rules: Array.from({ length: 6 }, () => "规".repeat(70)),
+  now: {
+    beijing: "周四 15:00", holidaysRecognized: false,
+    peaks: [
+      { pool: "池".repeat(20), lanes: ["a".repeat(20), "b".repeat(20)], peakNow: PEAK_NOW_156 },
+      { pool: "池乙".repeat(10), lanes: ["c".repeat(20)], peakNow: PEAK_NOW_156 },
+      { lane: "d".repeat(20), peakNow: PEAK_NOW_156 },
+      { lane: "e".repeat(20), peakNow: PEAK_NOW_156 },
+    ],
+  },
+};
+
 test("MRC-F1: receipt within cap for the honest metadata-max shape (Chinese headings + populated field values, no snippets) and body-size independent", () => {
   // 验收批修订（sol 反例实跑：71 字 ASCII 标题+空 fieldValues 的旧夹具量出
   // 4916B，中文 120 字标题=7786B、字段值在场=6896B——旧 6KiB 帽不可证）：
   // ①视角 snippet（真实记录全文 265-607 字/席）整体出回执；②帽重冻 8KiB；
-  // ③夹具改中文标题+在场字段值。成立边界：≤5 席 × ≤32 字 id × ≤10 问 ×
-  // ≤120 字中文标题 × 短字段值、无视角原文。schema 上限（id 128 字/brief
-  // 派生问题无帽）超界或字段值病态长可破帽——已知未收紧；正文体积完全无关。
+  // ③夹具改中文标题+在场字段值。第 156 批：label + laneRules 计入（上方
+  // 156 夹具块）。成立边界：≤5 席 × ≤32 字 id × ≤10 问 × ≤120 字中文标题 ×
+  // 短字段值 × label ≤80 字 × laneRules 当前规则体量、无视角原文。schema 上限
+  //（id 128 字/brief 派生问题无帽/laneRules 0097 配置上限全量）超界或字段值
+  // 病态长可破帽——已知未收紧；正文体积完全无关。
   const longId = "s".repeat(32);
   const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `问题标题第${i}号`.repeat(10) }));
   const body = "正文不应进回执。".repeat(8000); // ~100KB
@@ -1006,6 +1029,9 @@ test("MRC-F1: receipt within cap for the honest metadata-max shape (Chinese head
     consultId: "consult_20260101000000000aaaaaa",
     recordPath: "x".repeat(80),
     record: { consultId: "consult_20260101000000000aaaaaa" }, // 投影必须丢弃
+    // 第 156 批：label + laneRules 进最坏夹具（帽内证明）。
+    label: LABEL_156_WORST,
+    laneRules: LANE_RULES_156_WORST,
     questions,
     brief: { path: null, sha256: "a".repeat(64) },
     budgetMs: 600000,
@@ -1363,6 +1389,9 @@ test("MRC-F2: 有未终态席位、带 nextStep 的诚实边界回执仍 ≤8KiB
   const result = {
     consultId: "consult_20260101000000000aaaaaa",
     recordPath: "x".repeat(80),
+    // 第 156 批：label + laneRules 与 nextStep 同现（创建时点未终态席位的最坏共存）。
+    label: LABEL_156_WORST,
+    laneRules: LANE_RULES_156_WORST,
     questions,
     brief: { path: null, sha256: "a".repeat(64) },
     budgetMs: 600000,
@@ -1386,8 +1415,10 @@ test("MRC-F2: 有未终态席位、带 nextStep 的诚实边界回执仍 ≤8KiB
     }), "utf8"),
   });
   assert.equal(typeof receipt.nextStep, "string", "有未终态席位 → 带 nextStep");
+  assert.equal(receipt.label, LABEL_156_WORST, "label 进回执");
+  assert.deepEqual(receipt.laneRules, LANE_RULES_156_WORST, "laneRules 进回执（完整一份，不截断）");
   const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
   assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES,
-    `诚实边界 + nextStep 回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）；帽不得抬`);
+    `诚实边界 + nextStep + label + laneRules 回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）；帽不得抬`);
   assert.ok(!JSON.stringify(receipt).includes("正文不进回执"), "正文仍不进回执");
 });

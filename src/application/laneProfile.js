@@ -559,13 +559,15 @@ function clip(text, max) {
  * lead_preflight 的紧凑投影（0087 §4；caveats 全部带上，见 0088；未评格不投影、
  * 每行带暂停说明、上下文窗口与能否看图/看视频，见 0089；推断族系见 0090；行带
  * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097；行带
- * peakNow、顶层带 now（"此刻"，北京时间），见 152 批；行带 quotaPool（额度池
+ * peakNow、顶层带 now（"此刻"，北京时间）与 poolPeaks（同额度池合并后的高峰行，
+ * 一致才合并、不一致/无池逐条车道），见 152/156 批；行带 quotaPool（额度池
  * 名），见 153 批）。行序=
  * lanes.json 声明序；只含车道表里有画像的车道；不排序、不加推荐字段。所有
  * 字符串在应用层截到 MCP schema 上限，保证投影总能通过校验。
  * @param {number} [input.nowMs] "此刻"的时钟参数（测试注入）；生产缺省 Date.now()。
  * @returns {{scale:string, dimensionLabels:Object, costTierScale:(string|null),
  *   ownerRules:(string[]|null), now:{beijing:string, holidaysRecognized:boolean},
+ *   poolPeaks:({pool:string, lanes:string[], peakNow:object}|{lane:string, peakNow:object})[],
  *   rows:object[], omittedLaneIds:string[], notices:string[]}|null}
  *   单车道 invalid 时省略该行并把 id 放进 omittedLaneIds（供调用方写观察）；
  *   notices 携带降级观察（0097：costTier/ownerRules/costTierScale 一类，有界）；
@@ -625,9 +627,47 @@ export function projectLaneProfiles({ lanesDoc, traitsResult, nowMs = Date.now()
       videoInput: entry.multimodal.video,
     });
   }
-  // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。
+    // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。
   const tableIds = new Set(laneList.map((l) => l?.id).filter((x) => typeof x === "string"));
   const omittedLaneIds = (traitsResult.invalidIds ?? []).filter((id) => tableIds.has(id));
+  // 156 批（同额度池合并高峰）：同一 quotaPool 的车道高峰声明完全一致才合并成一行
+  // （{pool, lanes, peakNow}）；同池声明不一致的、或声明了高峰却没有额度池的，逐条
+  // 车道列出（{lane, peakNow}）；没声明高峰的车道不出现。绝不用池里第一条车道代表
+  // 整个池。推导只在本投影一处——wao lanes、预检与派发回显（laneRules，156 批）
+  // 都从这里取，不在任何出口各写一份。行序=车道表声明序（池行取首个成员的位置），
+  // 与 rows 同受 PROJECTION_ROWS_CAP 约束（防异常膨胀，真实车道表远小于此）。
+  const poolMembers = new Map(); // quotaPool → [{id, peak}]
+  const barePeakLanes = []; // 有 peak、无 quotaPool 的车道
+  let peakRowCount = 0;
+  const poolPeaks = [];
+  const pushPeakRow = (row) => {
+    if (peakRowCount >= PROJECTION_ROWS_CAP) return;
+    poolPeaks.push(row);
+    peakRowCount += 1;
+  };
+  for (const lane of laneList) {
+    const id = lane?.id;
+    if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(traitsResult.traits, id)) continue;
+    const entry = traitsResult.traits[id];
+    if (entry.peak === undefined) continue;
+    if (entry.quotaPool == null) {
+      barePeakLanes.push({ id, peak: entry.peak });
+      continue;
+    }
+    const members = poolMembers.get(entry.quotaPool) ?? [];
+    members.push({ id, peak: entry.peak });
+    poolMembers.set(entry.quotaPool, members);
+  }
+  const peakDeclKey = (peak) => JSON.stringify([peak.days, peak.hours, peak.effect]);
+  for (const [pool, members] of poolMembers) {
+    const consistent = members.every((m) => peakDeclKey(m.peak) === peakDeclKey(members[0].peak));
+    if (consistent) {
+      pushPeakRow({ pool, lanes: members.map((m) => m.id), peakNow: peakNowAt(members[0].peak, nowMs) });
+    } else {
+      for (const m of members) pushPeakRow({ lane: m.id, peakNow: peakNowAt(m.peak, nowMs) });
+    }
+  }
+  for (const m of barePeakLanes) pushPeakRow({ lane: m.id, peakNow: peakNowAt(m.peak, nowMs) });
   const notices = (traitsResult.observations ?? [])
     .slice(0, PROJECTION_NOTICES_CAP)
     .map((s) => clip(s, PROJECTION_NOTICE_MAX_CHARS));
@@ -642,6 +682,9 @@ export function projectLaneProfiles({ lanesDoc, traitsResult, nowMs = Date.now()
       : [...traitsResult.ownerRules].map((r) => clip(r, OWNER_RULE_MAX_CHARS)),
     // 152 批："此刻"（北京时间标签；同一时钟读数——行内 peakNow 与它同源）。
     now: { beijing: beijingNowLabel(nowMs), holidaysRecognized: false },
+    // 156 批：同额度池合并后的高峰行（{pool,lanes,peakNow} | {lane,peakNow}），
+    // 与 now 同一时钟读数；见上方推导块。
+    poolPeaks,
     rows,
     omittedLaneIds,
     notices,

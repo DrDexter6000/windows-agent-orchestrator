@@ -16,8 +16,9 @@
 //   - fail-open：画像读失败或车道不在画像里返回 null，派发照常——本模块的
 //     任何失败都不影响派发结果。
 //   - 依赖边（test/registry-roles/laneTraits.test.js 钉）：本模块只准被
-//     src/commands/run.js 与 src/mcp/server.js 引用；画像只经
-//     laneProfile.js 的读取与投影（本模块不出现画像文件名字面量）。
+//     src/commands/run.js、src/mcp/server.js 与 src/application/consultService.js
+//     （156 批：会审每席一行所选车道事实）引用；画像只经 laneProfile.js 的
+//     读取与投影（本模块不出现画像文件名字面量）。
 import {
   readLaneTraits,
   projectLaneProfiles,

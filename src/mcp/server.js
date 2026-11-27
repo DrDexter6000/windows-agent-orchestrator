@@ -377,6 +377,22 @@ import {
 // 失败或车道不在画像里时 laneFactsLine 返回 null，派发照常）。守卫边
 //（laneFactsLine ← mcp/server.js）由 test/registry-roles/laneTraits.test.js 钉。
 import { laneFactsLine, LANE_FACTS_LINE_MAX_CHARS } from "../application/laneFactsLine.js";
+// 第 156 批：Owner 车道规则原文 + 此刻高峰快照（laneRules 单一构造；上限常量随
+// 构造模块转出自 laneProfile SSOT）与派发 label（[车道] 任务名，标题取法与
+// Owner 看板同源）。守卫边（laneRules ← mcp/server.js）同样由
+// test/registry-roles/laneTraits.test.js 钉。
+import {
+  buildLaneRules,
+  degradedLaneRules,
+  RULES_UNAVAILABLE_REASON,
+  BEIJING_LABEL_MAX_CHARS,
+  PEAK_LANE_ID_MAX_CHARS,
+} from "../application/laneRules.js";
+import {
+  buildDispatchLabel,
+  appendLabelHint,
+  DISPATCH_LABEL_MAX_CHARS,
+} from "../application/dispatchLabel.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
 // TD-319：MCP 错误文本输出口统一渲染。SDK 对 isError/抛错只透传 text/message，
 // 配置来源值里的控制字符原样上 wire；register 的包装层（见 withToolErrorTextEscape）
@@ -1078,6 +1094,39 @@ const CONTRACT_ADVISORY_ENTRY = z.object({
 const CONTRACT_ADVISORIES_SCHEMA = z.array(CONTRACT_ADVISORY_ENTRY)
   .max(CONTRACT_CHECK_ADVISORY_CODES.length);
 
+// 第 156 批：laneRules——Owner 车道规则原文 + "此刻"高峰快照（结构化；单一构造
+// buildLaneRules 的产物）。上限全部取自 laneProfile SSOT（经 laneRules 转出），
+// 两层不各写一份。rules=null 必带闭集原因 rulesReason（绝不静默省略）；now=null
+// 是整字段降级（画像/车道表不可用）。peaks 两形：{pool,lanes,peakNow}=同池声明
+// 一致合并行、{lane,peakNow}=不一致/无池的逐车道行——peakNow 与 lanes 投影行
+// 同一格式。run_dispatch 与 run_consult 回执带；run_continue 不带（车道随谱系
+// 固定）。
+const LANE_RULES_PEAK_NOW = z.object({
+  state: z.enum(["peak", "off_peak"]),
+  until: z.string().min(1).max(32),
+  untilLocal: z.string().min(1).max(16),
+}).strict();
+const LANE_RULES_OUTPUT = z.object({
+  rules: z.array(z.string().min(1).max(OWNER_RULE_MAX_CHARS)).max(OWNER_RULES_CAP).nullable(),
+  // 闭集：原因只有构造函数那一个固定串（WAO 固定措辞单一归宿）。
+  rulesReason: z.enum([RULES_UNAVAILABLE_REASON]).optional(),
+  now: z.object({
+    beijing: z.string().min(1).max(BEIJING_LABEL_MAX_CHARS),
+    holidaysRecognized: z.literal(false),
+    peaks: z.array(z.union([
+      z.object({
+        pool: z.string().min(1).max(QUOTA_POOL_MAX_CHARS),
+        lanes: z.array(z.string().min(1).max(PEAK_LANE_ID_MAX_CHARS)).min(1),
+        peakNow: LANE_RULES_PEAK_NOW,
+      }).strict(),
+      z.object({
+        lane: z.string().min(1).max(PEAK_LANE_ID_MAX_CHARS),
+        peakNow: LANE_RULES_PEAK_NOW,
+      }).strict(),
+    ])).max(PROJECTION_ROWS_CAP),
+  }).nullable(),
+}).strict();
+
 // run_dispatch output: runId + agentId + accepted + state + additive workspaceProof
 // + additive providerSessionRouting. No paths, PID, prompt, argv, opaque session
 // id, Lead id, or provider payload. M11-8B final closeout: strict root; agentId
@@ -1096,6 +1145,10 @@ const RUN_DISPATCH_OUTPUT = z.object({
   // 派发没开成时再带闭集原因（非交付派发、显式关闭不带）。闭集取自派发服务 SSOT。
   continuable: z.boolean(),
   continuableOff: z.enum(CONTINUABLE_OFF_REASONS).optional(),
+  // 第 156 批（TD-384）：`[<车道>] <任务名>`——宿主后台任务的结构化名字；任务名
+  // 取法与 Owner 看板同源（deriveOwnerTitle）。取不到（连 runId 也没有）缺省。
+  // accepted:false 不给。
+  label: z.string().min(1).max(DISPATCH_LABEL_MAX_CHARS).optional(),
   // 决定 0095：受理成功的后台运行给一句静态模板（结束回合前挂好等待）；
   // accepted:false 不给。
   nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
@@ -1103,6 +1156,10 @@ const RUN_DISPATCH_OUTPUT = z.object({
   // 画像读失败或车道不在画像里时缺省——fail-open，绝不影响派发）。accepted:false
   // 不给；run_continue 不给。
   laneFacts: z.string().min(1).max(LANE_FACTS_LINE_MAX_CHARS).optional(),
+  // 第 156 批：受理回执带 Owner 规则原文 + 此刻高峰快照（只陈列非推荐；构造失败
+  // 只降级该字段——{rules:null,rulesReason,now:null}，绝不把受理折成错误）。
+  // accepted:false 不给。
+  laneRules: LANE_RULES_OUTPUT.optional(),
   // 决定 0129：就地预检（原 run_dispatch_contract_check 的承接）给出的 advisory
   // 码 + 固定说明——只是提醒、从不拦截；零提醒 = 键缺省。accepted:false 不给。
   contractAdvisories: z.array(CONTRACT_ADVISORY_ENTRY)
@@ -1380,6 +1437,10 @@ const RUN_CONSULT_OUTPUT = z.object({
   // 第 155 批：第 3 轮起才带（round + 提醒原文）；第 1、2 轮回执与改前逐字节相同。
   round: z.number().int().positive().optional(),
   roundAdvisory: z.string().optional(),
+  // 第 156 批：会审 label `[席位A+席位B] <任务书标题>`（服务在扇出时算好、随组
+  // 记录持久；读取模式经记录回放）与 laneRules（创建路径快照；读取模式不带）。
+  label: z.string().min(1).max(DISPATCH_LABEL_MAX_CHARS).optional(),
+  laneRules: LANE_RULES_OUTPUT.optional(),
   questions: z.array(RUN_CONSULT_QUESTION).optional(),
   brief: RUN_CONSULT_BRIEF_FACT.optional(),
   budgetMs: z.number().int().nonnegative().optional(),
@@ -1590,6 +1651,9 @@ const RUN_CONTINUE_OUTPUT = z.object({
   state: z.string().nullable(),
   // Refusal-only (non-null iff accepted === false).
   rejectionReason: z.enum(CONTINUE_REJECTION_REASONS).nullable(),
+  // 第 156 批（TD-384）：`[<车道>] <任务名>`（车道=谱系固定的父装配身份）。
+  // accepted:false 不给。laneRules 不带（车道随谱系固定，规则快照归新派发面）。
+  label: z.string().min(1).max(DISPATCH_LABEL_MAX_CHARS).optional(),
   // 决定 0095：受理成功的后台运行给一句静态模板（结束回合前挂好等待）；
   // accepted:false 不给。
   nextStep: z.string().max(LEAD_ADVISORY_WIRE_MAX_LEN).optional(),
@@ -3132,6 +3196,20 @@ const LANES_PROJECTION_OUTPUT = z.object({
     // 其他车道要先抽帧截图；决定 0098 同批）。
     videoInput: z.boolean(),
   }).strict()).max(PROJECTION_ROWS_CAP),
+  // 第 156 批：同额度池合并后的高峰行（投影新增的推导；与 now 同源）。
+  // {pool,lanes,peakNow}=同池声明一致合并行、{lane,peakNow}=逐车道行——
+  // peakNow 与行内同格同一格式；两形各自写出（不共享实例，$ref 字节先例）。
+  poolPeaks: z.array(z.union([
+    z.object({
+      pool: z.string().min(1).max(QUOTA_POOL_MAX_CHARS),
+      lanes: z.array(z.string().min(1).max(PEAK_LANE_ID_MAX_CHARS)).min(1),
+      peakNow: LANE_RULES_PEAK_NOW,
+    }).strict(),
+    z.object({
+      lane: z.string().min(1).max(PEAK_LANE_ID_MAX_CHARS),
+      peakNow: LANE_RULES_PEAK_NOW,
+    }).strict(),
+  ])).max(PROJECTION_ROWS_CAP),
 }).strict();
 
 const LEAD_PREFLIGHT_OUTPUT = z.object({
@@ -3954,6 +4032,9 @@ export function createWaoMcpServer({
   // 0097 §4：可注入的派发回显行（测试缝，同 laneFactsLineFn 模式；缺省=真实
   // laneFactsLine——fail-open，返回 null 时受理回执不带 laneFacts）。
   laneFactsLineFn,
+  // 第 156 批：可注入的 laneRules 构造（测试缝，同 laneFactsLineFn 模式；缺省=
+  // buildLaneRules——单一构造，任何失败自降级 {rules:null,...}，受理回执照常）。
+  laneRulesFn,
   // 第 147 批修正一：分支帽提示的只读采样 + 展示后记账（拆开，派发被拒不吞提示）。
   // 工厂缺省不采样（测试直接构造时绝不写真实 %LOCALAPPDATA%）；生产入口
   // src/mcp/stdio.js 注入真实 sampleDispatchResourceAdvisory。
@@ -5080,6 +5161,11 @@ export function createWaoMcpServer({
               resourceAdvisory,
             })
           : null;
+        // 第 156 批（TD-384）：受理回执带 label（车道段=解析后的绑定身份）；无法
+        // 构造（连 runId 都没有）→ 键缺省，绝不影响受理。
+        const dispatchLabelValue = result.accepted === true
+          ? buildDispatchLabel({ lane: result.agentId, prompt, fallbackId: result.runId })
+          : null;
         const parsed = RUN_DISPATCH_OUTPUT.parse({
           runId: result.runId,
           agentId: result.agentId,
@@ -5107,7 +5193,11 @@ export function createWaoMcpServer({
           // 长 runId 下整句放不下时只是不加半句，不让已受理的派发变成报错。
           // 第 147 批：分支帽提示也挂在既有 nextStep 末尾（不放新字段/不改 schema）；
           // 放不下时只丢这行提示，合同提醒、CLI 半句与受理结果照旧。
-          ...(acceptedNextStep != null ? { nextStep: acceptedNextStep.nextStep } : {}),
+          // 第 156 批：命名短提示（后台任务可命名 <label>）同款纪律挂最末——
+          // 放不下只丢提示，label 本身已在回执字段里。
+          ...(acceptedNextStep != null
+            ? { nextStep: appendLabelHint(acceptedNextStep.nextStep, dispatchLabelValue, LEAD_ADVISORY_WIRE_MAX_LEN) }
+            : {}),
           // 决定 0129：受理回执携带就地预检的 advisory 码（零提醒 = 键缺省；
           // accepted:false 不给）。数组已在派发前用同一 schema 严格预校验过：
           // 畸形/超限整组丢弃，绝不出现"run 已启动、宿主却收到 isError"。
@@ -5120,6 +5210,18 @@ export function createWaoMcpServer({
             if (result.accepted !== true) return {};
             const facts = (laneFactsLineFn ?? laneFactsLine)(factsLaneId);
             return facts == null ? {} : { laneFacts: facts };
+          })(),
+          // 第 156 批：受理回执带 label 与 laneRules（Owner 规则原文 + 此刻高峰
+          // 快照；单一构造，任何失败只降级该字段）。accepted:false 都不给。
+          ...(dispatchLabelValue != null ? { label: dispatchLabelValue } : {}),
+          ...(() => {
+            if (result.accepted !== true) return {};
+            // 构造那一跳的意外抛错（含注入缝）也只降级本字段——受理绝不折成错误。
+            try {
+              return { laneRules: (laneRulesFn ?? buildLaneRules)() };
+            } catch {
+              return { laneRules: degradedLaneRules() };
+            }
           })(),
         });
         // 第 147 批修正一：只有这行提示真正进了受理回执（advisoryIncluded）才把
@@ -5700,8 +5802,14 @@ export function createWaoMcpServer({
       // continuation_scope_incomplete 路径事实投影 fail closed（null）时整组省略，
       // 闭集原因照旧带给 Lead。
       try {
+        // 第 156 批（TD-384）：受理回执带 label（车道=谱系固定的父装配身份）；
+        // nextStep 末尾挂命名短提示（放不下只丢提示——第 147 批同款纪律）。
+        const continueLabel = result.accepted === true && typeof result.agentId === "string"
+          ? buildDispatchLabel({ lane: result.agentId, prompt, fallbackId: result.runId })
+          : null;
         const parsed = RUN_CONTINUE_OUTPUT.parse({
           ...projectContinueOutcome(result, delivery),
+          ...(continueLabel != null ? { label: continueLabel } : {}),
           // 决定 0095：受理成功的后台续跑附 nextStep（MCP 面模板；第 136 批起末尾
           // 的 CLI 半句带子运行自己的 runId）；拒收不给。
           // 第 135 批（决定 0130）：delivery 省略的受理回执在 nextStep 末尾补
@@ -5710,12 +5818,12 @@ export function createWaoMcpServer({
             ? {
                 // 第 136 批续修：继承合同那半句作为后缀交给 buildNextStep，与 CLI
                 // 半句一起算长度（放不下就只是不加半句，已受理的续修不变成报错）。
-                nextStep: buildNextStep({
+                nextStep: appendLabelHint(buildNextStep({
                   surface: "mcp",
                   situation: "dispatch_accepted",
                   runId: result.runId,
                   suffix: delivery === undefined ? CONTINUE_INHERITED_DELIVERY_NOTE : "",
-                }),
+                }), continueLabel, LEAD_ADVISORY_WIRE_MAX_LEN),
               }
             : {}),
         });
