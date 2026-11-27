@@ -215,8 +215,9 @@ function sanitizeControls(text) {
   return text.replace(UNSAFE_CONTROL_RE, "\uFFFD");
 }
 
-/** 限长（UTF-16 码元；超长截到 maxChars-1 后补 …，帽含省略号；不切开代理对）。 */
-function truncateHead(text, maxChars) {
+/** 限长（UTF-16 码元；超长截到 maxChars-1 后补 …，帽含省略号；不切开代理对）。
+ * 导出供 dispatchLabel 复用同一条截断（156 批修正一：不再写第二份 clip）。 */
+export function truncateHead(text, maxChars) {
   if (text.length <= maxChars) return text;
   let keep = maxChars - 1; // 留一格给 …
   const last = text.charCodeAt(keep - 1);

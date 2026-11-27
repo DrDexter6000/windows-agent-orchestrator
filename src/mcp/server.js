@@ -385,12 +385,14 @@ import {
   buildLaneRules,
   degradedLaneRules,
   RULES_UNAVAILABLE_REASON,
+  RULES_RECEIPT_CAPACITY_REASON,
   BEIJING_LABEL_MAX_CHARS,
   PEAK_LANE_ID_MAX_CHARS,
 } from "../application/laneRules.js";
 import {
   buildDispatchLabel,
   appendLabelHint,
+  isUsableLabel,
   DISPATCH_LABEL_MAX_CHARS,
 } from "../application/dispatchLabel.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
@@ -1108,8 +1110,8 @@ const LANE_RULES_PEAK_NOW = z.object({
 }).strict();
 const LANE_RULES_OUTPUT = z.object({
   rules: z.array(z.string().min(1).max(OWNER_RULE_MAX_CHARS)).max(OWNER_RULES_CAP).nullable(),
-  // 闭集：原因只有构造函数那一个固定串（WAO 固定措辞单一归宿）。
-  rulesReason: z.enum([RULES_UNAVAILABLE_REASON]).optional(),
+  // 闭集：构造函数那一个固定串，或会审回执容量降级的第二固定串（修正一）。
+  rulesReason: z.enum([RULES_UNAVAILABLE_REASON, RULES_RECEIPT_CAPACITY_REASON]).optional(),
   now: z.object({
     beijing: z.string().min(1).max(BEIJING_LABEL_MAX_CHARS),
     holidaysRecognized: z.literal(false),
@@ -1126,6 +1128,29 @@ const LANE_RULES_OUTPUT = z.object({
     ])).max(PROJECTION_ROWS_CAP),
   }).nullable(),
 }).strict();
+
+// 第 156 批修正一：laneRules 的出口纪律——先按本 schema 严格预校验。构造函数
+// 正常实现产出的值必过；注入缝/未来改动返回越界值（车道 id 超长、规则条数超限、
+// peakNow:null 等）时换成共享降级形。绝不出现"run/会审已受理、宿主却收到
+// isError、结构化回执里没有 runId/consultId"（contractAdvisories 同一先例）。
+function laneRulesForReceipt(value) {
+  const parsed = LANE_RULES_OUTPUT.safeParse(value);
+  return parsed.success ? parsed.data : degradedLaneRules();
+}
+
+// 第 156 批修正一：label 的出口纪律——构造抛错、越界值一律按缺省（字段省略、
+// 命名提示不加）。脱敏链与 Owner 看板同源（createSecretRedactor(process.env)）。
+function dispatchLabelForReceipt(input) {
+  try {
+    const value = buildDispatchLabel({
+      ...input,
+      redactString: createSecretRedactor(process.env).redactString,
+    });
+    return isUsableLabel(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 // run_dispatch output: runId + agentId + accepted + state + additive workspaceProof
 // + additive providerSessionRouting. No paths, PID, prompt, argv, opaque session
@@ -3196,20 +3221,6 @@ const LANES_PROJECTION_OUTPUT = z.object({
     // 其他车道要先抽帧截图；决定 0098 同批）。
     videoInput: z.boolean(),
   }).strict()).max(PROJECTION_ROWS_CAP),
-  // 第 156 批：同额度池合并后的高峰行（投影新增的推导；与 now 同源）。
-  // {pool,lanes,peakNow}=同池声明一致合并行、{lane,peakNow}=逐车道行——
-  // peakNow 与行内同格同一格式；两形各自写出（不共享实例，$ref 字节先例）。
-  poolPeaks: z.array(z.union([
-    z.object({
-      pool: z.string().min(1).max(QUOTA_POOL_MAX_CHARS),
-      lanes: z.array(z.string().min(1).max(PEAK_LANE_ID_MAX_CHARS)).min(1),
-      peakNow: LANE_RULES_PEAK_NOW,
-    }).strict(),
-    z.object({
-      lane: z.string().min(1).max(PEAK_LANE_ID_MAX_CHARS),
-      peakNow: LANE_RULES_PEAK_NOW,
-    }).strict(),
-  ])).max(PROJECTION_ROWS_CAP),
 }).strict();
 
 const LEAD_PREFLIGHT_OUTPUT = z.object({
@@ -5162,9 +5173,10 @@ export function createWaoMcpServer({
             })
           : null;
         // 第 156 批（TD-384）：受理回执带 label（车道段=解析后的绑定身份）；无法
-        // 构造（连 runId 都没有）→ 键缺省，绝不影响受理。
+        // 构造（连 runId 都没有）→ 键缺省，绝不影响受理。修正一：构造抛错与越界
+        // 值同样只让字段缺省（与 laneRules 同一降级纪律），命名提示随之不加。
         const dispatchLabelValue = result.accepted === true
-          ? buildDispatchLabel({ lane: result.agentId, prompt, fallbackId: result.runId })
+          ? dispatchLabelForReceipt({ lane: result.agentId, prompt, fallbackId: result.runId })
           : null;
         const parsed = RUN_DISPATCH_OUTPUT.parse({
           runId: result.runId,
@@ -5213,15 +5225,19 @@ export function createWaoMcpServer({
           })(),
           // 第 156 批：受理回执带 label 与 laneRules（Owner 规则原文 + 此刻高峰
           // 快照；单一构造，任何失败只降级该字段）。accepted:false 都不给。
+          // 修正一：laneRules 在整份回执校验前先按 LANE_RULES_OUTPUT 严格预校验——
+          // 畸形换共享降级形，绝不让已受理的派发回成 isError。
           ...(dispatchLabelValue != null ? { label: dispatchLabelValue } : {}),
           ...(() => {
             if (result.accepted !== true) return {};
             // 构造那一跳的意外抛错（含注入缝）也只降级本字段——受理绝不折成错误。
+            let value;
             try {
-              return { laneRules: (laneRulesFn ?? buildLaneRules)() };
+              value = (laneRulesFn ?? buildLaneRules)();
             } catch {
-              return { laneRules: degradedLaneRules() };
+              value = degradedLaneRules();
             }
+            return { laneRules: laneRulesForReceipt(value) };
           })(),
         });
         // 第 147 批修正一：只有这行提示真正进了受理回执（advisoryIncluded）才把
@@ -5652,7 +5668,13 @@ export function createWaoMcpServer({
           dispatchFn: countingDispatcher,
         });
         // 0051：create 成功 → 机械回执（正文零携带；分页经读模式按席取）。
-        const parsed = RUN_CONSULT_OUTPUT.parse(projectConsultReceipt(result, {
+        // 第 156 批修正一：laneRules 在回执组装前先按 LANE_RULES_OUTPUT 严格预
+        // 校验——注入缝/未来改动返回越界值时换共享降级形；会审已扇出，绝不让它
+        // 回成 isError（结构化回执里 consultId 必须在）。容量降级在投影一处裁决。
+        const receiptSource = result.laneRules != null
+          ? { ...result, laneRules: laneRulesForReceipt(result.laneRules) }
+          : result;
+        const parsed = RUN_CONSULT_OUTPUT.parse(projectConsultReceipt(receiptSource, {
           pageMeasure: consultSeatPageMeasure(result.consultId),
         }));
         return {
@@ -5804,8 +5826,9 @@ export function createWaoMcpServer({
       try {
         // 第 156 批（TD-384）：受理回执带 label（车道=谱系固定的父装配身份）；
         // nextStep 末尾挂命名短提示（放不下只丢提示——第 147 批同款纪律）。
+        // 修正一：label 走同一脱敏链，构造抛错/越界值按缺省（提示也随之不加）。
         const continueLabel = result.accepted === true && typeof result.agentId === "string"
-          ? buildDispatchLabel({ lane: result.agentId, prompt, fallbackId: result.runId })
+          ? dispatchLabelForReceipt({ lane: result.agentId, prompt, fallbackId: result.runId })
           : null;
         const parsed = RUN_CONTINUE_OUTPUT.parse({
           ...projectContinueOutcome(result, delivery),

@@ -900,15 +900,15 @@ export async function aggregateLeadPreflight({
       if (projection != null && typeof projection === "object") {
         // 0097：顶层新增 costTierScale/ownerRules 原样透传（null=缺失或降级），
         // notices（降级观察）各记一条 preflight 观察。152 批：now 提到 preflight
-        // 顶层（lanes 子对象不带）。156 批：poolPeaks（同池合并高峰行）随 rows
-        // 原样透传——推导在投影，预检/lanes 复用同一份。
+        // 顶层（lanes 子对象不带）。156 批修正一：投影里的 poolPeaks 留在投影内
+        // 供 laneRules 用；预检的 rows 已带 quotaPool 与 peakNow，池级重复视图
+        // 不在这里透传（工具面与每次输出都省一截）。
         lanes = {
           scale: projection.scale,
           dimensionLabels: projection.dimensionLabels,
           costTierScale: projection.costTierScale ?? null,
           ownerRules: projection.ownerRules ?? null,
           rows: projection.rows,
-          poolPeaks: projection.poolPeaks,
         };
         now = projection.now ?? null;
         for (const id of (projection.omittedLaneIds ?? [])) {

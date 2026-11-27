@@ -109,6 +109,9 @@ export const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 export const WEEKDAY_LABELS = Object.freeze([
   "周日", "周一", "周二", "周三", "周四", "周五", "周六",
 ]);
+/** 高峰/节假日口径的文字形式（投影 now.holidaysRecognized 恒 false 的人读版）。
+ * 只定义这一次：laneRules 的 stderr 行与 `wao lanes` 的表头都引用它。 */
+export const HOLIDAYS_NOTE = "法定节假日不识别，按工作日算";
 
 /** 车道级键闭集（schemaVersion 2）。出现未知键即该车道 invalid。 */
 const LANE_ENTRY_KEYS = new Set([
@@ -560,8 +563,8 @@ function clip(text, max) {
  * 每行带暂停说明、上下文窗口与能否看图/看视频，见 0089；推断族系见 0090；行带
  * costTier、格带 score、顶层带 costTierScale 与 ownerRules，见 0097；行带
  * peakNow、顶层带 now（"此刻"，北京时间）与 poolPeaks（同额度池合并后的高峰行，
- * 一致才合并、不一致/无池逐条车道），见 152/156 批；行带 quotaPool（额度池
- * 名），见 153 批）。行序=
+ * 池内全部成员都声明且声明一致才合并、否则逐条车道；行序=车道表声明序），见
+ * 152/156 批；行带 quotaPool（额度池名），见 153 批）。行序=
  * lanes.json 声明序；只含车道表里有画像的车道；不排序、不加推荐字段。所有
  * 字符串在应用层截到 MCP schema 上限，保证投影总能通过校验。
  * @param {number} [input.nowMs] "此刻"的时钟参数（测试注入）；生产缺省 Date.now()。
@@ -630,44 +633,53 @@ export function projectLaneProfiles({ lanesDoc, traitsResult, nowMs = Date.now()
     // invalid 车道：形状错误被加载器降级的、且确实在车道表里的——省略行 + 回传 id。
   const tableIds = new Set(laneList.map((l) => l?.id).filter((x) => typeof x === "string"));
   const omittedLaneIds = (traitsResult.invalidIds ?? []).filter((id) => tableIds.has(id));
-  // 156 批（同额度池合并高峰）：同一 quotaPool 的车道高峰声明完全一致才合并成一行
-  // （{pool, lanes, peakNow}）；同池声明不一致的、或声明了高峰却没有额度池的，逐条
-  // 车道列出（{lane, peakNow}）；没声明高峰的车道不出现。绝不用池里第一条车道代表
-  // 整个池。推导只在本投影一处——wao lanes、预检与派发回显（laneRules，156 批）
-  // 都从这里取，不在任何出口各写一份。行序=车道表声明序（池行取首个成员的位置），
-  // 与 rows 同受 PROJECTION_ROWS_CAP 约束（防异常膨胀，真实车道表远小于此）。
-  const poolMembers = new Map(); // quotaPool → [{id, peak}]
-  const barePeakLanes = []; // 有 peak、无 quotaPool 的车道
-  let peakRowCount = 0;
-  const poolPeaks = [];
-  const pushPeakRow = (row) => {
-    if (peakRowCount >= PROJECTION_ROWS_CAP) return;
-    poolPeaks.push(row);
-    peakRowCount += 1;
-  };
+  // 156 批（同额度池合并高峰，修正一）：同一 quotaPool 在车道表里（有画像的）**全部**
+  // 成员都声明了高峰、且声明完全相同，才合并成一行 {pool, lanes, peakNow}；池内只要
+  // 有一个成员没声明、或声明不一致，就对该池声明了高峰的成员逐条列出 {lane, peakNow}
+  // （没声明的成员不出现）——绝不用池里第一条车道代表整个池，也不让"名单=池成员"
+  // 变成隐含承诺。推导只在本投影一处——wao lanes、预检与派发回显（laneRules，156 批）
+  // 都从这里取，不在任何出口各写一份。行序=车道表声明序：池行放在它第一个成员的
+  // 位置，逐车道行放在各自的位置。与 rows 同受 PROJECTION_ROWS_CAP 约束（防异常
+  // 膨胀，真实车道表远小于此）。
+  const poolMembers = new Map(); // quotaPool → [{id, peak}]（表序；peak 可能 undefined）
   for (const lane of laneList) {
     const id = lane?.id;
     if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(traitsResult.traits, id)) continue;
     const entry = traitsResult.traits[id];
-    if (entry.peak === undefined) continue;
-    if (entry.quotaPool == null) {
-      barePeakLanes.push({ id, peak: entry.peak });
-      continue;
-    }
+    if (entry.quotaPool == null) continue;
     const members = poolMembers.get(entry.quotaPool) ?? [];
     members.push({ id, peak: entry.peak });
     poolMembers.set(entry.quotaPool, members);
   }
   const peakDeclKey = (peak) => JSON.stringify([peak.days, peak.hours, peak.effect]);
+  const mergedPools = new Map(); // quotaPool → {pool, lanes, peakNow}（全部声明且一致）
   for (const [pool, members] of poolMembers) {
+    if (!members.every((m) => m.peak !== undefined)) continue; // 部分缺声明 → 不合并
     const consistent = members.every((m) => peakDeclKey(m.peak) === peakDeclKey(members[0].peak));
-    if (consistent) {
-      pushPeakRow({ pool, lanes: members.map((m) => m.id), peakNow: peakNowAt(members[0].peak, nowMs) });
+    if (!consistent) continue; // 声明冲突 → 不合并
+    mergedPools.set(pool, {
+      pool,
+      lanes: members.map((m) => m.id),
+      peakNow: peakNowAt(members[0].peak, nowMs),
+    });
+  }
+  const poolPeaks = [];
+  const emittedPools = new Set();
+  for (const lane of laneList) {
+    if (poolPeaks.length >= PROJECTION_ROWS_CAP) break;
+    const id = lane?.id;
+    if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(traitsResult.traits, id)) continue;
+    const entry = traitsResult.traits[id];
+    if (entry.peak === undefined) continue; // 没声明高峰的车道/成员不出现
+    const pool = entry.quotaPool;
+    if (pool != null && mergedPools.has(pool)) {
+      if (emittedPools.has(pool)) continue; // 合并行只占第一个成员的位置
+      emittedPools.add(pool);
+      poolPeaks.push(mergedPools.get(pool));
     } else {
-      for (const m of members) pushPeakRow({ lane: m.id, peakNow: peakNowAt(m.peak, nowMs) });
+      poolPeaks.push({ lane: id, peakNow: peakNowAt(entry.peak, nowMs) });
     }
   }
-  for (const m of barePeakLanes) pushPeakRow({ lane: m.id, peakNow: peakNowAt(m.peak, nowMs) });
   const notices = (traitsResult.observations ?? [])
     .slice(0, PROJECTION_NOTICES_CAP)
     .map((s) => clip(s, PROJECTION_NOTICE_MAX_CHARS));

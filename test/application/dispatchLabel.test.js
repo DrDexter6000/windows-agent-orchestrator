@@ -16,9 +16,11 @@ import {
   buildDispatchLabel,
   buildConsultLabel,
   appendLabelHint,
+  isUsableLabel,
   DISPATCH_LABEL_MAX_CHARS,
 } from "../../src/application/dispatchLabel.js";
 import { deriveOwnerTitle } from "../../src/application/ownerReadModel.js";
+import { createSecretRedactor } from "../../src/secretRedaction.js";
 
 // ── 形状与同源 ───────────────────────────────────────────────────────────────
 
@@ -57,6 +59,41 @@ test("label 上限：整个 label ≤80 字符，超出截断加省略号", () =
   assert.ok(label.endsWith("…"), "截断以省略号收尾");
   assert.ok(label.startsWith("[fixture-lane] "), "车道段保留");
   assert.equal(DISPATCH_LABEL_MAX_CHARS, 80, "上限常量=80");
+});
+
+test("修正一：截断按完整字符切——emoji 恰好跨边界时不留落单代理项", () => {
+  // 车道段 `[x] `=4 码元 + 标题前缀 74 个 c = 78；第 79/80 位是代理对（😀）。
+  const prompt = "c".repeat(74) + "😀" + "d";
+  const label = buildDispatchLabel({ lane: "x", prompt, fallbackId: "r" });
+  assert.ok(label.length <= DISPATCH_LABEL_MAX_CHARS);
+  assert.ok(label.endsWith("…"), "超长仍以省略号收尾");
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(label), "无落单高位代理");
+  assert.ok(!/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(label), "无落单低位代理");
+  const lastKept = label.charCodeAt(label.length - 2);
+  assert.ok(!(lastKept >= 0xd800 && lastKept <= 0xdbff), "省略号前的字符不是半个代理对");
+});
+
+test("修正一：label 走 Owner 看板同一条脱敏链——无令牌形状的环境秘密原值也遮住，且与看板逐字相同", () => {
+  const env = { WAO_TEST_API_KEY: "plain-secret-15" };
+  const redactString = createSecretRedactor(env).redactString;
+  const prompt = `# 修 ${env.WAO_TEST_API_KEY} 的部署`;
+  const label = buildDispatchLabel({ lane: "x", prompt, fallbackId: "r", redactString });
+  const boardTitle = deriveOwnerTitle(prompt, redactString);
+  assert.equal(label, `[x] ${boardTitle}`, "与看板对同一输入逐字相同");
+  assert.ok(!label.includes(env.WAO_TEST_API_KEY), "秘密原值不出现");
+  assert.ok(label.includes("[REDACTED:WAO_TEST_API_KEY]"), "精确脱敏标记（与看板同一链）");
+  // 会审同一个 redactor（同一函数对象，不另造链）。
+  const consult = buildConsultLabel({ seats: ["a", "b"], brief: prompt, fallbackId: "c", redactString });
+  assert.equal(consult, `[a+b] ${boardTitle}`, "会审 label 同一条脱敏链");
+});
+
+test("修正一：出口纪律 isUsableLabel——非空且 ≤80 才可用（坏记录/越界值按缺省）", () => {
+  assert.equal(isUsableLabel("[x] 任务"), true);
+  assert.equal(isUsableLabel(""), false);
+  assert.equal(isUsableLabel(null), false);
+  assert.equal(isUsableLabel(123), false);
+  assert.equal(isUsableLabel("a".repeat(DISPATCH_LABEL_MAX_CHARS)), true, "恰好上限可用");
+  assert.equal(isUsableLabel("a".repeat(DISPATCH_LABEL_MAX_CHARS + 1)), false, "超上限不可用");
 });
 
 test("取不到标题：退回 `[<车道>] <runId>`；无车道键 → null", () => {

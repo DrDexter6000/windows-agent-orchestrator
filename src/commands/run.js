@@ -39,9 +39,11 @@ import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldA
 import { laneFactsLine } from "../application/laneFactsLine.js";
 // 第 156 批：laneRules（Owner 车道规则原文 + 此刻高峰快照——stderr 行与 JSON
 // 字段同源）与 label（[车道] 任务名，TD-384）。单一构造/渲染；依赖边由
-// test/registry-roles/laneTraits.test.js 钉。
-import { buildLaneRules, renderLaneRulesLines } from "../application/laneRules.js";
-import { buildDispatchLabel, appendLabelHint } from "../application/dispatchLabel.js";
+// test/registry-roles/laneTraits.test.js 钉。修正一：取规则那一跳抛错用共享
+// 降级形；label 与 Owner 看板同一条脱敏链（createSecretRedactor）。
+import { buildLaneRules, degradedLaneRules, renderLaneRulesLines } from "../application/laneRules.js";
+import { buildDispatchLabel, appendLabelHint, isUsableLabel } from "../application/dispatchLabel.js";
+import { createSecretRedactor } from "../secretRedaction.js";
 import { readRegistry } from "../registry.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
@@ -284,6 +286,20 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     }, null, 2));
     return;
   }
+  // 第 156 批修正一（TD-384）：label 只构造一次，JSON 字段与 note 末尾的命名
+  // 提示共用；抛错/越界值按缺省（字段省略、提示不加），脱敏链与 Owner 看板同源。
+  let label = null;
+  try {
+    label = buildDispatchLabel({
+      lane: agentId,
+      prompt: options.prompt ?? "",
+      fallbackId: result.runId,
+      redactString: createSecretRedactor(process.env).redactString,
+    });
+  } catch {
+    label = null;
+  }
+  if (!isUsableLabel(label)) label = null;
   console.log(JSON.stringify({
     runId: result.runId,
     agentId: result.agentId,
@@ -291,10 +307,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     background: true,
     // 第 156 批（TD-384）：[<车道>] <任务名>——宿主后台任务的结构化名字（取不到
     // 标题退回 runId）；note 末尾的命名短提示与之同源。
-    ...(() => {
-      const label = buildDispatchLabel({ lane: agentId, prompt: options.prompt ?? "", fallbackId: result.runId });
-      return label == null ? {} : { label };
-    })(),
+    ...(label != null ? { label } : {}),
     // 第 156 批：Owner 规则原文 + 此刻高峰快照（与 stderr 同一构造；失败只降级
     // 该字段）。与 laneFacts 不同，它进 JSON——Lead 筛 JSON 时规则不再被滤掉。
     ...(laneRules != null ? { laneRules } : {}),
@@ -313,7 +326,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
     ...(result.effectiveReasoning ? { reasoning: result.effectiveReasoning } : {}),
     note: appendLabelHint(
       "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Wait to settlement: `wao runs wait <runId> --until-settled`.",
-      buildDispatchLabel({ lane: agentId, prompt: options.prompt ?? "", fallbackId: result.runId }),
+      label,
     ),
   }, null, 2));
 }
@@ -554,8 +567,13 @@ export async function runCommand(args, config) {
     // laneFactsLineFn：测试缝（夹具注入；生产路径缺省真实实现）。
     laneFactsText = (config?.laneFactsLineFn ?? laneFactsLine)(holdLaneId, { lanesDoc });
     // 第 156 批：规则块与车道事实行同源同表（非默认 --registry 时表停用，
-    // laneRules 随之降级为"不可用"行——与 laneFacts 缺席同一纪律）。
-    laneRules = (config?.laneRulesFn ?? buildLaneRules)({ lanesDoc });
+    // laneRules 随之降级为"不可用"行——与 laneFacts 缺席同一纪律）。修正一：
+    // 取规则那一跳抛错也用共享降级形（受理/派发照常）。
+    try {
+      laneRules = (config?.laneRulesFn ?? buildLaneRules)({ lanesDoc });
+    } catch {
+      laneRules = degradedLaneRules();
+    }
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   // （已在解析块前提前加载 earlyDelivery——此处复用同一结果，不二次读盘。）
@@ -588,12 +606,13 @@ export async function runCommand(args, config) {
     options.cwd ? resolve(options.cwd) : process.cwd(),
   );
   if (advisoryLine) console.error(advisoryLine);
+  // 第 156 批：Owner 车道规则原文 + 此刻各额度池高峰（修正一：顺序与 consult run
+  // 一致——规则块 → 暂停说明行 → 所选车道事实行；同款 advisory 纪律，每条一行；
+  // 降级时恰一行"不可用"）。
+  for (const line of renderLaneRulesLines(laneRules)) console.error(`[wao] ${line}`);
   // TD-283：目标车道带 Owner 暂停说明 → stderr 一行 advisory（dispatchResource-
   // Advisory 同款纪律：只提示、不拦截、不改退出码、不污染 stdout 管道）。
   if (dispatchHoldLine) console.error(dispatchHoldLine);
-  // 第 156 批：Owner 车道规则原文 + 此刻各额度池高峰（先规则块后车道行——与会审
-  // stderr 的顺序一致；同款 advisory 纪律，每条一行；降级时恰一行"不可用"）。
-  for (const line of renderLaneRulesLines(laneRules)) console.error(`[wao] ${line}`);
   // 0097 §4：派发那一刻（前台与后台都在这里分岔前）往 stderr 打所选车道一行
   // 事实（只陈列，不是推荐；同款 advisory 纪律，fail-open——null 不打印）。
   if (laneFactsText) console.error(`[wao] ${laneFactsText}`);
@@ -669,11 +688,20 @@ export async function runCommand(args, config) {
   }
   // 第 156 批（TD-384）：文本格式带一行 label（start 后 runId 已知，取不到标题
   // 退回 runId）；JSON 面不重复（label 归 --background 的 JSON 与 MCP 回执）。
+  // 修正一：构造抛错/越界值只让这一行缺省；脱敏链与 Owner 看板同源。
   if (format !== "json") {
-    const fgLabel = buildDispatchLabel({
-      lane: agentId, prompt: promptText, fallbackId: run.transcript.context.runId,
-    });
-    if (fgLabel != null) console.log(`label: ${fgLabel}`);
+    let fgLabel = null;
+    try {
+      fgLabel = buildDispatchLabel({
+        lane: agentId,
+        prompt: promptText,
+        fallbackId: run.transcript.context.runId,
+        redactString: createSecretRedactor(process.env).redactString,
+      });
+    } catch {
+      fgLabel = null;
+    }
+    if (isUsableLabel(fgLabel)) console.log(`label: ${fgLabel}`);
   }
   const waitResult = await runAndWait(run, options);
   // P4 决策A：scorecard 从 transcript 的 scorecard.checked 事件取（runManager 无论通过/失败都落盘）。

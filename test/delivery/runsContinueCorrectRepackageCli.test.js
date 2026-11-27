@@ -50,6 +50,10 @@ import {
 } from "../../src/application/runDeliveryRepackage.js";
 import { proveWorkspaceRoot } from "../../src/application/workspaceBinding.js";
 import { HELP_TEXT } from "../../src/cliHelp.js";
+// 第 156 批修正一：`runs continue` 与 MCP run_continue 同一个 label 构造函数与
+// 命名提示（测试从同一实现派生期望，不抄第二份形制）。
+import { buildDispatchLabel, appendLabelHint } from "../../src/application/dispatchLabel.js";
+import { NEXT_STEP_MAX_LEN } from "../../src/application/runNextStep.js";
 
 // ===== 夹具与工具 =====
 
@@ -172,12 +176,16 @@ test("137a-C01: runs continue 受理 → exit 0；JSON 与 MCP 输出同名同�
   // 整个对象就是两面共用的投影函数的产物。省略交付规格 → nextStep 末尾带继承
   // 合同那半句（与 MCP 同一句，见 137a-C04）。
   const baseStep = `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD} --until-settled.`;
+  // 第 156 批修正一：label（[车道] 任务名）与 nextStep 末尾的命名提示。
+  const label = buildDispatchLabel({ lane: "coder_hq", prompt: PROMPT_TEXT, fallbackId: CHILD });
+  assert.ok(label && label.startsWith("[coder_hq] "), "受理回执带 label");
   assert.deepEqual(wire, {
     ...projectContinueOutcome(accepted(), undefined),
-    nextStep: baseStep + CONTINUE_INHERITED_DELIVERY_NOTE,
+    label,
+    nextStep: appendLabelHint(baseStep + CONTINUE_INHERITED_DELIVERY_NOTE, label, NEXT_STEP_MAX_LEN),
   });
   assert.deepEqual(Object.keys(wire).sort(), [
-    "accepted", "agentId", "continuation", "nextStep", "parentRunId",
+    "accepted", "agentId", "continuation", "label", "nextStep", "parentRunId",
     "rejectionReason", "rootRunId", "runId", "state",
   ]);
   assert.equal(wire.accepted, true);
@@ -186,7 +194,9 @@ test("137a-C01: runs continue 受理 → exit 0；JSON 与 MCP 输出同名同�
   assert.equal(wire.state, "pending");
   assert.equal(wire.rejectionReason, null);
   // 不回显：prompt、转录路径、绝对路径都不在输出里。
-  assert.ok(!r.out.includes("SECRET-PROMPT-MARKER"), "不回显 prompt");
+  // 第 156 批修正一：label 是唯一允许携带任务书标题的有界字段——剥掉后零回显。
+  const withoutLabel = r.out.split(label).join("");
+  assert.ok(!withoutLabel.includes("SECRET-PROMPT-MARKER"), "不回显 prompt（label 之外）");
   assert.ok(!r.out.includes("D:/abs"), "不回显绝对路径（转录路径）");
   assert.ok(!r.out.includes(repo), "不回显工作区绝对路径");
 });
@@ -230,27 +240,33 @@ test("137a-C03: runs continue 文本输出：子运行、父、根、状态与 C
   ));
   assert.equal(r.error, null);
   assert.equal(r.exitCode, 0);
+  const label = buildDispatchLabel({ lane: "coder_hq", prompt: PROMPT_TEXT, fallbackId: CHILD });
   assert.deepEqual(r.out.split("\n"), [
     `Run: ${CHILD}`,
     `Parent: ${PARENT}`,
     `Root: ${ROOT}`,
     "Agent: coder_hq",
+    // 第 156 批修正一：文本面与 MCP 同一份 label（只允许出现在这一行）。
+    `Label: ${label}`,
     "State: pending",
-    `Next step: Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`,
+    `Next step: ${appendLabelHint(`Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`, label, NEXT_STEP_MAX_LEN)}`,
   ]);
-  assert.ok(!r.out.includes("SECRET-PROMPT-MARKER"));
+  assert.ok(!r.out.split(label).join("").includes("SECRET-PROMPT-MARKER"), "label 之外不回显 prompt");
 });
 
 test("137a-C04: 省略 --delivery-spec-file → nextStep 末尾写明继承父合同（与 MCP 同一句）；显式给合同时不带这句", async () => {
   const repo = makeRepo();
   const promptFile = writePromptFile(repo);
+  const label = buildDispatchLabel({ lane: "coder_hq", prompt: PROMPT_TEXT, fallbackId: CHILD });
   const inherited = await runCli(() => runsCommand(
     ["continue", ...continueArgs(promptFile, repo, ["--format", "json"])], makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
   const inheritedStep = JSON.parse(inherited.out).nextStep;
-  assert.ok(inheritedStep.endsWith(CONTINUE_INHERITED_DELIVERY_NOTE),
-    `继承合同那半句在末尾（实测：${inheritedStep}）`);
-  assert.equal(inheritedStep, `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.ok(inheritedStep.includes(CONTINUE_INHERITED_DELIVERY_NOTE),
+    `继承合同那半句在场（实测：${inheritedStep}）`);
+  assert.equal(inheritedStep,
+    appendLabelHint(`Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`, label, NEXT_STEP_MAX_LEN),
+    "继承后缀之后是命名提示（放不下只丢提示）");
 
   const spec = join(repo, "delivery.json");
   writeFileSync(spec, JSON.stringify({ allowedPaths: ["src"], verificationCommands: ["npm test"] }), "utf8");
@@ -258,12 +274,56 @@ test("137a-C04: 省略 --delivery-spec-file → nextStep 末尾写明继承父�
     ["continue", ...continueArgs(promptFile, repo, ["--format", "json", "--delivery-spec-file", spec])],
     makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
-  assert.ok(!JSON.parse(explicit.out).nextStep.includes("inherited"), "显式合同不带继承那半句");
+  const explicitStep = JSON.parse(explicit.out).nextStep;
+  assert.ok(!explicitStep.includes("inherited"), "显式合同不带继承那半句");
+  assert.ok(explicitStep.endsWith(`（后台任务可命名 ${label}）`), "显式合同同样带命名提示");
   // 文本面同样带上这半句。
   const text = await runCli(() => runsCommand(
     ["continue", ...continueArgs(promptFile, repo)], makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
-  assert.ok(text.out.split("\n").at(-1).endsWith(CONTINUE_INHERITED_DELIVERY_NOTE), "文本面的 Next step 行同样写明");
+  assert.ok(text.out.split("\n").at(-1).includes(CONTINUE_INHERITED_DELIVERY_NOTE), "文本面的 Next step 行同样写明");
+});
+
+test("156 修正一 C04b: runs continue 带 label 与命名提示，走 Owner 看板同一条脱敏链（JSON 与文本面）", async () => {
+  const repo = makeRepo();
+  const prev = process.env.WAO_TEST_API_KEY;
+  const secret = "plain-secret-15";
+  process.env.WAO_TEST_API_KEY = secret;
+  try {
+    const promptFile = writePromptFile(repo, `# 修 ${secret} 的部署\n正文`);
+    const { createSecretRedactor } = await import("../../src/secretRedaction.js");
+    const { deriveOwnerTitle } = await import("../../src/application/ownerReadModel.js");
+    const title = deriveOwnerTitle(`# 修 ${secret} 的部署\n正文`, createSecretRedactor(process.env).redactString);
+    assert.ok(title.includes("[REDACTED:WAO_TEST_API_KEY]"), "前提：看板遮住原值");
+    const label = buildDispatchLabel({
+      lane: "coder_hq", prompt: `# 修 ${secret} 的部署\n正文`, fallbackId: CHILD,
+      redactString: createSecretRedactor(process.env).redactString,
+    });
+    assert.equal(label, `[coder_hq] ${title}`, "与看板逐字相同");
+
+    const jsonRun = await runCli(() => runsCommand(
+      ["continue", ...continueArgs(promptFile, repo, ["--format", "json"])], makeConfig(repo), { continueRunFn: stub(accepted()) },
+    ));
+    const wire = JSON.parse(jsonRun.out);
+    assert.equal(wire.label, label, "JSON 面带 label（同一构造函数同一脱敏链）");
+    assert.ok(!wire.label.includes(secret), "秘密原值不进 label");
+    assert.ok(wire.nextStep.includes("wao runs wait") && wire.nextStep.endsWith(`（后台任务可命名 ${label}）`),
+      `等到收口那句末尾加命名提示：${wire.nextStep}`);
+
+    const textRun = await runCli(() => runsCommand(
+      ["continue", ...continueArgs(promptFile, repo)], makeConfig(repo), { continueRunFn: stub(accepted()) },
+    ));
+    const withoutLabel = textRun.out.split(`Label: ${label}`).join("");
+    assert.ok(!withoutLabel.includes(secret), "文本面秘密原值只可能出现在 label 行");
+    const lines = textRun.out.split("\n");
+    assert.ok(lines.includes(`Label: ${label}`), "文本面带 Label 行");
+    assert.ok(lines.at(-1).endsWith(`（后台任务可命名 ${label}）`), "文本面命名提示在同一句末尾");
+    // 不带 laneRules（车道随谱系固定）。
+    assert.equal("laneRules" in wire, false, "CLI runs continue 不带 laneRules");
+  } finally {
+    if (prev === undefined) delete process.env.WAO_TEST_API_KEY;
+    else process.env.WAO_TEST_API_KEY = prev;
+  }
 });
 
 test("137a-C05: --delivery-spec-file 与 wao run 同一个解析器与文件格式（mode 可省；校验后的合同交给服务；外层包装给 INNER 提示）", async () => {
@@ -473,8 +533,12 @@ test("137a-C11: 服务结果里的多余字段（转录路径、活动 runId、p
       ["continue", ...continueArgs(promptFile, repo, extra)], makeConfig(repo), { continueRunFn: stub(junk) },
     ));
     assert.equal(r.error, null);
+    // 第 156 批修正一：label 是唯一允许携带任务书标题的有界字段；剥掉它之后
+    // 其余输出仍零回显。
+    const label = buildDispatchLabel({ lane: "coder_hq", prompt: PROMPT_TEXT, fallbackId: CHILD });
+    const withoutLabel = r.out.split(label).join("");
     for (const needle of ["C:/Users", "run_active_xyz", "SECRET-PROMPT-MARKER", "backgroundRunner", "abc", "11111111", "sess-xyz"]) {
-      assert.ok(!r.out.includes(needle), `不回显 ${needle}`);
+      assert.ok(!withoutLabel.includes(needle), `不回显 ${needle}`);
     }
   }
 });
@@ -1085,6 +1149,9 @@ test("续修1-C1: 全局等待预算——config.waitTimeout 给了就按 wao ru
 test("续修1-C2: 受理回执的等待命令带上调用方给的 --run-dir（含空格加引号）；放不下实际值写占位 <DIR>，任何长度都不抛错", async () => {
   const repo = makeRepo();
   const promptFile = writePromptFile(repo);
+  // 第 156 批修正一：nextStep 末尾同一份命名提示（放不下只丢提示）。
+  const label = buildDispatchLabel({ lane: "coder_hq", prompt: PROMPT_TEXT, fallbackId: CHILD });
+  const step = (base) => appendLabelHint(base, label, NEXT_STEP_MAX_LEN);
   const waitPre = `Background run accepted. Before ending the turn, keep a wait attached: wao runs wait ${CHILD}`;
   const wait = `${waitPre} --until-settled`;
   const nextStepOf = async (runDirFlag) => {
@@ -1099,19 +1166,19 @@ test("续修1-C2: 受理回执的等待命令带上调用方给的 --run-dir（�
     return JSON.parse(r.out).nextStep;
   };
   // 没给 --run-dir：等待命令不带（照抄落回缺省目录就对）。
-  assert.equal(await nextStepOf(null), `${wait}.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf(null), step(`${wait}.${CONTINUE_INHERITED_DELIVERY_NOTE}`));
   // 给了：等待命令带同一个值（照抄才找得到子运行）。
-  assert.equal(await nextStepOf("runs2"), `${waitPre} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf("runs2"), step(`${waitPre} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`));
   // 含空白的路径加双引号（与 runs wait 多目标重挂行同一规则）。
-  assert.equal(await nextStepOf("C:/my runs"), `${waitPre} --run-dir "C:/my runs" --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf("C:/my runs"), step(`${waitPre} --run-dir "C:/my runs" --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`));
   // 边界：恰好放得下的最长值用实际值，再长一个字符换占位。
   const room = 480 - `${wait} --run-dir .${CONTINUE_INHERITED_DELIVERY_NOTE}`.length;
   const fits = "r".repeat(room);
-  assert.equal(await nextStepOf(fits), `${waitPre} --run-dir ${fits} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
-  assert.equal(await nextStepOf(`${fits}r`), `${waitPre} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(await nextStepOf(fits), step(`${waitPre} --run-dir ${fits} --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`));
+  assert.equal(await nextStepOf(`${fits}r`), step(`${waitPre} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`));
   // 任何长度都不让已受理的回执变成报错：很长的路径写占位。
   for (const len of [400, 5000]) {
-    assert.equal(await nextStepOf("d/".repeat(len)), `${waitPre} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+    assert.equal(await nextStepOf("d/".repeat(len)), step(`${waitPre} --run-dir <DIR> --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`));
   }
   // 显式给了合同（无继承后缀）时同样带上 --run-dir。
   const spec = join(repo, "delivery.json");
@@ -1120,13 +1187,13 @@ test("续修1-C2: 受理回执的等待命令带上调用方给的 --run-dir（�
     ["continue", ...continueArgs(promptFile, repo, ["--format", "json", "--run-dir", "runs2", "--delivery-spec-file", spec])],
     makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
-  assert.equal(JSON.parse(explicit.out).nextStep, `${waitPre} --run-dir runs2 --until-settled.`);
+  assert.equal(JSON.parse(explicit.out).nextStep, step(`${waitPre} --run-dir runs2 --until-settled.`));
   // 文本面同款。
   const text = await runCli(() => runsCommand(
     ["continue", ...continueArgs(promptFile, repo, ["--run-dir", "runs2"])], makeConfig(repo), { continueRunFn: stub(accepted()) },
   ));
   assert.equal(text.exitCode, 0);
-  assert.equal(text.out.split("\n").at(-1), `Next step: ${waitPre} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`);
+  assert.equal(text.out.split("\n").at(-1), `Next step: ${step(`${waitPre} --run-dir runs2 --until-settled.${CONTINUE_INHERITED_DELIVERY_NOTE}`)}`);
 });
 
 const CLI_PATH = join(import.meta.dirname, "..", "..", "src", "cli.js");

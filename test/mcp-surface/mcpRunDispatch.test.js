@@ -36,6 +36,10 @@ import {
 import { KNOWN_BACKENDS } from "../../src/registry.js";
 // TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
 import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
+// 第 156 批修正一：laneRules 出口预校验的固定降级原因（不在测试里抄第二份）。
+import { RULES_UNAVAILABLE_REASON } from "../../src/application/laneRules.js";
+import { deriveOwnerTitle } from "../../src/application/ownerReadModel.js";
+import { createSecretRedactor } from "../../src/secretRedaction.js";
 
 // ===== Helpers =====
 
@@ -1288,6 +1292,81 @@ test("156: laneRules 只序列化（注入夹具原样上 wire）；构造抛错
       assert.equal(res.structuredContent.laneRules.now, null, "now:null");
     } finally { await clientBoom.close(); await serverBoom.close(); }
   } finally { cleanupDir(dir); }
+});
+
+test("156 修正一: laneRules 注入越界值（车道 id 超长/规则条数超限/peakNow:null）→ 受理照常，只该字段降级", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-rules-over-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const fakeDispatch = async () => ({
+      accepted: true, runId: "run_156_rules_over", agentId: "x", state: "pending",
+      providerSessionRouting: "not_used",
+    });
+    const NOW = { beijing: "周四 15:00", holidaysRecognized: false };
+    const PEAK = { state: "off_peak", until: "2026-11-26T18:00:00+08:00", untilLocal: "18:00" };
+    const OVER_BOUND = [
+      ["车道 id 65 字", {
+        rules: ["规则一"], now: { ...NOW, peaks: [{ lane: "x".repeat(65), peakNow: PEAK }] },
+      }],
+      ["规则 9 条", {
+        rules: Array.from({ length: 9 }, (_, i) => `规则${i}`), now: { ...NOW, peaks: [] },
+      }],
+      ["peakNow: null", {
+        rules: ["规则一"], now: { ...NOW, peaks: [{ lane: "x", peakNow: null }] },
+      }],
+    ];
+    for (const [label, laneRules] of OVER_BOUND) {
+      const server = createWaoMcpServer({
+        registryPath, runDir: "/server/runs", workspaceRoot: dir,
+        dispatchRunFn: fakeDispatch,
+        laneRulesFn: () => laneRules,
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "t", expectedWorkspaceRoot: dir } });
+        assert.equal(res.isError, undefined, `${label}: 受理照常（不是 run_dispatch failed）`);
+        assert.equal(res.structuredContent.runId, "run_156_rules_over", `${label}: runId 在结构化回执里`);
+        assert.deepEqual(res.structuredContent.laneRules,
+          { rules: null, rulesReason: RULES_UNAVAILABLE_REASON, now: null },
+          `${label}: 只有 laneRules 换成共享降级形`);
+        assert.equal(res.structuredContent.label, "[x] t", `${label}: label 不受连累`);
+      } finally { await client.close(); await server.close(); }
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("156 修正一: label 与 Owner 看板同一条脱敏链（无令牌形状的环境秘密原值也遮住）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-mcp-redact-"));
+  const prev = process.env.WAO_TEST_API_KEY;
+  const secret = "plain-secret-15";
+  process.env.WAO_TEST_API_KEY = secret;
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir,
+      dispatchRunFn: async () => ({
+        accepted: true, runId: "run_156_mcp_redact", agentId: "x", state: "pending",
+        providerSessionRouting: "not_used",
+      }),
+      laneRulesFn: () => ({ rules: ["规则一"], now: { beijing: "周四 15:00", holidaysRecognized: false, peaks: [] } }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const prompt = `# 修 ${secret} 的部署\n正文`;
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt, expectedWorkspaceRoot: dir } });
+      assert.equal(res.isError, undefined);
+      const expectedTitle = deriveOwnerTitle(prompt, createSecretRedactor(process.env).redactString);
+      assert.equal(res.structuredContent.label, `[x] ${expectedTitle}`, "与看板对同一输入逐字相同");
+      assert.ok(!res.structuredContent.label.includes(secret), "秘密原值不进 label");
+      assert.ok(res.structuredContent.label.includes("[REDACTED:WAO_TEST_API_KEY]"), "精确脱敏标记");
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    if (prev === undefined) delete process.env.WAO_TEST_API_KEY;
+    else process.env.WAO_TEST_API_KEY = prev;
+    cleanupDir(dir);
+  }
 });
 
 test("156: label 取法与 Owner 看板同源（标题去 # 记号）；无标题退回 runId；未受理不带", async () => {

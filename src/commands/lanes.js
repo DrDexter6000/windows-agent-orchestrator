@@ -29,7 +29,7 @@ import { readRegistry } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
 import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
-import { buildLanesView, readLaneTraits, peakNowAt, beijingNowLabel } from "../application/lanesView.js";
+import { buildLanesView, readLaneTraits, peakNowAt, beijingNowLabel, HOLIDAYS_NOTE } from "../application/lanesView.js";
 import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
 // TD-318（三）：车道表/画像/registry/台账值是磁盘上的不可信文本——join 前逐行
 // 转义，值里的换行不能再伪造一行（core 顶层叶子，commands 下向 import）。
@@ -118,7 +118,8 @@ function renderSummaryTable(rows, nowMs) {
   return [
     "车道对照表（只列三个实测维度，其余见下方；行序=声明序）:",
     // 152 批：表头上方的"此刻"行——读表用的当前北京时间（法定节假日不识别）。
-    `  此刻：北京时间 ${beijingNowLabel(nowMs)}（法定节假日不识别，按工作日算）`,
+    // 156 批修正一：节假日口径引用 laneProfile.HOLIDAYS_NOTE（与 laneRules 同一常量）。
+    `  此刻：北京时间 ${beijingNowLabel(nowMs)}（${HOLIDAYS_NOTE}）`,
     fmt(header),
     ...table.map(fmt),
     "  格：星级、n=样本量；主观=Owner 评；—=无评分（未评或画像不可用）；此刻列 —=车道未声明高峰时段",

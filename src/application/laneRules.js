@@ -28,12 +28,16 @@ import {
   OWNER_RULE_MAX_CHARS,
   PROJECTION_ROWS_CAP,
   QUOTA_POOL_MAX_CHARS,
+  HOLIDAYS_NOTE,
 } from "./laneProfile.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 import { escapeControlChars } from "../safeText.js";
 
 // MCP 出参 schema 派生用的上限（laneProfile SSOT 经本模块转出，不复制第二份数值）。
 export { OWNER_RULES_CAP, OWNER_RULE_MAX_CHARS, PROJECTION_ROWS_CAP, QUOTA_POOL_MAX_CHARS };
+// 法定节假日口径的文字形式只有一个家（laneProfile，与投影 holidaysRecognized 同处）：
+// 这里 re-export 给渲染侧与测试引用（不是第二份定义）；wao lanes 经 lanesView 取同一常量。
+export { HOLIDAYS_NOTE };
 
 // ── WAO 固定措辞：各定义一次，本模块是唯一归宿 ─────────────────────────────
 
@@ -43,8 +47,9 @@ export const OWNER_RULES_HEADER = "以下为 Owner 原文（车道规则，按�
 export const RULES_UNAVAILABLE_REASON = "ownerRules 缺失、不合法、为空或读取失败";
 /** 规则不可用时的整行固定文案。 */
 export const RULES_UNAVAILABLE_LINE = `车道规则不可用：${RULES_UNAVAILABLE_REASON}`;
-/** 法定节假日口径（投影 now.holidaysRecognized 恒 false 的文字形式）。 */
-export const HOLIDAYS_NOTE = "法定节假日不识别";
+/** 会审回执容量的第二个固定原因串（修正一）：整份回执放不下完整规则时，laneRules
+ * 换成 {rules:null, rulesReason:本串, now:null}——帽不抬、规则原文不截断。 */
+export const RULES_RECEIPT_CAPACITY_REASON = "回执容量不足，规则原文见 lead_preflight 的 lanes.ownerRules";
 /** now.beijing 标签的 wire 上限（"周四 22:15"=7 码元；宽裕上界）。 */
 export const BEIJING_LABEL_MAX_CHARS = 16;
 /** peaks 行里车道键/池成员的 wire 上限（投影行 id 同界的宽裕上界）。 */
@@ -62,6 +67,15 @@ function degraded() {
  */
 export function degradedLaneRules() {
   return degraded();
+}
+
+/**
+ * 会审回执容量降级形（修正一）：整份回执放不下完整的 laneRules 时，由回执组装处
+ * （projectConsultReceipt，唯一一处）换成这个——具名原因指向 lead_preflight 里
+ * 同一份 Owner 规则原文；帽不抬、规则原文不截断。形状仍过 MCP schema。
+ */
+export function receiptCapacityLaneRules() {
+  return { rules: null, rulesReason: RULES_RECEIPT_CAPACITY_REASON, now: null };
 }
 
 /**

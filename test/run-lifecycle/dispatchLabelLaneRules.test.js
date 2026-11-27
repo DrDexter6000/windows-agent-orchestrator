@@ -20,6 +20,9 @@ import { execSync } from "node:child_process";
 
 import { readRegistry } from "../../src/registry.js";
 import { runCommand } from "../../src/commands/run.js";
+import { deriveOwnerTitle } from "../../src/application/ownerReadModel.js";
+import { createSecretRedactor } from "../../src/secretRedaction.js";
+import { HOLIDAYS_NOTE } from "../../src/application/laneRules.js";
 
 const LANES = {
   ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
@@ -107,11 +110,38 @@ test("156 CLI stderr：规则块每条一行带 [wao] 前缀、在车道事实�
     const rulesLines = stderr.filter((l) => l.startsWith("[wao] 以下为 Owner 原文") || /^\[wao\] \d+\. 夹具规则/.test(l));
     assert.ok(rulesLines.length >= 3, "标头 + 两条规则行");
     assert.equal(stderr[stderr.findIndex((l) => l.includes("以下为 Owner 原文")) + 1], "[wao] 1. 夹具规则甲：非高峰优先低价车道");
-    assert.ok(stderr.some((l) => l.includes("此刻（北京时间 周四 15:00；法定节假日不识别）")), "此刻行带节假日口径");
+    assert.ok(stderr.some((l) => l.includes(`此刻（北京时间 周四 15:00；${HOLIDAYS_NOTE}）`)), "此刻行带节假日口径（同一常量）");
     const factsIdx = stderr.findIndex((l) => l.includes("所选车道事实"));
     const rulesIdx = stderr.findIndex((l) => l.includes("以下为 Owner 原文"));
     assert.ok(rulesIdx >= 0 && factsIdx > rulesIdx, "规则块在车道事实行之前");
     assert.equal(capture.spawned, 1, "派发照常完成（fail-degrade 不拦截）");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("156 修正一 CLI stderr：顺序与 consult run 一致——规则块 → 暂停说明行 → 所选车道事实行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-cli-order-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = writeRegistry(dir, ["fixture-lane"]);
+    const capture = { spawned: 0 };
+    const cfg = baseConfig(dir, registryPath, {
+      backendFor: () => fakeBackendFactory(capture),
+      loadLanesConfigFn: () => ({
+        ...LANES,
+        lanes: [{ ...LANES.lanes[0], dispatchHold: "Owner 夹具暂停说明" }],
+      }),
+      laneFactsLineFn: () => "所选车道事实（只陈列，不是推荐）：fixture-lane · 夹具",
+    });
+    const { stderr } = await withCapturedConsole(async () => {
+      await runCommand(["fixture-lane", "--prompt", "# 夹具任务\n正文"], cfg);
+    });
+    const rulesIdx = stderr.findIndex((l) => l.includes("以下为 Owner 原文"));
+    const holdIdx = stderr.findIndex((l) => l.includes("dispatchHold="));
+    const factsIdx = stderr.findIndex((l) => l.includes("所选车道事实"));
+    assert.ok(rulesIdx >= 0, "规则块在场");
+    assert.ok(holdIdx > rulesIdx, `暂停说明行在规则块之后（rules=${rulesIdx}, hold=${holdIdx}）`);
+    assert.ok(factsIdx > holdIdx, `所选车道事实行在暂停说明之后（hold=${holdIdx}, facts=${factsIdx}）`);
+    assert.equal(capture.spawned, 1, "派发照常完成");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -131,6 +161,26 @@ test("156 CLI stderr：构造降级 → 恰一行不可用行；仍不阻塞派�
     const degradedLines = stderr.filter((l) => l.includes("车道规则不可用"));
     assert.equal(degradedLines.length, 1, "恰一行不可用行");
     assert.ok(degradedLines[0].startsWith("[wao] "), "[wao] 前缀");
+    assert.equal(capture.spawned, 1, "派发照常完成");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("156 修正一 CLI stderr：取 laneRules 那一跳抛错 → 共享降级形，派发照常", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-cli-boom-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = writeRegistry(dir, ["fixture-lane"]);
+    const capture = { spawned: 0 };
+    const cfg = baseConfig(dir, registryPath, {
+      backendFor: () => fakeBackendFactory(capture),
+      laneRulesFn: () => { throw new Error("laneRules boom"); },
+    });
+    const { stderr } = await withCapturedConsole(async () => {
+      await runCommand(["fixture-lane", "--prompt", "# 夹具任务\n正文"], cfg);
+    });
+    const degradedLines = stderr.filter((l) => l.includes("车道规则不可用"));
+    assert.equal(degradedLines.length, 1, "恰一行不可用行（共享降级形，不在出口拼装）");
+    assert.ok(degradedLines[0].includes("ownerRules 缺失、不合法、为空或读取失败"), "同一固定原因串");
     assert.equal(capture.spawned, 1, "派发照常完成");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -201,4 +251,44 @@ test("156 CLI 前台：文本格式带 label: 一行；--format json 带 laneRul
     assert.equal("label" in parsed, false, "label 不进前台 JSON（归 --background 与 MCP 回执）");
     assert.equal(capture.spawned, 2, "两次前台派发照常完成");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("156 修正一 CLI：label 与 Owner 看板同一条脱敏链（无令牌形状的环境秘密原值也遮住）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-156-cli-redact-"));
+  const prev = process.env.WAO_TEST_API_KEY;
+  const secret = "plain-secret-15";
+  process.env.WAO_TEST_API_KEY = secret;
+  try {
+    makeGitRepo(dir);
+    const registryPath = writeRegistry(dir, ["fixture-lane"]);
+    const prompt = `# 修 ${secret} 的部署\n正文`;
+    const boardTitle = deriveOwnerTitle(prompt, createSecretRedactor(process.env).redactString);
+    assert.ok(boardTitle.includes("[REDACTED:WAO_TEST_API_KEY]"), "前提：看板遮住原值");
+    const cfg = baseConfig(dir, registryPath, {
+      dispatchRunFn: async () => ({
+        accepted: true, runId: "run_156_redact", agentId: "fixture-lane", transcriptPath: "/x.jsonl",
+      }),
+    });
+    const { stdout: bgOut } = await withCapturedConsole(async () => {
+      await runCommand(["fixture-lane", "--background", "--prompt", prompt], cfg);
+    });
+    const bg = JSON.parse(bgOut.join("\n"));
+    assert.equal(bg.label, `[fixture-lane] ${boardTitle}`, "后台 JSON 的 label 与看板逐字相同");
+    assert.ok(!bg.label.includes(secret), "秘密原值不进 label");
+    assert.ok(bg.note.includes(boardTitle), "命名提示引用的是同一份遮住后的 label");
+
+    // 前台文本面的 label: 行同一条链。
+    const capture = { spawned: 0 };
+    const fgCfg = baseConfig(dir, registryPath, { backendFor: () => fakeBackendFactory(capture) });
+    const { stdout: fgOut } = await withCapturedConsole(async () => {
+      await runCommand(["fixture-lane", "--prompt", prompt], fgCfg);
+    });
+    const labelLine = fgOut.find((l) => l.startsWith("label: "));
+    assert.equal(labelLine, `label: [fixture-lane] ${boardTitle}`, "CLI 文本行与看板逐字相同");
+    assert.ok(!labelLine.includes(secret), "CLI 文本行不出现秘密原值");
+  } finally {
+    if (prev === undefined) delete process.env.WAO_TEST_API_KEY;
+    else process.env.WAO_TEST_API_KEY = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

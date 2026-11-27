@@ -154,7 +154,10 @@ import {
   judgeRunSettlementOnce,
   SETTLEMENT_MAX_UNTRUSTED_ROUNDS as RUNS_WAIT_SETTLED_MAX_UNTRUSTED_ROUNDS,
 } from "../application/runSettlementWait.js";
-import { runWaitNextStep, buildNextStep, runnerUnprovenReport, quoteRunDirFlag } from "../application/runNextStep.js";
+import { runWaitNextStep, buildNextStep, runnerUnprovenReport, quoteRunDirFlag, NEXT_STEP_MAX_LEN } from "../application/runNextStep.js";
+// 第 156 批修正一：CLI `runs continue` 与 MCP run_continue 同一个 label 构造函数
+// 与同一条脱敏链（Owner 看板同源的 createSecretRedactor）。
+import { buildDispatchLabel, appendLabelHint, isUsableLabel } from "../application/dispatchLabel.js";
 // 第 137a 批续修 1：`runs continue` 的全局等待预算与 `wao run` 同一道门。
 import { validateBoundedWaitTimeout } from "../application/timeoutPolicy.js";
 // 决定 0112：收口终行的可续提示判定（与 run_continue 资格检查共用谱系事实函数）。
@@ -3188,11 +3191,29 @@ async function runsContinueCommand(args, config, hostDeps = {}) {
   const wire = projectContinueOutcome(raw, delivery);
   // 子运行 id 要写进等待命令：形状也按 runId SSOT 核一遍（投影只保证它是字符串）。
   if (wire.accepted && !isValidRunId(wire.runId)) throw new Error("runs continue bad child runId");
+  // 第 156 批修正一：CLI `runs continue` 与 MCP run_continue 同一操作同一面——
+  // label 用同一个构造函数与同一条脱敏链；构造抛错/越界按缺省（字段省略、命名
+  // 提示不加）。不带 laneRules（车道随谱系固定）。
+  let label = null;
+  if (wire.accepted) {
+    try {
+      label = buildDispatchLabel({
+        lane: wire.agentId,
+        prompt,
+        fallbackId: wire.runId,
+        redactString: createSecretRedactor(process.env).redactString,
+      });
+    } catch {
+      label = null;
+    }
+    if (!isUsableLabel(label)) label = null;
+  }
   const result = {
     ...wire,
+    ...(label != null ? { label } : {}),
     ...(wire.accepted
       ? {
-          nextStep: buildNextStep({
+          nextStep: appendLabelHint(buildNextStep({
             surface: "cli",
             situation: "dispatch_accepted",
             runId: wire.runId,
@@ -3201,7 +3222,7 @@ async function runsContinueCommand(args, config, hostDeps = {}) {
             // 续修 1：调用方显式给了 --run-dir，等待命令就带上同一个值（照抄才
             // 找得到不在缺省目录里的子运行）；放不下实际值时这里写占位 <DIR>。
             runDirFlag: values.runDir ?? null,
-          }),
+          }), label, NEXT_STEP_MAX_LEN),
         }
       : {}),
   };
@@ -3219,6 +3240,9 @@ function printContinueText(result) {
     console.log(`Parent: ${result.parentRunId}`);
     console.log(`Root: ${result.rootRunId}`);
     console.log(`Agent: ${result.agentId}`);
+    if (typeof result.label === "string" && result.label.length > 0) {
+      console.log(`Label: ${result.label}`);
+    }
     console.log(`State: ${result.state}`);
     console.log(`Next step: ${result.nextStep}`);
     return;

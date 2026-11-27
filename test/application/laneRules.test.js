@@ -117,6 +117,64 @@ test("时钟边界：周四 20:00 → 池甲合并行转非高峰、跨天带星
   assert.equal(mergedA.peakNow.untilLocal, "周五 14:00", "下一边界=下一工作日首段开始（跨天带星期）");
 });
 
+// ── 修正一：同池合并的成员口径与行序（行序=车道表声明序）────────────────────
+
+const laneEntry = (id, entry) => [id, entry];
+const mixedTraits = (traits) => ({
+  state: "ok", path: "fixture.json", sha256: "b".repeat(64), scale,
+  costTierScale: "成本档说明", ownerRules: [...FIXTURE_RULES], observations: [],
+  traits: Object.fromEntries(traits), invalidIds: [], issues: [],
+});
+const mixedDoc = (ids) => ({
+  ok: true, sha256: "a".repeat(64), issues: [],
+  lanes: ids.map((id) => ({ id, backend: "zcode", model: { id: "m1" }, reasoning: { effort: "max" } })),
+});
+
+test("修正一：同池部分车道没声明高峰 → 不合并，逐条列出声明了的成员（没声明的成员不出现）", () => {
+  const doc = mixedDoc(["p1", "p2", "p3"]);
+  const traits = mixedTraits([
+    laneEntry("p1", withPool({ quotaPool: "池P", peak: peak(["14:00-18:00"]) })),
+    laneEntry("p2", withPool({ quotaPool: "池P", peak: peak(["14:00-18:00"]) })),
+    laneEntry("p3", withPool({ quotaPool: "池P" })),
+  ]);
+  const { now } = buildLaneRules({ lanesDoc: doc, traitsResult: traits, nowMsFn: () => THU_15 });
+  assert.deepEqual(now.peaks.map((r) => (r.pool ? `pool:${r.pool}` : r.lane)), ["p1", "p2"],
+    "部分缺声明 → 不用池里第一条代表整池；p3 不出现");
+  assert.ok(now.peaks.every((r) => !("pool" in r)), "没有任何池行");
+});
+
+test("修正一：冲突成员交错排列 → 逐条车道行按车道表序（不按池分组重排）；无池车道在表首仍在表首", () => {
+  const doc = mixedDoc(["bare-first", "p1", "q1", "p2", "q2"]);
+  const traits = mixedTraits([
+    laneEntry("bare-first", withPool({ peak: peak(["09:00-12:00"]) })),
+    laneEntry("p1", withPool({ quotaPool: "池P", peak: peak(["14:00-18:00"]) })),
+    laneEntry("q1", withPool({ quotaPool: "池Q", peak: peak(["09:00-12:00"]) })),
+    laneEntry("p2", withPool({ quotaPool: "池P", peak: peak(["14:00-18:00"]) })),
+    laneEntry("q2", withPool({ quotaPool: "池Q", peak: peak(["16:00-18:00"]) })),
+  ]);
+  const { now } = buildLaneRules({ lanesDoc: doc, traitsResult: traits, nowMsFn: () => THU_15 });
+  // 池P 全部声明且一致 → 在 p1 的位置合并一行（p2 的位置不再单独出现）；
+  // 池Q 声明冲突 → q1/q2 各占自己的位置。行序仍是车道表序，无池车道在表首。
+  assert.deepEqual(now.peaks.map((r) => (r.pool ? `pool:${r.pool}` : r.lane)),
+    ["bare-first", "pool:池P", "q1", "q2"], "行序=车道表声明序（池行取首个成员位置）");
+  assert.deepEqual(now.peaks[1].lanes, ["p1", "p2"], "池P 合并行成员=池内全部车道");
+  assert.ok(!("pool" in now.peaks[2]) && !("pool" in now.peaks[3]), "池Q 冲突成员逐条车道列出");
+});
+
+test("修正一：同池全部声明且一致 → 合并一行，并占第一个成员的位置（不排到表尾）", () => {
+  const doc = mixedDoc(["m1", "bare-mid", "m2"]);
+  const traits = mixedTraits([
+    laneEntry("m1", withPool({ quotaPool: "池M", peak: peak(["14:00-18:00"]) })),
+    laneEntry("bare-mid", withPool({ peak: peak(["09:00-12:00"]) })),
+    laneEntry("m2", withPool({ quotaPool: "池M", peak: peak(["14:00-18:00"]) })),
+  ]);
+  const { now } = buildLaneRules({ lanesDoc: doc, traitsResult: traits, nowMsFn: () => THU_15 });
+  assert.deepEqual(now.peaks.map((r) => (r.pool ? `pool:${r.pool}` : r.lane)), ["pool:池M", "bare-mid"],
+    "池行在第一个成员的位置（表首），无池逐车道行在各自位置");
+  assert.deepEqual(now.peaks[0].lanes, ["m1", "m2"], "合并行成员=池内全部车道（表序）");
+  assert.deepEqual(now.peaks[0].peakNow, { state: "peak", until: "2026-11-26T18:00:00+08:00", untilLocal: "18:00" });
+});
+
 // ── 降级：rules null + 固定原因 ─────────────────────────────────────────────
 
 test("ownerRules 不合法（加载器置 null）→ rules:null + 固定原因，now 照常", () => {

@@ -515,7 +515,12 @@ const RED_23_WIRE = 75492;
 // lead_preflight 出参 lanes 增 poolPeaks（同池合并高峰行——投影新增推导的镜像）：
 // 78507→82384（实测；scripts/measure-mcp-surface.mjs 同口径 fullWire 82418；Owner
 // 硬顶 94532 内）。描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
-const FROZEN_17_WIRE_CEILING = 82384;
+// 第 156 批修正一（会审必改项，本批任务书授权按实测重冻）：lead_preflight 出参
+// lanes 不再镜像 poolPeaks（投影保留供 laneRules；预检 rows 已带 quotaPool/
+// peakNow，本批无消费者）；laneRules 的 rulesReason 闭集增"回执容量不足"具名
+// 降级原因：82384→81682（实测；scripts/measure-mcp-surface.mjs 同口径 fullWire
+// 81716；Owner 硬顶 94532 内）。描述与 inputSchema 零改动（desc/hostVisible 冻结线未动）。
+const FROZEN_17_WIRE_CEILING = 81682;
 // 第 87 批（TD-343，Owner 2026-11-08 批准重冻）：lead_preflight 描述补 open item
 // 行：93212→93324（实测；Owner 硬顶 94532 内）。inputSchema/outputSchema 零改动。
 // （scripts/measure-mcp-surface.mjs 的 fullWire=93358 与本测量的口径差是
@@ -818,8 +823,13 @@ test("M12-10-H: deterministic 17-tool wire at or below the frozen ceiling", asyn
 // stripped 载荷内，SHA 如实翻新；描述与 inputSchema 零改动（desc/hostVisible 冻结
 // 线未动）。（历史值：0128ed7d9e8c6db524c4d64a963f3c021532684999ac4e3e92d66fbc57de4c67
 // 为第 155 批后的冻结值。）
+// 第 156 批修正一（会审必改项，本批任务书授权重冻）：lead_preflight lanes 不再
+// 镜像 poolPeaks、laneRules 的 rulesReason 闭集增回执容量降级原因——两处 outputSchema
+// 都在 stripped 载荷内，SHA 如实翻新；描述与 inputSchema 零改动。
+// （历史值：e918208b02e38915e51debecc0892a31e9f3ba6bd7a4277a62f523311ca25e29
+// 为第 156 批首交付的冻结值。）
 const DESC_STRIPPED_CONTRACT_SHA =
-  "e918208b02e38915e51debecc0892a31e9f3ba6bd7a4277a62f523311ca25e29";
+  "dc89bd21ab74de6fe62155eea256a646e6e8b5e829bf360ba0737567abe5485a";
 // 第 119 批（v0.10.0 真删除式减面，Owner 批准）：三个工具整面移出（schemas 随之
 // 离开 stripped 载荷）、lead_preflight 输入改名 expectedWorkspaceRoot 并增
 // workspaceRoot/call_target、run_status/run_diagnose 输入增可选目标——SHA 如实翻新。

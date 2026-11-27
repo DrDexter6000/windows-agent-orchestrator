@@ -28,6 +28,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { TOOLS } from "../../src/mcp/toolSurface.js";
 import { CredentialMissingError } from "../../src/application/runDispatch.js";
+import { deriveOwnerTitle } from "../../src/application/ownerReadModel.js";
+import { createSecretRedactor } from "../../src/secretRedaction.js";
 
 async function buildInMemoryClient(server) {
   const { Client } = await import("@modelcontextprotocol/sdk/client");
@@ -740,4 +742,33 @@ test("137a-MRC: MCP 回执 = 应用层 projectContinueOutcome + 按面的 nextSt
       } finally { await client.close(); await server.close(); }
     }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+test("156 修正一: run_continue 的 label 与 Owner 看板同一条脱敏链（无令牌形状的环境秘密原值也遮住）", async () => {
+  const dir = makeGitDir("m127-rc-redact-");
+  const prev = process.env.WAO_TEST_API_KEY;
+  const secret = "plain-secret-15";
+  process.env.WAO_TEST_API_KEY = secret;
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server } = makeServer({ dir, serviceResult: successResult });
+    const client = await buildInMemoryClient(server);
+    try {
+      const prompt = `# 修 ${secret} 的部署\n正文`;
+      const r = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent", prompt, expectedWorkspaceRoot: dir, delivery: DELIVERY },
+      });
+      assert.equal(r.isError, undefined, `受理照常：${r.content?.[0]?.text ?? ""}`);
+      const expectedTitle = deriveOwnerTitle(prompt, createSecretRedactor(process.env).redactString);
+      assert.equal(r.structuredContent.label, `[coder_hq] ${expectedTitle}`, "与看板对同一输入逐字相同");
+      assert.ok(!r.structuredContent.label.includes(secret), "秘密原值不进 label");
+      assert.ok(r.structuredContent.label.includes("[REDACTED:WAO_TEST_API_KEY]"), "精确脱敏标记");
+      assert.ok(!r.content[0].text.includes(secret), "整份回执不出现秘密原值");
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    if (prev === undefined) delete process.env.WAO_TEST_API_KEY;
+    else process.env.WAO_TEST_API_KEY = prev;
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
 });

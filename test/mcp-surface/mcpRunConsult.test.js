@@ -38,7 +38,8 @@
 //       semantic guards, NOT a drilldown carrier.
 //   F — receipt capacity boundary: metadata-max shape ≤ receipt cap (8KiB,
 //       Chinese headings + populated field values); body independence
-//       (5 seats × 100KB replies → still within cap).
+//       (5 seats × 100KB replies → still within cap). 第 156 批修正一：laneRules
+//       完整规则放得下才带，放不下换具名容量降级（帽不抬、规则原文不截断）。
 //   G — pure pager edges (paginateConsultText): empty text; envelope-over-cap
 //       throws; tiny-cap hard split is code-point safe and lossless.
 //
@@ -64,6 +65,11 @@ import {
 } from "../../src/application/consultService.js";
 import { canonicalizeWorkspacePath } from "../../src/application/workspaceBinding.js";
 import { DRILLDOWN_TOOLS } from "../../src/application/runDrilldowns.js";
+// 第 156 批修正一：label 脱敏与看板同源；容量降级的两个固定原因来自 laneRules SSOT。
+import { deriveOwnerTitle } from "../../src/application/ownerReadModel.js";
+import { createSecretRedactor } from "../../src/secretRedaction.js";
+import { buildConsultLabel } from "../../src/application/dispatchLabel.js";
+import { RULES_UNAVAILABLE_REASON, RULES_RECEIPT_CAPACITY_REASON } from "../../src/application/laneRules.js";
 
 // ---- harness ----
 
@@ -976,71 +982,74 @@ test("MRC-E1: run_consult sits between run_dispatch_contract_check and run_conti
 // F — receipt capacity boundary (pure projection; body independence)
 // =====================================================================
 
-// 第 156 批：label（≤80 字）与 laneRules 的诚实最坏形（F1/F2 共用）。规则按
-// 当前 Owner 规则体量（6 条 × ~70 字中文 ≈ 现配置 420 字总量级，kimi/sol 会审
-// 实测原文 889B/JSON ~1KB）+ 4 行高峰（2 池合并行 + 2 逐车道行）。0097 配置
-// 上限全量（8 条 × 120 字 + 16 行高峰，实测仅 laneRules 一块即 ~5KB）单独可
-// 破帽——与"schema 上限超界或字段值病态长可破帽（已知未收紧）"同一口径；
-// 帽不为此抬。
-const LABEL_156_WORST = `[${"席".repeat(20)}+${"席".repeat(20)}] ${"题".repeat(37)}…`; // 恰 80 字
+// 第 156 批修正一：F1/F2 的输入按帽合同边界重做——120 字中文题名 + 恰好 32 字
+// 席位 id + 10 问，label 经真实构造函数（buildConsultLabel，与 Owner 看板同一条
+// 链），不再用"恰好 80 字"的合成串。规则夹具保留当前 Owner 规则体量（6 条 ×
+// 70 字 + 4 行高峰：2 池合并行 + 2 逐车道行）；0097 配置上限全量（8 条 × 120 字
+// + 16 行高峰）另测。两种边界都放不下完整规则 → 具名容量降级（帽不抬、规则原文
+// 不截断）；现有真实规模（6 条 × 70–110 字、2 行高峰、2 席、7 问）仍带完整规则。
+const TITLE_156_120 = "题".repeat(120);
 const PEAK_NOW_156 = { state: "off_peak", until: "2026-11-26T18:00:00+08:00", untilLocal: "周五 09:00" };
-const LANE_RULES_156_WORST = {
-  rules: Array.from({ length: 6 }, () => "规".repeat(70)),
-  now: {
-    beijing: "周四 15:00", holidaysRecognized: false,
-    peaks: [
-      { pool: "池".repeat(20), lanes: ["a".repeat(20), "b".repeat(20)], peakNow: PEAK_NOW_156 },
-      { pool: "池乙".repeat(10), lanes: ["c".repeat(20)], peakNow: PEAK_NOW_156 },
-      { lane: "d".repeat(20), peakNow: PEAK_NOW_156 },
-      { lane: "e".repeat(20), peakNow: PEAK_NOW_156 },
-    ],
-  },
-};
+const rulesFixture156 = (count, len) => Array.from({ length: count }, (_, i) => "规".repeat(len - 1) + String(i % 10));
+const peaksFixture156 = (rows) => Array.from({ length: rows }, (_, i) => (i % 2 === 0
+  ? { pool: "池".repeat(20), lanes: ["a".repeat(20), "b".repeat(20)], peakNow: PEAK_NOW_156 }
+  : { lane: "c".repeat(20), peakNow: PEAK_NOW_156 }));
+const laneRulesFixture156 = (count, len, rows) => ({
+  rules: rulesFixture156(count, len),
+  now: { beijing: "周四 15:00", holidaysRecognized: false, peaks: peaksFixture156(rows) },
+});
+/** 现有规则体量（当前 6 条规则的规模 + 4 行高峰）——合同边界用。 */
+const LANE_RULES_156_CURRENT = laneRulesFixture156(6, 70, 4);
+/** 0097 配置上限全量（8 条 × 120 字 + 16 行高峰）。 */
+const LANE_RULES_156_CONFIG_MAX = laneRulesFixture156(8, 120, 16);
+/** 现有真实规模（6 条 × 70–110 字、2 行高峰）。 */
+const LANE_RULES_156_REAL = laneRulesFixture156(6, 110, 2);
+const seatId156 = (i) => (i === 0 ? "s".repeat(32) : "s".repeat(31) + String(i));
+const heading120 = (i) => `问题标题第${i}号`.repeat(18).slice(0, 120);
+const heading70 = (i) => `问题标题第${i}号`.repeat(10);
 
-test("MRC-F1: receipt within cap for the honest metadata-max shape (Chinese headings + populated field values, no snippets) and body-size independent", () => {
-  // 验收批修订（sol 反例实跑：71 字 ASCII 标题+空 fieldValues 的旧夹具量出
-  // 4916B，中文 120 字标题=7786B、字段值在场=6896B——旧 6KiB 帽不可证）：
-  // ①视角 snippet（真实记录全文 265-607 字/席）整体出回执；②帽重冻 8KiB；
-  // ③夹具改中文标题+在场字段值。第 156 批：label + laneRules 计入（上方
-  // 156 夹具块）。成立边界：≤5 席 × ≤32 字 id × ≤10 问 × ≤120 字中文标题 ×
-  // 短字段值 × label ≤80 字 × laneRules 当前规则体量、无视角原文。schema 上限
-  //（id 128 字/brief 派生问题无帽/laneRules 0097 配置上限全量）超界或字段值
-  // 病态长可破帽——已知未收紧；正文体积完全无关。
-  const longId = "s".repeat(32);
-  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `问题标题第${i}号`.repeat(10) }));
+/**
+ * 156 边界夹具：120 字题名经真实 label 构造；5 席 ×32 字 id；10 问 ×120 字标题；
+ * 短字段值在场；无视角原文；正文 100KB（必须不进回执）。
+ */
+function boundaryFixture156({ laneRules, withNextStep = false }) {
+  const ids = Array.from({ length: 5 }, (_, i) => seatId156(i));
+  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: heading120(i) }));
   const body = "正文不应进回执。".repeat(8000); // ~100KB
-  const fieldDiff = ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10"];
+  const fieldDiff = questions.map((q) => `Q${q.q}`);
   const fieldValues = Object.fromEntries(fieldDiff.map((q, i) => [q, Object.fromEntries(
     Array.from({ length: 5 }, (_, j) => [`席位_${j}`, `选项${i}`]),
   )]));
-  const mkSeat = (i) => ({
-    agentId: i === 0 ? longId : `${longId}_${i}`,
-    runId: "run_20260101000000000aaaaaa",
-    runState: "completed",
-    formatState: "structured",
-    backend: "claude-code",
-    provider: null,
-    perspectiveSnippet: "视角全文不进回执。".repeat(100), // 病态长也必须被剥离
-    budgetExpired: false,
-    finalText: body, // 100KB 正文——投影后必须消失
-    attribution: { ordered: [{ q: 1, text: body }], unclassified: "", preamble: "" },
-  });
   const result = {
     consultId: "consult_20260101000000000aaaaaa",
     recordPath: "x".repeat(80),
     record: { consultId: "consult_20260101000000000aaaaaa" }, // 投影必须丢弃
-    // 第 156 批：label + laneRules 进最坏夹具（帽内证明）。
-    label: LABEL_156_WORST,
-    laneRules: LANE_RULES_156_WORST,
+    label: buildConsultLabel({
+      seats: ids,
+      brief: `# ${TITLE_156_120}\n\n正文`,
+      fallbackId: "consult_20260101000000000aaaaaa",
+    }),
+    laneRules,
     questions,
     brief: { path: null, sha256: "a".repeat(64) },
     budgetMs: 600000,
     elapsedMs: 123456,
-    seats: Array.from({ length: 5 }, (_, i) => mkSeat(i)),
+    seats: ids.map((agentId, i) => ({
+      agentId,
+      runId: "run_20260101000000000aaaaaa",
+      runState: withNextStep && i === 0 ? "running" : "completed",
+      formatState: "structured",
+      backend: "claude-code",
+      provider: null,
+      perspectiveSnippet: "视角全文不进回执。".repeat(100), // 病态长也必须被剥离
+      budgetExpired: false,
+      finalText: body, // 100KB 正文——投影后必须消失
+      attribution: { ordered: [{ q: 1, text: body }], unclassified: "", preamble: "" },
+    })),
     fieldDiff,
     fieldValues,
     bricks: {
-      runtimeFacts: Array.from({ length: 5 }, (_, i) => ({ agentId: `${longId}_${i}`, backend: "claude-code", provider: null })),
+      runtimeFacts: ids.map((agentId) => ({ agentId, backend: "claude-code", provider: null })),
       authorInSeats: null,
       reviewedAgentId: null,
       sessionIndependence: "未提供",
@@ -1054,10 +1063,25 @@ test("MRC-F1: receipt within cap for the honest metadata-max shape (Chinese head
     textFinal: true, page: body.length, totalPages: body.length, totalChars: body.length,
     textSha256: "a".repeat(64), pageText: candidate,
   }), "utf8");
+  return { result, body, measure };
+}
+
+test("MRC-F1: 合同边界（120 字题名×真实 label×5 席×32 字 id×10 问）回执 ≤8KiB；完整规则放不下 → 具名容量降级", () => {
+  const { result, body, measure } = boundaryFixture156({ laneRules: LANE_RULES_156_CURRENT });
   const receipt = projectConsultReceipt(result, { pageMeasure: measure });
   const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
   assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES,
-    `诚实边界回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B；边界=5席×32字id×10问×120字中文标题×在场字段值×无snippet）`);
+    `合同边界回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）`);
+  // 前提：这个边界下完整规则确实放不下（夹具没有自欺）。
+  const fullBytes = Buffer.byteLength(JSON.stringify({ ...receipt, laneRules: LANE_RULES_156_CURRENT }), "utf8");
+  assert.ok(fullBytes > CONSULT_RECEIPT_CAP_BYTES,
+    `前提：合同边界 + 完整规则放不下（实测 ${fullBytes}B > ${CONSULT_RECEIPT_CAP_BYTES}B）`);
+  assert.deepEqual(receipt.laneRules,
+    { rules: null, rulesReason: RULES_RECEIPT_CAPACITY_REASON, now: null },
+    "放不下时换具名容量降级（规则原文指向 lead_preflight 的 lanes.ownerRules）");
+  assert.equal(receipt.label, result.label, "label 经真实构造进回执");
+  assert.ok(receipt.label.length <= 80, `label ≤80（实测 ${receipt.label.length}）`);
+  assert.ok(receipt.label.endsWith("…"), "120 字题名被截断（省略号收尾）");
   assert.ok(!JSON.stringify(receipt).includes("正文不应进回执"), "正文不进回执（body-size 无关）");
   assert.ok(!JSON.stringify(receipt).includes("视角全文不进回执"), "视角全文不进回执（病态长也被剥离）");
   assert.ok(!("record" in receipt), "组记录副本不进回执（recordPath 指针承载）");
@@ -1067,6 +1091,63 @@ test("MRC-F1: receipt within cap for the honest metadata-max shape (Chinese head
     assert.equal(seat.textFinal, true);
     assert.ok(!("backend" in seat) && !("provider" in seat), "backend/provider 去重（bricks 已携带）");
   }
+});
+
+test("MRC-F1b: 配置上限全量（8 条×120 字 + 16 行高峰）也走同一具名容量降级，回执仍 ≤8KiB", () => {
+  const { result, measure } = boundaryFixture156({ laneRules: LANE_RULES_156_CONFIG_MAX, withNextStep: true });
+  const receipt = projectConsultReceipt(result, { pageMeasure: measure });
+  const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
+  assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES, `配置上限全量回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）`);
+  const fullBytes = Buffer.byteLength(JSON.stringify({ ...receipt, laneRules: LANE_RULES_156_CONFIG_MAX }), "utf8");
+  assert.ok(fullBytes > CONSULT_RECEIPT_CAP_BYTES, `前提：配置上限全量放不下（实测 ${fullBytes}B）`);
+  assert.deepEqual(receipt.laneRules,
+    { rules: null, rulesReason: RULES_RECEIPT_CAPACITY_REASON, now: null },
+    "同一具名容量降级");
+  assert.equal(typeof receipt.nextStep, "string", "未终态席位仍带 nextStep");
+});
+
+test("MRC-F3: 现有真实规模（6 条×70–110 字 + 2 行高峰 + 2 席 + 7 问）仍带完整 Owner 规则", () => {
+  const ids = [seatId156(0), seatId156(1)];
+  const questions = Array.from({ length: 7 }, (_, i) => ({ q: i + 1, heading: heading70(i) }));
+  const body = "正文不应进回执。".repeat(100);
+  const result = {
+    consultId: "consult_20260101000000000aaaaaa",
+    recordPath: "x".repeat(80),
+    label: buildConsultLabel({ seats: ids, brief: `# ${TITLE_156_120}\n\n正文`, fallbackId: "c" }),
+    laneRules: LANE_RULES_156_REAL,
+    questions,
+    brief: { path: null, sha256: "a".repeat(64) },
+    budgetMs: 600000,
+    elapsedMs: 123456,
+    seats: ids.map((agentId, i) => ({
+      agentId,
+      runId: "run_20260101000000000aaaaaa",
+      runState: i === 0 ? "running" : "completed",
+      formatState: "structured",
+      budgetExpired: false,
+      finalText: body,
+      attribution: { ordered: [], unclassified: "", preamble: "" },
+    })),
+    fieldDiff: [],
+    fieldValues: {},
+    bricks: {
+      runtimeFacts: ids.map((agentId) => ({ agentId, backend: "claude-code", provider: null })),
+      authorInSeats: null,
+      reviewedAgentId: null,
+      sessionIndependence: "未提供",
+    },
+  };
+  const measure = (seat, candidate) => Buffer.byteLength(JSON.stringify({
+    view: "seatPage", consultId: result.consultId, seat: seat.agentId, runId: seat.runId,
+    runState: seat.runState, formatState: seat.formatState, budgetExpired: seat.budgetExpired,
+    textFinal: true, page: 1, totalPages: 1, totalChars: body.length,
+    textSha256: "a".repeat(64), pageText: candidate,
+  }), "utf8");
+  const receipt = projectConsultReceipt(result, { pageMeasure: measure });
+  const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
+  assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES, `真实规模回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）`);
+  assert.deepEqual(receipt.laneRules, LANE_RULES_156_REAL, "放得下 → 完整规则原文不截断");
+  assert.equal(typeof receipt.nextStep, "string", "未终态席位 → nextStep 在场");
 });
 
 // =====================================================================
@@ -1369,56 +1450,171 @@ test("MRC-A3: create 与 read 两条路径都带 nextStep；席位到终态后�
   }
 });
 
-test("MRC-F2: 有未终态席位、带 nextStep 的诚实边界回执仍 ≤8KiB（帽不抬）", () => {
-  const longId = "s".repeat(32);
-  const questions = Array.from({ length: 10 }, (_, i) => ({ q: i + 1, heading: `问题标题第${i}号`.repeat(10) }));
-  const fieldDiff = questions.map((q) => `Q${q.q}`);
-  const fieldValues = Object.fromEntries(fieldDiff.map((q, i) => [q, Object.fromEntries(
-    Array.from({ length: 5 }, (_, j) => [`席位_${j}`, `选项${i}`]),
-  )]));
-  const mkSeat = (i) => ({
-    agentId: i === 0 ? longId : `${longId}_${i}`,
-    runId: "run_20260101000000000aaaaaa",
-    // 混入未终态席位：nextStep 进回执（最坏情况）。
-    runState: i === 0 ? "running" : "completed",
-    formatState: "structured",
-    budgetExpired: false,
-    finalText: "正文不进回执。".repeat(8000),
-    attribution: { ordered: [{ q: 1, text: "正文不进回执。".repeat(8000) }], unclassified: "", preamble: "" },
-  });
-  const result = {
-    consultId: "consult_20260101000000000aaaaaa",
-    recordPath: "x".repeat(80),
-    // 第 156 批：label + laneRules 与 nextStep 同现（创建时点未终态席位的最坏共存）。
-    label: LABEL_156_WORST,
-    laneRules: LANE_RULES_156_WORST,
-    questions,
-    brief: { path: null, sha256: "a".repeat(64) },
-    budgetMs: 600000,
-    elapsedMs: 123456,
-    seats: Array.from({ length: 5 }, (_, i) => mkSeat(i)),
-    fieldDiff,
-    fieldValues,
-    bricks: {
-      runtimeFacts: Array.from({ length: 5 }, (_, i) => ({ agentId: `${longId}_${i}`, backend: "claude-code", provider: null })),
-      authorInSeats: null,
-      reviewedAgentId: null,
-      sessionIndependence: "未提供",
-    },
-  };
-  const receipt = projectConsultReceipt(result, {
-    pageMeasure: (seat, candidate) => Buffer.byteLength(JSON.stringify({
-      view: "seatPage", consultId: result.consultId, seat: seat.agentId, runId: seat.runId,
-      runState: seat.runState, formatState: seat.formatState, budgetExpired: seat.budgetExpired,
-      textFinal: false, page: 1, totalPages: 1, totalChars: 1,
-      textSha256: "a".repeat(64), pageText: candidate,
-    }), "utf8"),
-  });
+test("MRC-F2: 合同边界 + 未终态席位（nextStep）回执仍 ≤8KiB；完整规则放不下 → 具名容量降级（帽不抬）", () => {
+  const { result, measure } = boundaryFixture156({ laneRules: LANE_RULES_156_CURRENT, withNextStep: true });
+  const receipt = projectConsultReceipt(result, { pageMeasure: measure });
   assert.equal(typeof receipt.nextStep, "string", "有未终态席位 → 带 nextStep");
-  assert.equal(receipt.label, LABEL_156_WORST, "label 进回执");
-  assert.deepEqual(receipt.laneRules, LANE_RULES_156_WORST, "laneRules 进回执（完整一份，不截断）");
+  assert.equal(typeof receipt.label, "string", "label 在回执里（真实构造）");
+  const fullBytes = Buffer.byteLength(JSON.stringify({ ...receipt, laneRules: LANE_RULES_156_CURRENT }), "utf8");
+  assert.ok(fullBytes > CONSULT_RECEIPT_CAP_BYTES,
+    `前提：合同边界 + nextStep + 完整规则放不下（实测 ${fullBytes}B > ${CONSULT_RECEIPT_CAP_BYTES}B）`);
+  assert.deepEqual(receipt.laneRules,
+    { rules: null, rulesReason: RULES_RECEIPT_CAPACITY_REASON, now: null },
+    "放不下 → 具名容量降级（不是静默省略，也不是截断规则原文）");
   const serialized = Buffer.byteLength(JSON.stringify(receipt), "utf8");
   assert.ok(serialized <= CONSULT_RECEIPT_CAP_BYTES,
-    `诚实边界 + nextStep + label + laneRules 回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）；帽不得抬`);
-  assert.ok(!JSON.stringify(receipt).includes("正文不进回执"), "正文仍不进回执");
+    `合同边界 + nextStep + 具名降级回执 ≤${CONSULT_RECEIPT_CAP_BYTES}B（实测 ${serialized}B）；帽不得抬`);
+  assert.ok(!JSON.stringify(receipt).includes("正文不应进回执"), "正文仍不进回执");
+});
+
+// =====================================================================
+// 156 修正一 — label 脱敏链、laneRules 出口预校验、越界/坏记录的降级
+// =====================================================================
+
+test("156 修正一: run_consult 的 label（创建回执/组记录/读取回放）走 Owner 看板同一条脱敏链；laneRules 越界值只本字段降级", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-redact-"));
+  const prev = process.env.WAO_TEST_API_KEY;
+  const secret = "plain-secret-15";
+  process.env.WAO_TEST_API_KEY = secret;
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    const brief = `# 修 ${secret} 的部署\n\n## Q1 方案可行吗\n`;
+    const expectedTitle = deriveOwnerTitle(brief, createSecretRedactor(process.env).redactString);
+    assert.ok(expectedTitle.includes("[REDACTED:WAO_TEST_API_KEY]"), "前提：看板遮住原值");
+    const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      const created = await callConsult(client, {
+        brief, seats: ["seat_a", "seat_b"], expectedWorkspaceRoot: dir, waitMs: 0,
+      });
+      assert.equal(created.threw, false);
+      assert.notEqual(created.res.isError, true, errText(created.res));
+      const receipt = created.res.structuredContent;
+      const expectedLabel = buildConsultLabel({
+        seats: ["seat_a", "seat_b"], brief, fallbackId: receipt.consultId,
+        redactString: createSecretRedactor(process.env).redactString,
+      });
+      assert.equal(receipt.label, expectedLabel, "创建回执的 label 与看板逐字相同");
+      assert.equal(receipt.label, `[seat_a+seat_b] ${expectedTitle}`);
+      assert.ok(!receipt.label.includes(secret), "秘密原值不进 label");
+      assert.ok(!created.res.content[0].text.includes(secret), "整份回执不出现秘密原值");
+      // 组记录持久的是同一份 label。
+      const record = JSON.parse(readFileSync(join(consultsDir, `${receipt.consultId}.json`), "utf8"));
+      assert.equal(record.label, expectedLabel, "会审组记录里的 label 同一条脱敏链");
+      // 读取模式回放同一份（不重算、不二次加工）。
+      const read = await callConsult(client, { consultId: receipt.consultId, expectedWorkspaceRoot: dir });
+      assert.equal(read.threw, false);
+      assert.notEqual(read.res.isError, true, errText(read.res));
+      assert.equal(read.res.structuredContent.label, expectedLabel, "读取模式回放同一份 label");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    if (prev === undefined) delete process.env.WAO_TEST_API_KEY;
+    else process.env.WAO_TEST_API_KEY = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("156 修正一: run_consult 创建回执的 laneRules 注入越界值 → 会审照常，只该字段换成共享降级形", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-over-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    const NOW = { beijing: "周四 15:00", holidaysRecognized: false };
+    const PEAK = { state: "off_peak", until: "2026-11-26T18:00:00+08:00", untilLocal: "18:00" };
+    const OVER_BOUND = [
+      ["车道 id 65 字", { rules: ["规则一"], now: { ...NOW, peaks: [{ lane: "x".repeat(65), peakNow: PEAK }] } }],
+      ["规则 9 条", { rules: Array.from({ length: 9 }, (_, i) => `规则${i}`), now: { ...NOW, peaks: [] } }],
+      ["peakNow: null", { rules: ["规则一"], now: { ...NOW, peaks: [{ lane: "x", peakNow: null }] } }],
+    ];
+    for (const [label, laneRules] of OVER_BOUND) {
+      const fake = async () => ({
+        consultId: "consult_20260101000000000overbd",
+        recordPath: join(consultsDir, "consult_20260101000000000overbd.json"),
+        // 越界 label（200 字）与越界 laneRules 同时注入：两者都只降级/缺省。
+        label: "长".repeat(200),
+        laneRules,
+        questions: [{ q: 1, heading: "Q1 可行吗" }],
+        brief: { path: null, sha256: "a".repeat(64) },
+        budgetMs: 0,
+        elapsedMs: 0,
+        seats: [{
+          agentId: "seat_a", runId: "run_x", runState: "completed", formatState: "structured",
+          budgetExpired: false, finalText: "", attribution: { ordered: [], unclassified: "", preamble: "" },
+        }],
+        fieldDiff: [],
+        fieldValues: {},
+        bricks: {
+          runtimeFacts: [{ agentId: "seat_a", backend: "claude-code", provider: null }],
+          authorInSeats: null, reviewedAgentId: null, sessionIndependence: "未提供",
+        },
+      });
+      const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir, runConsultFn: fake });
+      try {
+        const { res, threw } = await callConsult(client, {
+          brief: "任务书\n\nQ1: 可行吗", seats: ["seat_a"], expectedWorkspaceRoot: dir, waitMs: 0,
+        });
+        assert.equal(threw, false);
+        assert.notEqual(res.isError, true, `${label}: 会审照常（不是 run_consult failed）`);
+        assert.equal(res.structuredContent.consultId, "consult_20260101000000000overbd", `${label}: consultId 在回执里`);
+        assert.equal("label" in res.structuredContent, false, `${label}: 越界 label 按缺省`);
+        assert.deepEqual(res.structuredContent.laneRules,
+          { rules: null, rulesReason: RULES_UNAVAILABLE_REASON, now: null },
+          `${label}: 只有 laneRules 换成共享降级形`);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("156 修正一: 读取模式回放被改坏的记录 label（超长/非字符串）→ 回执照常，label 缺省", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-badlabel-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir);
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, ".wao", "runs", "consults");
+    mkdirSync(consultsDir, { recursive: true });
+    const cases = [
+      ["超长 label", "长".repeat(200)],
+      ["非字符串 label", 12345],
+    ];
+    const { server, client } = await buildConsultClient({ dir, registryPath, runDir, consultsDir });
+    try {
+      for (const [label, badValue] of cases) {
+        const consultId = `consult_2026100212000000${label === "超长 label" ? "badla1" : "badla2"}`;
+        writeFileSync(join(consultsDir, `${consultId}.json`), JSON.stringify({
+          consultId,
+          createdAt: "2026-10-02T12:00:00.000Z",
+          label: badValue,
+          brief: { path: null, sha256: sha256(BRIEF) },
+          budgetMs: 180000,
+          elapsedMs: 5,
+          questions: [{ q: 1, heading: "Q1 方案可行吗" }],
+          seats: [{ agentId: "seat_a", runId: null, runState: "dispatch_failed", formatState: "empty", backend: null, provider: null }],
+          fieldDiff: [],
+        }), "utf8");
+        const read = await callConsult(client, { consultId, expectedWorkspaceRoot: dir });
+        assert.equal(read.threw, false);
+        assert.notEqual(read.res.isError, true, `${label}: 记录读得到就必须渲染得出（实测：${errText(read.res)}）`);
+        assert.equal(read.res.structuredContent.consultId, consultId, `${label}: consultId 在`);
+        assert.equal("label" in read.res.structuredContent, false, `${label}: 改坏的 label 按缺省（不回放）`);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

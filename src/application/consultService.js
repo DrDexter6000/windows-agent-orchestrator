@@ -69,8 +69,8 @@ import { buildNextStep } from "./runNextStep.js";
 // stderr 的那几行也来自同一构造/渲染）。画像只经 laneProfile 的投影——本模块
 // 不直接引用 laneProfile（依赖边由 test/registry-roles/laneTraits.test.js 钉：
 // laneRules/laneFactsLine ← 本模块）。
-import { buildLaneRules, degradedLaneRules, renderLaneRulesLines } from "./laneRules.js";
-import { buildConsultLabel } from "./dispatchLabel.js";
+import { buildLaneRules, degradedLaneRules, renderLaneRulesLines, receiptCapacityLaneRules } from "./laneRules.js";
+import { buildConsultLabel, isUsableLabel } from "./dispatchLabel.js";
 import { laneFactsLine } from "./laneFactsLine.js";
 
 function listRoleLibrarySync() { return listRoleLibrary(); }
@@ -786,7 +786,20 @@ export async function runConsult({
   // laneRules（Owner 规则原文 + 此刻高峰快照）。label 随组记录持久（读取模式经
   // 记录回放）；laneRules 是创建时点的快照，只在结果上携带、不持久。开始时经
   // advisory 通道打一次（规则每条一行 + 此刻；MCP 面的 sink 是 no-op，零输出）。
-  const label = buildConsultLabel({ seats: seatIds, brief: text, fallbackId: consultId });
+  // 修正一：label 走 Owner 看板同一条脱敏链（环境秘密值的精确脱敏）；构造那一跳
+  // 的意外抛错（生产实现不会抛；防注入/未来改动）只让字段缺省——会审照常扇出。
+  let label = null;
+  try {
+    label = buildConsultLabel({
+      seats: seatIds,
+      brief: text,
+      fallbackId: consultId,
+      redactString: createSecretRedactor(env).redactString,
+    });
+  } catch {
+    label = null;
+  }
+  if (!isUsableLabel(label)) label = null;
   // 构造那一跳的意外抛错（生产实现不会抛；防注入/未来改动）只降级本字段——
   // 会审照常扇出（与 run_dispatch 受理回执同一纪律）。
   let laneRules;
@@ -1441,7 +1454,8 @@ export async function rerenderConsultFromRecord({
     ...roundFacts,
     // 第 156 批：读取模式经记录回放 label（旧记录没有该字段 → 键缺省，不重算——
     // 任务书原文不在记录里，重算只会得到 consultId 回退形，不如如实缺省）。
-    ...(typeof record.label === "string" && record.label.length > 0 ? { label: record.label } : {}),
+    // 修正一：记录可能被外部改坏/跨版本——只有 ≤上限 的非空字符串才回放。
+    ...(isUsableLabel(record.label) ? { label: record.label } : {}),
     questions: record.questions ?? [],
     brief: record.brief,
     budgetMs: record.budgetMs,
@@ -1480,11 +1494,17 @@ export async function rerenderConsultFromRecord({
 export const CONSULT_PAGE_CAP_BYTES = 12 * 1024;
 
 /** 机械回执（含外壳元数据）序列化后 UTF-8 字节的文档化帽。成立边界（测试钉
- * MRC-F1，验收批修订 2026-10-09：中文标题+字段值实测下 6KiB 不可证、视角
- * snippet 携全文故整体剥离）：≤5 席 × ≤32 字席位 id × ≤10 问 × ≤120 字中文
- * 标题 × 短字段值、无视角原文（recordPath 取）——schema 上限超界或字段值
- * 病态长可破帽（已知未收紧）；正文体积完全无关。派发失败原因每席至多 400
- * 码元，不在这个成立边界内。 */
+ * MRC-F1/F2，第 156 批修正一按真实输入重做）：≤5 席 × ≤32 字席位 id × ≤10 问
+ * × ≤120 字中文标题 × 短字段值 × 无视角原文（recordPath 取）——正文体积完全
+ * 无关；派发失败原因每席至多 400 码元，不在这个成立边界内。
+ *
+ * 第 156 批起回执还带 label（≤80 字）与 laneRules（Owner 规则原文 + 此刻高峰
+ * 快照）。laneRules 按「整份回执放得下才带完整原文」处理（修正一）：
+ * projectConsultReceipt 用与本帽同一种序列化测量——放得下就带完整规则；放不下
+ * 就换成具名降级形 {rules:null, rulesReason:回执容量原因, now:null}（规则原文
+ * 指向 lead_preflight 的 lanes.ownerRules）。帽不抬、规则原文不截断；因此带
+ * laneRules 也不破帽。schema 上限超界或字段值病态长（laneRules 之外的字段）仍
+ * 可破帽（已知未收紧）。 */
 export const CONSULT_RECEIPT_CAP_BYTES = 8 * 1024;
 
 /** 席位正文 sha256（hex）——分页版本锚：跨页拼接时调用方比对每页的
@@ -1634,16 +1654,18 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
       consultId: result.consultId,
     })
     : null;
-  return {
+  // 第 156 批：会审 label（创建与读取都经 result 携带；旧记录缺 → 键缺省）与
+  // laneRules（创建时点快照；读取路径 result 不带 → 键缺省）。修正一：label 只有
+  // 「非空且 ≤80」才进回执（记录改坏/注入越界按缺省）；laneRules 的容量降级在
+  // 下面按整份回执的序列化字节统一裁决（唯一一处）。
+  const buildReceipt = (laneRulesValue) => ({
     view: "receipt",
     consultId: result.consultId,
     recordPath: result.recordPath,
     // 第 155 批：第 3 轮起（result 带了才有）回执携带 round 与提醒原文；第 1、2 轮不带。
     ...(typeof result.roundAdvisory === "string" ? { round: result.round, roundAdvisory: result.roundAdvisory } : {}),
-    // 第 156 批：会审 label（创建与读取都经 result 携带；旧记录缺 → 键缺省）与
-    // laneRules（创建时点快照；读取路径 result 不带 → 键缺省）。
-    ...(typeof result.label === "string" && result.label.length > 0 ? { label: result.label } : {}),
-    ...(result.laneRules != null ? { laneRules: result.laneRules } : {}),
+    ...(isUsableLabel(result.label) ? { label: result.label } : {}),
+    ...(laneRulesValue != null ? { laneRules: laneRulesValue } : {}),
     questions: result.questions,
     brief: result.brief,
     budgetMs: result.budgetMs,
@@ -1653,5 +1675,14 @@ export function projectConsultReceipt(result, { pageMeasure } = {}) {
     fieldDiff: result.fieldDiff,
     fieldValues: result.fieldValues,
     bricks: result.bricks,
-  };
+  });
+  const receipt = buildReceipt(result.laneRules);
+  // 第 156 批修正一：8 KiB 帽的裁决只在这里。放得下 → 完整 Owner 规则原文照带；
+  // 放不下 → 只把 laneRules 换成具名降级形（规则原文指向 lead_preflight 的
+  // lanes.ownerRules），不抬帽、不截断规则原文，也不影响已受理的会审。
+  if (result.laneRules != null
+    && Buffer.byteLength(JSON.stringify(receipt), "utf8") > CONSULT_RECEIPT_CAP_BYTES) {
+    return buildReceipt(receiptCapacityLaneRules());
+  }
+  return receipt;
 }
