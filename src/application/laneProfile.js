@@ -497,8 +497,8 @@ export function readLaneTraits(explicitPath, readFileFn = null) {
   // 每条非空、≤单条上限（=总预算）、无控制字符；所有规则合计 ≤总预算。坏值只
   // 降级自身 + 一条观察，不连累 traits（与 costTier 同纪律）。
   const ownerRulesValid = Array.isArray(doc.ownerRules) && doc.ownerRules.length <= OWNER_RULES_CAP
-    && doc.ownerRules.reduce((sum, r) => sum + r.length, 0) <= OWNER_RULES_TOTAL_MAX_CHARS
-    && doc.ownerRules.every((r) => isStr(r, 1, OWNER_RULE_MAX_CHARS) && !hasControlChars(r));
+    && doc.ownerRules.every((r) => isStr(r, 1, OWNER_RULE_MAX_CHARS) && !hasControlChars(r))
+    && doc.ownerRules.reduce((sum, r) => sum + r.length, 0) <= OWNER_RULES_TOTAL_MAX_CHARS;
   const ownerRules = doc.ownerRules === undefined ? [] : (ownerRulesValid ? [...doc.ownerRules] : null);
   if (doc.ownerRules !== undefined && ownerRules === null) observations.push("ownerRules 不合法，置 null（各车道行照常投影）");
   const traits = {};

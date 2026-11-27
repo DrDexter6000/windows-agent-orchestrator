@@ -815,6 +815,8 @@ test("0097 ownerRules/costTierScale 顶层校验：缺省/合法/坏值；159 �
       [""],
       ["x".repeat(OWNER_RULE_MAX_CHARS + 1)],
       ["a\u0007b"],
+      // 非字符串元素：先判形状再求和，降级而不是抛错。
+      [null],
       // 159 批：每条都在单条上限内、无控制字符，但合计超过总预算 → 降级置 null。
       Array.from({ length: 2 }, () => "x".repeat(OWNER_RULES_TOTAL_MAX_CHARS / 2 + 1)),
     ];

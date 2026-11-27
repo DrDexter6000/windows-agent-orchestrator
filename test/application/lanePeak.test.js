@@ -36,6 +36,8 @@ import {
   PEAK_HOURS_CAP,
   BEIJING_OFFSET_MS,
   WEEKDAY_LABELS,
+  OWNER_RULES_CAP,
+  OWNER_RULES_TOTAL_MAX_CHARS,
 } from "../../src/application/laneProfile.js";
 import { aggregateLeadPreflight } from "../../src/application/leadPreflight.js";
 import { loadLanesConfig } from "../../src/dispatchResolution.js";
@@ -417,15 +419,16 @@ test("152 MCP lead_preflight：peakNow 行与顶层 now 过整份出参 schema�
 // ── 真实数据：config/lane-traits.json 本身 ───────────────────────────────────
 
 // 只钉形状与口径，不钉 Owner 给的值。
-test("152 真实数据：六条 Owner 规则都在 120 字内；四条车道的 peak 合法；cost 无时段与 UTC 换算", () => {
+test("152 真实数据：Owner 规则在条数与总字数预算内；四条车道的 peak 合法；cost 无时段与 UTC 换算", () => {
   const r = readLaneTraits();
   assert.equal(r.state, "ok", "真实画像文件必须可读且顶层合法");
   assert.deepEqual(r.issues, [], "零 issue");
   assert.deepEqual(r.observations, [], "零降级观察");
-  assert.equal(Array.isArray(r.ownerRules) && r.ownerRules.length, 6, "六条 Owner 规则");
-  for (const rule of r.ownerRules) {
-    assert.ok(rule.length <= 120, `每条规则在 120 字内（超长：${rule.slice(0, 20)}…）`);
-  }
+  // 条数与字数是 Owner 的值，只钉上限（决定 0135：至多 OWNER_RULES_CAP 条、合计不超总预算）。
+  assert.ok(Array.isArray(r.ownerRules) && r.ownerRules.length >= 1 && r.ownerRules.length <= OWNER_RULES_CAP,
+    "Owner 规则非空且不超条数上限");
+  const totalChars = r.ownerRules.reduce((sum, rule) => sum + rule.length, 0);
+  assert.ok(totalChars <= OWNER_RULES_TOTAL_MAX_CHARS, `规则合计 ${totalChars} 字，不超总预算`);
   const peakLanes = ["glm-flash", "glm-pro", "deepseek-flash", "deepseek-pro"];
   const lanesDoc = loadLanesConfig();
   for (const lane of lanesDoc.lanes) {

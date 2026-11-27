@@ -166,7 +166,7 @@ backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴�
 | kimi 无头命令行（`kimi -p … --output-format stream-json`） | kimi-web | 输出不报 token 用量；工具失败只能按输出关键词判 | stream-json 报 token 用量，且工具结果带结构化的错误或退出码 | `archive/kimi-code-backend` |
 | dsh 的 JSON-RPC 入口（`dsh-jsonrpc-agent`） | deepseek-acp | 找不到官方发行渠道（候选 npm 包 E404）；不支持会话复用 | 官方发行这个入口，且支持跨进程续接会话 | `archive/deepseek-harness-backend` |
 
-**收口**（七项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → 原语表守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 升级或换代的车道在 `config/lane-traits.json` 写 `reviewPending`（复核规则见决定 0087），同时复核 costTier（Owner 给值）→ 画像复核：`npm run lane-review-stats -- --since <上次巡检日>` 重算会审席位统计（声明了 Q1 却没填的席位不推断，未声明 Q1 的会审才按答复开头推断，决定 0128），查这期间各车道的失败诊断有没有新规律，复测待复核车道，按 0087 的写规则（0092 修订）改画像并汇报 Owner（决定 0089）→ 刷新记录写进提交说明（范围+结论+证据指针；含版本对照——各 harness 本地×latest、升级建议与 Owner 决定，暂缓/维持现状同样写明）；还在等 Owner 决定的升级建议登记进台账，防"建议过但无人记得"。
+**收口**（七项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → 原语表守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 升级或换代的车道复核 costTier（Owner 给值）；换了模型或 effort 的车道，画像按 `ratedAgainst` 自动标待复核→ 画像复核：`npm run lane-review-stats -- --since <上次巡检日>` 重算会审席位统计（声明了 Q1 却没填的席位不推断，未声明 Q1 的会审才按答复开头推断，决定 0128），查这期间各车道的失败诊断有没有新规律，复测待复核车道，按 0087 的写规则（0092 修订）改画像并汇报 Owner（决定 0089）→ 刷新记录写进提交说明（范围+结论+证据指针；含版本对照——各 harness 本地×latest、升级建议与 Owner 决定，暂缓/维持现状同样写明）；还在等 Owner 决定的升级建议登记进台账，防"建议过但无人记得"。
 
 **待复核的解除口径**（"复测待复核车道"复测到什么程度算数）：
 - 只升级 harness、车道身份不变：新版本上冒烟通过，且每个 measured 格所属的维度在新版本上至少完成一个实际任务（真实派活，或带答案键与隐藏测试的同题横评题），结果与原评级相符即解除，不相符按新数据改格；只有 owner 格的车道冒烟通过即解除（owner 格是对模型的判断，不随 harness 变）；七格全未评的车道直接解除。`ownerRules` 明确不派该车道去做的维度等不到实际任务，不因它挂着。

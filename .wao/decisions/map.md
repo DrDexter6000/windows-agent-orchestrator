@@ -136,3 +136,4 @@
 0132 | Owner 看板 Activity 实时流 /api/worker/stream：帧复用 Activity 投影，游标对不上回 reset，连不上退回 5 秒轮询
 0133 | 带交付的后台派发默认可续修：后端当前环境能续才自动开，结果回显 continuable/continuableOff（取代 0112 第 3 条）
 0134 | 派发那一刻带 Owner 车道规则原文与此刻高峰（laneRules），派发结果带 [车道] 任务名（label）（修订 0097 第 4 条）
+0135 | 撤掉手写 reviewPending，待复核只看 ratedAgainst；Owner 车道规则改为合计 1000 字的总字数预算（修订 0087、0097）
