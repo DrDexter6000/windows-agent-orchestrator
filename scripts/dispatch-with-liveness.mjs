@@ -52,8 +52,7 @@ import { boundReportScope } from "../src/metrics.js";
 import { diagnoseFailure, DIAGNOSIS_CODES } from "../src/diagnosis.js";
 import { assessRunEvidence } from "../src/runEvidenceAssessment.js";
 import { summarizeLiveness } from "../src/application/runWait.js";
-import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../src/registry.js";
-import { loadLanesConfig } from "../src/dispatchResolution.js";
+import { readRegistry, effectiveRegistryView, lanesMergeDocFor, pairedDefaultRegistryPath } from "../src/registry.js";
 import { backendFor } from "../src/backends/factory.js";
 import { checkNodeVersion } from "../src/nodeVersionGuard.js";
 
@@ -521,7 +520,7 @@ async function resolveBackendNoSession(registryPath, agentId) {
   try {
     const registry = effectiveRegistryView(
       await readRegistry(registryPath),
-      isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null,
+      lanesMergeDocFor(registryPath, pairedDefaultRegistryPath()),
     );
     return sessionEndsWithProcess(registry.getAgent(agentId));
   } catch {

@@ -23,8 +23,8 @@
 import { resolve } from "node:path";
 import { parseOptions } from "./shared.js";
 import { readFileSync } from "node:fs";
-import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
-import { loadLanesConfig } from "../dispatchResolution.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
+import { lanesMergeDocForCall } from "./shared.js";
 import { kimiServerTokenFile } from "../envPolicy.js";
 import {
   serveStatusReport,
@@ -37,14 +37,21 @@ import {
 
 /** 解析目标 serve（url/token/agentId）与 kimi 席位集合。固定错误点名缺席面。
  * TD-253（决定 0058，双席修正）：--registry 显式消费；--url 未命中席位 → **拒绝**
- * （旧静默回落 kimiAgents[0] 会把 58630 的回收打到 58628——opus/sol 同发现）。 */
-async function resolveServeTarget(config, urlOverride, kimiHomeOverride) {
-  const registryPath = resolve(config.registry ?? "config/agents.json");
-  // b158a：席位解析走生效视图（默认注册表配对启用合并；私有去四轴后 kimi 席位
-  // 的 backend 仍可判）。
+ * （旧静默回落 kimiAgents[0] 会把 58630 的回收打到 58628——opus/sol 同发现）。
+ * b158a 修复二：config.registry 保持默认注册表原值，显式 --registry 作为"本次实际
+ * 用的注册表"交给共享配对判定——外来表不再被强制合并（自包含，四轴照条目自带）。 */
+async function resolveServeTarget(config, urlOverride, kimiHomeOverride, registryOverride = undefined) {
+  const registryPath = resolve(registryOverride ?? config.registry ?? "config/agents.json");
+  // b158a 修复一/二：席位解析走生效视图——单一配对判定（没给 --registry 时
+  // registryInUse=config.registry=默认 → 启用；外来 --registry → 停用自包含；
+  // 表坏则 lanes_merge_unavailable）。
   const registry = effectiveRegistryView(
     await readRegistry(registryPath),
-    isPairedDefaultRegistry(config.registry ?? undefined) ? loadLanesConfig() : null,
+    lanesMergeDocForCall(
+      registryOverride !== undefined ? { registry: registryOverride } : {},
+      config,
+      config?.loadLanesConfigFn,
+    ),
   );
   const kimiAgents = registry.listAgents().filter((a) => a.backend === "kimi-web");
   if (kimiAgents.length === 0) {
@@ -138,9 +145,13 @@ async function serveCommand(args, config) {
   const [sub, ...tail] = args;
   const options = parseOptions(tail);
   // TD-253（决定 0058）：--registry 显式消费（sol：试点走注册表副本时 serve 也要读同一份）。
-  if (typeof options.registry === "string" && options.registry.length > 0) config = { ...config, registry: options.registry };
+  // b158a 修复二：不再改写 config.registry（那会把默认值变成自身比较、外来表强制
+  // 合并）；显式路径作为第 4 参数交给 resolveServeTarget 的共享判定。
+  const registryOverride = typeof options.registry === "string" && options.registry.length > 0
+    ? options.registry
+    : undefined;
   if (sub === "status") {
-    const target = await resolveServeTarget(config, options.url, options.kimiHome);
+    const target = await resolveServeTarget(config, options.url, options.kimiHome, registryOverride);
     const report = await serveStatusReport({
       port: Number(new URL(target.serveUrl).port),
       serveUrl: target.serveUrl,
@@ -151,7 +162,7 @@ async function serveCommand(args, config) {
     return;
   }
   if (sub === "sweep") {
-    const target = await resolveServeTarget(config, options.url, options.kimiHome);
+    const target = await resolveServeTarget(config, options.url, options.kimiHome, registryOverride);
     const runDir = resolve(options.runDir ?? config.runDir);
     const plan = await planSessionSweep({ runDir, serveUrl: target.serveUrl, token: target.token, kimiHome: options.kimiHome ?? target.kimiHome });
     if (plan.error) throw new Error(plan.error);
@@ -167,7 +178,7 @@ async function serveCommand(args, config) {
     return;
   }
   if (sub === "recycle") {
-    const target = await resolveServeTarget(config, options.url, options.kimiHome);
+    const target = await resolveServeTarget(config, options.url, options.kimiHome, registryOverride);
     const runDir = resolve(options.runDir ?? config.runDir);
     const soakMs = Number.parseInt(String(options.soakMs ?? ""), 10);
     const result = await recycleServe({

@@ -26,9 +26,11 @@ import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
-// b158a：runner 的注册表读取接到生效视图——配对判定与派发侧同一规则
-//（isPairedDefaultRegistry；对象 registry 注入缝缺省停用，测试可显式给 doc）。
-import { effectiveRegistryView, isPairedDefaultRegistry } from "./registry.js";
+// b158a：runner 的注册表读取接到生效视图——启用决定只认派发方显式传入的
+// --lanes-merge（off | sha256:<hex>；对象 registry 注入缝可用 opts.lanesMergeDoc
+// 显式给表）。
+import { effectiveRegistryView } from "./registry.js";
+import { appendDurableResumeFailure, durableResumeFailureCode } from "./resumeFailureFact.js";
 import { resolveTranscriptPath } from "./projectBuckets.js";
 import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor, parseTags, persistedOwnerTaskType } from "./transcript.js";
 
@@ -98,7 +100,7 @@ export function armRunnerStderrCleanup(targetProcess, runDir, runId) {
 
 // 测试用：registry 以对象形式注入时，构造一个内存 readRegistry（与 registry.js 同结构）。
 // b158a：补 rawEntries（effectiveRegistryView 的生效视图包装要求同形状——对象
-// 注入缝经 runnerLanesMergeDoc 显式给表时同样可合并）。
+// 注入缝经 opts.lanesMergeDoc 显式给表时同样可合并）。
 function makeObjectRegistry(registryObj) {
   const agents = registryObj.agents ?? {};
   return async () => ({
@@ -121,23 +123,40 @@ function makeObjectRegistry(registryObj) {
 // 入口，从工厂 import 构造器。
 
 /**
- * b158a：runner 侧的车道合并启用车道表（单一判定，供 runBackground 与
- * runResumeBackground 共用）。
- *   - 字符串/缺席的 registry：与派发侧同一配对规则（isPairedDefaultRegistry
- *     ——runner 即使跑默认注册表也会收到 --registry，判定看路径是否等于车道表
- *     所配对的默认注册表，不看 flag 是否出现）。派发进程从仓库根
- *     （npm run cli）或 install-root 重定基（全局 bin）发起时，传来的
- *     resolvedRegistry 与本规则锚定到同一路径。
- *   - 对象 registry（测试/嵌入注入缝）：缺省停用（注入的是自包含形状）；测试
- *     要验生效形状时用 opts.lanesMergeDoc 显式给表。
- * 启用而表读不出/不合法时原样传出——effectiveRegistryView 以
- * lanes_merge_unavailable 具名拒绝（不回退私有旧四轴）。
+ * b158a 修复一：--lanes-merge 参数的形状（off | sha256:<hex>）。
+ * 返回 null = 形状不合法（调用方按 lanes_merge_spec_missing 拒绝）。
  */
-export function runnerLanesMergeDoc(opts, loadLanesConfigFn = loadLanesConfig) {
-  if (opts.lanesMergeDoc !== undefined) return opts.lanesMergeDoc ?? null;
-  if (typeof opts.registry === "object" && opts.registry !== null) return null;
-  const path = typeof opts.registry === "string" ? opts.registry : undefined;
-  return isPairedDefaultRegistry(path) ? loadLanesConfigFn() : null;
+export function parseLanesMergeSpec(raw) {
+  if (raw === "off") return { mode: "off" };
+  const m = /^sha256:([0-9a-f]{64})$/.exec(String(raw ?? ""));
+  return m ? { mode: "sha256", sha256: m[1] } : null;
+}
+
+/**
+ * b158a 修复一：runner 的车道合并决定——**只认派发方显式传递的 --lanes-merge**
+ *（off | sha256:<hex>），不再按路径猜（旧实现的 isPairedDefaultRegistry 路径
+ * 猜测会在 config.registry 自定义/大小写异拼写时与派发侧判反，普通后台运行
+ * 静默用私有旧四轴起跑）。返回 { doc, refusal }：
+ *   - 对象 registry（测试/嵌入注入缝）：照旧——opts.lanesMergeDoc 显式给表，
+ *     缺省停用，无 refusal。
+ *   - 字符串/缺席路径：off → doc=null；sha256:<hex> → runner 自己读表，读到的
+ *     哈希与传来的不同 → refusal="lanes_changed_since_dispatch"（认证门/解析/
+ *     预检看过的是旧表，runner 不能用新表起跑——只改 effort 也算）；缺省/形状
+ *     不合法 → refusal="lanes_merge_spec_missing"（旧父进程，拒绝而非当停用）。
+ *   - 启用而表读不出/不合法：doc 原样传出，由 effectiveRegistryView 以
+ *     lanes_merge_unavailable 具名拒绝（不回退私有旧四轴）。
+ */
+export function runnerLanesMergeDecision(opts, loadLanesConfigFn = loadLanesConfig) {
+  if (typeof opts.registry === "object" && opts.registry !== null) {
+    return { doc: opts.lanesMergeDoc !== undefined ? (opts.lanesMergeDoc ?? null) : null, refusal: null };
+  }
+  const raw = opts["lanes-merge"] ?? opts.lanesMergeSpec;
+  const spec = parseLanesMergeSpec(raw);
+  if (spec === null) return { doc: null, refusal: "lanes_merge_spec_missing" };
+  if (spec.mode === "off") return { doc: null, refusal: null };
+  const doc = loadLanesConfigFn();
+  if (doc?.sha256 !== spec.sha256) return { doc: null, refusal: "lanes_changed_since_dispatch" };
+  return { doc, refusal: null };
 }
 
 /**
@@ -187,6 +206,14 @@ async function failClosedResolution(runDir, runId, agentId, code, message, trans
     : transcriptPathFor(runDir, runId);
   try {
     const t = new JsonlTranscript(transcriptPath, { runId, agentId: agentId ?? "unknown", initialSeq: 0 });
+    // b158a 修复一：直接进程内调用（无派发侧预写转录）时先补 pending 初始化，
+    // 再落 failed——run.error + 终态都是持久失败记录。父进程（runDispatch）已
+    // 预写 pending 时不再重复 transition（同一账本会多一条 pending→pending）。
+    let existing = null;
+    try { existing = await readTranscript(transcriptPath); } catch { existing = null; }
+    if (existing === null || existing.length === 0) {
+      await t.transitionState(null, "pending", STATE_CHANGE_REASON.created);
+    }
     await t.append("run.error", { phase: "dispatch_resolution", error: code, message });
     await t.transitionState("pending", "failed", STATE_CHANGE_REASON.dispatch_resolution_failed);
   } catch { /* best effort — the returned failure is the primary surface */ }
@@ -228,14 +255,36 @@ export async function runBackground(opts = {}) {
   // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
   const waoCliPath = getWaoCliPath();
   // registry 可是路径（生产）或对象（测试注入）。对象时构造一个内存 readRegistry。
+  // b158a 修复二：readRegistryFn 是测试注入缝（计数读取次数用），缺省模块 readRegistry。
   const registryResolver = typeof opts.registry === "object" && opts.registry !== null
     ? makeObjectRegistry(opts.registry)
-    : readRegistry;
+    : (typeof opts.readRegistryFn === "function" ? opts.readRegistryFn : readRegistry);
   const registryPath = typeof opts.registry === "string" ? opts.registry : (opts.registry ? undefined : "config/agents.json");
-  // b158a：本 runner 的生效车道表（配对判定见 runnerLanesMergeDoc）。下方全部
-  // 注册表读取（材料复核 / 显式解析 / RunManager.start）共用同一份——复核过的
-  // 就是随后启动用的那份，中间不重读出另一版。
-  const lanesMerge = runnerLanesMergeDoc(opts);
+  // b158a 修复二：一次起跑只读一次注册表——材料复核、显式解析与 RunManager.start
+  // 共用同一个句柄（同一份快照；复核过的就是随后启动用的那份，中间不重读出另一版）。
+  let cachedRegistryHandle = null;
+  const readRegistryOnce = async (path) => {
+    if (cachedRegistryHandle === null) cachedRegistryHandle = await registryResolver(path);
+    return cachedRegistryHandle;
+  };
+  // b158a 修复一：本 runner 的车道合并决定——只认派发方显式传递的 --lanes-merge
+  //（off | sha256:<hex>；缺省=旧父进程，拒绝而非当停用）。启用时 runner 自己读
+  // 表，读到的哈希与派发传来的不同 → lanes_changed_since_dispatch（认证门/解析/
+  // 预检看过的是旧表——只改 effort 也算），启动 worker 之前具名拒绝并留下持久
+  // 失败记录。下方全部注册表读取（材料复核 / 显式解析 / RunManager.start）共用
+  // 同一份——复核过的就是随后启动用的那份，中间不重读出另一版。
+  const lanesMergeDecision = runnerLanesMergeDecision(opts, opts.loadLanesConfigFn);
+  if (lanesMergeDecision.refusal !== null) {
+    return await failClosedBeforeStart(
+      lanesMergeDecision.refusal,
+      lanesMergeDecision.refusal === "lanes_changed_since_dispatch"
+        ? "config/lanes.json changed between dispatch and runner start (sha256 differs — effort-only changes count); "
+          + "refusing to start the worker on a table the dispatch never saw; re-dispatch"
+        : "runner missing a valid --lanes-merge spec (off | sha256:<hex>) — this runner requires the dispatcher's "
+          + "explicit lane-merge verdict; refusing to guess (old-parent dispatch process)",
+    );
+  }
+  const lanesMerge = lanesMergeDecision.doc;
 
   const manager = new RunManager({
     config: {
@@ -252,7 +301,7 @@ export async function runBackground(opts = {}) {
       waitTimeout: opts.globalWaitTimeout ?? opts.waitTimeout,
       timeout: 30000, // independent backend request/poll timeout (not derived from deadline)
     },
-    readRegistry: registryResolver,
+    readRegistry: readRegistryOnce,
     // M11-11C: test seam — an injected backendFor overrides the default
     // runtime construction (used by the causal chain test to capture the
     // compiled claude argv). Production leaves this unset.
@@ -270,7 +319,7 @@ export async function runBackground(opts = {}) {
     if (frozenMaterialRaw) {
       let frozenMaterial = null;
       try { frozenMaterial = JSON.parse(frozenMaterialRaw); } catch { frozenMaterial = null; }
-      const regM = effectiveRegistryView(await registryResolver(registryPath ?? "config/agents.json"), lanesMerge);
+      const regM = effectiveRegistryView(await readRegistryOnce(registryPath ?? "config/agents.json"), lanesMerge);
       const agentEntry = typeof regM.getAgent === "function" && agentId ? regM.getAgent(agentId) : null;
       if (!frozenMaterial || !agentEntry) {
         return await failClosedBeforeStart(
@@ -318,8 +367,11 @@ export async function runBackground(opts = {}) {
     let startAgentId = agentId;
     let resolvedTarget = null;
     if (opts.lane !== undefined || opts.role !== undefined) {
-      const lanesDoc = loadLanesConfig();
-      const reg = effectiveRegistryView(await registryResolver(registryPath ?? "config/agents.json"), lanesMerge);
+      // b158a 修复二：合并启用时复用命令行校验通过的那份表（不再读第二次——
+      // 校验后到起跑之间表再变也不会用新版解析）；停用时沿用既有读法（本地
+      // 显式车道解析仍需要真实表，这是本批不改的历史语义）。
+      const lanesDoc = lanesMerge ?? loadLanesConfig();
+      const reg = effectiveRegistryView(await readRegistryOnce(registryPath ?? "config/agents.json"), lanesMerge);
       const registryAgents = Object.fromEntries(
         (typeof reg.listAgents === "function" ? reg.listAgents() : []).map((a) => [a.id, a]),
       );
@@ -498,9 +550,27 @@ export async function runResumeBackground(opts = {}) {
     ? makeObjectRegistry(opts.registry)
     : readRegistry;
   const registryPath = typeof opts.registry === "string" ? opts.registry : (opts.registry ? undefined : "config/agents.json");
-  // b158a：与 runBackground 同一配对判定（daemon --resume-on-start 传的也是
-  // resolvedRegistry 路径；对象注入缝缺省停用）。
-  const lanesMerge = runnerLanesMergeDoc(opts);
+  // b158a 修复一：与 runBackground 同一决定（--lanes-merge 显式；缺省拒绝并留
+  // 持久失败记录——后台 resume 的拒因可见）。
+  const lanesMergeDecision = runnerLanesMergeDecision(opts, opts.loadLanesConfigFn);
+  if (lanesMergeDecision.refusal !== null) {
+    clearInterval(heartbeatTimer);
+    clearOwner(runDir, runId);
+    await appendDurableResumeFailure(
+      runId,
+      runDir,
+      `resume refused before handle attach (${lanesMergeDecision.refusal}: ${lanesMergeDecision.refusal === "lanes_changed_since_dispatch" ? "config/lanes.json changed between the resume fork and runner start" : "runner missing a valid --lanes-merge spec"})`,
+    );
+    return {
+      runId,
+      resumed: false,
+      reason: lanesMergeDecision.refusal,
+      completed: false,
+      failed: false,
+      timedOut: false,
+    };
+  }
+  const lanesMerge = lanesMergeDecision.doc;
 
   const manager = new RunManager({
     config: {
@@ -529,7 +599,11 @@ export async function runResumeBackground(opts = {}) {
   } catch (e) {
     clearInterval(heartbeatTimer);
     clearOwner(runDir, runId);
-    await appendDurableResumeFailure(runId, runDir, "resume threw before handle attach");
+    // b158a 修复一/二：持久失败记录带具名原因码（不写异常原文/路径/配置值——
+    // 只从固定形状的消息里取闭集代码，其余归 resume_exception）；追加用原运行的
+    // 已绑定席位（appendDurableResumeFailure 内部取 canonical agentId）。
+    const code = durableResumeFailureCode(e?.message);
+    await appendDurableResumeFailure(runId, runDir, `resume threw before handle attach (${code})`);
     throw e;
   }
   if (!run) {
@@ -707,6 +781,8 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
     const result = await runResumeBackground({
       runId: opts["resume-run-id"],
       registry: opts.registry,
+      // b158a 修复一：派发方显式传递的配对判定（off | sha256:<hex>）。
+      "lanes-merge": opts["lanes-merge"],
       runDir: opts["run-dir"],
       waitTimeout: opts["wait-timeout"] !== undefined ? Number(opts["wait-timeout"]) : undefined,
       globalWaitTimeout: opts["global-wait-timeout"] !== undefined ? Number(opts["global-wait-timeout"]) : undefined,
@@ -801,6 +877,8 @@ export async function runMain(argv = process.argv.slice(2), { stdin = process.st
     agentId,
     prompt,
     registry: opts.registry,
+    // b158a 修复一：派发方显式传递的配对判定（off | sha256:<hex>）。
+    "lanes-merge": opts["lanes-merge"],
     runDir: opts["run-dir"],
     runId: opts["run-id"],
     cwd: opts.cwd,
@@ -913,24 +991,6 @@ function parseSessionReuseJson(raw) {
   }
 }
 
-
-/**
- * 审计 P1（TD-151 复核二轮）：向 run 转录追加 resume 失败的持久事实。
- * 固定安全文案（run.error 既有事件类型，phase=resume）；写失败不改变退出路径
- * （best-effort：转录不可写时 stderr 仍留痕）。
- */
-async function appendDurableResumeFailure(runId, runDir, reasonText) {
-  try {
-    const { JsonlTranscript } = await import("./transcript.js");
-    // 终审修正：签名为 (filePath, context)——此前误传 (runId, runDir) 把事实写到
-    // 工作目录裸文件。规范形状对齐 runManager（join(runDir, runId.jsonl) + 绑定上下文）。
-    const t = new JsonlTranscript(resolveTranscriptPath(runDir, runId), { runId, agentId: "resume-runner" });
-    await t.append("run.error", { phase: "resume", error: reasonText });
-  } catch (e) {
-    process.stderr.write(`backgroundRunner: durable resume-failure fact unwritable: ${e.message}
-`);
-  }
-}
 
 // 直接作为入口运行时（detached 子进程）：node backgroundRunner.js ...；被 import 时不跑。
 const isMain = isEntryModule(import.meta.url, { ifUnknown: false });

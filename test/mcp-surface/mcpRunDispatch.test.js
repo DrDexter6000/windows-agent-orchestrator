@@ -1478,6 +1478,51 @@ test("0097: accepted run_dispatch carries laneFacts (no [wao] prefix); null → 
   } finally { cleanupDir(dir); }
 });
 
+test("b158a 修复二 run_dispatch 回执：laneFacts/laneRules 与派发共用本次请求的车道表（恰读一次）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-fix2-facts-rules-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { lane1: { cwd: dir } });
+    const lanesDoc = {
+      ok: true, path: "<fixture>", sha256: "b".repeat(64), issues: [], rolesHint: [],
+      lanes: [{ id: "lane1", backend: "claude-code", model: { id: "m1" }, reasoning: { effort: "high" }, aliases: {} }],
+    };
+    const captured = { facts: null, rules: null, dispatch: null, lanesLoads: 0 };
+    const server = createWaoMcpServer({
+      registryPath, runDir: join(dir, "runs"), workspaceRoot: dir,
+      // 临时注册表当默认注册表 → 合并启用。
+      pairedDefaultRegistryPathFn: () => registryPath,
+      loadLanesConfigFn: () => { captured.lanesLoads += 1; return lanesDoc; },
+      dispatchRunFn: async (input) => {
+        captured.dispatch = input;
+        return {
+          accepted: true, runId: "run_fix2_fr", agentId: "lane1", state: "pending",
+          providerSessionRouting: "not_used",
+        };
+      },
+      laneFactsLineFn: (laneId, opts) => { captured.facts = { laneId, opts }; return "FACTS-FROM-REQUEST-DOC"; },
+      laneRulesFn: (opts) => {
+        captured.rules = opts;
+        return { rules: ["规则一"], now: { beijing: "周四 15:00", holidaysRecognized: false, peaks: [] } };
+      },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { lane: "lane1", role: "coder", prompt: "t", expectedWorkspaceRoot: dir },
+      });
+      assert.equal(res.isError, undefined, "受理成功");
+      assert.equal(captured.lanesLoads, 1, "一次请求恰读一次车道表");
+      assert.equal(captured.dispatch.lanesMerge, lanesDoc, "派发用本次请求的表");
+      assert.equal(captured.facts?.opts?.lanesDoc, lanesDoc, "laneFacts 用同一份对象");
+      assert.equal(captured.rules?.lanesDoc, lanesDoc, "laneRules 用同一份对象");
+      assert.equal(res.structuredContent.laneFacts, "FACTS-FROM-REQUEST-DOC");
+      assert.deepEqual(res.structuredContent.laneRules.rules, ["规则一"]);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
 // =====================================================================
 // 决定 0129：原 run_dispatch_contract_check 的就地承接——run_dispatch 在派发前
 // 跑同一份预检服务；合同级问题照旧在任何副作用之前拒绝（既有固定文案），

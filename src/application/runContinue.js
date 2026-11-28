@@ -871,7 +871,9 @@ export async function continueRun({
     const resolution = resolveDispatchTarget({
       lane: lineageLaneRole.laneId,
       role: lineageLaneRole.roleId,
-      lanesDoc: loadLanesConfig(),
+      // b158a 修复一：谱系重解析用本次请求的同一份表（合并启用时即传入的
+      // lanesMergeDoc；停用时沿用既有读法），不再单独读一次。
+      lanesDoc: lanesMergeDoc ?? loadLanesConfig(),
       registryAgents,
       roleLibrary: listRoleLibrary(),
     });
@@ -1018,6 +1020,10 @@ export async function continueRun({
     "--run-dir", resolvedRunDir,
     "--run-id", childRunId,
     "--registry", resolve(registryPath),
+    // b158a 修复一：续修的配对判定显式交给子 runner（同一份表的哈希——runner
+    // 读到不同版本即 lanes_changed_since_dispatch，不用新表起跑）。
+    "--lanes-merge",
+    lanesMergeDoc === null || lanesMergeDoc === undefined ? "off" : `sha256:${lanesMergeDoc.sha256}`,
     "--poll-interval", String(effectivePollInterval),
     "--cwd", authorizedWorkspaceRoot,
     "--isolate",

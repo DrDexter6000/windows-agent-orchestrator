@@ -6,8 +6,9 @@
 //   - 0065（0045 §1.2 终局）：seatRole 声明列已删除（席位角色维退役——对抗性
 //     改派生事实；registry 归一化 strip 该字段）；行不再携带 seatRole 键。
 //   - certification=null 语义="未取得匹配认证（原因未区分）"，状态原样透传；
-//   - 接线四态：wired/drift（axesEqual 同 explicit 派发 G4 判定）/unwired
-//     （键不存在）/invalid（键在、条目无法解析）严格分开；
+//   - 接线四态：wired/drift（只比**在场**的残留轴——b158a 起四轴以车道表为唯一
+//     出处，残留只给事实）/unwired（键不存在）/invalid（键在、条目无法解析）
+//     严格分开；
 //   - 画像三态：present/absent/invalid（该车道形状错误）/unreadable（整文件）；
 //     present 时行带 v2 画像与 ratingsState/reviewReasons（0087），表头带
 //     刻度行与维度中文名；

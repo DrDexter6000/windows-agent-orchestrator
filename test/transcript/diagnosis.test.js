@@ -26,6 +26,7 @@ import {
   PROVIDER_DIAGNOSIS_CODES,
   PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   NO_EFFECT_DIAGNOSIS_CODES,
+  DISPATCH_RESOLUTION_DIAGNOSIS_CODES,
   ISOLATION_DESTINATIONS,
   ISOLATION_DISPLAY_PATH_MAX_CHARS,
   ISOLATION_VIOLATION_REASONS,
@@ -1638,10 +1639,10 @@ test("M12-21C: valid completion (assistant text) bound → none, no marker proje
 // enum; completed_empty is NOT folded into PROVIDER_DIAGNOSIS_CODES.
 // ---------------------------------------------------------------------------
 
-test("M12-24: DIAGNOSIS_CODES is the single general SSOT (auth ∪ capacity ∪ no-effect)", () => {
+test("M12-24: DIAGNOSIS_CODES is the single general SSOT (auth ∪ capacity ∪ no-effect ∪ dispatch-resolution)", () => {
   assert.deepEqual(
     [...DIAGNOSIS_CODES],
-    [...PROVIDER_DIAGNOSIS_CODES, ...PROVIDER_CAPACITY_DIAGNOSIS_CODES, ...NO_EFFECT_DIAGNOSIS_CODES],
+    [...PROVIDER_DIAGNOSIS_CODES, ...PROVIDER_CAPACITY_DIAGNOSIS_CODES, ...NO_EFFECT_DIAGNOSIS_CODES, ...DISPATCH_RESOLUTION_DIAGNOSIS_CODES],
   );
   // completed_empty is present and is the only no-effect code.
   assert.ok(DIAGNOSIS_CODES.includes("completed_empty"));
@@ -1651,6 +1652,7 @@ test("M12-24: DIAGNOSIS_CODES is the single general SSOT (auth ∪ capacity ∪ 
   // Every provider code is a member of the general SSOT (no drift).
   for (const c of PROVIDER_DIAGNOSIS_CODES) assert.ok(DIAGNOSIS_CODES.includes(c));
   for (const c of PROVIDER_CAPACITY_DIAGNOSIS_CODES) assert.ok(DIAGNOSIS_CODES.includes(c));
+  for (const c of DISPATCH_RESOLUTION_DIAGNOSIS_CODES) assert.ok(DIAGNOSIS_CODES.includes(c));
 });
 
 test("M12-21: isValidDiagnosisCode enforces exact category-code pairs (fail closed)", () => {
@@ -1662,6 +1664,9 @@ test("M12-21: isValidDiagnosisCode enforces exact category-code pairs (fail clos
     assert.equal(isValidDiagnosisCode("provider_capacity", c), true, `provider_capacity × ${c} is valid`);
   }
   assert.equal(isValidDiagnosisCode("no_effect", "completed_empty"), true, "no_effect × completed_empty is valid");
+  for (const c of DISPATCH_RESOLUTION_DIAGNOSIS_CODES) {
+    assert.equal(isValidDiagnosisCode("unknown", c), true, `unknown × ${c} is valid`);
+  }
   // Invalid pairings: a provider code under no_effect, or completed_empty under provider_auth.
   assert.equal(isValidDiagnosisCode("no_effect", "unauthorized"), false, "provider code under no_effect is invalid");
   assert.equal(isValidDiagnosisCode("provider_auth", "completed_empty"), false, "completed_empty under provider_auth is invalid");
@@ -2726,4 +2731,39 @@ test("DX-ISO-12: diagnoseFailure keeps its return shape — no isolationViolatio
   const d = diagnoseFailure([isoEvent({ reason: "file_written_physical_outside", destination: "temp", reportedPath: "p", escapedAt: "p" })], "run_iso_bind");
   assert.equal(d.category, "workdir_escape");
   assert.deepEqual(Object.keys(d).sort(), ["category", "code", "evidence"]);
+});
+
+// ---------------------------------------------------------------------------
+// b158a 修复二：runner 起跑前具名拒绝（dispatch_resolution）在诊断面可见
+// ---------------------------------------------------------------------------
+
+test("b158a 修复二: dispatch_resolution 三种具名拒绝 → unknown 类别 + 闭集 code + 固定出路文案", () => {
+  const runId = "run_fix2_dispatch_resolution";
+  const cases = [
+    ["lanes_merge_spec_missing", /lanes_merge_spec_missing/, /重启.*WAO MCP 服务/],
+    ["lanes_changed_since_dispatch", /lanes_changed_since_dispatch/, /config\/lanes\.json 改过/],
+    ["lanes_merge_unavailable", /lanes_merge_unavailable/, /修好 config\/lanes\.json/],
+  ];
+  for (const [code, codeRe, factRe] of cases) {
+    const events = [
+      { type: "run.started", runId, agentId: "coder_hq", backend: "claude-code", ts: "2026-11-28T00:00:00.000Z", seq: 1 },
+      { type: "run.error", runId, agentId: "coder_hq", phase: "dispatch_resolution", error: code, message: "fixed", ts: "2026-11-28T00:00:00.100Z", seq: 2 },
+      { type: "run.state_change", runId, agentId: "coder_hq", from: "pending", to: "failed", reason: "dispatch_resolution_failed", ts: "2026-11-28T00:00:00.200Z", seq: 3 },
+    ];
+    const d = diagnoseFailure(events, runId);
+    assert.equal(d.category, "unknown", `${code}: 类别沿用既有 unknown`);
+    assert.equal(d.code, code, `${code}: code 暴露在诊断结果`);
+    assert.ok(DIAGNOSIS_CODES.includes(code), `${code}: 在 DIAGNOSIS_CODES 闭集`);
+    assert.ok(isValidDiagnosisCode("unknown", code), `${code}: (unknown, code) 成对有效`);
+    assert.equal(d.evidence.length, 1, `${code}: 一条固定事实`);
+    assert.match(d.evidence[0].fact, codeRe, `${code}: 文案点名原因码`);
+    assert.match(d.evidence[0].fact, factRe, `${code}: 文案写出路`);
+  }
+  // 外 run 的同类事件不污染本 run 的诊断（绑定纪律）。
+  const foreign = [
+    { type: "run.error", runId: "run_other", agentId: "coder_hq", phase: "dispatch_resolution", error: "lanes_merge_spec_missing", message: "x" },
+    { type: "run.state_change", runId, agentId: "coder_hq", from: "pending", to: "failed", reason: "dispatch_resolution_failed" },
+  ];
+  const dForeign = diagnoseFailure(foreign, runId);
+  assert.equal(dForeign.code, null, "非本 run 的拒绝事件不采信");
 });

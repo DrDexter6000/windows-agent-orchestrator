@@ -1,14 +1,18 @@
 // test/commands/lanesCommand.test.js
 //
-// 0064：`wao lanes` 命令适配层钉（夹具面——非默认 registry 与显式车道表成对）：
+// 0064：`wao lanes` 命令适配层钉（夹具面——registry 与车道表）：
 //   - 防跨绑成对规则：单独 --registry 拒绝；--registry+--lanes-file 放行+注记；
+//   - b158a 修复二：--lanes-file 只作本次展示输入，是否合并仍走共享判定
+//     （外来注册表+--lanes-file 停用合并、条目不标"已不生效"）；
+//     默认判定用 sameRegistryFile（win32 大小写不敏感）；
+//   - 车道表不可用：先报告表不可用（不对原始条目 listAgents() 抛缺 backend）；
 //   - --json 白名单投影：不泄漏 cwd/sessionReuse/missingCredentialEnvNames；
 //   - 车道表权威失败：exitCode 1 + 不渲染正常车道面；
 //   - 未知选项 fail-fast。
 // readyState 断言只验闭集成员（真探测随机器环境变化——不断言具体值）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lanesCommand } from "../../src/commands/lanes.js";
@@ -34,7 +38,7 @@ function makeEnv() {
       { id: "l2", backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, aliases: {} },
     ],
   }), "utf8");
-  // 夹具 registry：l1 接线一致；l2 的 model 漂移（G4 判定=drift）。
+  // 夹具 registry：l1 接线一致；l2 的 model 漂移（私有残留观察=drift）。
   writeFileSync(join(dir, "agents.json"), JSON.stringify({
     agents: {
       l1: { backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, binary: "C:/wao-test-zcode/zcode.cjs", cwd: dir, seatRole: "adversarial" },
@@ -54,7 +58,16 @@ function makeEnv() {
   return dir;
 }
 
-test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 闭集（0065：seatRole 列退役）", async () => {
+/** 把夹具 lanes.json 读成 loadLanesConfig 形状（配置缝注入；不读真实仓库表）。 */
+function lanesDocOf(dir) {
+  const parsed = JSON.parse(readFileSync(join(dir, "lanes.json"), "utf8"));
+  return {
+    ok: true, path: join(dir, "lanes.json"), sha256: "a".repeat(64),
+    lanes: parsed.lanes, issues: [], rolesHint: [],
+  };
+}
+
+test("wao lanes：合并启用渲染——drift 判定/cert null 语义/readyState 闭集（0065：seatRole 列退役）", async () => {
   const dir = makeEnv();
   try {
     const lines = [];
@@ -62,12 +75,15 @@ test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 
     console.log = (...a) => { lines.push(a.join(" ")); };
     try {
       await lanesCommand(
-        ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
-        { registry: "config/agents.json", runDir: join(dir, "runs") },
+        ["--registry", join(dir, "agents.json"), "--run-dir", join(dir, "runs")],
+        {
+          registry: join(dir, "agents.json"),
+          runDir: join(dir, "runs"),
+          loadLanesConfigFn: () => lanesDocOf(dir),
+        },
       );
     } finally { console.log = origLog; }
     const text = lines.join("\n");
-    assert.ok(text.includes("显式拼接面"), "成对放行有横幅注记");
     assert.ok(text.includes("lane l1"), "l1 在场");
     assert.match(text, /^lane l1 — .+ · 推断族系 \S+$/m, "车道行带推断族系（决定 0090）");
     assert.ok(/私有残留四轴（已不生效，可删/.test(text), "l2 drift 判定（b158a：残留观察，非拒绝语义；长行可折行）");
@@ -79,6 +95,133 @@ test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 
       "台账匹配记录并入认证/就绪一行");
     assert.ok(text.includes("认证: 无匹配记录"), "l2 身份不匹配→null 的收敛文案");
     assert.equal(process.exitCode, undefined, "正常面不改退出码");
+  } finally { cleanupDir(dir); }
+});
+
+test("wao lanes b158a 修复一：drift 只比在场轴——干净条目无残留、部分残留只列该轴、全残留列四轴", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-drift-"));
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  try {
+    writeFileSync(join(dir, "lanes.json"), JSON.stringify({
+      schema: 2,
+      lanes: [
+        { id: "clean", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, aliases: {} },
+        { id: "partial", backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, aliases: {} },
+        { id: "full", backend: "claude-code", model: { id: "claude-opus-5", providerID: "anthropic" }, reasoning: { effort: "xhigh" }, aliases: {} },
+      ],
+    }), "utf8");
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({
+      agents: {
+        // 干净：四轴全缺席（只剩本机接线）——合并后生效，不判残留。
+        clean: { cwd: dir, binary: "C:/wao-test-zcode/zcode.cjs" },
+        // 部分残留：backend 与车道表一致，只有 effort 不同（缺 model 不算残留）。
+        partial: { cwd: dir, backend: "codex", reasoning: { effort: "low" } },
+        // 全残留：四轴都在场且都与车道表不同。
+        full: { cwd: dir, backend: "codex", model: { id: "old-model", providerID: "old-provider" }, reasoning: { effort: "low" } },
+      },
+    }), "utf8");
+    const lanesDoc = lanesDocOf(dir);
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => { lines.push(a.join(" ")); };
+    try {
+      await lanesCommand(
+        ["--registry", join(dir, "agents.json"), "--run-dir", join(dir, "runs")],
+        {
+          registry: join(dir, "agents.json"),
+          runDir: join(dir, "runs"),
+          loadLanesConfigFn: () => lanesDoc,
+        },
+      );
+    } finally { console.log = origLog; }
+    // 渲染可能折行：按车道块切段（"lane <id> — " 起行）。
+    const blocks = lines.join("\n").split(/\n(?=lane )/);
+    const blockOf = (id) => blocks.find((b) => b.startsWith(`lane ${id} — `)) ?? "";
+    const cleanBlock = blockOf("clean");
+    assert.ok(cleanBlock, "clean 车道行在场");
+    assert.ok(!cleanBlock.includes("私有残留四轴"), "四轴全缺席=干净：不报残留/不标已不生效");
+    const partialBlock = blockOf("partial");
+    assert.ok(partialBlock.includes("私有残留四轴（已不生效，可删"), "部分残留=有残留事实");
+    assert.ok(partialBlock.includes("差异轴：effort"), "只列在场且不同的轴（effort）");
+    assert.ok(!partialBlock.includes("差异轴：backend"), "缺键的 backend 不算残留");
+    const fullBlock = blockOf("full");
+    assert.ok(fullBlock.includes("差异轴：backend/modelId/providerID/effort"), "全残留=四轴逐一列出");
+  } finally { cleanupDir(dir); }
+});
+
+test("wao lanes b158a 修复二：外来 --registry + --lanes-file → 展示文件只作展示，合并停用（条目不标已不生效）", async () => {
+  const dir = makeEnv();
+  try {
+    // 默认注册表在 default-agents.json；本次实际用的是 agents.json（外来）。
+    writeFileSync(join(dir, "default-agents.json"), JSON.stringify({ agents: {} }), "utf8");
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => { lines.push(a.join(" ")); };
+    try {
+      await lanesCommand(
+        ["--registry", join(dir, "agents.json"), "--lanes-file", join(dir, "lanes.json"), "--run-dir", join(dir, "runs")],
+        { registry: join(dir, "default-agents.json"), runDir: join(dir, "runs") },
+      );
+    } finally { console.log = origLog; }
+    const text = lines.join("\n");
+    assert.ok(text.includes("显式拼接面"), "外来+显式车道表仍是成对放行（横幅注记）");
+    assert.ok(text.includes("lane l1") && text.includes("lane l2"), "展示用表仍然渲染");
+    assert.ok(!text.includes("私有残留四轴"), "合并停用：条目自带四轴即生效值，不标已不生效");
+    assert.ok(!text.includes("差异轴："), "合并停用：不出残留轴差");
+  } finally { cleanupDir(dir); }
+});
+
+test("wao lanes b158a 修复二：默认注册表路径只差大小写 → sameRegistryFile 判默认（不再要求 --lanes-file）", { skip: process.platform !== "win32" }, async () => {
+  const dir = makeEnv();
+  try {
+    const lanesDoc = lanesDocOf(dir);
+    const upper = join(dir, "agents.json").toUpperCase();
+    const lines = [];
+    const origLog = console.log;
+    console.log = (...a) => { lines.push(a.join(" ")); };
+    try {
+      // 只给大小写不同的 --registry（不给 --lanes-file）：旧实现字符串直比 → 误拒。
+      await lanesCommand(
+        ["--registry", upper, "--run-dir", join(dir, "runs")],
+        {
+          registry: join(dir, "agents.json"),
+          runDir: join(dir, "runs"),
+          loadLanesConfigFn: () => lanesDoc,
+        },
+      );
+    } finally { console.log = origLog; }
+    assert.ok(lines.join("\n").includes("lane l1"), "路径大小写异拼写按同一文件处理（正常渲染）");
+  } finally { cleanupDir(dir); }
+});
+
+test("wao lanes b158a 修复二：车道表不可用 → 先报表不可用，不被原始条目缺 backend 盖住", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-lanescmd-badtable-"));
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  try {
+    // 原始条目去掉四轴（只剩 cwd）；共享表非法（缺 lanes 数组）。
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { l1: { cwd: dir } } }), "utf8");
+    const badDoc = {
+      ok: false, path: "<fixture>", sha256: null, issues: ["lanes 数组缺席（空表须显式 lanes: []）"],
+      lanes: [], rolesHint: [],
+    };
+    const lines = [];
+    const origLog = console.log;
+    const savedExitCode = process.exitCode;
+    process.exitCode = undefined;
+    console.log = (...a) => { lines.push(a.join(" ")); };
+    try {
+      await lanesCommand(
+        ["--run-dir", join(dir, "runs")],
+        { registry: join(dir, "agents.json"), runDir: join(dir, "runs"), loadLanesConfigFn: () => badDoc },
+      );
+    } finally {
+      console.log = origLog;
+      process.exitCode = savedExitCode;
+    }
+    const text = lines.join("\n");
+    assert.ok(text.includes("车道表不可用"), "先报告车道表不可用");
+    assert.ok(text.includes("lanes 数组缺席"), "带表的结构原因");
+    assert.ok(!/missing backend/.test(text), "不再先抛私有条目缺 backend");
   } finally { cleanupDir(dir); }
 });
 

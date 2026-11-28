@@ -21,6 +21,13 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { readUsageDocs } from "../_usageDocs.mjs";
 
+test("b158a 修复二 源级钉：mcpWorkspaceActivation 的默认注册表走 pairedDefaultRegistryPath(REPO_ROOT)", () => {
+  const source = readFileSync(resolve(import.meta.dirname, "../../src/application/mcpWorkspaceActivation.js"), "utf8");
+  assert.match(source, /function registryPath\(\) \{ return pairedDefaultRegistryPath\(REPO_ROOT\); \}/,
+    "workspace activation 写出的 --registry 必须是默认注册表唯一出处");
+  assert.ok(!/join\(REPO_ROOT, "config", "agents\.json"\)/.test(source), "不再写死 config/agents.json");
+});
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function makeGitRepo(dir) {

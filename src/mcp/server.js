@@ -233,7 +233,7 @@ import {
   // 第 155 批：follows 指向读不出的会审——识别后原样回具名拒绝文案（零派发）。
   ConsultFollowsRefusalError,
 } from "../application/consultService.js";
-import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView, lanesMergeDocFor, pairedDefaultRegistryPath, assertLanesMergeDocUsable } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, DISPATCH_HOLD_MAX_CHARS } from "../dispatchResolution.js";
 import { readFile } from "node:fs/promises";
 import { getWaoStateDir } from "../waoDir.js";
@@ -705,6 +705,21 @@ function projectCertEvidenceRows(rows) {
 // content (err.message, path, argv, env) — the model learns only that dispatch
 // failed, never operational detail.
 const DISPATCH_ERROR_TEXT = "run_dispatch failed";
+
+// b158a 修复一：车道表不可用的具名拒绝文案（run_dispatch / run_continue /
+// run_consult / run_stop 共用）——写原因码并指向 config/lanes.json，不回显表里
+// 的值。识别 lane_merge_unavailable / lanes_merge_unavailable 两种拼写前缀。
+const LANES_MERGE_UNAVAILABLE_TEXT =
+  "refused (lanes_merge_unavailable): the lane table config/lanes.json is missing, unreadable, "
+  + "or invalid (structure or four-axes shape). Lane-keyed entries take their four axes "
+  + "(backend / model.id / model.providerID / reasoning.effort) ONLY from the lane table — "
+  + "WAO never falls back to stale private-registry values. Fix config/lanes.json and retry.";
+
+function lanesMergeUnavailableTextOf(error) {
+  return typeof error?.message === "string" && error.message.includes("lanes_merge_unavailable")
+    ? LANES_MERGE_UNAVAILABLE_TEXT
+    : null;
+}
 
 // M11-7: fixed, actionable error when a worker lacks a required credential at
 // dispatch time. Actionable (names shown) but never echoes credential VALUES.
@@ -4054,6 +4069,9 @@ export function createWaoMcpServer({
   // 0045 §1.4：车道表读取缝（测试注入别名夹具；缺省 loadLanesConfig——生产恒读
   // 仓库 config/lanes.json）。派发目标解析与 consult 共用。
   loadLanesConfigFn,
+  // b158a 修复二：默认注册表路径测试缝——配对判定、run_dispatch 的 ──lanes-merge
+  // 哈希都从这一个出处取；缺省=registry.js 的 pairedDefaultRegistryPath()。
+  pairedDefaultRegistryPathFn,
   // ADR-0032 修订（2026-09-22）：可注入的认证证据详情服务（默认真实
   // getCertificationEvidenceInventory；测试注伪用，同 getRegistryInventoryFn 模式）。
   getCertificationEvidenceFn,
@@ -4156,7 +4174,7 @@ export function createWaoMcpServer({
   // WAO_MCP_REQUIRE_CERTIFIED 在宿主进程 spawn 时定格，模型不可经 tool args 翻转。
   // CLI 保持 Owner/Lead 特权通道（认证 drill 经 CLI 自举——全局门=自举悖子）。
   // 返回 null=门关；[]=全过；非空=不在清单的 lane 名单（调用方零派发拒绝）。
-  const certGateFailingLanes = async (laneIds) => {
+  const certGateFailingLanes = async (laneIds, lanesMergeDoc = null) => {
     // 0064 注入缝补（并发测试雷）：测试经 certGateOverride 定门（进程级 env 会被
     // 并行测试文件互相踩——实测 model-override 用例被隔壁文件的门误伤）。部署面
     // 语义不变：env 宿主定格、tool args 不可达。
@@ -4175,7 +4193,7 @@ export function createWaoMcpServer({
     if (ledgerState !== "ok") return [...laneIds]; // fail-closed：全部按不在清单拒
     let registryForGate = null;
     try {
-      registryForGate = effectiveRegistryView(await readRegistry(registryPath), serverLanesMergeDoc());
+      registryForGate = effectiveRegistryView(await readRegistry(registryPath), lanesMergeDoc);
     } catch {
       registryForGate = null;
     }
@@ -4231,12 +4249,15 @@ export function createWaoMcpServer({
     : randomUUID();
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const readLanesDoc = typeof loadLanesConfigFn === "function" ? loadLanesConfigFn : loadLanesConfig;
-  // b158a：本服务实例的生效车道表——配对规则与 CLI 的 lanesDocForCall 同义
-  //（registryPath 是车道表所配对的默认注册表才启用；外来 --registry 停用，注册表
-  // 自包含）。启用而表读不出/不合法时原样传出，由 effectiveRegistryView 以
-  // lanes_merge_unavailable 具名拒绝（不回退私有旧四轴）。每次调用重读——与
-  // 派发侧 lanesDoc 同一新鲜度纪律。
-  const serverLanesMergeDoc = () => (isPairedDefaultRegistry(registryPath) ? readLanesDoc() : null);
+  // b158a 修复二：默认注册表路径的单一出处（生产=pairedDefaultRegistryPath；
+  // 测试可注入同一判定）。配对判定与派发哈希共用它。
+  const resolvePairedDefaultRegistryPath = typeof pairedDefaultRegistryPathFn === "function"
+    ? pairedDefaultRegistryPathFn
+    : pairedDefaultRegistryPath;
+  // b158a 修复一：本服务实例的配对判定——registryPath 与本安装默认注册表同一
+  // 文件才启用；外来 --registry 停用（注册表自包含）。各工具处理器**一次请求恰
+  // 读一次**车道表（requestLanesDoc），本函数仅供无请求上下文的零散读取面。
+  const serverLanesMergeDoc = () => lanesMergeDocFor(registryPath, resolvePairedDefaultRegistryPath(), readLanesDoc);
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
@@ -4478,11 +4499,13 @@ export function createWaoMcpServer({
       // 先于聚合器（证据服务抛错/形状违约 ⇒ 整次调用 fail-closed 到固定错误
       // 文本：请求了详情却静默省略，会被读成"查过了、没有证据行"（伪事实）；
       // 即便聚合器随后也失败，这一失败也如实上抛，不吞）。默认调用零额外读。
+      // b158a 修复一：一次 preflight 恰读一次车道表（名册/认证证据/残留事实行共用）。
+      const preflightLanesDoc = serverLanesMergeDoc();
       let certEvidence = null;
       if (detail === "certificationEvidence") {
         try {
           certEvidence = projectCertEvidenceRows(
-            await certEvidenceService({ registryPath, runDir, lanesMergeDoc: serverLanesMergeDoc() }),
+            await certEvidenceService({ registryPath, runDir, lanesMergeDoc: preflightLanesDoc }),
           );
         } catch {
           return {
@@ -4495,11 +4518,12 @@ export function createWaoMcpServer({
       // outcome (snapshot or failure) and pass a resolver that replays THAT
       // outcome — never lets the aggregator fall back to a second default read.
       // This prevents first-fail/second-success skew between workers and
-      // knownAgentIds.
+      // knownAgentIds. b158a 修复一：一次 preflight 恰读一次车道表——名册/认证
+      // 证据/残留事实行共用同一份（停用时事实行不给出）。
       let inventorySnapshot = null;
       let inventoryFailed = false;
       try {
-        const rawSnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv, lanesMergeDoc: serverLanesMergeDoc() });
+        const rawSnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv, lanesMergeDoc: preflightLanesDoc });
         // M12-25B: normalize through the SINGLE shared shape. Accepts the legacy
         // bare-array AND the partial {agents, issues, issuesTruncated} shapes;
         // THROWS on null/malformed → inventoryFailed (the aggregator then reports
@@ -4529,6 +4553,7 @@ export function createWaoMcpServer({
           registryPath,
           runDir,
           userEnvReader: resolveUserEnv,
+          lanesMergeDoc: preflightLanesDoc,
           getRegistryInventoryFn: inventoryResolver,
           // Server-build drift facts (the git subprocess lives in
           // serverBuildFacts.js; the aggregator only consumes the result).
@@ -4646,6 +4671,15 @@ export function createWaoMcpServer({
       // 0097 §4：回显行用解析所得车道键（explicit/alias 都有 laneId；agentId 直派
       // 时席位键即车道键）。laneFactsLine 只陈列事实，fail-open。
       let factsLaneId = agentId;
+      // b158a 修复一：一次请求恰读一次车道表——选车道/合同预检/认证门/派发共用
+      // 同一个对象（启用判定单一出处 lanesMergeDocFor）。这份表的哈希经
+      // --lanes-merge 交给 detached runner（runDispatch 内部）。
+      const requestLanesDoc = readLanesDoc();
+      const requestLanesMergeDoc = lanesMergeDocFor(
+        registryPath,
+        resolvePairedDefaultRegistryPath(),
+        () => requestLanesDoc,
+      );
       {
         // 决定 0114 修订：仅 {agentId} 的旧形态也要过解析器——别名必须解析成
         // 车道+别名角色执行（否则 runner 拿不到 --role，材料两侧不同源）。
@@ -4653,15 +4687,21 @@ export function createWaoMcpServer({
         // {lane,role} 或解析器错误仍按既有固定选择器文案拒绝。
         let resolution = null;
         try {
-          const lanesDoc = readLanesDoc();
+          const lanesDoc = requestLanesDoc;
           // b158a：解析输入用生效条目（与随后 dispatchRun/runner 同一份配置）。
-          const registry = effectiveRegistryView(await readRegistry(registryPath), serverLanesMergeDoc());
+          const registry = effectiveRegistryView(await readRegistry(registryPath), requestLanesMergeDoc);
           const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
           resolution = resolveDispatchTarget({
             agentId, lane, role,
             lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
           });
         } catch (error) {
+          // b158a 修复一：车道表不可用是具名拒绝，纯 {agentId} 路径也不折成通用
+          // 失败（否则认证门/派发前的同一条错误会被吞掉或改写）。
+          const lanesText = lanesMergeUnavailableTextOf(error);
+          if (lanesText !== null) {
+            return { isError: true, content: [{ type: "text", text: lanesText }] };
+          }
           if (lane !== undefined || role !== undefined || agentId === undefined) throw error;
         }
         if (resolution && resolution.kind === "error") {
@@ -4712,7 +4752,7 @@ export function createWaoMcpServer({
         // model 覆盖——否则可借已认证车道跑未认证模型（P1-1 互斥先例的门禁继承）。
         // reasoning 覆盖是否同拒待 Owner 裁定（0046 把 effort 调整定为 delta 重取证，
         // 同族推理适用，但按纪律不擅自扩闭集）。failing !== null 即门开。
-        const failing = await certGateFailingLanes([agentIdInput]);
+        const failing = await certGateFailingLanes([agentIdInput], requestLanesMergeDoc);
         if (failing !== null && failing.length > 0) {
           return {
             isError: true,
@@ -4738,7 +4778,8 @@ export function createWaoMcpServer({
           };
         }
         // B1（Owner 2026-10-06 批）：reasoning(effort) 覆盖同拒——**政策取向而非指纹
-        // 推论**（身份指纹=四元组，effort 有意不进指纹；effort 只在 G4 断言面）：
+        // 推论**（身份指纹=四元组，effort 有意不进指纹；b158a 起 effort 的配置来源
+        // 是车道表，这里只做持久配置漂移的门禁比对）：
         // 已认证记录不能为未取证的执行参数背书（0046 §1.9 effort 调整=delta 重取证）。
         // 持久配置漂移的同族机制约束=门禁侧 effort 比对（见 certGateFailingLanes，
         // opus 补席审计盲区修，Owner B1 批复精神延伸）。
@@ -4855,7 +4896,7 @@ export function createWaoMcpServer({
             workspaceBinding: { bound: true, source: "call_target", ...workspaceProofBinding },
             registryPath,
             // b158a：与派发同一份生效注册表（presence 校验同源）。
-            lanesMergeDoc: serverLanesMergeDoc(),
+            lanesMergeDoc: requestLanesMergeDoc,
           });
         } catch {
           precheck = null; // advisory 缺席，不拦派发
@@ -4970,8 +5011,8 @@ export function createWaoMcpServer({
           agentId: agentIdInput,
           prompt,
           registryPath,
-          // b158a：生效车道表（server 配对判定；与上方解析输入同一份）。
-          lanesMerge: serverLanesMergeDoc(),
+          // b158a：生效车道表（一次请求同一份；哈希随 --lanes-merge 交给 runner）。
+          lanesMerge: requestLanesMergeDoc,
           runDir,
           ...(resolvedLane !== undefined ? { resolvedLane } : {}),
           ...(resolvedRole !== undefined ? { resolvedRole } : {}),
@@ -5058,6 +5099,14 @@ export function createWaoMcpServer({
             isError: true,
             content: [{ type: "text", text: DISPATCH_CREDENTIAL_MISSING_TEXT }],
           };
+        }
+        // b158a 修复一：车道表不可用（纯 {agentId} 路径的解析 catch 不再吞掉它，
+        // dispatchRun 的读取也会抛它）——具名文案，不折成通用失败。
+        {
+          const lanesText = lanesMergeUnavailableTextOf(e);
+          if (lanesText !== null) {
+            return { isError: true, content: [{ type: "text", text: lanesText }] };
+          }
         }
         // Round 4 Bundle B: readOnly × delivery refused by the shared service
         // (defense-in-depth — the handler already refused it up front). Same
@@ -5228,10 +5277,11 @@ export function createWaoMcpServer({
             ? { contractAdvisories }
             : {}),
           // 决定 0097 §4：受理成功附所选车道一行事实（无 [wao] 前缀）。回显失败
-          // =laneFactsLine 返回 null → 键缺省，绝不把受理折成错误。
+          // =laneFactsLine 返回 null → 键缺省，绝不把受理折成错误。b158a 修复二：
+          // 复用本次请求读到的车道表（不再另读一版）。
           ...(() => {
             if (result.accepted !== true) return {};
-            const facts = (laneFactsLineFn ?? laneFactsLine)(factsLaneId);
+            const facts = (laneFactsLineFn ?? laneFactsLine)(factsLaneId, { lanesDoc: requestLanesDoc });
             return facts == null ? {} : { laneFacts: facts };
           })(),
           // 第 156 批：受理回执带 label 与 laneRules（Owner 规则原文 + 此刻高峰
@@ -5244,7 +5294,9 @@ export function createWaoMcpServer({
             // 构造那一跳的意外抛错（含注入缝）也只降级本字段——受理绝不折成错误。
             let value;
             try {
-              value = (laneRulesFn ?? buildLaneRules)();
+              // b158a 修复二：同 run_dispatch 请求的那份表（laneRules/ownerRules 与
+              // 派发用表同源，不再另读）。
+              value = (laneRulesFn ?? buildLaneRules)({ lanesDoc: requestLanesDoc });
             } catch {
               value = degradedLaneRules();
             }
@@ -5586,11 +5638,23 @@ export function createWaoMcpServer({
       }
       // Per-seat registry existence (closed-set refusal naming the missing seats).
       // An unreadable registry fails closed here — existence cannot be proven,
-      // so nothing is dispatched.
+      // so nothing is dispatched. b158a 修复二：一次请求恰读一次车道表——入口
+      // 席位检查、认证门与扇出服务的 lanesDocFn 共用同一份；合并停用时也把
+      // 这份表交给服务（与 run_dispatch 的选择器用表一致，入口与服务不会各判一套）。
+      const consultRequestLanesDoc = readLanesDoc();
+      const consultLanesMergeDoc = lanesMergeDocFor(
+        registryPath,
+        resolvePairedDefaultRegistryPath(),
+        () => consultRequestLanesDoc,
+      );
       let registry;
       try {
-        registry = effectiveRegistryView(await readRegistry(registryPath), serverLanesMergeDoc());
-      } catch {
+        registry = effectiveRegistryView(await readRegistry(registryPath), consultLanesMergeDoc);
+      } catch (e) {
+        const lanesText = lanesMergeUnavailableTextOf(e);
+        if (lanesText !== null) {
+          return { isError: true, content: [{ type: "text", text: lanesText }] };
+        }
         return { isError: true, content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }] };
       }
       // 0046 ⑨：席位门走与 CLI 同款解析——席位名可能是车道别名（本会话首腿实测
@@ -5604,10 +5668,10 @@ export function createWaoMcpServer({
           // fallthrough 到别名解析
         }
         try {
-          const lanesDoc = readLanesDoc();
           const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
           const resolution = resolveDispatchTarget({
-            agentId: id, lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
+            agentId: id, lanesDoc: consultRequestLanesDoc,
+            registryAgents, roleLibrary: listRoleLibrary(),
           });
           return resolution.kind === "resolved" ? resolution.agentId : null;
         } catch {
@@ -5627,7 +5691,7 @@ export function createWaoMcpServer({
       // 0046 收口补丁（三席会审双洞之二，opus+sol 双席独立复现）：consult 扇出不
       // 经 run_dispatch 处理器——门禁必须在此逐席生效，任一席位不在清单=整体拒绝
       // 零派发（点名缺席者）。
-      const gateFailingSeats = await certGateFailingLanes(seatIds);
+      const gateFailingSeats = await certGateFailingLanes(seatIds, consultLanesMergeDoc);
       if (gateFailingSeats !== null && gateFailingSeats.length > 0) {
         return {
           isError: true,
@@ -5674,8 +5738,10 @@ export function createWaoMcpServer({
           // floor here.
           budgetFloorMs: RUN_CONSULT_WAIT_MIN_MS,
           registryPath,
-          // b158a：席位身份事实与派发的生效车道表（server 配对判定）。
-          lanesMergeDoc: serverLanesMergeDoc(),
+          // b158a 修复一/二：席位身份事实/别名解析/暂停提示/派发共用同一份表
+          //（一次请求恰读一次；合并启用与停用两种状态都经 lanesDocFn 交给服务）。
+          lanesMergeDoc: consultLanesMergeDoc,
+          lanesDocFn: () => consultRequestLanesDoc,
           runDir,
           consultsDir: recordsDir,
           cwd: consultTarget.root,
@@ -5763,9 +5829,26 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: CONTINUE_VERIFICATION_REQUIRED_TEXT }],
         };
       }
+      // b158a 修复二：先读本次请求的车道表（恰一次）并校验可用性，再跑认证门——
+      // 门按**生效条目**（车道表四轴）裁决，不再拿私有原文裁决；表不可用时在门前
+      // 就返回固定 lanes_merge_unavailable 文案。同一对象随后传给 continueService。
+      const continueRequestLanesDoc = serverLanesMergeDoc();
+      if (continueRequestLanesDoc !== null) {
+        try {
+          assertLanesMergeDocUsable(continueRequestLanesDoc);
+        } catch (e) {
+          const lanesText = lanesMergeUnavailableTextOf(e);
+          if (lanesText !== null) {
+            return { isError: true, content: [{ type: "text", text: lanesText }] };
+          }
+          throw e;
+        }
+      }
       // B4（Owner 2026-10-06 批）：认证门禁覆盖续接——"父 run 创建时已过门"只在门
       // 恒开时成立，台账可能在中间把车道刷掉；continue 启动的是新执行，按父 run
       // 的装配（其 agentId）过同一个共享判定，不在清单即拒（零派发零 fork）。
+      // b158a 修复二：判定用本次请求的车道表（生效条目），与下面的 continueService
+      // 同一份——不再按私有原文四轴裁决。
       {
         const parentAgentId = await (async () => {
           try {
@@ -5776,7 +5859,7 @@ export function createWaoMcpServer({
           }
         })();
         if (parentAgentId) {
-          const failingParent = await certGateFailingLanes([parentAgentId]);
+          const failingParent = await certGateFailingLanes([parentAgentId], continueRequestLanesDoc);
           if (failingParent !== null && failingParent.length > 0) {
             return {
               isError: true,
@@ -5802,8 +5885,7 @@ export function createWaoMcpServer({
           delivery,
           runDir,
           registryPath,
-          // b158a：续修读取的生效车道表（与派发同一 server 配对判定）。
-          lanesMergeDoc: serverLanesMergeDoc(),
+          lanesMergeDoc: continueRequestLanesDoc,
           authorizedWorkspaceRoot: workspaceCwd,
           userEnvReader: resolveUserEnv,
           // Certification advisory (same contract as run_dispatch): registry
@@ -5820,6 +5902,13 @@ export function createWaoMcpServer({
             isError: true,
             content: [{ type: "text", text: CONTINUE_CREDENTIAL_MISSING_TEXT }],
           };
+        }
+        // b158a 修复一：车道表不可用 → 具名文案（不折成通用失败）。
+        {
+          const lanesText = lanesMergeUnavailableTextOf(e);
+          if (lanesText !== null) {
+            return { isError: true, content: [{ type: "text", text: lanesText }] };
+          }
         }
         // All other environmental failures (registry read, spawn, lineage store
         // I/O, argv length): fixed safe text. Never concatenate dynamic content.
@@ -6650,6 +6739,16 @@ export function createWaoMcpServer({
               type: "text",
               text: RUN_STOP_PRECONDITION_TEXT[result.preconditionFailed] ?? RUN_STOP_PRECONDITION_TEXT.observation_unknown,
             }],
+          };
+        }
+        // b158a 修复一：车道表不可用导致停止目标解析不出——固定文案写原因码并
+        // 指向 config/lanes.json（不回显表里的值），不折成通用 JSON 回执。
+        if (result.outcome === "stop_route_unavailable"
+          && typeof result.routeError === "string"
+          && result.routeError.includes("lanes_merge_unavailable")) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: LANES_MERGE_UNAVAILABLE_TEXT }],
           };
         }
         const payload = {

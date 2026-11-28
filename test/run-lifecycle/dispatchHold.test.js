@@ -28,8 +28,8 @@ import { lanesDocForCall } from "../../src/commands/shared.js";
 const LANES = {
   ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
   lanes: [
-    { id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" },
-    { id: "plain-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {} },
+    { id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: {}, dispatchHold: "夹具：暂停说明" },
+    { id: "plain-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: {} },
   ],
 };
 const HELD = LANES.lanes[0];

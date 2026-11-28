@@ -677,8 +677,8 @@ test("TD-283-inventory: 条目按车道 id 带 dispatchHold；无说明/非车�
     const lanesDocFn = () => ({
       ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [],
       lanes: [
-        { id: "held-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" },
-        { id: "plain-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: null, aliases: {} },
+        { id: "held-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: {}, aliases: {}, dispatchHold: "夹具：暂停说明" },
+        { id: "plain-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: {}, aliases: {} },
       ],
     });
     const result = await getRegistryInventory({ registryPath, runDir, lanesDocFn });
@@ -705,7 +705,7 @@ test("TD-283-inventory: 车道表不可用（结构红/缺失）→ 全部 null�
     const structurallyInvalid = {
       ok: false, path: "fixture", sha256: "cd".repeat(32),
       issues: ["lane \"x\" dispatchHold 形状不合法"],
-      lanes: [{ id: "held-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" }],
+      lanes: [{ id: "held-lane", backend: "claude-code", model: { id: "glm-5.2" }, reasoning: {}, aliases: {}, dispatchHold: "夹具：暂停说明" }],
     };
     const r1 = await getRegistryInventory({ registryPath, runDir, lanesDocFn: () => structurallyInvalid });
     assert.equal(r1[0].dispatchHold, null, "结构红表（即使含该车道）→ null");

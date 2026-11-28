@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance, effectiveRegistryView } from "../registry.js";
+import { normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance, mergeRawRegistryDoc } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 // 决定 0108：registry align 的诊断与写侧单一实现在 application/registryAlign.js
 //（commands 只做 I/O：选项收集、路径解析、文本渲染）。
@@ -205,12 +205,8 @@ async function registryValidateCommand(args, config) {
   const lanesMergeDoc = lanesMergeDocForCall(options, config, config?.lanesDocFn);
   let effectiveAgents;
   try {
-    effectiveAgents = lanesMergeDoc === null
-      ? new Map() // 停用：逐条回退私有原文（effectiveAgents.get(id) ?? agent）
-      : new Map(
-        effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
-          .mergedRawEntries(),
-      );
+    // b158a 修复一：mergeRawRegistryDoc 收拢（停用=原样；启用=合并后 agents）。
+    effectiveAgents = new Map(Object.entries(mergeRawRegistryDoc({ agents }, lanesMergeDoc).agents));
   } catch (e) {
     // lanes_merge_unavailable：与 JSON 解析失败同一早失败面（文本/JSON 各自既有形状）。
     if (asJson) {

@@ -73,6 +73,37 @@ test("TD-250 A1b: makeAcceptedSessionRelease——能力在场+有会话 → 恰
   assert.equal(appended[0].payload.backendSessionId, "session_lin");
 });
 
+test("b158a 修复一: makeAcceptedSessionRelease 取生效条目——私有只剩本机接线，backend 来自车道表", async () => {
+  const released = [];
+  // 私有条目去掉四轴（只剩本机接线）；车道表供给 backend/model/effort。
+  const rawAgent = { cwd: "D:/w", serveUrl: "http://x", tokenEnv: "T" };
+  const lanesDoc = {
+    ok: true, path: "<fixture>", sha256: "f".repeat(64), issues: [], rolesHint: [],
+    lanes: [{ id: "kimi", backend: "kimi-web", model: { id: "kimi-code/k3" }, reasoning: { effort: null }, aliases: {} }],
+  };
+  const release = makeAcceptedSessionRelease({
+    registryPath: "/r.json",
+    readRegistryFn: async () => ({
+      getAgent(id) { if (id !== "kimi") throw new Error("Unknown agent"); return { id, ...rawAgent }; },
+      rawEntries() { return [["kimi", rawAgent]]; },
+    }),
+    backendForFn: () => ({
+      supportsSessionRelease: true,
+      async releaseSession(a, sid) { released.push({ backend: a.backend, sid }); return { outcome: "deleted" }; },
+    }),
+    lanesMergeDoc: lanesDoc,
+  });
+  const appended = [];
+  const fired = await release({
+    agentId: "kimi",
+    events: [{ type: "session.created", backend: "kimi-web", backendSessionId: "session_lin", agentId: "kimi", seq: 1 }],
+    transcript: { async append(type, payload) { appended.push({ type, payload }); } },
+  });
+  assert.equal(fired.session, true, "合并后的生效条目可解析 backend → 释放照常");
+  assert.deepEqual(released, [{ backend: "kimi-web", sid: "session_lin" }]);
+  assert.equal(appended[0]?.type, "run.upstream_session_deleted");
+});
+
 test("TD-250 A1b: 能力缺席/无会话/未知 agent/注册表故障 → 零事件零副作用（静默 no-op）", async () => {
   const appended = [];
   const transcript = { async append(type, payload) { appended.push({ type, payload }); } };

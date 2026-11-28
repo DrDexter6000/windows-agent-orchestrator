@@ -33,7 +33,7 @@
 
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeAgent, effectiveRegistryView } from "../registry.js";
+import { normalizeAgent, mergeRawRegistryDoc, pairedDefaultRegistryPath } from "../registry.js";
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一来源——doctor
 // 的 scoped 检查与本模块的推荐矩阵共用同一份表（此前两处逐字重复且各自漂移）。
 import { BACKEND_CLI } from "./backendCliMap.js";
@@ -476,6 +476,10 @@ export function buildMinimalRegistry({ template, agentId }) {
 export function buildMcpSnippet({ installRoot }) {
   const root = normalizeRoot(installRoot);
   const abs = (rel) => toForwardSlash(join(root, rel));
+  // b158a 修复二：MCP 缺省注册表只有一个出处——pairedDefaultRegistryPath(root)
+  // （读 <root>/config/default.json 的 registry 键；缺席回落 config/agents.json）。
+  // 不再写死 config/agents.json：Owner 改默认 registry 时绑定片段跟着走。
+  const defaultRegistry = toForwardSlash(pairedDefaultRegistryPath(root));
   return {
     mcpServers: {
       wao: {
@@ -483,7 +487,7 @@ export function buildMcpSnippet({ installRoot }) {
         args: [
           abs("scripts/wao-node.cjs"),
           abs("src/mcp/stdio.js"),
-          "--registry", abs("config/agents.json"),
+          "--registry", defaultRegistry,
           "--run-dir", abs("runs"),
         ],
       },
@@ -708,38 +712,35 @@ async function loadPrivateRegistry(privateRegistryPath, fs) {
  */
 async function buildConfiguredFace(registry, probeEnv, lanesMergeDoc = null) {
   const agents = isPlainObject(registry?.agents) ? registry.agents : {};
-  // b158a：车道键条目按合并后的生效形状校验/生产（私有缺四轴合法）。表不可用
-  // （合并抛错）按私有原文降级——onboarding 是诊断面。
-  let mergeFor = (id, agent) => agent;
+  // b158a 修复一：车道键条目按合并后的生效形状校验/生产（私有缺四轴合法；
+  // mergeRawRegistryDoc 收拢）。表不可用（合并抛错）按私有原文降级——onboarding
+  // 是诊断面。返回 effectiveAgents 供 drift 的 effort 兜底。
+  let mergedAgents = agents;
   if (lanesMergeDoc !== null) {
     try {
-      const mergedMap = new Map(
-        effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
-          .mergedRawEntries(),
-      );
-      mergeFor = (id, agent) => mergedMap.get(id) ?? agent;
+      mergedAgents = mergeRawRegistryDoc({ agents }, lanesMergeDoc).agents;
     } catch {
-      mergeFor = (id, agent) => agent;
+      mergedAgents = agents;
     }
   }
   let invalidCount = 0;
   const valid = {};
   for (const [id, agent] of Object.entries(agents)) {
     try {
-      normalizeAgent(id, mergeFor(id, agent));
+      normalizeAgent(id, mergedAgents[id] ?? agent);
       valid[id] = agent;
     } catch {
       invalidCount += 1;
     }
   }
-  const validRegistry = { ...registry, agents: Object.fromEntries(Object.entries(valid).map(([id, a]) => [id, mergeFor(id, a)])) };
+  const validRegistry = { ...registry, agents: Object.fromEntries(Object.entries(valid).map(([id]) => [id, mergedAgents[id] ?? agents[id]])) };
   // R11-2（决策 0024）：已配置面行按私有 registry 顺序稳定展示（矩阵"已配置行
   // 在前、私有顺序稳定"契约）——不做 ready-first 重排；就绪块分级对行序不敏感。
   const { rows } = await buildRecommendations(
     buildCandidateList(validRegistry), validRegistry, probeEnv,
     { sortReadyFirst: false, source: "configured" },
   );
-  return { rows, count: Object.keys(agents).length, validCount: Object.keys(valid).length, invalidCount };
+  return { rows, count: Object.keys(agents).length, validCount: Object.keys(valid).length, invalidCount, effectiveAgents: mergedAgents };
 }
 
 /**
@@ -783,18 +784,24 @@ async function buildTemplateFaceRecommendations(candidates, template, probeEnv) 
  */
 // d′（决定 0044）：行 effort 的稳定读法——优先行字段（buildConfiguredFace 若
 // 投影），缺席时从私有 registry 席位块兜底（模板侧对称读 tpl.reasoning.effort）。
-function rowEffortOf(row, privAgents) {
+function rowEffortOf(row, effectiveAgents) {
   if (typeof row?.effort === "string" && row.effort.length > 0) return row.effort;
-  const seat = privAgents?.[row?.id];
+  // b158a 修复一：兜底读**生效条目**（合并启用时四轴来自车道表，不回读私有
+  // 旧 effort——否则车道表改了 effort、私有残留旧值，drift 拿旧值比出假差）。
+  const seat = effectiveAgents?.[row?.id];
   return isPlainObject(seat) ? seat.reasoning?.effort ?? null : null;
 }
 
 // 0065（0045 §1.2 终局执行）：0062 B9 乙′引入的 seatRoleDriftBetween/
 // seatRoleDriftRows 整轴删除（supersede——模板与私有副本的席位声明均已随
 // seatRole 机制退役，无可比对对象；0024 修订节同步）。
-async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv }) {
-  const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
+async function buildDualSourceMatrix({ template, effectiveTemplate, privateRegistry, cfg, probeEnv }) {
+  // b158a 修复一：drift 的模板侧与已配置侧都比**生效形状**——模板候选按车道表
+  // 合并后的形状判定（写出的条目形状本批不变，仍按模板原文）。
+  const tplOf = effectiveTemplate ?? template;
+  const tplAgents = isPlainObject(tplOf?.agents) ? tplOf.agents : {};
   const privAgents = isPlainObject(privateRegistry?.agents) ? privateRegistry.agents : {};
+  const effectivePrivAgents = isPlainObject(cfg?.effectiveAgents) ? cfg.effectiveAgents : privAgents;
   // 模板未配置候选 = 模板行 − 私有同 id 行（同 id 含无效条目——已配置不重复列；
   // 无效条目的修复出口是 C-2 提示行，模板行不顶替入场）。
   const unconfiguredAgents = {};
@@ -803,7 +810,10 @@ async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv 
   }
   const templateCandidates = buildCandidateList({ ...template, agents: unconfiguredAgents });
   // 模板候选组：ready-first 既有排序 + source "template"（buildRecommendations 默认）。
-  const tplRec = await buildRecommendations(templateCandidates, template, probeEnv);
+  // b158a 修复二：就绪探测用**生效模板**——候选 backend/凭据/token 文件按车道表
+  // 合并后的形状推导（旧实现传原模板，backend 落后时按旧 backend 探测）；写出
+  // 条目形状本批不变，仍用原模板。
+  const tplRec = await buildRecommendations(templateCandidates, tplOf, probeEnv);
   const configuredShown = cfg.rows.slice(0, MAX_CANDIDATES); // 行生产已 ≤ MAX，双保险
   const slots = MAX_CANDIDATES - configuredShown.length;
   const templateShown = tplRec.rows.slice(0, slots);
@@ -827,7 +837,7 @@ async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv 
         ? template.certification.matrix : [];
       const privMatrixModel = privMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
       const tplMatrixModel = tplMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
-      const effortDrift = rowEffortOf(out, privAgents) !== templateEffort;
+      const effortDrift = rowEffortOf(out, effectivePrivAgents) !== templateEffort;
       const matrixDrift = privMatrixModel !== null && tplMatrixModel !== null && privMatrixModel !== tplMatrixModel;
       if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel || effortDrift || matrixDrift) {
         out.drift = {
@@ -935,7 +945,11 @@ export async function runOnboarding({
       reason: "could not read or parse the tracked template",
     });
   }
-  const candidates = buildCandidateList(template);
+  // b158a 修复一：模板候选/探测/校验按车道表合并后的**生效形状**判定（模板原文
+  // 的四轴是残留——车道表才是唯一出处）；--apply 写出的条目形状本批不变，仍按
+  // 模板原文（去四轴留到 158b）。
+  const effectiveTemplate = mergeRawRegistryDoc(template, lanesMergeDoc);
+  const candidates = buildCandidateList(effectiveTemplate);
 
   // R10-B: 私有 registry 面加载（只读、注入 fs；永不 throw）。present+readable
   // → readiness 块输入行切到已配置面（同一 engine、同一探测实现；R10-C C-2：
@@ -948,12 +962,12 @@ export async function runOnboarding({
   if (privateLoad.status === "readable") {
     const cfg = await buildConfiguredFace(privateLoad.registry, probeEnv, lanesMergeDoc);
     panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, invalidCount: cfg.invalidCount, sourceUnreadable: false };
-    recommendations = await buildDualSourceMatrix({ template, privateRegistry: privateLoad.registry, cfg, probeEnv });
+    recommendations = await buildDualSourceMatrix({ template, effectiveTemplate, privateRegistry: privateLoad.registry, cfg, probeEnv });
   } else {
     // R6-C: advisory lane matrix + environment fit, derived from the template rows
     // + the INJECTED probe. Bounded (≤4 CLI probes + ≤N key probes, memoized per
     // unique name); probe failures degrade to "unknown" and never throw.
-    recommendations = await buildTemplateFaceRecommendations(candidates, template, probeEnv);
+    recommendations = await buildTemplateFaceRecommendations(candidates, effectiveTemplate, probeEnv);
     panelState = { face: "template", rows: recommendations.rows, configuredCount: null, invalidCount: 0, sourceUnreadable: privateLoad.status === "unreadable" };
   }
 
@@ -1010,8 +1024,10 @@ export async function runOnboarding({
   let registry;
   try {
     registry = buildMinimalRegistry({ template, agentId });
-    // Re-validate the built entry through the shared normalizer (no second validator).
-    normalizeAgent(agentId, registry.agents[agentId]);
+    // Re-validate the built entry through the shared normalizer (no second
+    // validator). b158a 修复一：按**车道表合并后的形状**判定——模板条目四轴已
+    // 是残留（车道表才是唯一出处）；写出的条目形状本批不变。
+    normalizeAgent(agentId, effectiveTemplate.agents?.[agentId] ?? registry.agents[agentId]);
   } catch (err) {
     // Fixed safe projection: OnboardingError carries a fixed safe message; any
     // other (raw parser/normalizer) exception is projected to a fixed string.

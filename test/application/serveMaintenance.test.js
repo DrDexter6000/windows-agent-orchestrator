@@ -600,7 +600,49 @@ test("TD-252③: listArchiveTranscriptFiles——月份目录形状校验、不�
   } finally { cleanupDir(root); }
 });
 
-// ===== 决定 0074：serve 维护族对声明了 kimiHome 的车道 =====
+// ===== b158a 修复二：serve 的启用判定（默认注册表 vs 本次 --registry） =====
+
+test("serve b158a 修复二：外来 --registry 判停用（条目自包含，不被车道表覆盖）；指回默认文件判启用", async () => {
+  const { mkdtempSync, writeFileSync: writeFile, mkdirSync: mkdirSyncFn, rmSync: rm } = await import("node:fs");
+  const { tmpdir: osTmp } = await import("node:os");
+  const { join: joinPath } = await import("node:path");
+  const { resolveServeTarget } = await import("../../src/commands/serve.js");
+  const dir = mkdtempSync(joinPath(osTmp(), "wao-serve-fix2-"));
+  try {
+    const home = joinPath(dir, "kimi-home");
+    mkdirSyncFn(home);
+    writeFile(joinPath(home, "server.token"), "servetoken\n", "utf8");
+    const defaultPath = joinPath(dir, "default-agents.json");
+    const foreignPath = joinPath(dir, "foreign-agents.json");
+    // 车道表：同 id 车道是 claude-code（若外来表被强制合并，kimi-web 席位会消失）。
+    const lanesDoc = {
+      ok: true, path: joinPath(dir, "lanes.json"), sha256: "a".repeat(64), issues: [], rolesHint: [],
+      lanes: [{ id: "kimi", backend: "claude-code", model: { id: "claude-opus-5" }, reasoning: { effort: "high" }, aliases: {} }],
+    };
+    const config = { registry: defaultPath, loadLanesConfigFn: () => lanesDoc };
+    const lanesDocB = {
+      ...lanesDoc,
+      lanes: [{ id: "kimi", backend: "kimi-web", model: { id: "kimi-code/k3" }, reasoning: { effort: null }, aliases: {} }],
+    };
+    const configB = { registry: defaultPath, loadLanesConfigFn: () => lanesDocB };
+    // 外来注册表：自包含 kimi-web 条目（自带四轴）——停用合并时它就是生效值。
+    writeFile(foreignPath, JSON.stringify({
+      agents: { kimi: { backend: "kimi-web", cwd: ".", serveUrl: "http://127.0.0.1:58628", kimiHome: home, tokenEnv: "WAO_TEST_SERVE_FIX2_TOKEN", model: { id: "private-model" } } },
+    }), "utf8");
+    const foreign = await resolveServeTarget(config, undefined, undefined, foreignPath);
+    assert.equal(foreign.serveUrl, "http://127.0.0.1:58628", "外来表停用合并：自包含条目可解析（旧实现强制合并后没有 kimi-web 席位）");
+    // 默认文件（config.registry）：条目去四轴，由车道表合并供给 → 启用。
+    writeFile(defaultPath, JSON.stringify({
+      agents: { kimi: { cwd: ".", serveUrl: "http://127.0.0.1:58629", kimiHome: home, tokenEnv: "WAO_TEST_SERVE_FIX2_TOKEN" } },
+    }), "utf8");
+    const paired = await resolveServeTarget(configB, undefined, undefined, defaultPath);
+    assert.equal(paired.serveUrl, "http://127.0.0.1:58629", "指回默认文件：合并启用，去四轴条目仍可解析");
+  } finally {
+    rm(dir, { recursive: true, force: true });
+  }
+});
+
+
 
 test("serve 0074: 车道声明 kimiHome → 维护命令用该主目录的 server.token 鉴权并把它当作缺省主目录；未声明照旧读环境变量", async () => {
   const { mkdtempSync, writeFileSync: writeFile, rmSync: rm } = await import("node:fs");

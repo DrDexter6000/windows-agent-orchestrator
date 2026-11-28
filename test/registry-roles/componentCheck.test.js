@@ -1285,6 +1285,13 @@ test("component ledger glue F9: stable refresh replaces prior, newly drifted his
     "the duplicate-producing full-prior concatenation must not return");
 });
 
+test("b158a 修复二 源级钉：component-check 缺省注册表走 pairedDefaultRegistryPath(ROOT)", () => {
+  const source = readFileSync(ENTRY, "utf8");
+  assert.match(source, /getArg\("registry"\) \|\| pairedDefaultRegistryPath\(ROOT\)/, "缺省注册表走单一出处");
+  assert.ok(!/join\(ROOT, "config", "agents\.json"\)/.test(source), "不再写死 config/agents.json");
+});
+
+
 test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp/codex → phase6）", () => {
   assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), ["deepseek-acp", "codex"]);
   assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), Object.keys(PHASE6_BACKEND_SHAPES),

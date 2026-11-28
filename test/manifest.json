@@ -335,6 +335,7 @@
       "run-lifecycle/lineageIdentity.test.js",
       "run-lifecycle/m12-7-runContinue.test.js",
       "run-lifecycle/b158a-laneAxesBehavior.test.js",
+      "run-lifecycle/b158aFix1Runner.test.js",
       "run-lifecycle/runContinueInheritedDelivery.test.js",
       "run-lifecycle/runnerLaunchContinueKillGate.test.js",
       "delivery/m12-13-verification-timeout.test.js",

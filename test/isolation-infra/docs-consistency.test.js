@@ -1643,8 +1643,8 @@ test("车道当前型号只在配置里：lanes.json 车道与 agents.example.js
   for (const lane of lanes) {
     const agent = parsed.agents?.[lane.id];
     assert.ok(agent, `agents.example.json 缺与车道同 id 的条目：${lane.id}`);
-    // 与 explicit 派发同一判定（决定 0090）：四轴（backend/model.id/providerID/effort）
-    // 不一致时，照抄模板配出的注册表会被 `--lane` 派发以 lane_wiring_mismatch 拒绝。
+    // 关系检查：模板与车道表的四轴一致（b158a 起四轴以车道表为唯一出处；
+    // 模板只是 158b 前的存量副本，不一致不再拒绝派发，只作为清理前的守卫）。
     assert.ok(axesEqual(laneAxes(lane), agentAxes(agent)),
       `${lane.id}：agents.example.json 的接线轴 ${JSON.stringify(agentAxes(agent))} 必须等于 config/lanes.json 的 ${JSON.stringify(laneAxes(lane))}（升级型号或改 effort 时两处同改）`);
   }

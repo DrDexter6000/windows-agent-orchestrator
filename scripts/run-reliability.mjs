@@ -41,8 +41,7 @@ import { safeJsonParse } from "../src/safeText.js";
 // 时，认证身份/执行画像消费**生效条目**（四轴来自 config/lanes.json，合并用
 // src/registry.js 的单一实现）；临时/非默认注册表照旧自包含。表不可用即抛
 // lanes_merge_unavailable（不回退私有旧四轴——认证身份不能建立在回退值上）。
-import { effectiveRegistryView, isPairedDefaultRegistry } from "../src/registry.js";
-import { loadLanesConfig } from "../src/dispatchResolution.js";
+import { lanesMergeDocFor, pairedDefaultRegistryPath, mergeRawRegistryDoc } from "../src/registry.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 // reportsCommandExitCode 条件化的判定源（backendCapabilitySnapshot SSOT）。
 import { backendCapabilitySnapshot, backendFor } from "../src/backends/factory.js";
@@ -96,7 +95,9 @@ if (_argResult.error) {
   process.exit(2);
 }
 const getArg = (name) => _argResult.values[name];
-const REGISTRY = getArg("registry") || resolve(ROOT, "config/agents.json");
+// b158a 修复二：本安装的默认注册表只有一个出处（pairedDefaultRegistryPath(ROOT)，
+// 读 <ROOT>/config/default.json 的 registry 键）；不再写死 config/agents.json。
+const REGISTRY = getArg("registry") || pairedDefaultRegistryPath(ROOT);
 const ONLY_AGENT = getArg("agent");
 // 默认 300000（5min/worker）：strict profile 含 scorecard+isolation 等多 drill，
 // 120s 易在重 worker 上卡边界（codex/claude-code strict 单 worker 实测 30-60s，留余量）。
@@ -138,18 +139,13 @@ function loadRegistry() {
 }
 
 const registry = loadRegistry();
-// b158a：默认注册表 → 生效条目（lane 合并后的 agents + 原 certification 配置）；
-// 非默认 → 原样自包含。
-const effectiveRegistry = (() => {
-  const lanesMergeDoc = isPairedDefaultRegistry(getArg("registry")) ? loadLanesConfig() : null;
-  if (lanesMergeDoc === null) return registry;
-  const agents = registry?.agents && typeof registry.agents === "object" ? registry.agents : {};
-  const mergedAgents = Object.fromEntries(
-    effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
-      .mergedRawEntries(),
-  );
-  return { ...registry, agents: mergedAgents };
-})();
+// b158a 修复一：默认注册表 → 生效条目（mergeRawRegistryDoc——lane 合并后的
+// agents + 原 certification 配置）；非默认 → 原样自包含。判定单一出处
+// lanesMergeDocFor。
+const effectiveRegistry = mergeRawRegistryDoc(
+  registry,
+  lanesMergeDocFor(REGISTRY, pairedDefaultRegistryPath()),
+);
 const MATRIX = buildCertificationMatrix({
   registry: effectiveRegistry,
   onlyAgent: ONLY_AGENT,
@@ -530,7 +526,9 @@ for (const tc of MATRIX) {
     console.log(`    [DRILL] sandbox enforcement probe...`);
     // 决定 0086：不经模型的 OS 写沙箱执行取证（与 containmentEvidence 同一
     // 位置——矩阵构建对声明 enforcesWriteSandbox 的后端做了词汇替换）。
-    const drill = await runSandboxEnforcementDrill(tc, registry.agents?.[tc.agentId]);
+    // b158a 修复一：sandbox 探测用生效条目（私有去四轴后 backend/binary 仍可判，
+    // 结果归到生效身份——不再用原始条目构造 backend/probe）。
+    const drill = await runSandboxEnforcementDrill(tc, effectiveRegistry.agents?.[tc.agentId]);
     caseResult.sandboxError = drill.error;
     // 派发/探测被外部因素阻塞（额度/鉴权/连接）：沿用 classifyExternalBlocker——
     // 整个取证面不可用，记一条 blocked 检查（映射 case 级 blocked，ADR-0032 §8）。

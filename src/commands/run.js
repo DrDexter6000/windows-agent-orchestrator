@@ -33,7 +33,7 @@ import { renderRunSummary } from "../cliRunSummary.js";
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
 // （boundReportScope；commands → core 下向边，与 runs.js 既有 metrics import 同款）。
 import { boundReportScope } from "../metrics.js";
-import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall, lanesMergeDocForCall, cliWaitOptions } from "./shared.js";
+import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesMergeDocForCall, cliWaitOptions } from "./shared.js";
 import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 // 0097 §4：派发时回显所选车道一行事实（只陈列非推荐；fail-open——null 不打印）。
 import { laneFactsLine } from "../application/laneFactsLine.js";
@@ -44,7 +44,7 @@ import { laneFactsLine } from "../application/laneFactsLine.js";
 import { buildLaneRules, degradedLaneRules, renderLaneRulesLines } from "../application/laneRules.js";
 import { buildDispatchLabel, appendLabelHint, isUsableLabel } from "../application/dispatchLabel.js";
 import { createSecretRedactor } from "../secretRedaction.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // M9-2A: background dispatch delegated to shared application service.
@@ -190,7 +190,7 @@ export async function loadScorecardFromTranscript(transcriptPath, runId = null) 
 // P2（M7）→ M9-2A：fork detached runner 托管一个 background run。
 // 派发逻辑已提取到共享 application service (dispatchRun)；本函数只负责 CLI 适配——
 // 选项整理 + 把 service 结构化结果映射到既有 JSON 输出契约（不变）。
-async function spawnBackgroundRunner(agentId, options, config, delivery, resolvedFrom, laneRules = null) {
+async function spawnBackgroundRunner(agentId, options, config, delivery, resolvedFrom, laneRules = null, lanesMergeDoc = null) {
   if (options.scorecardRules) {
     parseScorecardRules(options.scorecardRules, options.scorecardRulesSource);
   }
@@ -205,9 +205,8 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
       agentId,
       prompt: options.prompt ?? "",
       registryPath: resolve(options.registry ?? config.registry),
-      // b158a：后台派发的生效车道表（配对规则同 run 解析块——非默认 --registry
-      // 时为 null，外来注册表自包含）。
-      lanesMerge: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
+      // b158a 修复一：后台派发用 runCommand 解析块的同一份表（一次调用恰一份）。
+      lanesMerge: lanesMergeDoc,
       runDir: resolve(options.runDir ?? config.runDir),
       runId: options.runId,
       cwd: options.cwd,
@@ -497,15 +496,25 @@ export async function runCommand(args, config) {
       }
     }
   }
+  // b158a 修复一：本次调用的生效车道表——解析块内取得，前台/后台派发块共用
+  // 同一份（一次调用恰读一次）；块外声明以便两处分岔都读它。
+  let lanesMergeDoc = null;
   if (true) {
     const registryPath = resolve(options.registry ?? config?.registry ?? "config/agents.json");
-    // 非默认 --registry 时车道表停用（防跨绑，lanesDocForCall）；loadLanesConfigFn
-    // 是测试缝（夹具车道表注入；生产路径缺省真实表）。
-    const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
+    // b158a 修复一：一次调用恰读一次车道表（单一判定 lanesMergeDocForCall）——
+    // 解析块、前台 start、后台 dispatchRun 共用同一份；表的哈希经 --lanes-merge
+    // 交给 detached runner（runDispatch 内部）。非默认 --registry 时停用（防跨绑；
+    // 外来注册表自包含）。loadLanesConfigFn 是测试缝（夹具车道表注入）。
+    lanesMergeDoc = lanesMergeDocForCall(options, config, config?.loadLanesConfigFn);
+    const lanesDoc = lanesMergeDoc ?? { lanes: [], sha256: null, issues: [], rolesHint: [] };
     // readRegistry 返回方法对象（getAgent/listAgents）；解析器要纯映射
-    // {id: 条目}——listAgents 的 normalizeAgent 产物自带 id 字段。
+    // {id: 条目}——listAgents 的 normalizeAgent 产物自带 id 字段。b158a：解析
+    // 输入用**生效视图**（私有条目去四轴后 listAgents 不再整表抛错）。
     // 注入优先（测试/嵌入面）：config.readRegistry 存在则不经磁盘。
-    const reg = await (config?.readRegistry ?? readRegistry)(registryPath);
+    const reg = effectiveRegistryView(
+      await (config?.readRegistry ?? readRegistry)(registryPath),
+      lanesMergeDoc,
+    );
     const registryAgents = Object.fromEntries(reg.listAgents().map((a) => [a.id, a]));
     const resolution = resolveDispatchTarget({
       agentId, lane: options.lane, role: options.role,
@@ -633,7 +642,7 @@ export async function runCommand(args, config) {
   if (options.background) {
     options.prompt = await loadPrompt(options);
     await loadScorecardRules(options);
-    return spawnBackgroundRunner(agentId, options, config, delivery, resolvedTarget?.source, laneRules);
+    return spawnBackgroundRunner(agentId, options, config, delivery, resolvedTarget?.source, laneRules, lanesMergeDoc);
   }
   options.wait = true;
   await loadScorecardRules(options);
@@ -643,9 +652,8 @@ export async function runCommand(args, config) {
   const run = await manager.start(agentId, {
     prompt: promptText,
     registry: options.registry,
-    // b158a：前台派发的生效车道表（与解析块同一配对判定；表读不出/不合法由
-    // effectiveRegistryView 以 lanes_merge_unavailable 具名拒绝）。
-    lanesMerge: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
+    // b158a 修复一：前台派发用解析块的同一份表（一次调用恰一份）。
+    lanesMerge: lanesMergeDoc,
     runDir: options.runDir,
     tags: options.tag,
     ...(options.cwd ? { cwd: options.cwd } : {}),

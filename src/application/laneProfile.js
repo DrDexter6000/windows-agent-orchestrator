@@ -25,7 +25,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 // laneAxes：车道侧四轴（backend/modelId/providerID/effort，null 归一）——与
-// explicit 派发 G4、wao lanes 接线轴同一判定来源，不造第二份比较规则。
+// 生效视图、wao lanes 接线轴同一判定来源，不造第二份比较规则。
 import { laneAxes, validDispatchHold } from "../dispatchResolution.js";
 // 推断族系（0090：会审选不同族系的副审时参考；展示专用非契约，见 modelFamily.js）。
 import { modelFamilyOf, familyLabel } from "./modelFamily.js";

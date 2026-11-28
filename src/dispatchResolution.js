@@ -132,8 +132,8 @@ export function dispatchHoldAdvisoryLine(laneId, hold) {
   return `[wao] advisory: lane ${laneId} dispatchHold="${text}" — Owner 的暂停派发说明，仅提示不拦截；派发照常进行，决定权在 Lead`;
 }
 
-// 0064：三函数自本批起导出——wao lanes 读取面复用同一 G4 轴判定（接线漂移
-// 展示与 explicit 派发拒绝同语义，不造第二份比较规则）。逻辑零改动。
+// 0064：三函数自本批起导出——wao lanes 读取面 / 生效视图 / 残留诊断复用同一
+// 轴读取与在场判定（不造第二份比较规则）。逻辑零改动。
 function laneAxes(lane) {
   return {
     backend: lane.backend ?? null,
@@ -153,6 +153,21 @@ function agentAxes(agent) {
 function axesEqual(a, b) {
   return a.backend === b.backend && a.modelId === b.modelId
     && a.providerID === b.providerID && a.effort === b.effort;
+}
+// b158a 修复一：只取**在场**的轴（键缺席不算 null 残留）——"私有残留四轴"
+// 诊断（registryAlign.diagnose / lanesView.drift）的判定输入。一条已清理干净、
+// 只剩本机接线的条目返回空对象（干净，不是"残留全 null"）。
+export function presentAgentAxes(agent) {
+  const out = {};
+  if (agent?.backend !== undefined && agent?.backend !== null) out.backend = agent.backend;
+  if (agent?.model?.id !== undefined && agent?.model?.id !== null) out.modelId = agent.model.id;
+  if (agent?.model?.providerID !== undefined && agent?.model?.providerID !== null) {
+    out.providerID = agent.model.providerID;
+  }
+  if (agent?.reasoning?.effort !== undefined && agent?.reasoning?.effort !== null) {
+    out.effort = agent.reasoning.effort;
+  }
+  return out;
 }
 export { laneAxes, agentAxes, axesEqual };
 
@@ -241,6 +256,10 @@ export function validateLanesStructure(doc) {
   for (const k of Object.keys(doc)) {
     if (!TOP_KEYS.has(k)) issues.push(`未知顶层键 "${k}"（白名单 ${[...TOP_KEYS].join("/")}）`);
   }
+  // b158a 修复一：lanes 数组缺席（如只有 {"schema":2}）= 不合法——loadLanesConfig
+  // 会把缺席归一成空数组，"合法空表"与"缺 lanes"的区分只能在这层做；显式
+  // lanes: [] 保持合法。
+  if (doc.lanes === undefined) issues.push("lanes 数组缺席（空表须显式 lanes: []）");
   if (doc.lanes !== undefined && !Array.isArray(doc.lanes)) issues.push("lanes 必须是数组");
   const lanes = Array.isArray(doc.lanes) ? doc.lanes : [];
   const seenLaneIds = new Set();

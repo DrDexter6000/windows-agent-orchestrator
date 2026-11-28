@@ -11,19 +11,20 @@
 //   - certification=null 不等于"无记录"——无记录/身份不匹配/台账缺失或不可读
 //     三种原因未区分，展示层如实标注（sol P1-3）；状态值原样透传（不止
 //     certified/conditional 两态）。
-//   - 接线轴复用 dispatchResolution 的 axesEqual 判定（b158a 修订：生效四轴来自
-//     车道表，wired/invalid 按合并后条目判定；drift=私有残留四轴与车道表不同——
-//     已不生效可删，只给事实，不再断言"派发将拒绝"）；"键不存在"（unwired）与
-//     "键存在但条目无效"（invalid）严格分开（sol P1-1）。
+//   - 接线轴复用 dispatchResolution 的轴读取与"在场轴"判定（b158a 修订：生效四轴
+//     来自车道表，wired/invalid 按合并后条目判定；drift=私有残留四轴与车道表
+//     不同——已不生效可删，只给事实，不再断言"派发将拒绝"）；"键不存在"（unwired）
+//     与"键存在但条目无效"（invalid）严格分开（sol P1-1）。
 //   - 画像降级三态分开：absent（无该车道键）/ invalid（形状错误）/ unreadable
 //     （整文件不可读）——不用默认值冒充观察事实（sol P1-4）。
 //   - 本模块纯函数：所有 IO（读文件/探测/registry）由调用方注入；零 env 读取。
 //     画像加载器经 laneProfile.js 取得并 re-export（命令层单入口——laneProfile
 //     只准被本模块、leadPreflight 与 laneFactsLine 引用，隔离守卫钉住）。
 
-// axesEqual/laneAxes/agentAxes（explicit 派发 G4 同一判定，0064 起导出）。
+// laneAxes/agentAxes/presentAgentAxes（生效视图与 wao lanes 接线轴同一来源，
+// 0064 起导出；b158a 修复一起加 presentAgentAxes——只比在场轴）。
 // validDispatchHold（TD-283）：dispatchHold 的形状校验与车道表同一纪律。
-import { axesEqual, laneAxes, agentAxes, validDispatchHold } from "../dispatchResolution.js";
+import { laneAxes, agentAxes, presentAgentAxes, validDispatchHold } from "../dispatchResolution.js";
 import {
   readLaneTraits,
   ratingsState,
@@ -99,10 +100,11 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     const declared = laneAxes(lane);
     const agent = registryAgents?.[id] ?? null;
 
-    // 接线轴（sol P1-1；b158a 语义修订）：unwired（键不存在）/ invalid（键在、
-    // 生效条目无法解析）/ wired（生效条目过校验——四轴来自车道表，恒一致）/
-    // drift（私有**残留**四轴与车道表不同——已不生效、可删；读取原始视图，
-    // 逐轴列差值，只给事实不再断言"派发将拒绝"）。
+    // 接线轴（sol P1-1；b158a 修复一语义）：unwired（键不存在）/ invalid（键在、
+    // 生效条目无法解析）/ wired（生效条目过校验）/ drift（私有**残留**四轴与
+    // 车道表不同——已不生效、可删）。b158a 修复一：只比**在场**的轴（四轴全
+    // 缺席=干净，不误报）；停用合并时调用方不传 rawRegistryAgents——条目自带的
+    // 四轴就是实际生效值，不标"已不生效"。
     let wiring = "unwired";
     let wiringDetail = null;
     if (invalidIds.has(id)) wiring = "invalid";
@@ -110,10 +112,11 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
       wiring = "wired";
       const raw = rawRegistryAgents?.[id];
       if (raw !== undefined && raw !== null) {
-        const rawAxes = agentAxes(raw);
-        if (!axesEqual(declared, rawAxes)) {
+        const present = presentAgentAxes(raw);
+        const differing = Object.keys(present).filter((axis) => present[axis] !== declared[axis]);
+        if (differing.length > 0) {
           wiring = "drift";
-          wiringDetail = { declared, registry: rawAxes };
+          wiringDetail = { declared, registry: agentAxes(raw), differingAxes: differing };
         }
       }
     }

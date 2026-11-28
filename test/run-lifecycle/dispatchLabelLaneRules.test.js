@@ -26,7 +26,7 @@ import { HOLIDAYS_NOTE } from "../../src/application/laneRules.js";
 
 const LANES = {
   ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
-  lanes: [{ id: "fixture-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {} }],
+  lanes: [{ id: "fixture-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: {} }],
 };
 
 const FAKE_RULES = {

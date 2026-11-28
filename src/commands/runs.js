@@ -116,7 +116,7 @@ import {
 } from "../verificationGate.js";
 import { describePendingVerificationGate } from "../application/verificationGateView.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
-import { parseOptions, resolveTargetCwd, loadPrompt } from "./shared.js";
+import { parseOptions, resolveTargetCwd, loadPrompt  , lanesMergeDocForCall } from "./shared.js";
 // 第 145a 批：`runs dashboard --web` 的退役文案（与 `wao ask` 同一个墓碑写法）。
 import { RUNS_DASHBOARD_WEB_RETIRED_MESSAGE } from "../cliHelp.js";
 // 第 137a 批：`runs continue --delivery-spec-file` 与 `wao run` 同一个解析器与
@@ -3179,6 +3179,9 @@ async function runsContinueCommand(args, config, hostDeps = {}) {
     delivery,
     runDir: resolve(values.runDir ?? config.runDir),
     registryPath: resolve(values.registry ?? config.registry),
+    // b158a 修复一：续修的 drift 比对用生效视图（一次恰一份表；与 MCP run_continue 同一接线，子
+    // runner 的 --lanes-merge 由 continueRun 内部穿线）。
+    lanesMergeDoc: lanesMergeDocForCall({ registry: values.registry }, config, config?.loadLanesConfigFn),
     authorizedWorkspaceRoot,
     // 与 MCP 处理函数一致。认证清单门（WAO_MCP_REQUIRE_CERTIFIED）是 MCP 边界的
     // 部署开关，只在 MCP 适配层；CLI 是 Lead 的特权通道，不设这道门。
@@ -3822,6 +3825,8 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       reason,
       sessionRelease: makeAcceptedSessionRelease({
         registryPath: resolve(config.registry ?? "config/agents.json"),
+        // b158a 修复一：交付采纳后的会话释放取生效条目（一次恰一份表）。
+        lanesMergeDoc: lanesMergeDocForCall({}, config, config?.loadLanesConfigFn),
       }),
     });
   } catch (err) {

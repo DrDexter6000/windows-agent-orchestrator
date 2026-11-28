@@ -1076,8 +1076,8 @@ export class RunManager {
       // 0045 §1.4 W2：派发目标解析结果（dispatchResolution.resolveDispatchTarget
       // 产出）。source="explicit" → 角色=角色库 config/roles/<roleId>.md（经 P1
       // 钉住机制生效，替代 registry 的 systemPrompt）；source="alias" → 仅身份
-      // 注解（执行零变化，H1）；absent → 行为与 W2 前逐字节一致。注册表赢原则：
-      // 轴不一致在解析器已拒（lane_wiring_mismatch），此处不重比。
+      // 注解（执行零变化，H1）；absent → 行为与 W2 前逐字节一致。四轴解析在
+      // b158a 后以车道表为唯一出处（有效条目已在调用方合并），此处不重比私有残留。
       resolvedTarget = null,
       // M8-1：默认 scorecard 模式。warn=默认开启(不阻塞,只留痕) | hard=升级硬闸 | off=完全关闭。
       scorecardMode = "warn",
@@ -1183,11 +1183,11 @@ export class RunManager {
     taskType = null,
     // CLI retry 的新运行记原 runId（run.started.retryOf）。只接受合法 runId。
     retryOf = null,
-    // b158a：车道四轴合并的启用车道表（null/undefined = 停用）。调用方按
-    // lanesDocForCall / isPairedDefaultRegistry 的同一配对规则显式传入；启用时
-    // 本方法读取的注册表走 effectiveRegistryView 的生效条目（车道表不可用即以
-    // lanes_merge_unavailable 具名拒绝），单次 --model/--reasoning 覆盖仍在合并
-    // 之后生效。
+    // b158a：车道四轴合并的启用车道表（null/undefined = 停用）。调用方经
+    // registry.js 的单一判定（lanesMergeDocFor，CLI 侧 lanesMergeDocForCall）取得
+    // 后显式传入；启用时本方法读取的注册表走 effectiveRegistryView 的生效条目
+    //（车道表不可用即以 lanes_merge_unavailable 具名拒绝），单次 --model/
+    // --reasoning 覆盖仍在合并之后生效。
     lanesMerge = null,
     } = options;
 
@@ -2439,25 +2439,38 @@ export class RunManager {
       agent = { ...agent, reasoning: { ...(agent.reasoning ?? {}), effort: resumeReasoningOverride } };
     }
 
-    // b158a（续修与恢复条款）：恢复一个**没有显式 override** 的旧运行时，当前
-    // 生效配置（车道表合并后）的四轴必须与该运行 run.started 记下的一致——
-    // 不一致按具名原因拒绝恢复，不用新配置跑后半程（daemon 接管换模型/换
-    // backend 的静默漂移面）。带 override 的运行不在此列：override 重建已把
-    // 记录的轴盖回当前 agent，其余轴仍在此比对（backend/providerID 变了同样
-    // 拒绝）。比对用 dispatchResolution 的 axesEqual（null 归一，与派发解析
-    // 同一判定）；固定文案不回显轴值（值是配置来源的自由文本）。
+    // b158a（续修与恢复条款；修复一文案收口）：恢复时当前**生效配置**的四轴
+    // 必须与该运行 run.started 记下的一致——不一致按具名原因拒绝恢复，不用新
+    // 配置跑后半程（daemon 接管换模型/换 backend 的静默漂移面）。检查无条件
+    // 执行：停用合并时比的是条目自带的四轴（自包含注册表同样不许漂移）；带
+    // override 的运行，override 重建已把记录的轴盖回当前 agent，其余轴仍比对。
+    // 两种拒因分开：①run.started 没有记录 reasoning（老转录无证据——缺证据
+    // 不猜当时的 effort）；②四轴确实变了。只列轴名，不列值（值是配置来源的
+    // 自由文本）；比对用 dispatchResolution 的 axesEqual（null 归一）。
     {
       const recordedAxes = agentAxes({
         backend: runStarted.backend,
         model: runStarted.model,
         reasoning: runStarted.reasoning,
       });
-      if (!axesEqual(recordedAxes, agentAxes(agent))) {
+      const currentAxes = agentAxes(agent);
+      const differingAxes = ["backend", "modelId", "providerID", "effort"]
+        .filter((axis) => recordedAxes[axis] !== currentAxes[axis]);
+      if (differingAxes.length > 0) {
+        const reasoningNotRecorded = differingAxes.length === 1
+          && differingAxes[0] === "effort"
+          && (runStarted.reasoning === undefined || runStarted.reasoning === null)
+          && currentAxes.effort !== null;
         throw new Error(
-          "resume_refused: the current effective lane axes (backend/model.id/model.providerID/"
-          + "reasoning.effort, merged from config/lanes.json) differ from what run.started recorded "
-          + "for this run (worker_configuration_changed) — the back half must not run on a new "
-          + "configuration; restore the lane table to the recorded axes or start a new run instead",
+          reasoningNotRecorded
+            ? "resume_refused (reasoning_not_recorded): run.started did not record this run's "
+              + "reasoning.effort (pre-recording transcript) while the current effective "
+              + "configuration declares one — WAO does not guess the recorded effort; "
+              + "start a new run instead of resuming"
+            : "resume_refused (worker_configuration_changed): the current effective "
+              + "configuration's lane axes differ from what run.started recorded for this run "
+              + "(differing axes: " + differingAxes.join("/") + ") — the back half must not run on a "
+              + "new configuration; restore the recorded axes or start a new run instead",
         );
       }
     }

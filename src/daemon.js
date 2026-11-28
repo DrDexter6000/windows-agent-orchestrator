@@ -26,8 +26,10 @@ import { dirname } from "node:path";
 import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "./projectBuckets.js";
 import { RunManager } from "./runManager.js";
-import { readRegistry, normalizeAgent, isPairedDefaultRegistry } from "./registry.js";
-import { loadLanesConfig } from "./dispatchResolution.js";
+import { readRegistry, normalizeAgent, lanesMergeDocFor, pairedDefaultRegistryPath } from "./registry.js";
+// b158a 修复二：resume-on-start 失败写与 runner 同一份持久失败记录（闭集原因码 +
+// 原席位身份）；stderr 只留 runId 与原因码。
+import { appendDurableResumeFailure, durableResumeFailureCode } from "./resumeFailureFact.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS, isFreshHeartbeat } from "./application/ownerLiveness.js";
 import { validateBoundedWaitTimeout } from "./application/timeoutPolicy.js";
 
@@ -352,11 +354,17 @@ export async function startDaemon(opts = {}) {
     ? makeObjectRegistry(opts.registry)
     : readRegistry;
   const registryPath = typeof opts.registry === "string" ? opts.registry : undefined;
-  // b158a：daemon 的生效车道表（与 backgroundRunner 同一配对判定：对象注入缝
-  // 停用；字符串路径=车道表所配对的默认注册表才启用）。
-  const lanesMerge = typeof opts.registry === "object" && opts.registry !== null
+  // b158a 修复一：daemon 的生效车道表（单一判定：对象注入缝停用；字符串/缺席
+  // 路径与 pairedDefaultRegistryPath()——代码根 config/default.json 的 registry
+  // 键——同一文件才启用）。IPC start/resume 按请求现读，不用这份启动快照。
+  // 修复二：允许测试注入整份判定函数（坏表 resume-on-start 用例），生产不用。
+  const daemonLanesMergeDoc = typeof opts.registry === "object" && opts.registry !== null
     ? null
-    : (isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null);
+    : () => lanesMergeDocFor(resolve(registryPath ?? "config/agents.json"), pairedDefaultRegistryPath());
+  // 对象注入缝（无路径）→ 无判定函数（resume/start 不带 lanesMerge，旧语义）。
+  const lanesMergeDocFn = typeof opts.lanesMergeDocFn === "function"
+    ? opts.lanesMergeDocFn
+    : daemonLanesMergeDoc;
   // M10-pre3C: the daemon must NOT inject an implicit 120000 execution deadline.
   // Omitted/null means disabled — RunManager.waitForCompletion resolves the
   // policy via the timeout-policy SSOT and creates no total-duration timer.
@@ -465,7 +473,7 @@ export async function startDaemon(opts = {}) {
           sock.write(JSON.stringify({ ok: false, error: "request not JSON" }) + "\n");
           continue;
         }
-        handleRequest(req, manager, { runDir, waitTimeout, pollInterval, registryPath, runControllers, requestShutdown })
+        handleRequest(req, manager, { runDir, waitTimeout, pollInterval, registryPath, runControllers, requestShutdown, lanesMergeDocFn })
           .then((res) => {
             sock.write(JSON.stringify(res) + "\n");
           })
@@ -487,15 +495,26 @@ export async function startDaemon(opts = {}) {
     const resumable = scanResumableRuns(runDir);
     for (const runId of resumable) {
       try {
-        const run = await manager.resume(runId, { runDir, registry: registryPath, lanesMerge });
+        // b158a 修复一：接管 resume 按请求现读车道表；失败不再静默——留一行
+        // 可见事实（含具名原因码），单个 run 失败仍不拖垮 daemon。
+        const run = await manager.resume(runId, {
+          runDir, registry: registryPath,
+          ...(lanesMergeDocFn ? { lanesMerge: lanesMergeDocFn() } : {}),
+        });
         if (!run) continue;
         const controller = new AbortController();
         runControllers.set(runId, controller);
         run.waitForCompletion({ waitTimeout, pollInterval, signal: controller.signal })
           .catch(() => { /* resume 失败已在 transcript 记录 */ })
           .finally(() => { runControllers.delete(runId); });
-      } catch {
-        // 单个 run resume 失败不拖垮整个 daemon
+      } catch (e) {
+        // 单个 run resume 失败不拖垮整个 daemon——但不再静默：写与 runner 同一份
+        // 持久失败记录（闭集原因码，保留原席位身份），stderr 只留 runId+原因码
+        //（不写异常原文：可能带车道 id、键名或本机路径；且 daemon 常规以
+        // stdio:"ignore" 启动，这行本来就不可见——可查询的真相在转录里）。
+        const code = durableResumeFailureCode(e?.message);
+        await appendDurableResumeFailure(runId, runDir, `resume-on-start failed (${code})`);
+        process.stderr.write(`daemon: --resume-on-start resume failed for ${runId} (${code})\n`);
       }
     }
   }
@@ -572,11 +591,14 @@ export async function handleRequest(req, manager, ctx = {}) {
   if (cmd === "start") {
     const { agentId, prompt } = req;
     if (!agentId || !prompt) return { ok: false, error: "start requires agentId + prompt" };
+    // b158a 修复一：IPC start 按请求现读车道表（单一判定；不用 daemon 启动时的
+    // 快照——表在 daemon 生命周期内变化时本请求看到的就是当下这一份）。
     const run = await manager.start(agentId, {
       prompt,
       registry: ctx.registryPath,
       runDir: ctx.runDir,
       fireAndForget: false, // daemon 自己驱动 waitForCompletion，不触发护栏
+      ...(ctx.lanesMergeDocFn ? { lanesMerge: ctx.lanesMergeDocFn() } : {}),
     });
     // per-run controller：daemon 拿中断权。传给 waitForCompletion 作外部 signal。
     const controller = new AbortController();

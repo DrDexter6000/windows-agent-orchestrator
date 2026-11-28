@@ -53,6 +53,8 @@ import { HOST_DESCRIPTORS, HOST_DESCRIPTOR_IDS, findHostDescriptor } from "../ho
 import { probeHostRegistration, describeStdioEntry } from "../hostAdapters/hostRegistrationProbe.js";
 // 片段构造与宿主示例行复用 onboarding 的单一派生（TD-191① 验收判据：消灭第二清单）。
 import { buildMcpSnippet, buildHostExamples } from "./onboarding.js";
+// b158a 修复二：默认注册表路径的单一出处。
+import { pairedDefaultRegistryPath } from "../registry.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -68,7 +70,10 @@ const REPO_ROOT = resolve(_MODULE_DIR, "..", "..");
 
 function shimPath() { return join(REPO_ROOT, "scripts", "wao-node.cjs"); }
 function stdioPath() { return join(REPO_ROOT, "src", "mcp", "stdio.js"); }
-function registryPath() { return join(REPO_ROOT, "config", "agents.json"); }
+// b158a 修复二：本安装的默认注册表只有一个出处（pairedDefaultRegistryPath）；
+// 不再写死 config/agents.json——Owner 改 config/default.json 的 registry 后，
+// workspace activation 写出的绑定与实际默认一致。
+function registryPath() { return pairedDefaultRegistryPath(REPO_ROOT); }
 function runDirPath() { return join(REPO_ROOT, "runs"); }
 
 // ── Expected server contract ─────────────────────────────────────────────────

@@ -40,8 +40,8 @@ import { recordAcceptance, listAcceptance } from "../application/acceptanceRecor
 // 0065（0045 §1.2 终局）：--reviewed-run 的对抗性派生（application 层编排，
 // 复用 deriveIndependenceRelations 指纹比对——core 命令层只做装配）。
 import { derivePanelFacts, seatFactsFromRegistry } from "../application/panelDerivation.js";
-import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
-import { loadLanesConfig } from "../dispatchResolution.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
+import { lanesMergeDocForCall } from "./shared.js";
 import { readTranscript } from "../transcript.js";
 import { resolveTranscriptPath } from "../projectBuckets.js";
 
@@ -53,10 +53,10 @@ import { resolveTranscriptPath } from "../projectBuckets.js";
  */
 async function derivePanelFactsForStage({ seatIds, reviewedRunIds, options, config }) {
   const registryPath = resolve(options.registry ?? config.registry);
-  // b158a：席位事实走生效视图（默认注册表配对启用合并；与派发同源的登记事实）。
+  // b158a 修复一：席位事实走生效视图——单一配对判定（与 CLI 派发同一规则）。
   const reg = effectiveRegistryView(
     await readRegistry(registryPath),
-    isPairedDefaultRegistry(options.registry) ? loadLanesConfig() : null,
+    lanesMergeDocForCall(options, config),
   );
   const agentsById = new Map(reg.listAgents().map((a) => [a.id, a]));
   return derivePanelFacts({

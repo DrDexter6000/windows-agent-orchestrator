@@ -25,15 +25,19 @@
 
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
-import { loadLanesConfig } from "../dispatchResolution.js";
+import { readRegistry, effectiveRegistryView, sameRegistryFile } from "../registry.js";
+
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
 import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
 import { buildLanesView, readLaneTraits, peakNowAt, beijingNowLabel, HOLIDAYS_NOTE } from "../application/lanesView.js";
+// b158a 修复一：配对判定单一出处（CLI 规则；--registry+--lanes-file 成对面由
+// 上方 explicitLanesDoc 承担）。
+import { lanesMergeDocForCall } from "./shared.js";
 import { probeCliOnPath, probeKeyEnvSource, probeKimiTokenFile } from "./onboarding.js";
 // TD-318（三）：车道表/画像/registry/台账值是磁盘上的不可信文本——join 前逐行
 // 转义，值里的换行不能再伪造一行（core 顶层叶子，commands 下向 import）。
 import { escapeControlChars } from "../safeText.js";
+import { loadLanesConfig } from "../dispatchResolution.js";
 
 function parseOptions(args) {
   const options = { json: false, evidence: false, registry: undefined, lanesFile: undefined, runDir: undefined };
@@ -177,7 +181,9 @@ function renderLane(row, width, dimensionLabels, evidence) {
   // b158a：drift 语义=私有残留四轴与车道表不同（已不生效，可删）——只给事实，
   // 不再断言"派发将拒绝"。
   if (row.wiring === "drift") {
-    emit("接线", `漂移——私有残留四轴（已不生效，可删；实际生效值以车道表为准）：车道表(${axesLabel(row.wiringDetail.declared)}) ≠ 私有残留(${axesLabel(row.wiringDetail.registry)})`);
+    // b158a 修复一：只列在场且不同的轴（differingAxes）；缺键不算残留。
+    const axes = (row.wiringDetail.differingAxes ?? []).join("/");
+    emit("接线", `漂移——私有残留四轴（已不生效，可删；实际生效值以车道表为准${axes ? `，差异轴：${axes}` : ""}）：车道表(${axesLabel(row.wiringDetail.declared)}) ≠ 私有残留(${axesLabel(row.wiringDetail.registry)})`);
   } else if (row.wiring === "invalid") lines.push("  接线: 条目无效（registry 条目无法解析——认证/就绪跳过；见尾部 issues）");
   else if (row.wiring === "unwired") lines.push(`  接线: 未接线（registry 无键 ${row.id}——认证/就绪跳过）`);
 
@@ -258,38 +264,65 @@ export async function lanesCommand(args, config) {
   const options = parseOptions(args);
 
   // 防跨绑成对规则（0064 裁定，语义同 run 命令的 lanesEnabled——单独外来
-  // registry 拒绝；与显式车道表成对=操作员声明拼接，放行并注记）。
+  // registry 拒绝；与显式车道表成对=操作员声明拼接，放行并注记）。b158a 修复二：
+  // 默认判定改用共享的 sameRegistryFile（win32 大小写不敏感）；--lanes-file 只是
+  // 本次展示的车道表输入，是否合并仍走共享判定（外来自包含，不强制合并）。
   const defaultRegistryPath = resolve(config?.registry ?? "config/agents.json");
   const registryPath = options.registry !== undefined ? resolve(options.registry) : defaultRegistryPath;
-  const registryIsDefault = registryPath === defaultRegistryPath;
+  const registryIsDefault = sameRegistryFile(registryPath, defaultRegistryPath);
   const explicitPairing = !registryIsDefault && options.lanesFile !== undefined;
   if (!registryIsDefault && options.lanesFile === undefined) {
     throw new Error(
-      "wao lanes: 非默认 --registry 需与 --lanes-file 成对显式给出（车道表与接线防跨绑，规则同 run 命令）。",
+      "wao lanes: 非默认 --registry 需与 --lanes-file 成对显式给出（车道表与接线防跨绑，规则同 run 命令；路径只差大小写算同一个文件）。",
     );
   }
 
-  // registry 单次读取：inventory / 探测输入 / 接线轴同源。b158a：生效视图
-  //（registryPath 是车道表所配对的默认注册表才启用合并——显式配对面
-  //（--registry+--lanes-file 成对）同样按"registryPath 是否默认"判定；外来
-  // registry 与车道表本就不允许单独混拼）。rawAgents 保留原始视图供 drift 观察。
+  // registry 单次读取：inventory / 探测输入 / 接线轴同源。b158a 修复一/二：
+  // **一次调用恰读一次车道表、同一个启用判定**——是否覆盖注册表四轴的合并决定
+  // 只由 lanesMergeDocForCall 给出；`--lanes-file` 只换本次**展示**的车道表。
+  // 合并停用（外来注册表）时条目自带的四轴就是实际生效值——不传 rawRegistryAgents，
+  // 不标"已不生效"。raw 视图仅供启用时的 drift 观察。
   const reg = await readRegistry(registryPath);
-  const lanesMergeDoc = isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null;
-  const effectiveReg = effectiveRegistryView(reg, lanesMergeDoc);
-  const registryAgents = Object.fromEntries(effectiveReg.listAgents().map((a) => [a.id, a]));
-  const rawAgents = Object.fromEntries(reg.rawEntries());
-  const runDir = resolve(options.runDir ?? config?.runDir ?? "runs");
-  const inventory = await getRegistryInventoryWithIssues({
-    registryPath,
-    runDir,
-    readRegistryFn: async () => effectiveReg,
-    readFileFn: (p) => readFile(p, "utf8"),
-    lanesMergeDoc,
-  });
-
-  const lanesDoc = options.lanesFile !== undefined
+  const explicitLanesDoc = options.lanesFile !== undefined
     ? loadLanesConfig(resolve(options.lanesFile))
-    : loadLanesConfig();
+    : null;
+  const lanesMergeDoc = lanesMergeDocForCall(options, config, config?.loadLanesConfigFn);
+  // 表不可用（结构/四轴坏，合并抛 lanes_merge_unavailable）→ 保留具名原因，
+  // 降级到"车道表不可用"渲染面（issues 带原因、exitCode 1、不渲染正常车道面），
+  // 认证/就绪按停用处理（不合并、无 drift 观察）——视图命令不走派发式硬拒。
+  let mergeFailureMessage = null;
+  let effectiveReg = reg;
+  if (lanesMergeDoc !== null) {
+    try {
+      effectiveReg = effectiveRegistryView(reg, lanesMergeDoc);
+    } catch (e) {
+      mergeFailureMessage = e.message;
+    }
+  }
+  // 展示用表：合并表不可用时报告它；否则显式 --lanes-file 优先（只作展示输入），
+  // 再否则用共享合并表，最后空表。
+  const lanesDoc = mergeFailureMessage !== null
+    ? { ok: false, path: "<lane table>", sha256: null, lanes: [], issues: [mergeFailureMessage], rolesHint: [] }
+    : (explicitLanesDoc ?? lanesMergeDoc ?? { lanes: [], sha256: null, issues: [], rolesHint: [] });
+  const usableMergeDoc = mergeFailureMessage === null ? lanesMergeDoc : null;
+  const runDir = resolve(options.runDir ?? config?.runDir ?? "runs");
+  // b158a 修复二：车道表不可用时先报告表不可用——不能先对原始条目 listAgents()
+  // 抛"缺 backend"，把准备好的 bad-table 报告盖掉。此时认证/就绪/drift 全部省略。
+  let registryAgents = {};
+  let rawAgents = {};
+  let inventory = { agents: [], issues: [], issuesTruncated: false };
+  let ready = { rows: [] };
+  if (mergeFailureMessage === null) {
+    registryAgents = Object.fromEntries(effectiveReg.listAgents().map((a) => [a.id, a]));
+    rawAgents = Object.fromEntries(reg.rawEntries());
+    inventory = await getRegistryInventoryWithIssues({
+      registryPath,
+      runDir,
+      readRegistryFn: async () => effectiveReg,
+      readFileFn: (p) => readFile(p, "utf8"),
+      lanesMergeDoc: usableMergeDoc,
+    });
+  }
   // readLaneTraitsFn：测试缝（夹具画像注入；生产路径缺省真实画像）。与
   // loadLanesConfigFn/readRegistry 同一注入纪律。nowMsFn（152 批）：对照表
   // "此刻"的时钟缝；生产缺省 Date.now()。
@@ -300,17 +333,23 @@ export async function lanesCommand(args, config) {
   // drift 条目本身合法，就绪事实属于 registry 侧；未接线/无效无行）。
   const laneIdSet = new Set((Array.isArray(lanesDoc.lanes) ? lanesDoc.lanes : [])
     .map((l) => l?.id).filter((id) => typeof id === "string"));
-  const candidates = (inventory.agents ?? [])
-    .filter((a) => laneIdSet.has(a.id))
-    .map((a) => ({ id: a.id, backend: a.backend, model: null }));
-  const ready = await buildRecommendations(
-    candidates, { agents: registryAgents },
-    { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource, hasKimiTokenFile: probeKimiTokenFile },
-    { source: "configured", sortReadyFirst: false },
-  );
+  if (mergeFailureMessage === null) {
+    const candidates = (inventory.agents ?? [])
+      .filter((a) => laneIdSet.has(a.id))
+      .map((a) => ({ id: a.id, backend: a.backend, model: null }));
+    ready = await buildRecommendations(
+      candidates, { agents: registryAgents },
+      { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource, hasKimiTokenFile: probeKimiTokenFile },
+      { source: "configured", sortReadyFirst: false },
+    );
+  }
 
   const view = buildLanesView({
-    lanesDoc, traitsResult, inventory, registryAgents, rawRegistryAgents: rawAgents, readyRows: ready.rows,
+    lanesDoc, traitsResult, inventory, registryAgents,
+    // 停用合并（外来注册表）或表不可用时不传 raw 视图——自带四轴即生效值 /
+    // 无法判定残留，无"残留"观察。
+    ...(usableMergeDoc !== null ? { rawRegistryAgents: rawAgents } : {}),
+    readyRows: ready.rows,
   });
 
   if (options.json) {

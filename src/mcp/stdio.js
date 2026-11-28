@@ -30,12 +30,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createWaoMcpServer } from "./server.js";
 import { armMcpParentImage } from "./parentImage.js";
 import { isEntryModule } from "../entryPoint.js";
+// b158a 修复二：本安装的默认注册表只有一个出处——不带 --registry 时用
+// pairedDefaultRegistryPath()（代码根 config/default.json 的 registry 键，
+// 相对路径按代码根解析），不再写死相对 config/agents.json。
+import { pairedDefaultRegistryPath } from "../registry.js";
 import {
   sampleDispatchResourceAdvisory,
   commitDispatchResourceAdvisory,
 } from "../dispatchResourceAdvisory.js";
 
-const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
 // M10-pre3: default execution deadline is disabled (null).
 // Previously 300000, which caused real workers still making progress to be killed.
@@ -117,7 +120,7 @@ export { loadGlobalWaitTimeout as loadGlobalWaitTimeoutForTest };
  * @throws {Error} on malformed --workspace-root
  */
 export function parseMcpArgs(argv) {
-  const out = { registryPath: DEFAULT_REGISTRY, runDir: DEFAULT_RUN_DIR, workspaceRoot: undefined };
+  const out = { registryPath: pairedDefaultRegistryPath(), runDir: DEFAULT_RUN_DIR, workspaceRoot: undefined };
   if (!Array.isArray(argv)) return out;
   let workspaceRootSeen = false;
   for (let i = 0; i < argv.length; i += 1) {

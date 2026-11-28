@@ -61,8 +61,7 @@ import { checkStateOf } from "./reliability/checkStates.mjs";
 import { safeJsonParse } from "../src/safeText.js";
 // b158a：默认注册表时组件层消费生效条目（四轴来自 config/lanes.json）；临时/
 // 非默认注册表照旧自包含。表不可用即抛 lanes_merge_unavailable（不回退旧值）。
-import { effectiveRegistryView, isPairedDefaultRegistry } from "../src/registry.js";
-import { loadLanesConfig } from "../src/dispatchResolution.js";
+import { lanesMergeDocFor, pairedDefaultRegistryPath, mergeRawRegistryDoc } from "../src/registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -83,7 +82,8 @@ if (_argResult.error) {
 }
 const getArg = (name) => _argResult.values[name];
 const SUBJECT = getArg("subject");
-const REGISTRY_PATH = resolve(getArg("registry") || join(ROOT, "config", "agents.json"));
+// b158a 修复二：本安装的默认注册表只有一个出处（pairedDefaultRegistryPath(ROOT)）。
+const REGISTRY_PATH = resolve(getArg("registry") || pairedDefaultRegistryPath(ROOT));
 const COMPOSITION_SUMMARY_PATH = resolve(
   getArg("composition-summary") || join(ROOT, "runs", "reliability-summary.json"),
 );
@@ -128,17 +128,12 @@ try {
   console.error(`[component-check] registry unparseable (${REGISTRY_PATH}): ${error.message ?? error}`);
   process.exit(2);
 }
-// b158a：默认注册表 → 生效条目（lane 合并后的 agents + 原样其余配置）。
+// b158a 修复一：默认注册表 → 生效条目（mergeRawRegistryDoc 收拢）。
 try {
-  const lanesMergeDoc = isPairedDefaultRegistry(getArg("registry")) ? loadLanesConfig() : null;
-  if (lanesMergeDoc !== null) {
-    const agents = registry?.agents && typeof registry.agents === "object" ? registry.agents : {};
-    const mergedAgents = Object.fromEntries(
-      effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
-        .mergedRawEntries(),
-    );
-    registry = { ...registry, agents: mergedAgents };
-  }
+  registry = mergeRawRegistryDoc(
+    registry,
+    lanesMergeDocFor(REGISTRY_PATH, pairedDefaultRegistryPath()),
+  );
 } catch (error) {
   console.error(`[component-check] ${error.message ?? error}`);
   process.exit(2);

@@ -9,7 +9,8 @@
 //     null / contextWindow / deepseek 双字段各一例）；
 //   - effectiveRegistryView 的启用契约：null=停用原样返回；启用而表不可用
 //     （结构/不可读/四轴不合法）抛 lanes_merge_unavailable；rawEntries 恒原始；
-//   - 配对判定 isPairedDefaultRegistry（undefined=默认启用；外来路径停用）；
+//   - 配对判定（b158a 修复一单一出处）：sameRegistryFile / lanesMergeDocFor /
+//     pairedDefaultRegistryPath（win32 大小写不敏感；代码根 config/default.json）；
 //   - modelPolicyEqual（键序无关、null≡缺席）——续修比较的 SSOT；
 //   - 身份面兼容：车道指纹 / matchedCertRecord 在新旧两侧同值（私有=车道表时）。
 import { test } from "node:test";
@@ -18,17 +19,21 @@ import {
   mergeLaneAxes,
   effectiveRegistryView,
   validateLaneAxesIssues,
-  isPairedDefaultRegistry,
+  sameRegistryFile,
+  lanesMergeDocFor,
   pairedDefaultRegistryPath,
+  mergeRawRegistryDoc,
+  effectiveEntriesOf,
   modelPolicyEqual,
   normalizeAgent,
   readRegistry,
 } from "../../src/registry.js";
 import { matchedCertRecord } from "../../src/runManager.js";
+import { validateLanesStructure } from "../../src/dispatchResolution.js";
 import { laneFingerprint as laneFingerprintOf } from "../../src/application/identityProjection.js";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 
 // ── 夹具：一份结构合法、四轴齐备的车道表（loadLanesConfig 产物同形状） ──────
 function lanesDocOf(lanes) {
@@ -245,15 +250,50 @@ test("b158a 视图：getAgent 的 Unknown agent 语义与覆盖序（overrides �
   assert.deepEqual(ids, ["custom", "glm-pro"]);
 });
 
-test("b158a 配对：isPairedDefaultRegistry（undefined 启用；路径等于配对默认启用；外来停用）", () => {
-  assert.equal(isPairedDefaultRegistry(undefined), true);
-  assert.equal(isPairedDefaultRegistry(null), true);
-  assert.equal(isPairedDefaultRegistry(pairedDefaultRegistryPath()), true);
-  assert.equal(isPairedDefaultRegistry(resolve(pairedDefaultRegistryPath())), true, "解析规范化后相等");
-  assert.equal(isPairedDefaultRegistry("D:/elsewhere/agents.json"), false, "外来注册表停用");
-  // 自定义锚点（MCP/脚本按各自根锚定）
-  assert.equal(isPairedDefaultRegistry("D:/w/config/agents.json", "D:/w/config/agents.json"), true);
-  assert.equal(isPairedDefaultRegistry("D:/w2/config/agents.json", "D:/w/config/agents.json"), false);
+test("b158a 修复一 配对：sameRegistryFile（同一文件=启用；外来=停用；win32 大小写不敏感）", () => {
+  assert.equal(sameRegistryFile("D:/w/config/agents.json", "D:/w/config/agents.json"), true);
+  assert.equal(sameRegistryFile("D:/w2/config/agents.json", "D:/w/config/agents.json"), false, "真正的外部文件停用");
+  // 同一文件只差大小写（Windows 文件系统大小写不敏感；resolve 保留原拼写，
+  // 字符串直比会判错）——两种拼写都判"同一文件"。
+  assert.equal(sameRegistryFile("d:/w/CONFIG/Agents.json", "D:/w/config/agents.json"), true,
+    process.platform === "win32" ? "win32 大小写异拼写=同一文件" : "非 win32 仍按字面（本仓在 win32 跑）");
+  assert.equal(sameRegistryFile("D:/w/config/../config/agents.json", "D:/w/config/agents.json"), true, "解析规范化后相等");
+});
+
+test("b158a 修复一 配对：lanesMergeDocFor（同一文件→读表；外来→null；不依赖 cwd）", () => {
+  const doc = { ok: true, sha256: "a".repeat(64), lanes: [], issues: [], rolesHint: [] };
+  const loadFn = () => doc;
+  assert.equal(lanesMergeDocFor("D:/w/config/agents.json", "D:/w/config/agents.json", loadFn), doc);
+  assert.equal(lanesMergeDocFor("D:/w2/agents.json", "D:/w/config/agents.json", loadFn), null);
+  // 大小写异拼写也启用
+  assert.equal(lanesMergeDocFor("d:/w/config/agents.json".toUpperCase() === "D:/W/CONFIG/AGENTS.JSON" ? "D:/W/CONFIG/AGENTS.JSON" : "D:/W/config/agents.json", "D:/w/config/agents.json", loadFn), doc);
+});
+
+test("b158a 修复一：pairedDefaultRegistryPath 读代码根 config/default.json 的 registry（相对按代码根），缺省回落", () => {
+  const mk = (dir, files) => {
+    mkdirSync(dir, { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, name)), { recursive: true });
+      writeFileSync(join(dir, name), content);
+    }
+  };
+  const rootA = mkdtempSync(join(tmpdir(), "wao-pd-a-"));
+  const rootB = mkdtempSync(join(tmpdir(), "wao-pd-b-"));
+  try {
+    mk(join(rootA, "config"), { "default.json": JSON.stringify({ registry: "custom/agents.custom.json" }) });
+    assert.equal(pairedDefaultRegistryPath(rootA), join(rootA, "custom/agents.custom.json"), "相对键按代码根解析");
+    // 绝对键原样
+    mk(join(rootB, "config"), { "default.json": JSON.stringify({ registry: join(rootB, "abs/agents.json") }) });
+    assert.equal(pairedDefaultRegistryPath(rootB), join(rootB, "abs/agents.json"));
+    // 无配置文件 → 回落 config/agents.json
+    const rootC = mkdtempSync(join(tmpdir(), "wao-pd-c-"));
+    try {
+      assert.equal(pairedDefaultRegistryPath(rootC), join(rootC, "config", "agents.json"));
+    } finally { rmSync(rootC, { recursive: true, force: true }); }
+  } finally {
+    rmSync(rootA, { recursive: true, force: true });
+    rmSync(rootB, { recursive: true, force: true });
+  }
 });
 
 // ── 身份面兼容：谱系指纹 / 认证身份在合并前后同值（私有=车道表前提） ─────────
@@ -291,6 +331,86 @@ test("b158a modelPolicyEqual：键序无关；缺键≡null；逐字段比值；
   assert.equal(modelPolicyEqual(undefined, null), true);
   assert.equal(modelPolicyEqual(undefined, { id: "m" }), false);
   assert.equal(modelPolicyEqual({ id: "m" }, null), false);
+});
+
+// ── b158a 修复一：validateLaneAxesIssues 补三项 + 缺 lanes + 句柄契约 ────────
+
+test("b158a 修复一：providerID 非法形状（数字/空串）与 reasoning 标量都算四轴不合法", () => {
+  const badProvider = lanesDocOf([{ ...ZCODE_LANE, model: { id: "bigmodel-api/GLM-5.3", providerID: 123 } }]);
+  assert.ok(validateLaneAxesIssues(badProvider).length === 1, "数字 providerID 拒");
+  const emptyProvider = lanesDocOf([{ ...ZCODE_LANE, model: { id: "bigmodel-api/GLM-5.3", providerID: "" } }]);
+  assert.ok(validateLaneAxesIssues(emptyProvider).length === 1, "空串 providerID 拒");
+  assert.throws(() => effectiveRegistryView(objectRegistry({}), badProvider), /lanes_merge_unavailable/);
+  const scalarReasoning = lanesDocOf([{ ...ZCODE_LANE, reasoning: "max" }]);
+  assert.ok(validateLaneAxesIssues(scalarReasoning).length === 1, "reasoning 标量拒（不静默丢 effort）");
+  assert.throws(() => effectiveRegistryView(objectRegistry({}), scalarReasoning), /lanes_merge_unavailable/);
+  // 合法形状：providerID 字符串/null、reasoning 对象/缺席
+  assert.deepEqual(validateLaneAxesIssues(lanesDocOf([
+    { ...ZCODE_LANE, model: { id: "x", providerID: "p" } },
+    { ...ZCODE_LANE, reasoning: undefined },
+  ])), []);
+});
+
+test("b158a 修复二：reasoning: null 判不合法（只允许对象或缺席）", () => {
+  const doc = lanesDocOf([{ ...ZCODE_LANE, reasoning: null }]);
+  assert.equal(validateLaneAxesIssues(doc).length, 1, "显式 null 与任务书『对象或缺席』不符");
+  assert.throws(() => effectiveRegistryView(objectRegistry({}), doc), /lanes_merge_unavailable/);
+  // 缺席仍合法。
+  assert.deepEqual(validateLaneAxesIssues(lanesDocOf([{ ...ZCODE_LANE, reasoning: undefined }])), []);
+});
+
+test("b158a 修复一：缺 lanes 数组（如只有 {\"schema\":2}）= 不合法；显式 lanes: [] 合法", () => {
+  assert.ok(validateLanesStructure({ schema: 2 }).length > 0, "缺 lanes 数组=结构 issue");
+  assert.deepEqual(validateLanesStructure({ schema: 2, lanes: [] }), [], "显式 lanes: [] 合法");
+  // 经 loadLanesConfig 形状走 effectiveRegistryView：缺 lanes 文档 → lanes_merge_unavailable
+  assert.throws(
+    () => effectiveRegistryView(objectRegistry({}), { ok: false, sha256: "a".repeat(64), lanes: [], issues: validateLanesStructure({ schema: 2 }), rolesHint: [] }),
+    /lanes 数组缺席/,
+  );
+});
+
+// ── b158a 修复一：句柄契约（先表后句柄） ────────────────────────────────────
+
+test("b158a 修复一：启用合并而句柄无 rawEntries() → 内部契约报错（不静默返回）", () => {
+  const noRaw = { listAgents: () => [], getAgent: () => { throw new Error("x"); } };
+  assert.throws(
+    () => effectiveRegistryView(noRaw, lanesDocOf([ZCODE_LANE])),
+    /lacks rawEntries/,
+  );
+  // 表本身不合法时，表错误优先于句柄错误（先表后句柄）
+  assert.throws(
+    () => effectiveRegistryView(noRaw, { ...lanesDocOf([]), ok: false, issues: ["schema 必须为 2"] }),
+    /lanes_merge_unavailable/,
+  );
+});
+
+// ── b158a 修复一：modelPolicyEqual 递归 ─────────────────────────────────────
+
+test("b158a 修复一：modelPolicyEqual 递归——嵌套键序无关、每层 null≡缺键、数组保序", () => {
+  assert.equal(modelPolicyEqual({ a: { x: 1, y: 2 } }, { a: { y: 2, x: 1 } }), true, "嵌套键序无关（旧实现 JSON.stringify 在此误判）");
+  assert.equal(modelPolicyEqual({ a: { x: null } }, { a: {} }), true, "每层 null≡缺键");
+  assert.equal(modelPolicyEqual({ a: [1, 2] }, { a: [2, 1] }), false, "数组保持顺序");
+  assert.equal(modelPolicyEqual({ a: [1, { b: 1, c: 2 }] }, { a: [1, { c: 2, b: 1 }] }), true);
+  assert.equal(modelPolicyEqual({ a: 1 }, { a: "1" }), false, "标量类型敏感");
+});
+
+// ── b158a 修复一：收拢函数 mergeRawRegistryDoc / effectiveEntriesOf ──────────
+
+test("b158a 修复一：mergeRawRegistryDoc（agents 合并、其余键原样）+ effectiveEntriesOf", () => {
+  const rawDoc = {
+    agents: { "glm-pro": { cwd: "D:/w" }, custom: { backend: "codex", cwd: "D:/c" } },
+    certification: { matrix: [{ agentId: "glm-pro" }] },
+  };
+  const merged = mergeRawRegistryDoc(rawDoc, lanesDocOf([ZCODE_LANE]));
+  assert.equal(merged.agents["glm-pro"].backend, "zcode", "车道键合并");
+  assert.equal(merged.agents.custom.backend, "codex", "非车道键原样");
+  assert.deepEqual(merged.certification, rawDoc.certification, "其余键原样");
+  assert.equal(mergeRawRegistryDoc(rawDoc, null), rawDoc, "停用原样");
+  // effectiveEntriesOf：有 mergedRawEntries 用它，否则 rawEntries
+  const view = effectiveRegistryView(objectRegistry(rawDoc.agents), lanesDocOf([ZCODE_LANE]));
+  const entries = effectiveEntriesOf(view);
+  assert.equal(Object.fromEntries(entries)["glm-pro"].backend, "zcode");
+  assert.equal(effectiveEntriesOf(objectRegistry(rawDoc.agents))[0][0], "glm-pro", "未包装句柄回退 rawEntries");
 });
 
 // ── 真实文件面：readRegistry（未包装）与生效视图组合 ─────────────────────────

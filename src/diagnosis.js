@@ -142,10 +142,19 @@ export const NO_EFFECT_DIAGNOSIS_CODES = Object.freeze([
 // ONE general diagnosis-code SSOT. It derives the provider-auth,
 // provider-capacity, and completed-empty code sets without merging their
 // category meanings. MCP wire schemas derive their enum from this set.
+// b158a 修复二：dispatch-resolution 拒绝码（runner 起跑前的具名拒绝）——类别沿用
+// 既有 unknown（不扩类别闭集）；这三个码让 Lead 在诊断面直接看到出路。
+export const DISPATCH_RESOLUTION_DIAGNOSIS_CODES = Object.freeze([
+  "lanes_merge_spec_missing",
+  "lanes_changed_since_dispatch",
+  "lanes_merge_unavailable",
+]);
+
 export const DIAGNOSIS_CODES = Object.freeze([
   ...PROVIDER_DIAGNOSIS_CODES,
   ...PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   ...NO_EFFECT_DIAGNOSIS_CODES,
+  ...DISPATCH_RESOLUTION_DIAGNOSIS_CODES,
 ]);
 
 // Valid (category → code) pairs. Each coded category owns its exact code set;
@@ -156,6 +165,7 @@ const CATEGORY_CODE_SETS = Object.freeze({
   provider_auth: PROVIDER_DIAGNOSIS_CODES,
   provider_capacity: PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   no_effect: NO_EFFECT_DIAGNOSIS_CODES,
+  unknown: DISPATCH_RESOLUTION_DIAGNOSIS_CODES,
 });
 
 // 打包环境类别 → 固定文案事实（runManager 从错误对象结构化属性分出闭集
@@ -173,6 +183,34 @@ export const DELIVERY_ERROR_CLASS_FACTS = Object.freeze({
   git_timeout: "the git process was killed or timed out during packaging",
   git_command_failed: "a git command exited non-zero during packaging",
 });
+
+// b158a 修复二：runner 起跑前拒绝的固定文案。只认闭集原因码；文案给 Lead 一条
+// 出路事实（对应铁律的既有例外：固定、无值、不猜）——不回显异常原文/路径/表值。
+export const DISPATCH_RESOLUTION_DIAGNOSIS_FACTS = Object.freeze({
+  lanes_merge_spec_missing:
+    "runner 起跑前拒绝（lanes_merge_spec_missing）：派发它的 WAO 进程早于当前代码——"
+    + "多半是宿主里没重启的 WAO MCP 服务；重启该宿主的 WAO MCP 服务后重新派发",
+  lanes_changed_since_dispatch:
+    "runner 起跑前拒绝（lanes_changed_since_dispatch）：派发后 config/lanes.json 改过，"
+    + "runner 没有用派发方没看过的表起跑——直接重新派发",
+  lanes_merge_unavailable:
+    "runner 起跑前拒绝（lanes_merge_unavailable）：车道表 config/lanes.json 缺失、不可读或"
+    + "不合法——修好 config/lanes.json 后重新派发",
+});
+
+/**
+ * b158a 修复二：本 run 绑定的 dispatch-resolution 具名拒绝（状态 failed 时）。
+ * @param {object[]} evs 绑定后的转录事件
+ * @returns {{event: object, code: string}|null}
+ */
+function findBoundDispatchResolutionRefusal(evs) {
+  for (const e of evs) {
+    if (e?.type !== "run.error" || e.phase !== "dispatch_resolution") continue;
+    if (DISPATCH_RESOLUTION_DIAGNOSIS_CODES.includes(e.error)) return { event: e, code: e.error };
+  }
+  return null;
+}
+
 
 /**
  * Is (category, code) a valid diagnosis-code pair? An exact member of the
@@ -1637,6 +1675,22 @@ function diagnoseFailureInner(events, expectedRunId) {
       });
     }
     return { category: "crash", evidence };
+  }
+
+  // 6.5) b158a 修复二：runner 起跑前的具名拒绝（dispatch-resolution）。
+  //    失败终态 + 绑定本 run 的 phase:"dispatch_resolution" run.error + error 在
+  //    DISPATCH_RESOLUTION_DIAGNOSIS_CODES 闭集里 → 沿用既有 unknown 类别，给出
+  //    闭集 code 与固定出路文案（不扩类别闭集、不回显原文）。这条排在兜底
+  //    unknown 之前：否则旧 MCP 服务派发的 run 只剩 failed + unknown。
+  if (state === "failed") {
+    const refusal = findBoundDispatchResolutionRefusal(evs);
+    if (refusal !== null) {
+      return {
+        category: "unknown",
+        code: refusal.code,
+        evidence: [{ eventType: "run.error", fact: DISPATCH_RESOLUTION_DIAGNOSIS_FACTS[refusal.code] }],
+      };
+    }
   }
 
   // 7) 有失败终态但无明确信号 → unknown（不强归类）。zcode 收口带 started/

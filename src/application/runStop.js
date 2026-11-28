@@ -712,6 +712,14 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
 // ── stopRouteUnavailable (server-side stop target not resolvable) ────────────
 
 // B92：会话既无 hostPid 也无 serveUrl 的固定文案（无停止路由——deepseek-acp 在
+// b158a 修复一：车道表不可用导致停止目标解析不出——固定文案写原因码并指向
+// config/lanes.json，不回显表里的值（与 MCP run_stop 出口同一语义）。
+const STOP_LANES_MERGE_UNAVAILABLE_TEXT =
+  "stop route unavailable (lanes_merge_unavailable): the lane table config/lanes.json is missing, "
+  + "unreadable, or invalid, so the worker's backend identity cannot be resolved from the effective "
+  + "configuration — no stop request was sent and the run was not marked aborted; fix config/lanes.json "
+  + "and retry the stop";
+
 // 记录 hostPid 之前派发的运行）。固定文本，不回显 runId、路径或任何动态值。
 const STOP_NO_ROUTE_TEXT =
   "stop route unavailable: this session records neither a host process id nor a serveUrl — no stop request was sent "
@@ -726,7 +734,9 @@ async function stopRouteUnavailable({ transcript, session, fromState, runId, dep
     ? routeError
     : Object.values(SERVER_STOP_ROUTE_TEXT).includes(error?.message)
       ? error.message
-      : SERVER_STOP_ROUTE_TEXT.unresolved;
+      : (typeof error?.message === "string" && error.message.includes("lanes_merge_unavailable")
+        ? STOP_LANES_MERGE_UNAVAILABLE_TEXT
+        : SERVER_STOP_ROUTE_TEXT.unresolved);
   const backend = serverStopBackendOf(session);
 
   // 同 invalidPidStop：不认领终态——只记 stop_requested + stop_unverified。

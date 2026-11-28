@@ -29,6 +29,10 @@ import { openRunnerStderrFd, runnerStderrPath } from "../application/runnerStder
 // → application 下向）。
 import { launchRunner, runnerLaunchFailureText } from "../application/runnerLaunch.js";
 import { parseOptions, loadRun, newRunManager, resolveIsolateFlag, cliWaitOptions, lanesMergeDocForCall } from "./shared.js";
+// b158a 修复一：fork 前校验车道表可用性（与 effectiveRegistryView 同一判据）——
+// 表坏/缺失时在父进程即以 lanes_merge_unavailable 具名拒绝（零 fork），不再把
+// "sha256:null" 这种无效规格交给 runner 去报 lanes_merge_spec_missing。
+import { assertLanesMergeDocUsable } from "../registry.js";
 // ADR-0030（TD-151）：前台等待的到期通知行（单一定义处，run/resume/retry 共用）。
 import { printObservationDeadlineNotice } from "./run.js";
 // R12: the per-dispatch override shape SSOT (hosted in runManager.js with the
@@ -165,6 +169,9 @@ export async function retryCommand(args, config) {
   const run = await manager.start(agentId, {
     prompt: promptEvent.prompt,
     registry: options.registry,
+    // b158a 修复一：retry 是派发面——生效车道表与 run 同一配对判定（一次恰一份；
+    // 表坏即 lanes_merge_unavailable，不回退私有旧四轴）。
+    lanesMerge: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
     runDir: options.runDir,
     tags: options.tag,
     cwd: options.cwd,
@@ -260,11 +267,19 @@ export async function forkResumeRunner(
   }
   // TD-98 同款路径推导：本模块在 src/commands/，backgroundRunner.js 在 src/。
   const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "backgroundRunner.js");
+  // b158a 修复一：resume runner 的配对判定显式传递（off | sha256:<hex>；缺省
+  // 会被 runner 拒绝）。resume 命令现读一次车道表——哈希与 runner 读到的不同即
+  // lanes_changed_since_dispatch（持久失败记录，可见拒因）。
+  const resumeLanesMergeDoc = lanesMergeDocForCall(options, config, config?.loadLanesConfigFn);
+  // 表不可用 → 具名拒绝（读坏即拒，零 fork）；可用时哈希原样交给 runner。
+  if (resumeLanesMergeDoc !== null) assertLanesMergeDocUsable(resumeLanesMergeDoc);
   const runnerArgs = [
     runnerPath,
     "--resume-run-id", runId,
     "--run-dir", runDir,
     "--registry", registryPath,
+    "--lanes-merge",
+    resumeLanesMergeDoc === null ? "off" : `sha256:${resumeLanesMergeDoc.sha256}`,
     "--poll-interval", String(options.pollInterval ?? config.pollInterval ?? 1000),
   ];
   if (options.waitTimeout !== undefined && options.waitTimeout !== null) {

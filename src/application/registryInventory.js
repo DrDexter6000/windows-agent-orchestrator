@@ -19,7 +19,7 @@
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readRegistry, normalizeAgent, effectiveRegistryView } from "../registry.js";
+import { readRegistry, normalizeAgent, effectiveRegistryView, effectiveEntriesOf } from "../registry.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { assessWorkerReadiness, alignReadinessToKimiTokenFile, createEnvResolver } from "./credentialReadiness.js";
 // TD-111: certification advisory context 闭集 SSOT——投影层用它做 fail-closed 校验：
@@ -370,12 +370,8 @@ export async function getRegistryInventoryWithIssues({
 
   const agents = [];
   const rawIssues = [];
-  // b158a：生效条目枚举（合并视图提供；未包装的注入缝回退 rawEntries——
-  // 停用合并时两者本就相同）。
-  const effectiveEntries = typeof registry.mergedRawEntries === "function"
-    ? registry.mergedRawEntries()
-    : registry.rawEntries();
-  for (const [id, raw] of effectiveEntries) {
+  // b158a 修复一：生效条目枚举（effectiveEntriesOf 收拢）。
+  for (const [id, raw] of effectiveEntriesOf(registry)) {
     try {
       const agent = normalizeAgent(id, raw);
       // 决定 0074：kimiHome 车道的 credentialAvailability 按 token 文件取值

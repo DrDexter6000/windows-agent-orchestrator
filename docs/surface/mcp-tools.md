@@ -323,7 +323,7 @@ Output:
 | state | string | yes |  |
 | terminal | boolean | yes |  |
 | category | string | yes | enum: provider_auth \| provider_capacity \| config_conflict \| timeout \| budget \| scorecard_fail \| evidence_passed_backend_failed \| provider_disconnect \| no_effect \| crash \| aborted_manual \| workdir_escape \| delivery_packaging_failed \| unknown \| none |
-| code | string\|null | yes | enum: subscription_access_disabled \| organization_policy_denied \| api_key_missing \| unauthorized \| invalid_credential \| rate_limited \| quota_exhausted \| overloaded \| completed_empty |
+| code | string\|null | yes | enum: subscription_access_disabled \| organization_policy_denied \| api_key_missing \| unauthorized \| invalid_credential \| rate_limited \| quota_exhausted \| overloaded \| completed_empty \| lanes_merge_spec_missing \| lanes_changed_since_dispatch \| lanes_merge_unavailable |
 | signalEventTypes | array<string> | yes |  |
 | signalCount | integer | yes |  |
 | signalsTruncated | boolean | yes |  |

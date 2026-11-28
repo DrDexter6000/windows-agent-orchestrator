@@ -1986,8 +1986,8 @@ test("TD-283: 会审席位目标是带 dispatchHold 的车道 → 每席一行�
   const lanesDoc = {
     ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
     lanes: [
-      { id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" },
-      { id: "plain-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {} },
+      { id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: {}, dispatchHold: "夹具：暂停说明" },
+      { id: "plain-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: {} },
     ],
   };
   const heldLane = lanesDoc.lanes[0];
@@ -2090,7 +2090,7 @@ test("TD-283 consult run：默认注册表 → 服务拿到车道表；非默认
   const { laneDispatchHold } = await import("../../src/dispatchResolution.js");
   const lanesDoc = {
     ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: [],
-    lanes: [{ id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: {}, dispatchHold: "夹具：暂停说明" }],
+    lanes: [{ id: "held-lane", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: {}, dispatchHold: "夹具：暂停说明" }],
   };
   const seen = [];
   const deps = { runConsult: async (input) => { seen.push(input.lanesDocFn()); return craftedResult(); } };
@@ -2109,7 +2109,7 @@ test("会审的身份事实与席位派发共用同一张车道表：别名两�
   });
   const aliasTable = {
     ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: ["coder"],
-    lanes: [{ id: "lane-a", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: { "alias-seat": { role: "coder" } } }],
+    lanes: [{ id: "lane-a", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: { "alias-seat": { role: "coder" } } }],
   };
   const inactiveTable = { lanes: [], sha256: null, issues: [], rolesHint: [] };
   for (const [name, table, expectTarget, expectBackend] of [
@@ -2145,7 +2145,7 @@ test("会审：注册表键与车道别名同名时，组记录与派发都按�
   });
   const aliasTable = {
     ok: true, path: "fixture", sha256: "ab".repeat(32), issues: [], rolesHint: ["coder"],
-    lanes: [{ id: "lane-a", backend: "claude-code", model: { id: "fixture-m" }, reasoning: null, aliases: { "alias-seat": { role: "coder" } } }],
+    lanes: [{ id: "lane-a", backend: "claude-code", model: { id: "fixture-m" }, reasoning: {}, aliases: { "alias-seat": { role: "coder" } } }],
   };
   const { dispatchFn, calls } = makeDispatchStub();
   const result = await runConsult(baseInput({

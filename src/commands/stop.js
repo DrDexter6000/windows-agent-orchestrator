@@ -21,7 +21,7 @@
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
-import { parseOptions } from "./shared.js";
+import { parseOptions, lanesMergeDocForCall } from "./shared.js";
 
 // ── Primitive helpers (re-exported from runStop.js for test compatibility) ──
 // The canonical implementations live in src/application/runStop.js.
@@ -52,10 +52,16 @@ export async function stopCommand(args, config, deps = {}) {
   // 服务端中止需要鉴权的后端（kimi-web）取派发该运行的 registry agent——路径同其它
   // 命令：--registry 优先，缺省 config.registry。
   const registry = options.registry ?? config?.registry;
+  // b158a 修复一：服务端中止的后端身份取生效条目（一次恰一份表；表坏→
+  // 具名 stop_route_unavailable(lanes_merge_unavailable)；本地 pid 停止不依赖当前四轴，照旧可用）。
+  const stopLanesMergeDoc = lanesMergeDocForCall(options, config, config?.loadLanesConfigFn);
   const result = await stopRun({
     runId,
     runDir,
     ...(typeof registry === "string" && registry.length > 0 ? { registryPath: resolve(registry) } : {}),
+    // b158a 修复一：服务端中止的后端身份取生效条目（一次恰一份表；表坏→
+    // 具名 stop_route_unavailable(lanes_merge_unavailable)；本地 pid 停止不依赖当前四轴，照旧可用）。
+    ...(stopLanesMergeDoc !== null ? { lanesMergeDoc: stopLanesMergeDoc } : {}),
     justification: { reason, observedSeq },
     deps: { ...deps, config },
   });

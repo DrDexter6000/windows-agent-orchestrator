@@ -111,6 +111,25 @@ test("源级钉: run-reliability.mjs 不再内联定义任何 drill glue（复�
   assert.match(entry, /import\s*\{[^}]*\bextractJson\b[^}]*\bcheck\b[^}]*\bhasSentinel\b[^}]*\}\s*from\s*"\.\/reliability\/drills\.mjs"/s);
 });
 
+test("b158a 修复一 源级钉：sandbox drill 用生效条目构造 backend/probe（不传原始 registry.agents）", () => {
+  const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  assert.match(entry, /runSandboxEnforcementDrill\(tc,\s*effectiveRegistry\.agents\?\.\[tc\.agentId\]\)/,
+    "sandbox drill 必须消费车道表合并后的生效条目（私有去四轴后 backend/binary 仍可判）");
+  assert.ok(!/runSandboxEnforcementDrill\(tc,\s*registry\.agents/.test(entry),
+    "不得用原始 registry.agents 构造 backend/probe（旧值不同会测错后端、旧轴删掉会假红）");
+});
+
+test("b158a 修复二 源级钉：默认注册表与跨检出 drill 走 pairedDefaultRegistryPath 单一出处", () => {
+  const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  assert.match(entry, /pairedDefaultRegistryPath\(ROOT\)/, "run-reliability 缺省注册表走单一出处");
+  assert.ok(!/resolve\(ROOT,\s*"config\/agents\.json"\)/.test(entry), "不再写死 config/agents.json");
+  const drill = readFileSync(new URL("../../scripts/reliability/dsh-acp/wao-reuse-drill.mjs", import.meta.url), "utf8");
+  assert.match(drill, /mainCheckoutRoot\(ROOT\)/, "缺省来源绑定主检出根");
+  assert.match(drill, /pairedDefaultRegistryPath\(mainRoot\)/, "配对判定用主检出根");
+  assert.match(drill, /loadLanesConfig\(join\(mainRoot, "config", "lanes\.json"\)\)/, "车道表绑定主检出");
+  assert.match(drill, /explicitRegistrySource === undefined/, "显式 --registry-source 仍按外来处理");
+});
+
 // ════ 3. 依赖注入钉（drills.mjs 不复制入口环境常量——那是新的双源）════
 
 test("源级钉: drills.mjs 不复制入口环境常量，环境只经 createDrills 显式注入", () => {

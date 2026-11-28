@@ -642,3 +642,17 @@ test("OI-O5: default collector (no injection) → any open item lines it emits a
     assert.ok(o.length <= 512 && o.length > "open item: ".length, `well-formed line: ${o}`);
   }
 });
+
+test("b158a 修复二 preflight：车道画像复用本次请求的车道表（不再另读一版）", async () => {
+  // 请求表只有一条车道；旧实现 defaultLaneProfiles 会重读仓库真实表（多条）。
+  const lanesMergeDoc = {
+    ok: true, path: "<fixture>", sha256: "a".repeat(64), issues: [], rolesHint: [],
+    lanes: [{ id: "opus", backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, aliases: {} }],
+  };
+  const result = await aggregateLeadPreflight(baseInput({
+    lanesMergeDoc,
+    workerContextFn: () => null,
+  }));
+  assert.ok(result.lanes && Array.isArray(result.lanes.rows), "车道画像在场");
+  assert.deepEqual(result.lanes.rows.map((r) => r.id), ["opus"], "画像行=本次请求表的车道（不是重读的仓库表）");
+});

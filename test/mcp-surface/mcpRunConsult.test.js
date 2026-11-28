@@ -125,7 +125,7 @@ function writeTranscript(runDir, runId, events) {
  * （扇出与零派发断言的事实源）；runId 形状确定性（run_consult_stub_<agentId>）
  * 以便预置 transcript 文件。
  */
-async function buildConsultClient({ dir, registryPath, runDir, consultsDir, failSeat, runConsultFn, noWorkspace } = {}) {
+async function buildConsultClient({ dir, registryPath, runDir, consultsDir, failSeat, runConsultFn, noWorkspace, serverOptions } = {}) {
   const { createWaoMcpServer } = await import("../../src/mcp/server.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -138,6 +138,7 @@ async function buildConsultClient({ dir, registryPath, runDir, consultsDir, fail
     ...(noWorkspace ? {} : { workspaceRoot: dir }),
     consultsDir,
     ...(runConsultFn ? { runConsultFn } : {}),
+    ...(serverOptions ?? {}),
     dispatchRunFn: async (input) => {
       dispatchCalls.push(input);
       if (failSeat && input.agentId === failSeat) {
@@ -1640,6 +1641,76 @@ test("156 修正一: 读取模式回放被改坏的记录 label（超长/非字�
       await client.close();
       await server.close();
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// b158a 修复二：run_consult 入口席位检查 / 认证门 / 服务用同一份车道表（停用也传）
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("b158a 修复二 run_consult：外来注册表用车道别名——入口与服务判出同一结果（同一份表交给服务）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-fix2-alias-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: { lane_x: { backend: "claude-code", cwd: dir, model: { id: "m" } } } }), "utf8");
+    const aliasDoc = {
+      ok: true, path: "<fixture>", sha256: "c".repeat(64), issues: [], rolesHint: [],
+      lanes: [{ id: "lane_x", backend: "claude-code", model: { id: "m" }, reasoning: { effort: "high" }, aliases: { "alias-seat": { role: "coder" } } }],
+    };
+    let captured = null;
+    let loads = 0;
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, "consults");
+    const { server, client } = await buildConsultClient({
+      dir, registryPath, runDir, consultsDir,
+      serverOptions: { loadLanesConfigFn: () => { loads += 1; return aliasDoc; } },
+      runConsultFn: async (input) => { captured = input; throw new Error("stub after capture"); },
+    });
+    try {
+      const { res } = await callConsult(client, { brief: BRIEF, seats: ["alias-seat"], waitMs: 0, expectedWorkspaceRoot: dir });
+      assert.ok(captured, `入口席位检查用同一份表（旧实现空表 → 别名席位被拒、服务不被调用；实际：${errText(res)}）`);
+      assert.equal(loads, 1, "一次请求恰读一次车道表");
+      assert.equal(captured.lanesMergeDoc, null, "外来注册表：合并停用");
+      assert.equal(captured.lanesDocFn(), aliasDoc, "停用时也把本次请求的车道表交给服务");
+    } finally { await client.close(); await server.close(); }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("b158a 修复二 run_consult：合并启用时入口/认证门/服务同一份表（lanesDocFn 与 lanesMergeDoc 同对象）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mrc-fix2-merged-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    // 私有条目去四轴：合并后才可解析。
+    writeFileSync(registryPath, JSON.stringify({ agents: { lane_x: { cwd: dir } } }), "utf8");
+    const aliasDoc = {
+      ok: true, path: "<fixture>", sha256: "d".repeat(64), issues: [], rolesHint: [],
+      lanes: [{ id: "lane_x", backend: "claude-code", model: { id: "m" }, reasoning: { effort: "high" }, aliases: { "alias-seat": { role: "coder" } } }],
+    };
+    let captured = null;
+    let loads = 0;
+    const runDir = join(dir, "runs");
+    const consultsDir = join(dir, "consults");
+    const { server, client } = await buildConsultClient({
+      dir, registryPath, runDir, consultsDir,
+      serverOptions: {
+        pairedDefaultRegistryPathFn: () => registryPath,
+        loadLanesConfigFn: () => { loads += 1; return aliasDoc; },
+      },
+      runConsultFn: async (input) => { captured = input; throw new Error("stub after capture"); },
+    });
+    try {
+      const { res } = await callConsult(client, { brief: BRIEF, seats: ["alias-seat"], waitMs: 0, expectedWorkspaceRoot: dir });
+      assert.ok(captured, `合并启用时席位检查放行（实际：${errText(res)}）`);
+      assert.equal(loads, 1, "一次请求恰读一次车道表");
+      assert.equal(captured.lanesMergeDoc, aliasDoc, "服务拿到本次请求的表（合并启用）");
+      assert.equal(captured.lanesDocFn(), aliasDoc, "lanesDocFn 记忆化到同一对象");
+    } finally { await client.close(); await server.close(); }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

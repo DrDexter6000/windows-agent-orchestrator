@@ -642,7 +642,11 @@ test("RO-C2a: --explain short-circuits ahead of the hoisted read-only conflict r
       const origLog = console.log;
       console.log = (s) => logs.push(String(s));
       try {
-        await runCommand(argv, { readRegistry });
+        await runCommand(argv, {
+          readRegistry,
+          // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用合并。
+          loadLanesConfigFn: () => null,
+        });
       } finally {
         console.log = origLog;
       }

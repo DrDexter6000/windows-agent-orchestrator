@@ -95,6 +95,98 @@ function successResult(args) {
 }
 
 // =====================================================================
+// b158a 修复二：认证门按车道表生效四轴裁决（不再按私有原文）
+// =====================================================================
+
+function laneCoderDoc() {
+  return {
+    ok: true, path: "<fixture>", sha256: "a".repeat(64), issues: [], rolesHint: [],
+    lanes: [{ id: "coder_hq", backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, aliases: {} }],
+  };
+}
+
+test("b158a 修复二 run_continue 认证门：去四轴放行；保留旧 effort 时按车道表 effort 裁决", async () => {
+  for (const scenario of ["stripped", "old-effort"]) {
+    const dir = makeGitDir(`m127-fix2-gate-${scenario}-`);
+    try {
+      const registryPath = join(dir, "agents.json");
+      const privateAgent = scenario === "stripped"
+        ? { cwd: dir }
+        : { cwd: dir, backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "low" } };
+      writeFileSync(registryPath, JSON.stringify({ agents: { coder_hq: privateAgent } }), "utf8");
+      const runDir = join(dir, "runs");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "reliability-summary.json"), JSON.stringify({
+        ledgerKeySpace: "lane-v1",
+        workers: {
+          coder_hq: {
+            backend: "codex", modelId: "gpt-6.1-sol", status: "certified",
+            executionProfile: { effort: "high" },
+          },
+        },
+      }), "utf8");
+      const lanesDoc = laneCoderDoc();
+      let lanesLoads = 0;
+      const calls = [];
+      const server = createWaoMcpServer({
+        registryPath, runDir, workspaceRoot: dir,
+        certGateOverride: true,
+        // 让临时注册表成为本次安装的"默认注册表"→ 合并启用。
+        pairedDefaultRegistryPathFn: () => registryPath,
+        loadLanesConfigFn: () => { lanesLoads += 1; return lanesDoc; },
+        getRunStatusFn: async () => ({ agentId: "coder_hq" }),
+        continueRunFn: async (input) => { calls.push(input); return successResult(input); },
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({
+          name: "run_continue",
+          arguments: { parentRunId: "run_parent_gate", prompt: "fix", expectedWorkspaceRoot: dir },
+        });
+        const text = (res.content ?? []).map((c) => c.text || "").join(" ");
+        assert.notEqual(res.isError, true, `${scenario}: 门按生效条目放行（实际：${text}）`);
+        assert.equal(calls.length, 1, `${scenario}: 服务被调用`);
+        assert.equal(calls[0].lanesMergeDoc, lanesDoc, `${scenario}: 门与服务的表是同一个对象`);
+        assert.equal(lanesLoads, 1, `${scenario}: 一次请求恰读一次车道表`);
+      } finally { await client.close(); await server.close(); }
+    } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+  }
+});
+
+test("b158a 修复二 run_continue：车道表不可用 → 门前固定 lanes_merge_unavailable 文案（零服务调用）", async () => {
+  const dir = makeGitDir("m127-fix2-gate-bad-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: { coder_hq: { cwd: dir } } }), "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    let serviceCalls = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir, workspaceRoot: dir,
+      certGateOverride: true,
+      pairedDefaultRegistryPathFn: () => registryPath,
+      loadLanesConfigFn: () => ({ ok: false, path: "<fixture>", sha256: null, lanes: [], issues: ["fixture bad"] }),
+      getRunStatusFn: async () => ({ agentId: "coder_hq" }),
+      continueRunFn: async () => { serviceCalls += 1; throw new Error("must not be called"); },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent_bad", prompt: "fix", expectedWorkspaceRoot: dir },
+      });
+      const text = (res.content ?? []).map((c) => c.text || "").join(" ");
+      assert.equal(res.isError, true, "坏表拒绝");
+      assert.match(text, /lanes_merge_unavailable/, "固定原因码文案");
+      assert.match(text, /config\/lanes\.json/, "指向车道表");
+      assert.equal(serviceCalls, 0, "门前拒绝，零服务调用");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+
+
+// =====================================================================
 // Group 1: tool discovery + count + annotations + strict input
 // =====================================================================
 

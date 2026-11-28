@@ -256,10 +256,12 @@ function buildRunnerGoneOpenItemLine(runIds) {
 // and profile file (WAO install root, same discipline as the CLI) and projects
 // the compact shape. Read-only; never throws upward (the section catches).
 // Injected via laneProfilesFn for tests; the MCP handler replays its own.
-function defaultLaneProfiles() {
-  const lanesDoc = loadLanesConfig();
+// b158a 修复二：本次请求已读到的车道表（lanesMergeDoc）优先——预检的车道画像
+// 与名册/认证/残留行用同一份表，不再另读一版；停用（null）时沿用既有读法。
+function defaultLaneProfiles(lanesDoc = null) {
+  const doc = lanesDoc ?? loadLanesConfig();
   const traitsResult = readLaneTraits();
-  return projectLaneProfiles({ lanesDoc, traitsResult });
+  return projectLaneProfiles({ lanesDoc: doc, traitsResult });
 }
 
 // One observation-time FACT line from a status snapshot. Durations derive
@@ -382,6 +384,10 @@ export async function aggregateLeadPreflight({
   runDir,
   userEnvReader,
   getRegistryInventoryFn,
+  // b158a 修复一：本次调用的生效车道表（调用方经单一判定 lanesMergeDocFor 取得，
+  // 一次请求恰一份）。null = 停用（外来注册表自包含）→ 残留事实行不给出
+  //（自带四轴就是实际生效值，不能标"已不生效"）。
+  lanesMergeDoc = null,
   listRunsFn,
   recentRuns,
   serverBuildFactsFn,
@@ -832,17 +838,19 @@ export async function aggregateLeadPreflight({
     // 桶数读不出 → 不加这一条（不抛、不影响其余结果）。
   }
 
-  // --- Section 5b: lane wiring mismatch fact (0108; advisory, read-only) ---
-  // ONE bounded observation line when --lane dispatch to this registry would
-  // be refused on axes divergence (lane_wiring_mismatch). Facts only — never
-  // checkStatus/complete. Suppressed in a worker context (lane-derived
-  // guidance is Lead-only, same discipline as the lanes profiles section);
-  // unreadable/absent facts omit the line entirely.
+  // --- Section 5b: lane wiring mismatch fact (b158a 修复一语义) ---
+  // ONE bounded observation line listing the PRIVATE-RESIDUAL axes that differ
+  // from the lane table (residuals are ineffective; facts only, never
+  // checkStatus/complete). Only when lane merging is PAIRED for this registry —
+  // a foreign registry's self-contained axes ARE the effective values and must
+  // not be labelled ineffective. Suppressed in a worker context (Lead-only,
+  // same discipline as the lanes profiles section); unreadable/absent facts
+  // omit the line entirely.
   try {
     const wiringContextFn = typeof workerContextFn === "function" ? workerContextFn : nestedDispatchContext;
-    if (wiringContextFn() == null) {
+    if (wiringContextFn() == null && lanesMergeDoc !== null) {
       const factFn = typeof laneWiringFactFn === "function" ? laneWiringFactFn : laneWiringMismatchFactLine;
-      const line = await factFn({ registryPath });
+      const line = await factFn({ registryPath, lanesDoc: lanesMergeDoc });
       if (typeof line === "string" && line.length > 0 && observations.length < 64) {
         observations.push(line);
       }
@@ -895,7 +903,7 @@ export async function aggregateLeadPreflight({
     if (contextFn() != null) {
       observeLaneOmission("lane profiles are not shown in a worker context");
     } else {
-      const fn = laneProfilesFn ?? defaultLaneProfiles;
+      const fn = laneProfilesFn ?? (() => defaultLaneProfiles(lanesMergeDoc));
       const projection = await fn();
       if (projection != null && typeof projection === "object") {
         // 0097：顶层新增 costTierScale/ownerRules 原样透传（null=缺失或降级），

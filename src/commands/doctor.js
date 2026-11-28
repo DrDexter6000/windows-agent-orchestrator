@@ -56,12 +56,12 @@ import { gitChildEnv } from "../delivery.js";
 
 import { validateWaoDir, getWaoDir, getWaoStateDir } from "../waoDir.js";
 import { mainWorktreeRoot } from "../projectIdentity.js";
-import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
+import { parseOptions, resolveTargetCwd, lanesMergeDocForCall } from "./shared.js";
 import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // 0065：panel 行归一化门（与 onboarding 已配置面同口径——sol P1）。
 // 会审修复批（2026-10-28）：registry 条目校验复用 KNOWN_BACKENDS + normalizeAgent
 //（与派发 readRegistry().getAgent 同一实现——doctor 不得把派发会拒的条目判 HEALTHY）。
-import { normalizeAgent, KNOWN_BACKENDS, effectiveRegistryView } from "../registry.js";
+import { normalizeAgent, KNOWN_BACKENDS, mergeRawRegistryDoc } from "../registry.js";
 // 复核席第三轮（2026-10-28）：registry 键名合法性判定复用 canonicalAgentId SSOT
 //（与 normalizeAgent 的 id 校验同源——doctor 不写第二份字母表）。
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
@@ -104,7 +104,7 @@ import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 import { skillSlotInventory } from "../application/skillLink.js";
 // 决定 0108：车道表 × 私有注册表接线一致性诊断（registry align 预览同源单一
 // 实现——本文件不写第二份轴比较规则）。
-import { diagnoseRegistryAlignment } from "../application/registryAlign.js";
+import { diagnoseRegistryAlignment, axisJsonPath } from "../application/registryAlign.js";
 // 0065（0045 §1.2 终局）：0062 B9 乙′的 seatRole 漂移指针行整段删除（席位声明
 // 退役，无可比对对象——0065 决定档 supersession 记录）。
 
@@ -260,23 +260,19 @@ export async function waoDoctorCommand(args, config) {
     });
   }
 
-  // 2a′. b158a：生效条目视图——车道键条目的四轴按车道表（config/lanes.json）合并，
-  //      下方的条目校验、CLI/key 探测、cwd/binary/env、panel 行全部消费它；私有
-  //      残留四轴不生效（drift 观察见 2c，读原始视图）。表读不出/不合法时按 WARN
-  //      如实报告并回退私有原文做**体检**（doctor 是诊断面，不是派发面——派发路径
-  //      的 lanes_merge_unavailable 拒绝不受影响）。
-  const lanesMergeEnabled = options.registry === undefined
-    || (typeof options.registry === "string"
-      && resolve(options.registry) === resolve(config?.registry ?? "config/agents.json"));
+  // 2a′. b158a 修复一：生效条目视图——车道键条目的四轴按车道表（config/lanes.json）
+  //      合并，下方的条目校验、CLI/key 探测、cwd/binary/env、panel 行全部消费它；
+  //      私有残留四轴不生效（drift 观察见 2c，读原始视图、只比在场轴）。配对判定
+  //      单一出处（lanesMergeDocForCall——与 CLI 派发同一规则，win32 大小写不敏感），
+  //      本命令恰读一次车道表。表读不出/不合法时按 WARN 如实报告并回退私有原文
+  //      做**体检**（doctor 是诊断面，不是派发面——派发路径的 lanes_merge_unavailable
+  //      拒绝不受影响）。
+  const lanesMergeDoc = lanesMergeDocForCall(options, config, config?.loadLanesConfigFn);
   let effectiveRegistryEntries = validRegistryEntries;
-  if (registryOk && lanesMergeEnabled) {
+  if (registryOk && lanesMergeDoc !== null) {
     try {
-      const merged = effectiveRegistryView(
-        { rawEntries: () => registryEntries },
-        lanesMergeEnabled ? lanesDocForCall(options, config, config?.loadLanesConfigFn) : null,
-      ).mergedRawEntries();
-      const mergedMap = new Map(merged);
-      effectiveRegistryEntries = validRegistryEntries.map(([id]) => [id, mergedMap.get(id)]);
+      const mergedMap = mergeRawRegistryDoc({ agents: Object.fromEntries(registryEntries) }, lanesMergeDoc).agents;
+      effectiveRegistryEntries = validRegistryEntries.map(([id]) => [id, mergedMap[id]]);
     } catch (e) {
       pushCheck(checks, {
         name: "lane_wiring",
@@ -317,24 +313,32 @@ export async function waoDoctorCommand(args, config) {
   //     合法差异（表有私无 / 私有有表无 / 矩阵行 modelId 滞后）照旧 INFO。全部
   //     一致时不产生条目（零 OK 噪音惯例）。非默认 --registry 时车道表停用
   //    （防跨绑，规则同 run / registry list）——本检查随之跳过。
-  if (registryOk
-    && (options.registry === undefined || resolve(options.registry) === resolve(config?.registry ?? "config/agents.json"))) {
+  if (registryOk && lanesMergeDoc !== null) {
     try {
-      const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
-      const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc });
+      const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc: lanesMergeDoc });
       if (diag.ok) {
         const mismatches = diag.entries.filter((e) => e.state === "wiring-mismatch");
         const legalOnly = diag.onlyInTable.length + diag.onlyInRegistry.length
           + diag.entries.filter((e) => e.state === "aligned" && e.matrixMismatch).length;
         if (mismatches.length > 0) {
-          const previewLane = mismatches[0].id;
+          // b158a 修复一/二：逐轴列出差值（只列在场且不同的轴——缺键不算残留）；
+          // 报告用 JSON 键路径（`model.id` / `reasoning.effort`，不是内部轴名）；
+          // fix 指路=删掉私有条目里这几项（align --apply 会把四轴写回，不再引导）。
+          const axisDetail = (e) => e.diffs
+            .map((d) => `${axisJsonPath(d.axis)}: 车道表 ${d.laneValue} / 私有残留 ${d.registryValue}`)
+            .join("；");
           const idList = mismatches.map((e) => e.id).join("、");
+          const axesByLane = mismatches
+            .slice(0, 3)
+            .map((e) => `${e.id}——${axisDetail(e)}`)
+            .join("；");
+          const moreLanes = mismatches.length > 3 ? `（另 ${mismatches.length - 3} 条见 registry align 预览）` : "";
           pushCheck(checks, {
             name: "lane_wiring",
             pass: true,
             level: "info",
-            detail: `车道 ${idList} 的私有注册表残留四轴与车道表不同（已不生效，可删；实际生效值以车道表为准，逐轴明细见 registry align 预览）；run: npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>）`,
-            fix: `npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>；逐车道采用，没有一键全修）`,
+            detail: `车道 ${idList} 的私有注册表残留四轴与车道表不同（已不生效，可删；实际生效值以车道表为准）：${axesByLane}${moreLanes}`,
+            fix: `删掉私有注册表里这些条目的残留轴（${[...new Set(mismatches.flatMap((e) => e.diffs.map((d) => axisJsonPath(d.axis))))].join("/")}）——已不生效，删除不改变实际运行配置`,
           });
         } else if (legalOnly > 0) {
           pushCheck(checks, {
@@ -780,7 +784,8 @@ export async function waoDoctorCommand(args, config) {
     }
     // 决定 0090：车道表里暂停派发的车道不算会审候选（非默认 --registry 时车道表停用）。
     const panel = assessPanelReadiness(panelRows, {
-      dispatchHolds: dispatchHoldsByLane(lanesDocForCall(options, config, config?.loadLanesConfigFn)),
+      // b158a 修复一：暂停说明与合并用同一份表（本命令恰读一次）。
+      dispatchHolds: dispatchHoldsByLane(lanesMergeDoc ?? { lanes: [], sha256: null, issues: [], rolesHint: [] }),
     });
     // 0065（opus P1-3）：静默条件=three_seat 且已知族系 ≥2——三席全同族仍打印
     // （假全清防线从"零对抗席"平移到"零跨族"；R9-C C-1.4 同病预防）。

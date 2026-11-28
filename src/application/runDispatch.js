@@ -580,11 +580,11 @@ export async function dispatchRun({
   // TD-341（第 89 批 A）：runner stderr 文件打开器注入缝（缺省 openRunnerStderrFd；
   // 测试注入"打开失败"形状）。返回值作为 spawn stdio[2] 的 fd。
   openRunnerStderrFn,
-  // b158a：车道四轴合并的启用车道表（null/undefined = 停用）。由调用方按
-  // lanesDocForCall / isPairedDefaultRegistry 的同一配对规则显式传入；启用时
-  // 本函数解析的 agent（凭据预检/复用身份/谱系材料/runner argv 的来源）走
-  // effectiveRegistryView 的生效条目，车道表不可用即以 lanes_merge_unavailable
-  // 拒绝（不回退私有旧四轴）。
+  // b158a：车道四轴合并的启用车道表（null/undefined = 停用）。由调用方经
+  // registry.js 的单一判定（lanesMergeDocFor，CLI 侧 lanesMergeDocForCall）取得
+  // 后显式传入；启用时本函数解析的 agent（凭据预检/复用身份/谱系材料/runner
+  // argv 的来源）走 effectiveRegistryView 的生效条目，车道表不可用即以
+  // lanes_merge_unavailable 拒绝（不回退私有旧四轴）。
   lanesMerge = null,
 }) {
   if (!agentId || typeof agentId !== "string") {
@@ -967,6 +967,11 @@ export async function dispatchRun({
       "--run-dir", resolvedRunDir,
       "--run-id", finalRunId,
       "--registry", resolvedRegistry,
+      // b158a 修复一：配对判定显式交给 runner（off | sha256:<hex>；runner 不再按
+      // 路径猜，缺省会拒绝）。启用 doc 恒有 sha——表读不出/不合法在上方注册表
+      // 读取处已以 lanes_merge_unavailable 拒绝，走不到这里。
+      "--lanes-merge",
+      lanesMerge === null || lanesMerge === undefined ? "off" : `sha256:${lanesMerge.sha256}`,
       "--poll-interval", String(effectivePollInterval),
     ];
     // M10-pre: only pass --wait-timeout when explicitly provided (CLI override).

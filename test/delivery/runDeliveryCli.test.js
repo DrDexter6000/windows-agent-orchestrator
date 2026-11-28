@@ -90,6 +90,9 @@ function makeConfig(runDir, repoDir, fetchImpl) {
     retries: 0,
     defaultIsolation: "none",
     backendFor: () => backend,
+    // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并
+    // （注入 loadFn 返回 null = 同一份"外来注册表自包含"语义）。
+    loadLanesConfigFn: () => null,
     readRegistry: async () => ({
       getAgent(id, overrides = {}) {
         const defined = Object.fromEntries(
@@ -399,6 +402,8 @@ test("3C1-07: ordinary foreground run without delivery does not gain a delivery 
       registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
       timeout: 5000, retries: 0,
       backendFor: () => backend,
+      // b158a 修复一：自包含注入句柄 → 停用车道合并（无 rawEntries 契约）。
+      loadLanesConfigFn: () => null,
       readRegistry: async () => ({
         getAgent(id, overrides = {}) {
           return { id, backend: "claude-code", cwd: dir, ...overrides };

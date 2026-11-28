@@ -159,6 +159,12 @@ const CORE_TOP = Object.freeze(new Set([
   "src/nestedDispatchGuard.js",
   "src/nodeVersionGuard.js",
   "src/registry.js",
+  // b158a 修复二登记：后台 resume 失败的持久事实（run.error phase=resume +
+  // 原席位身份 + 闭集原因码）。零相对出边除两条 core 同层边
+  // （./transcript.js、./projectBuckets.js）；消费方 src/backgroundRunner.js 与
+  // src/daemon.js（core 同层）。放 core 的理由：runner/daemon 都是 core 入口，
+  // 不能反向 import application。
+  "src/resumeFailureFact.js",
   "src/runEvidenceAssessment.js",
   "src/runManager.js",
   // TD-318：安全 JSON 解析（报错只带行列号，不带源文本）与文本输出的控制字符转义。
@@ -220,7 +226,8 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/runManager.js -> src/application/processStopVerify.js",
   "src/runManager.js -> src/application/timeoutPolicy.js",
   "src/commands/lifecycle.js -> src/application/timeoutPolicy.js",
-  "src/backgroundRunner.js -> src/transcript.js",
+  // b158a 修复二：resume 失败事实抽到 src/resumeFailureFact.js（静态 import
+  // transcript/projectBuckets），backgroundRunner 不再动态 import transcript。
   // 0058（TD-254）：lineageClose 的转录/桶动态导入+runContinue 闭态检查+CLI 接线（全下向）。
   "src/application/lineageClose.js -> src/projectBuckets.js",
   "src/application/lineageClose.js -> src/transcript.js",

@@ -9,11 +9,16 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { listTranscriptsDeep, resolveTranscriptPath } from "../../src/projectBuckets.js";
 
+/** The main checkout's root directory (from either a main checkout or a linked worktree). */
+export function mainCheckoutRoot(repoRoot) {
+  const commonDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: repoRoot, encoding: "utf8" }).trim();
+  return dirname(commonDir);
+}
+
 /** The main checkout's config/agents.json. It is gitignored, so a linked worktree has none;
  * the git common dir locates the main checkout from either. */
 export function mainCheckoutRegistry(repoRoot) {
-  const commonDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: repoRoot, encoding: "utf8" }).trim();
-  return join(dirname(commonDir), "config", "agents.json");
+  return join(mainCheckoutRoot(repoRoot), "config", "agents.json");
 }
 
 /** Path of a run's record under runDir (its project bucket, or the legacy flat file). */

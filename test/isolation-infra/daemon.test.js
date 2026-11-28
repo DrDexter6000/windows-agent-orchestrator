@@ -48,7 +48,10 @@ function writeTranscript(runDir, runId, stateChangeTo, agentId = "test_agent") {
   const lines = [
     { ts: "2026-06-25T00:00:00.000Z", seq: 1, runId, agentId, type: "run.created" },
     { ts: "2026-06-25T00:00:01.000Z", seq: 2, runId, agentId, type: "session.created", backendSessionId: "s_x", backend: "kimi-web" },
-    { ts: "2026-06-25T00:00:02.000Z", seq: 3, runId, agentId, type: "run.started", cwd: runDir, backend: "kimi-web" },
+    // b158a 修复一：恢复的四轴复核无条件执行——残留运行记录的四轴必须与当前
+    // 生效配置一致（mockRegistry 的 kimi-web 条目带 model.id），否则 daemon 接管
+    // 会以 worker_configuration_changed 具名拒绝。
+    { ts: "2026-06-25T00:00:02.000Z", seq: 3, runId, agentId, type: "run.started", cwd: runDir, backend: "kimi-web", model: { id: "kimi-code/k3" } },
     // prompt.sent：kimi-web 的 resume 走 replay 分支（replayByRespawn=true），
     // 重放需要绑定 prompt.sent。
     { ts: "2026-06-25T00:00:02.500Z", seq: 4, runId, agentId, type: "prompt.sent", prompt: "leftover task" },
@@ -668,6 +671,53 @@ test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终�
       }
       assert.equal(state, "completed",
         `resume-scan 应把残留 run 推进到自然终态 completed，实际=${state}`);
+    } finally {
+      await daemon.stop();
+    }
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("b158a 修复二 resume-scan：坏车道表 → 持久失败记录带原因码；stderr 只留 runId+码（不回显原文）", async () => {
+  const runDir = makeRunDir();
+  const pipe = uniquePipe();
+  const marker = "FIX2-RAW-TABLE-VALUE-MUST-NOT-LEAK";
+  try {
+    writeTranscript(runDir, "run_bad_lanes", "running", "worker_a");
+    const stderrWrites = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk, ...rest) => { stderrWrites.push(String(chunk)); return true; };
+    let daemon;
+    try {
+      daemon = await startDaemon({
+        runDir, pipe,
+        registry: mockRegistry(runDir),
+        fetchImpl: makeMockFetch(),
+        resumeOnStart: true,
+        // 注入坏表判定（生产由 pairedDefaultRegistryPath + loadLanesConfig 给出）。
+        lanesMergeDocFn: () => ({
+          ok: false, path: "<fixture>", sha256: null, lanes: [],
+          issues: [`lane table unreadable ${marker}`],
+        }),
+        waitTimeout: 1000,
+        pollInterval: 20,
+      });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    try {
+      const events = readFileSync(join(runDir, "run_bad_lanes.jsonl"), "utf8")
+        .split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+      const err = events.find((e) => e.type === "run.error" && e.phase === "resume");
+      assert.ok(err, "持久失败记录（run.error phase=resume）在场");
+      assert.match(String(err.error), /lanes_merge_unavailable/, "记录带闭集原因码");
+      assert.ok(!String(err.error).includes(marker), "记录不回显表值/异常原文");
+      assert.equal(err.agentId, "worker_a", "记录沿用原席位身份");
+      const line = stderrWrites.find((l) => l.includes("--resume-on-start")) ?? "";
+      assert.ok(line.includes("run_bad_lanes") && line.includes("lanes_merge_unavailable"),
+        `stderr 行只留 runId 与原因码（实际：${line}）`);
+      assert.ok(!line.includes(marker), "stderr 不回显异常原文");
     } finally {
       await daemon.stop();
     }

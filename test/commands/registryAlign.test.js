@@ -16,10 +16,12 @@
 //    （-1、-2…），绝不覆盖。
 //   - 认证影响两类：backend/model.id/providerID 变=换身份（档位按 runbook：同 backend 换 model 走 delta）；只差
 //     effort=身份不变（runbook「lane 变更同步面」④ delta 重取证）。
-//   - doctor：接线不一致 WARN + align 预览命令；只有合法差异 INFO；非默认
-//     --registry（车道表停用）不产该检查项。
-//   - lead_preflight：接线不一致时 observations 加一行事实（≤512）；worker
-//     上下文不投影；无不一致不加行。
+//   - doctor（b158a 修复一）：私有残留不一致 → INFO，逐轴列差值，fix 指"删掉
+//     私有条目里这几项"（不再引导 align --apply——它会写回四轴）；表坏 WARN 由
+//     生效视图检查承载；非默认 --registry（车道表停用）不产该检查项。
+//   - lead_preflight（b158a 修复一）：合并**启用**时 observations 加一行事实
+//     （≤512，逐轴列在场差异）；worker 上下文不投影；停用/无不一致不加行
+//     （停用时自带四轴即生效值，不标"已不生效"）。
 //
 // 隔离：注册表、车道表、模板全用临时目录夹具（经 config.lanesDocFn /
 // config.alignTemplatePath / config.alignNowFn 测试缝注入），绝不读仓库真实
@@ -260,6 +262,63 @@ test("0108 预览：--lane 显示将改成什么；全一致时如实说一致",
     const { lines, exitCode } = await runAlign([], config);
     assert.equal(exitCode, 0);
     assert.ok(lines.join("\n").includes("私有注册表与车道表一致"), "全一致如实展示");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("b158a 修复一 doctor：私有条目四轴全缺席（只剩本机接线）→ 不误报 lane_wiring 残留", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-align-doc-clean-"));
+  try {
+    const lanesDoc = {
+      ok: true, path: join(dir, "lanes.json"), sha256: "0".repeat(64), issues: [], rolesHint: [],
+      lanes: [{ id: "flash", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, aliases: {} }],
+    };
+    const stripped = {
+      agents: { flash: { cwd: dir, binary: join(dir, "zcode.cjs") } },
+      certification: { matrix: [{ agentId: "flash", modelId: "bigmodel-api/GLM-5.3" }] },
+    };
+    const cwd = makeDoctorRoot(stripped);
+    try {
+      const parsed = await captureDoctorChecks({
+        cwd,
+        registry: join(cwd, "agents.json"),
+        loadLanesConfigFn: () => lanesDoc,
+        alignTemplatePath: writeTemplateFor(dir, lanesDoc),
+      });
+      assert.equal(parsed.checks.find((c) => c.name === "lane_wiring"), undefined,
+        "四轴全缺席=干净：不出 lane_wiring 检查项（旧实现按缺键归一 null 会误报）");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("b158a 修复一 registry align 预览：干净条目（四轴全缺席）→ 如实说一致，不列要改", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-align-preview-clean-"));
+  try {
+    const lanesDoc = {
+      ok: true, path: join(dir, "lanes.json"), sha256: "1".repeat(64), issues: [], rolesHint: [],
+      lanes: [{ id: "flash", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, aliases: {} }],
+    };
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { flash: { cwd: dir, binary: join(dir, "zcode.cjs") } },
+      certification: { matrix: [{ agentId: "flash", modelId: "bigmodel-api/GLM-5.3" }] },
+    }), "utf8");
+    const config = {
+      registry: registryPath,
+      lanesDocFn: () => lanesDoc,
+      alignTemplatePath: writeTemplateFor(dir, lanesDoc),
+      alignNowFn: () => FIXED_NOW,
+    };
+    const { lines, exitCode } = await runAlign([], config);
+    const out = lines.join("\n");
+    assert.equal(exitCode, 0);
+    assert.ok(out.includes("私有注册表与车道表一致"), "干净条目如实说一致（不再列残留）");
+    assert.ok(!out.includes("将改为:"), "干净条目不产生要改目标（align --apply 不会把四轴写回）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -546,6 +605,45 @@ test("0108 诊断：三类事实判据（wiring-mismatch/invalid/onlyIn）与 ap
   }
 });
 
+test("b158a 修复一 诊断：只比在场轴——干净=aligned；部分残留只列该轴；全残留列四轴；事实行同源", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-align-present-"));
+  try {
+    const lanesDoc = {
+      ok: true, path: "<fixture>", sha256: "d".repeat(64), issues: [], rolesHint: [],
+      lanes: [
+        { id: "clean", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3" }, reasoning: { effort: "max" }, aliases: {} },
+        { id: "partial", backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, aliases: {} },
+        { id: "full", backend: "claude-code", model: { id: "claude-opus-5", providerID: "anthropic" }, reasoning: { effort: "xhigh" }, aliases: {} },
+      ],
+    };
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        // 干净：四轴全缺席，只剩本机接线（旧实现会把缺键归一成 null → 误报残留）。
+        clean: { cwd: dir, binary: join(dir, "zcode.cjs") },
+        partial: { cwd: dir, backend: "codex", reasoning: { effort: "low" } },
+        full: { cwd: dir, backend: "codex", model: { id: "old-model", providerID: "old-provider" }, reasoning: { effort: "low" } },
+      },
+    }), "utf8");
+    const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc });
+    assert.equal(diag.ok, true);
+    const clean = diag.entries.find((e) => e.id === "clean");
+    assert.equal(clean.state, "aligned", "四轴全缺席=干净（不再 wiring-mismatch）");
+    assert.deepEqual(clean.diffs, [], "干净条目零残留轴");
+    const partial = diag.entries.find((e) => e.id === "partial");
+    assert.deepEqual(partial.diffs.map((d) => d.axis), ["effort"], "只列在场且不同的轴");
+    const full = diag.entries.find((e) => e.id === "full");
+    assert.deepEqual(full.diffs.map((d) => d.axis), ["backend", "modelId", "providerID", "effort"], "全残留逐轴列出");
+    // doctor 与 lead_preflight 的这一行同源（都走 laneWiringMismatchFactLine）。
+    const line = laneWiringMismatchFactLine({ registryPath, lanesDoc });
+    assert.ok(line.includes("partial(reasoning.effort)"), "事实行带部分残留的 JSON 键路径");
+    assert.ok(line.includes("full(backend/model.id/model.providerID/reasoning.effort)"), "事实行带全残留的四轴 JSON 键路径");
+    assert.ok(!line.includes("clean("), "干净条目不出现在残留事实行");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("0108 apply（模块面）：车道表结构未过 → 拒绝；非法哈希形状 → 拒绝", () => {
   const env = makeEnv();
   try {
@@ -617,7 +715,7 @@ function makeDoctorRoot(registryDoc) {
   return cwd;
 }
 
-test("0108 doctor：接线不一致 → WARN + registry align 预览命令；合法差异 → INFO", async () => {
+test("0108 doctor：私有残留不一致 → INFO（逐轴键路径 + 指删键）+ 干净条目不误报；合法差异 → INFO", async () => {
   const env = makeEnv();
   try {
     const cwd = makeDoctorRoot(JSON.parse(bytesOf(env.registryPath).toString()));
@@ -634,9 +732,16 @@ test("0108 doctor：接线不一致 → WARN + registry align 预览命令；合
       assert.equal(check.pass, true, "WARN 不改 pass（advisory）");
       assert.ok(check.detail.includes(`车道 flash、sole、dsh-lane 的私有注册表残留四轴与车道表不同`), "INFO detail 列出车道（残留语义）");
       assert.ok(check.detail.includes("已不生效，可删"), "INFO detail 写明残留已不生效");
-      assert.ok(check.detail.includes("registry align --lane flash"), "WARN detail 给预览命令");
-      assert.ok((check.fix ?? "").includes("--expect-sha256 <预览输出的 SHA-256>"), "fix 带 apply 用法");
-      assert.ok((check.fix ?? "").includes("没有一键全修"), "fix 写明无一键全修");
+      // b158a 修复一/二：逐轴列差值（JSON 键路径: 车道表 X / 私有残留 Y）
+      assert.ok(check.detail.includes(": 车道表 ") && check.detail.includes(" / 私有残留 "), "逐轴差值在场（键路径: 车道表 X / 私有残留 Y）");
+      assert.ok(check.detail.includes("model.id: 车道表 "), "INFO 明细列 JSON 键路径 model.id");
+      assert.ok(check.detail.includes("reasoning.effort: 车道表 "), "INFO 明细列 JSON 键路径 reasoning.effort");
+      assert.ok(!check.detail.includes("modelId: 车道表 "), "不再列内部轴名 modelId");
+      // fix 指路=删掉私有条目里的残留轴（align --apply 会写回，不再引导）
+      assert.ok((check.fix ?? "").includes("删掉私有注册表里这些条目的残留轴"), "fix 指删键");
+      assert.ok((check.fix ?? "").includes("model.id") && (check.fix ?? "").includes("reasoning.effort"), "fix 列 JSON 键路径");
+      assert.ok(!(check.fix ?? "").includes("modelId"), "fix 不列内部轴名");
+      assert.ok(!(check.fix ?? "").includes("--apply"), "fix 不再引导 apply");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -757,23 +862,25 @@ function preflightInput(env, overrides) {
 test("0108 preflight：接线不一致 → observations 恰加一行事实（≤512）；worker 上下文不投影", async () => {
   const env = makeEnv();
   try {
-    const line = "lane wiring: 车道 flash 的接线与私有注册表不一致——--lane 派发会拒（夹具注入）";
-    const result = await aggregateLeadPreflight(preflightInput(env, {
+    const line = "lane wiring: 车道 flash 的私有注册表残留四轴与车道表不同（夹具注入）";
+    // b158a 修复一：事实行只在合并**启用**时给出——注入用例带上同一份表。
+    const merged = { ...preflightInput(env, {
+      laneWiringFactFn: async () => line,
+      workerContextFn: () => null,
+    }), lanesMergeDoc: fixtureLanesDoc("fixture") };
+    const result = await aggregateLeadPreflight(merged);
+    assert.ok(result.observations.some((o) => o === line), "注入的事实行原样进 observations");
+    // 停用（外来注册表）：自带四轴即生效值——事实行不给出
+    const disabled = await aggregateLeadPreflight(preflightInput(env, {
       laneWiringFactFn: async () => line,
       workerContextFn: () => null,
     }));
-    assert.ok(result.observations.some((o) => o === line), "注入的事实行原样进 observations");
+    assert.ok(!disabled.observations.some((o) => o.includes("lane wiring")), "停用合并不加事实行");
     // worker 上下文：不投影
-    const suppressed = await aggregateLeadPreflight(preflightInput(env, {
-      laneWiringFactFn: async () => line,
-      workerContextFn: () => ({ worker: true }),
-    }));
+    const suppressed = await aggregateLeadPreflight({ ...merged, workerContextFn: () => ({ worker: true }) });
     assert.ok(!suppressed.observations.some((o) => o.includes("lane wiring")), "worker 上下文省略整行");
     // 注入缝抛错 → 省略整行，preflight 不失败
-    const resilient = await aggregateLeadPreflight(preflightInput(env, {
-      laneWiringFactFn: async () => { throw new Error("boom"); },
-      workerContextFn: () => null,
-    }));
+    const resilient = await aggregateLeadPreflight({ ...merged, laneWiringFactFn: async () => { throw new Error("boom"); } });
     assert.ok(!resilient.observations.some((o) => o.includes("lane wiring")), "fact 抛错省略整行");
     assert.equal(resilient.checkStatus.workers, "observed", "抛错不影响其余部分");
   } finally {
@@ -787,9 +894,9 @@ test("0108 preflight：默认事实函数——不一致时一行（≤512）、
     const line = laneWiringMismatchFactLine({ registryPath: env.registryPath, lanesDoc: fixtureLanesDoc("fixture") });
     assert.ok(typeof line === "string" && line.length > 0, "有不一致 → 一行");
     assert.ok(line.length <= 512, `行长在 MCP observations 上限内（${line.length}）`);
-    assert.ok(line.includes("flash、sole、dsh-lane"), "列出差异车道（前 3 条）");
+    assert.ok(line.includes("flash(") && line.includes("sole(") && line.includes("dsh-lane("), "列出差异车道（带各自差异轴，前 3 条）");
     assert.ok(line.includes("已不生效"), "b158a：事实行写明残留已不生效（不再点名派发拒绝码）");
-    assert.ok(line.includes("registry align --lane <id>"), "给预览命令");
+    assert.ok(line.includes("删掉私有条目里这几项"), "指路=删键（不再引导 apply）");
     // 无不一致 → null
     const clean = mkdtempSync(join(tmpdir(), "wao-align-pf-clean-"));
     try {

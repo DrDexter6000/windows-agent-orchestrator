@@ -2126,7 +2126,9 @@ test("runner：--tag type=image 与 --task-type 都固化成 run.started.taskTyp
   try {
     const registryPath = makeRegistryFile(dir, { bg_worker: { backend: "claude-code", cwd: dir } });
     // runner 入口自己就是 argv[0] 之后的那串参数：位置参数是 agentId，其余是旗标。
-    const base = ["--run-dir", dir, "--registry", registryPath, "--poll-interval", "10"];
+    // b158a 修复一：runner 只认派发方显式给出的 --lanes-merge（off | sha256:<hex>）；
+    // 本用例的临时注册表是外来自包含表 → off。
+    const base = ["--run-dir", dir, "--registry", registryPath, "--lanes-merge", "off", "--poll-interval", "10"];
     const run = async (runId, extra) => {
       await runCapturedRunner(
         ["bg_worker", "--prompt", "x", "--run-id", runId, ...base, ...extra],
@@ -2340,6 +2342,9 @@ test("CLI retry：新运行继承原运行的 taskType（含只有标签的旧�
     const config = {
       registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000, timeout: 5000, retries: 0,
       backendFor: () => makeFakeBackend(),
+      // b158a 修复一：本用例的注册表是注入句柄（自包含、无 rawEntries），显式让
+      // 车道表加载返回 null = 停用合并（同"外来注册表自包含"语义）。
+      loadLanesConfigFn: () => null,
       readRegistry: async () => ({
         getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, model: { id: "glm-5.3" } }),
         listAgents: () => [],

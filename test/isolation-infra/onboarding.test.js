@@ -177,7 +177,7 @@ function makeMemFs(initial = {}) {
 function memRun({
   agentId, apply, endorseWorker, installRoot = "D:/wao", probeEnv,
   initial = {}, reliabilitySummaryPath = "D:/wao/runs/reliability-summary.json",
-  privateRegistryPath, dispatchHolds,
+  privateRegistryPath, dispatchHolds, lanesMergeDoc,
 } = {}) {
   const fs = makeMemFs({
     "D:/wao/config/agents.example.json": JSON.stringify(TEMPLATE),
@@ -194,6 +194,8 @@ function memRun({
       privateRegistryPath,
       probeEnv,
       dispatchHolds,
+      // b158a 修复一：生效车道表（命令层按配对规则显式传入）。
+      lanesMergeDoc,
       fs,
     }),
   };
@@ -495,6 +497,113 @@ test("an unreadable / unparseable template is a bounded error that writes nothin
   assert.equal(rCorrupt.outcome, "error");
   assert.equal(rCorrupt.writes.registry, false);
   assert.ok(/read or parse|template/i.test(rCorrupt.reason ?? ""), "reason must name the template problem");
+});
+
+// ── b158a 修复一：车道键条目按车道表合并后的生效形状校验/候选 ────────────────
+const ONB_LANE = {
+  id: "coder_low", backend: "deepseek-acp",
+  model: { id: "deepseek-v4-flash", providerID: "deepseek-official" },
+  reasoning: { effort: "max" }, aliases: {},
+};
+function onbLanesDoc() {
+  return { ok: true, path: "<fixture>", sha256: "e".repeat(64), lanes: [ONB_LANE], issues: [], rolesHint: [] };
+}
+const ONB_PROBE = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
+
+test("b158a 修复一 onboarding：已配置面按合并后形状校验；drift 的 effort 兜底不回读私有旧值", async () => {
+  // 私有条目残留旧 effort=low；车道表生效 effort=max；模板 effort=max。
+  // 旧实现 rowEffortOf 回读私有原文 → 误报 drift；修复后读生效条目 → 无 drift。
+  const privateDoc = {
+    agents: {
+      coder_low: {
+        credentialEnv: "DEEPSEEK_API_KEY", cwd: ".",
+        systemPrompt: "config/roles/coder_low.md",
+        reasoning: { effort: "low" },
+      },
+    },
+  };
+  const { result } = await memRun({
+    agentId: "coder_low",
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(privateDoc) },
+    lanesMergeDoc: onbLanesDoc(),
+    probeEnv: ONB_PROBE,
+  });
+  const r = await result;
+  assert.equal(r.panelFace, "configured", "私有注册表可读 → 已配置面");
+  const row = r.recommendations.rows.find((x) => x.id === "coder_low");
+  assert.ok(row, "已配置行在场");
+  assert.equal(row.backend, "deepseek-acp", "行按合并后的生效形状（私有条目无 backend）");
+  assert.equal(row.drift, undefined, "生效 effort=max=模板 effort → 无 drift（不回读私有旧 effort=low）");
+  assert.equal(r.outcome, "previewed");
+});
+
+test("b158a 修复一 onboarding：模板条目去四轴 + 车道表在场 → 候选与选中校验按生效形状（写出形状不变）", async () => {
+  // 模板原文只剩本机接线（四轴由车道表供给）；旧实现按模板原文校验 → missing backend。
+  const strippedTemplate = {
+    ...TEMPLATE,
+    agents: {
+      coder_low: {
+        credentialEnv: "DEEPSEEK_API_KEY", cwd: ".",
+        systemPrompt: "config/roles/coder_low.md",
+      },
+    },
+    certification: TEMPLATE.certification,
+  };
+  const { result } = await memRun({
+    agentId: "coder_low",
+    initial: { "D:/wao/config/agents.example.json": JSON.stringify(strippedTemplate) },
+    lanesMergeDoc: onbLanesDoc(),
+  });
+  const r = await result;
+  assert.equal(r.outcome, "previewed", `选中校验按合并后形状通过（reason: ${r.reason}）`);
+  assert.equal(r.selected, true);
+  const candidate = r.candidates.find((c) => c.id === "coder_low");
+  assert.equal(candidate.backend, "deepseek-acp", "候选按生效形状（模板原文无 backend）");
+  // 本批边界：--apply 写出的条目形状不变，仍按模板原文（去四轴留到 158b）。
+  assert.equal(r.registry.agents.coder_low.backend, undefined, "写出形状仍按模板原文");
+});
+
+test("b158a 修复二 onboarding：模板面就绪探测按生效模板 backend（不按原模板旧 backend）", async () => {
+  // 模板里 coder_low 的 backend 落后（deepseek-acp）；车道表生效值是 claude-code。
+  // 私有注册表可读但只有别的条目 → coder_low 作为模板候选进入双源矩阵；
+  // 就绪探测的 CLI 必须按车道表 backend（claude）而不是模板旧 backend（dsh）。
+  const lanes = {
+    ok: true, path: "<fixture>", sha256: "e".repeat(64), issues: [], rolesHint: [],
+    lanes: [{ id: "coder_low", backend: "claude-code", model: { id: "claude-opus-5" }, reasoning: { effort: "high" }, aliases: {} }],
+  };
+  const privateDoc = { agents: { other_worker: { backend: "claude-code", cwd: ".", model: { id: "m" } } } };
+  const { result } = await memRun({
+    lanesMergeDoc: lanes,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(privateDoc) },
+    probeEnv: { hasCli: async () => true, hasKeyEnv: async () => "process_env" },
+  });
+  const r = await result;
+  const row = r.recommendations.rows.find((x) => x.id === "coder_low");
+  assert.ok(row, "模板候选行在场（双源矩阵）");
+  assert.equal(row.backend, "claude-code", "候选按生效模板 backend");
+  // 生效 backend=claude-code：旧模板的 deepseek-acp credentialEnv 不再被当成
+  // 必填凭据（旧实现按模板原文 backend 探测 → requiresKeyEnv=DEEPSEEK_API_KEY）。
+  assert.equal(row.requiresKeyEnv, null, "凭据探测用生效 backend（claude-code 无必填 env）");
+});
+
+test("b158a 修复二 buildMcpSnippet：--registry 路径 = pairedDefaultRegistryPath(installRoot)（自定义 registry 跟随）", async () => {
+  const { buildMcpSnippet } = await import("../../src/application/onboarding.js");
+  const { pairedDefaultRegistryPath } = await import("../../src/registry.js");
+  const root = mkdtempSync(join(tmpdir(), "wao-snippet-root-"));
+  try {
+    mkdirSync(join(root, "config"), { recursive: true });
+    writeFileSync(join(root, "config", "default.json"), JSON.stringify({ registry: "state/custom-agents.json" }), "utf8");
+    const snippet = buildMcpSnippet({ installRoot: root });
+    const args = snippet.mcpServers.wao.args;
+    const registryArg = args[args.indexOf("--registry") + 1];
+    const expected = pairedDefaultRegistryPath(root).replace(/\\/g, "/");
+    assert.equal(registryArg, expected, "绑定片段用默认注册表唯一出处");
+    assert.ok(registryArg.endsWith("/state/custom-agents.json"), "自定义默认 registry 被跟随（不再写死 config/agents.json）");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("an endorsement write failure projects a safe reason and leaves no corrupt summary", async () => {

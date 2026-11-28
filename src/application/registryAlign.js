@@ -3,10 +3,10 @@
 // 决定 0108：私有注册表跟随车道表——`registry align`。
 //
 // 升级后模板与 config/lanes.json 换了型号或 effort，私有 config/agents.json 还是
-// 旧接线，--lane 派发就以 lane_wiring_mismatch 拒绝。本模块做"逐车道显式采用"
-// 的诊断与写侧：**不做通用合并**——没有合并基线，WAO 分不清用户有意的改动和
-// 模板的更新，所以默认只读，写入只限用户点名的车道、只改接线四轴与同名认证
-// 矩阵行的 modelId。
+// 旧接线。b158a 起四轴以车道表为唯一出处：私有残留四轴不再生效、不再拒绝派发，
+// 只在诊断里列为"可删"事实。本模块做"逐车道显式采用"的诊断与写侧：**不做通用
+// 合并**——没有合并基线，WAO 分不清用户有意的改动和模板的更新，所以默认只读，
+// 写入只限用户点名的车道、只改接线四轴与同名认证矩阵行的 modelId。
 //
 // 分层（layering 冻结）：application(1) 向下 import core(2) —— registry.js
 // （normalizeAgent）、dispatchResolution.js（laneAxes/agentAxes/axesEqual——
@@ -33,7 +33,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { normalizeAgent, mergeLaneAxes } from "../registry.js";
-import { laneAxes, agentAxes, axesEqual, loadLanesConfig } from "../dispatchResolution.js";
+import { laneAxes, agentAxes, axesEqual, presentAgentAxes, loadLanesConfig } from "../dispatchResolution.js";
 import { escapeControlChars, safeJsonParse } from "../safeText.js";
 import { atomicWriteFileSync } from "../atomicWriteSync.js";
 
@@ -44,6 +44,17 @@ export const DEFAULT_TEMPLATE_PATH = join(MODULE_ROOT, "config", "agents.example
 
 // 接线四轴的稳定遍历序（渲染与 diff 顺序的事实来源）。
 const AXIS_NAMES = Object.freeze(["backend", "modelId", "providerID", "effort"]);
+// b158a 修复二：报告面列 Lead 真正要删的 JSON 键路径（不是内部轴名）。
+// 单一出处：doctor 的 INFO/fix 行、lead_preflight 的一行事实都从这里取。
+export const AXIS_JSON_PATHS = Object.freeze({
+  backend: "backend",
+  modelId: "model.id",
+  providerID: "model.providerID",
+  effort: "reasoning.effort",
+});
+export function axisJsonPath(axis) {
+  return AXIS_JSON_PATHS[axis] ?? String(axis);
+}
 
 /** 私有注册表原文的 SHA-256（utf8 串哈希，与 loadLanesConfig 的哈希面同法）。 */
 export function sha256OfRaw(raw) {
@@ -134,11 +145,17 @@ export function diagnoseRegistryAlignment({ registryPath, lanesDoc }) {
       entries.push({ id, position, state: "invalid", invalidReason, inLaneTable: true });
       continue;
     }
+    // b158a 修复一：只比**在场**的轴——缺键不算 null 残留。四轴全缺席 = 干净
+    //（已清理条目，不再误报"残留不一致"，align --apply 也不会把四轴写回去）；
+    // 只有在场且与车道表不同的轴才算残留，逐轴列出。
     const la = laneAxes(lane);
     const aa = agentAxes(entry);
+    const present = presentAgentAxes(entry);
     const diffs = [];
     for (const axis of AXIS_NAMES) {
-      if (aa[axis] !== la[axis]) diffs.push({ axis, laneValue: la[axis], registryValue: aa[axis] });
+      if (Object.prototype.hasOwnProperty.call(present, axis) && present[axis] !== la[axis]) {
+        diffs.push({ axis, laneValue: la[axis], registryValue: present[axis] });
+      }
     }
     // 同名认证矩阵行的 modelId 与车道表不同也列出（apply 时只改 modelId）。
     // 只看**在场**的行：行不存在=没有可采纳的 modelId（apply 也不添加行），
@@ -415,8 +432,12 @@ export function laneWiringMismatchFactLine({ registryPath, lanesDoc } = {}) {
   }
   const mismatches = diag.entries.filter((e) => e.state === "wiring-mismatch");
   if (mismatches.length === 0) return null;
-  const ids = mismatches.map((e) => e.id);
+  // b158a 修复一/二：只列在场且不同的轴（缺键不算残留）；报告用 JSON 键路径
+  //（Lead 删的是 `model.id` / `reasoning.effort` 这些键，不是内部轴名）；指路=
+  // 删掉私有条目里这几项（不再引导 registry align --apply——apply 会把四轴写回）。
+  const axesOf = (e) => e.diffs.map((d) => axisJsonPath(d.axis)).join("/");
+  const ids = mismatches.map((e) => `${e.id}(${axesOf(e)})`);
   const shown = ids.slice(0, 3).join("、");
   const more = ids.length > 3 ? ` 等 ${ids.length} 条` : "";
-  return `lane wiring: 车道 ${shown}${more} 的私有注册表残留四轴与车道表不同——已不生效（实际生效值以车道表为准），可删；预览: npm run cli -- registry align --lane <id>`;
+  return `lane wiring: 车道 ${shown}${more} 的私有注册表残留四轴与车道表不同——已不生效（实际生效值以车道表为准），删掉私有条目里这几项即可；预览: npm run cli -- registry align --lane <id>`;
 }

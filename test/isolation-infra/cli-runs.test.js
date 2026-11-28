@@ -207,6 +207,8 @@ test("run --format json: --scorecard-rules-file 从文件加载规则", async ()
     const config = {
       registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
       timeout: 5000, retries: 0, backendFor: () => backend, readRegistry,
+      // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并。
+      loadLanesConfigFn: () => null,
     };
 
     const out = await captureLog(async () => {
@@ -999,6 +1001,8 @@ test("run --format json: 带 scorecard 字段（与 text 对等，TD-53）", asy
     const config = {
       registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
       timeout: 5000, retries: 0, backendFor: () => backend, readRegistry,
+      // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并。
+      loadLanesConfigFn: () => null,
     };
 
     const out = await captureLog(async () => {
@@ -1038,6 +1042,8 @@ test("run --format text: 带 scorecard 卡片（与 json 对等，TD-53 对照�
     const config = {
       registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
       timeout: 5000, retries: 0, backendFor: () => backend, readRegistry,
+      // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并。
+      loadLanesConfigFn: () => null,
     };
 
     const out = await captureLog(async () => {
@@ -1257,6 +1263,8 @@ function makeModelOverrideFixture(dir) {
   const config = {
     registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
     timeout: 5000, retries: 0, backendFor: () => fakeBackend, readRegistry,
+    // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并。
+    loadLanesConfigFn: () => null,
   };
   return { config, spawnedModels };
 }
@@ -1503,6 +1511,8 @@ function makeReasoningOverrideFixture(dir) {
   const config = {
     registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
     timeout: 5000, retries: 0, backendFor: () => fakeBackend, readRegistry,
+    // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并。
+    loadLanesConfigFn: () => null,
   };
   return { config, spawnedPolicies };
 }

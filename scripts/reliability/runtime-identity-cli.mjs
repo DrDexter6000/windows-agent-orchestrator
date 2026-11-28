@@ -22,8 +22,7 @@ import { backendFor } from "../../src/backends/factory.js";
 // b158a：--registry 给的是车道表所配对的默认注册表时，anchor 取**生效条目**
 //（四轴来自 config/lanes.json——私有去四轴后按合并形状找该 backend 的席位）；
 // 别的显式注册表照旧自包含。
-import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../../src/registry.js";
-import { loadLanesConfig } from "../../src/dispatchResolution.js";
+import { readRegistry, effectiveRegistryView, effectiveEntriesOf, lanesMergeDocFor, pairedDefaultRegistryPath } from "../../src/registry.js";
 
 function usage(stream) {
   stream.write(
@@ -72,12 +71,9 @@ export async function probeFor({ backend, registry }) {
     // 配对注册表用生效条目找 anchor。
     const handle = effectiveRegistryView(
       await readRegistry(registry),
-      isPairedDefaultRegistry(registry) ? loadLanesConfig() : null,
+      lanesMergeDocFor(registry, pairedDefaultRegistryPath()),
     );
-    const entries = typeof handle.mergedRawEntries === "function"
-      ? handle.mergedRawEntries()
-      : handle.rawEntries();
-    const entry = entries.find(([, config]) => config?.backend === backend);
+    const entry = effectiveEntriesOf(handle).find(([, config]) => config?.backend === backend);
     agent = entry ? { id: entry[0], ...entry[1] } : null;
     if (agent) {
       try {

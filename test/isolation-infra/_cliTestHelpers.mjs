@@ -106,6 +106,8 @@ export function makeRetryInheritFixture(dir) {
   const config = {
     registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
     timeout: 5000, retries: 0, backendFor: () => fakeBackend, readRegistry,
+    // b158a 修复一：注入句柄是自包含注册表（无 rawEntries）→ 显式停用车道合并。
+    loadLanesConfigFn: () => null,
   };
   return { config, spawned };
 }
