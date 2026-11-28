@@ -48,6 +48,9 @@ function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); 
 function fakeBackendFactory(capture) {
   return {
     supportsRoleContract: true, sessionOutlivesProcess: false,
+    // b158a：生效车道表给条目补上 model（夹具车道带 model.id）→ 派发会走
+    // validateAgentPolicy 门，假 backend 补声明。
+    validateAgentPolicy() {},
     async spawn(agent, task) {
       capture.spawned += 1;
       capture.lastAgentId = agent.id ?? null;

@@ -25,7 +25,7 @@
 
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 import { getRegistryInventoryWithIssues } from "../application/registryInventory.js";
 import { buildRecommendations, displayWidth, wrapDisplay as wrapLines } from "../application/onboarding.js";
@@ -174,8 +174,10 @@ function renderLane(row, width, dimensionLabels, evidence) {
   // "只告知不拦截"这层意思由 sourceNotes.dispatchHold 说一次（153 批）。
   if (row.dispatchHold) emit("dispatchHold", row.dispatchHold);
   // 153 批：接线一致是常态不占行；漂移、条目无效、未接线照旧写。
+  // b158a：drift 语义=私有残留四轴与车道表不同（已不生效，可删）——只给事实，
+  // 不再断言"派发将拒绝"。
   if (row.wiring === "drift") {
-    emit("接线", `漂移——explicit 派发将拒绝：declared(${axesLabel(row.wiringDetail.declared)}) ≠ registry(${axesLabel(row.wiringDetail.registry)})`);
+    emit("接线", `漂移——私有残留四轴（已不生效，可删；实际生效值以车道表为准）：车道表(${axesLabel(row.wiringDetail.declared)}) ≠ 私有残留(${axesLabel(row.wiringDetail.registry)})`);
   } else if (row.wiring === "invalid") lines.push("  接线: 条目无效（registry 条目无法解析——认证/就绪跳过；见尾部 issues）");
   else if (row.wiring === "unwired") lines.push(`  接线: 未接线（registry 无键 ${row.id}——认证/就绪跳过）`);
 
@@ -267,16 +269,22 @@ export async function lanesCommand(args, config) {
     );
   }
 
-  // registry 单次读取：inventory / 探测输入 / 接线轴同源。
+  // registry 单次读取：inventory / 探测输入 / 接线轴同源。b158a：生效视图
+  //（registryPath 是车道表所配对的默认注册表才启用合并——显式配对面
+  //（--registry+--lanes-file 成对）同样按"registryPath 是否默认"判定；外来
+  // registry 与车道表本就不允许单独混拼）。rawAgents 保留原始视图供 drift 观察。
   const reg = await readRegistry(registryPath);
-  const registryAgents = Object.fromEntries(reg.listAgents().map((a) => [a.id, a]));
+  const lanesMergeDoc = isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null;
+  const effectiveReg = effectiveRegistryView(reg, lanesMergeDoc);
+  const registryAgents = Object.fromEntries(effectiveReg.listAgents().map((a) => [a.id, a]));
   const rawAgents = Object.fromEntries(reg.rawEntries());
   const runDir = resolve(options.runDir ?? config?.runDir ?? "runs");
   const inventory = await getRegistryInventoryWithIssues({
     registryPath,
     runDir,
-    readRegistryFn: async () => reg,
+    readRegistryFn: async () => effectiveReg,
     readFileFn: (p) => readFile(p, "utf8"),
+    lanesMergeDoc,
   });
 
   const lanesDoc = options.lanesFile !== undefined
@@ -296,13 +304,13 @@ export async function lanesCommand(args, config) {
     .filter((a) => laneIdSet.has(a.id))
     .map((a) => ({ id: a.id, backend: a.backend, model: null }));
   const ready = await buildRecommendations(
-    candidates, { agents: rawAgents },
+    candidates, { agents: registryAgents },
     { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource, hasKimiTokenFile: probeKimiTokenFile },
     { source: "configured", sortReadyFirst: false },
   );
 
   const view = buildLanesView({
-    lanesDoc, traitsResult, inventory, registryAgents, readyRows: ready.rows,
+    lanesDoc, traitsResult, inventory, registryAgents, rawRegistryAgents: rawAgents, readyRows: ready.rows,
   });
 
   if (options.json) {

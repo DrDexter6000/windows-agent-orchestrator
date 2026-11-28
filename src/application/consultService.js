@@ -76,7 +76,7 @@ import { laneFactsLine } from "./laneFactsLine.js";
 function listRoleLibrarySync() { return listRoleLibrary(); }
 
 
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
 import { boundReportScope } from "../metrics.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { dispatchRun } from "./runDispatch.js";
@@ -677,6 +677,9 @@ export async function runConsult({
   // 车道表读取面：席位别名解析与 TD-283 暂停提示共用。CLI 在非默认 --registry
   // 时传入停用的空表（防跨绑，规则同 run 命令）；测试注入夹具；缺省真实表。
   lanesDocFn = loadLanesConfig,
+  // b158a：席位身份事实与派发读取的生效车道表（null = 停用；由调用面按
+  // lanesMergeDocForCall / server 配对规则显式传入，绝不用停用空表冒充）。
+  lanesMergeDoc = null,
   // 第 156 批：laneRules 构造与每席车道事实行的测试缝（缺省=单一构造/单一实现；
   // 注入夹具，测试不读真实画像）。
   laneRulesFn = buildLaneRules,
@@ -768,9 +771,11 @@ export async function runConsult({
 
   // 三块砖①厂族：registry 原始字段直读（backend + provider，不做族系归类
   // 判断——R9：族系归类是展示闭集能力，控制面只报原始事实）。
+  // b158a：读取接生效视图（lanesMergeDoc 启用时按车道表合并四轴；合并失败
+  // （表不可用）同 registry 不可读处理——厂族砖降级 null，不阻断会审）。
   let registry = null;
   try {
-    registry = await registryReadFn(resolvedRegistry);
+    registry = effectiveRegistryView(await registryReadFn(resolvedRegistry), lanesMergeDoc);
   } catch {
     registry = null; // registry 不可读不阻断会审——厂族砖如实降级为 null
   }
@@ -892,6 +897,8 @@ export async function runConsult({
         ...(seatPolicy?.resolvedTarget?.source === "alias" ? { resolvedFrom: "alias" } : {}),
         prompt,
         registryPath: resolvedRegistry,
+        // b158a：席位派发读取的生效车道表（与本服务的身份事实同一份）。
+        lanesMerge: lanesMergeDoc,
         runDir: resolvedRunDir,
         cwd,
         readOnly: true,

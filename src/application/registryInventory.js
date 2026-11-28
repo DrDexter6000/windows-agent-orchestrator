@@ -19,7 +19,7 @@
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readRegistry, normalizeAgent } from "../registry.js";
+import { readRegistry, normalizeAgent, effectiveRegistryView } from "../registry.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { assessWorkerReadiness, alignReadinessToKimiTokenFile, createEnvResolver } from "./credentialReadiness.js";
 // TD-111: certification advisory context 闭集 SSOT——投影层用它做 fail-closed 校验：
@@ -200,9 +200,12 @@ export async function getRegistryInventory({
   readFileFn,
   userEnvReader,
   lanesDocFn,
+  // b158a：生效车道表（null = 停用；调用面按配对规则显式传入）。启用时
+  // listAgents 走合并后的生效条目；表不可用即抛 lanes_merge_unavailable。
+  lanesMergeDoc = null,
 }) {
   const _readRegistry = readRegistryFn ?? readRegistry;
-  const registry = await _readRegistry(registryPath);
+  const registry = effectiveRegistryView(await _readRegistry(registryPath), lanesMergeDoc);
   const certMap = await buildCertMap(runDir, readFileFn);
   const dispatchHoldByLane = laneDispatchHoldIndex((lanesDocFn ?? loadLanesConfig)());
 
@@ -352,19 +355,27 @@ export async function getRegistryInventoryWithIssues({
   readFileFn,
   userEnvReader,
   lanesDocFn,
+  // b158a：生效车道表（null = 停用）。启用时逐条校验走合并后条目（车道键条目
+  // 缺私有四轴仍有效）；诊断私有残留四轴的观察面读 rawEntries 原始视图。
+  lanesMergeDoc = null,
 }) {
   const _readRegistry = readRegistryFn ?? readRegistry;
   // Read/parse the registry source ONCE. readRegistry throws on a missing file
   // or invalid JSON — that is a whole-source failure, NOT a per-entry issue, so
   // it propagates (the caller surfaces a hard error; never a faked partial list).
-  const registry = await _readRegistry(registryPath);
+  const registry = effectiveRegistryView(await _readRegistry(registryPath), lanesMergeDoc);
   const certMap = await buildCertMap(runDir, readFileFn);
   const resolver = createEnvResolver(userEnvReader);
   const dispatchHoldByLane = laneDispatchHoldIndex((lanesDocFn ?? loadLanesConfig)());
 
   const agents = [];
   const rawIssues = [];
-  for (const [id, raw] of registry.rawEntries()) {
+  // b158a：生效条目枚举（合并视图提供；未包装的注入缝回退 rawEntries——
+  // 停用合并时两者本就相同）。
+  const effectiveEntries = typeof registry.mergedRawEntries === "function"
+    ? registry.mergedRawEntries()
+    : registry.rawEntries();
+  for (const [id, raw] of effectiveEntries) {
     try {
       const agent = normalizeAgent(id, raw);
       // 决定 0074：kimiHome 车道的 credentialAvailability 按 token 文件取值
@@ -996,9 +1007,11 @@ export async function getCertificationEvidenceInventory({
   readFileFn,
   existsFn = existsSync,
   now = new Date().toISOString(),
+  // b158a：生效车道表（null = 停用；声明列与派发同源）。
+  lanesMergeDoc = null,
 } = {}) {
   const _readRegistry = readRegistryFn ?? readRegistry;
-  const registry = await _readRegistry(registryPath);
+  const registry = effectiveRegistryView(await _readRegistry(registryPath), lanesMergeDoc);
   const ledger = await readReliabilityLedgerDetail(runDir, readFileFn);
   const rows = [];
   for (const agent of registry.listAgents()) {

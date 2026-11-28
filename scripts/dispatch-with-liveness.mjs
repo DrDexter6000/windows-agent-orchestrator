@@ -52,7 +52,8 @@ import { boundReportScope } from "../src/metrics.js";
 import { diagnoseFailure, DIAGNOSIS_CODES } from "../src/diagnosis.js";
 import { assessRunEvidence } from "../src/runEvidenceAssessment.js";
 import { summarizeLiveness } from "../src/application/runWait.js";
-import { readRegistry } from "../src/registry.js";
+import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../src/registry.js";
+import { loadLanesConfig } from "../src/dispatchResolution.js";
 import { backendFor } from "../src/backends/factory.js";
 import { checkNodeVersion } from "../src/nodeVersionGuard.js";
 
@@ -514,10 +515,14 @@ function collectRunSummary(events, runId, backendNoSession, stopRereadOk = false
   };
 }
 
-/** registry 读取失败/未知 agent → false（条件③ fail-closed：只剩证停一臂）。 */
+/** registry 读取失败/未知 agent → false（条件③ fail-closed：只剩证停一臂）。
+ * b158a：默认配对注册表用生效条目（私有去四轴后 backend 仍可判）。 */
 async function resolveBackendNoSession(registryPath, agentId) {
   try {
-    const registry = await readRegistry(registryPath);
+    const registry = effectiveRegistryView(
+      await readRegistry(registryPath),
+      isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null,
+    );
     return sessionEndsWithProcess(registry.getAgent(agentId));
   } catch {
     return false;

@@ -68,7 +68,7 @@ import {
 import { validateProjectedPath } from "./deliveryReview.js";
 import { INVENTORY_PATHS_LIMIT } from "./candidateInventory.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView, modelPolicyEqual } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
@@ -549,6 +549,10 @@ export async function continueRun({
   // TD-341（第 89 批 A）：runner stderr 文件打开器注入缝（缺省 openRunnerStderrFd；
   // 测试注入"打开失败"形状）。返回值作为 spawn stdio[2] 的 fd。
   openRunnerStderrFn,
+  // b158a：续修读取的生效车道表（null = 停用；由调用面按配对规则显式传入）。
+  // 启用时 drift 比对用的 agent 是合并后的生效条目；表不可用即抛
+  // lanes_merge_unavailable（不回退私有旧四轴）。
+  lanesMergeDoc = null,
 }) {
   const refuse = (rejectionReason, extra = {}) => ({
     accepted: false,
@@ -813,7 +817,9 @@ export async function continueRun({
   // 9. Backend must support provider session reuse (capability gate, mirror
   //    RunManager.start). No runtime-name branching — the injected backendFor
   //    decides from the declared capability.
-  const registry = await readRegistry(resolve(registryPath));
+  // b158a：生效视图（lanesMergeDoc 启用时四轴按车道表合并——私有去四轴后
+  // 续修的 drift 比对仍取到完整身份）。
+  const registry = effectiveRegistryView(await readRegistry(resolve(registryPath)), lanesMergeDoc);
   // 0045 W4d（R5 §1.3）：重键前父档案的 envelope agentId=席位名（注册表已车道键化）——
   // getAgent 的 Unknown 信号转具名拒绝（固定文案指路重派，不裸抛；mock 注册表同
   // resume 侧一致以 getAgent 为准）。
@@ -836,7 +842,7 @@ export async function continueRun({
   // current side; a parent recorded against a pre-0106 provider wiring
   // (non-null string) must NOT be silently adopted — fresh run instead.
   if (started.backend !== agent.backend
-    || JSON.stringify(started.model ?? null) !== JSON.stringify(agent.model ?? null)
+    || !modelPolicyEqual(started.model, agent.model)
     || (started.providerKey !== undefined
       && started.providerKey !== null)) {
     return refuse("worker_configuration_changed");

@@ -63,7 +63,7 @@ import {
   tokenHasAbsolutePathLiteral,
   ALLOWED_PATHS_RULE_TEXT,
 } from "../delivery.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
 
 // The frozen closed set of issue codes the precheck can emit. The MCP output
 // schema is built from this single set so the service and the schema cannot
@@ -412,6 +412,8 @@ export async function runDispatchContractCheck({
   executionProfileId,
   workspaceBinding,
   registryPath,
+  // b158a：生效车道表（null = 停用；presence 校验与派发同一份枚举）。
+  lanesMergeDoc = null,
   resolveVerificationFn,
   prepareDeliveryRequestFn,
   readRegistryFn,
@@ -477,7 +479,7 @@ export async function runDispatchContractCheck({
   // section still observed.
   if (typeof registryPath === "string" && registryPath.length > 0) {
     try {
-      const registry = await readReg(registryPath);
+      const registry = effectiveRegistryView(await readReg(registryPath), lanesMergeDoc);
       const present = registry.listAgents().some((a) => a.id === agentId);
       sections.registry = "observed";
       if (!present) {

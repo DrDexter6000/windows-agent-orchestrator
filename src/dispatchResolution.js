@@ -12,11 +12,12 @@
 //     （空串与 null 不许靠 truthy 冒充"未提供"）。
 //   - 别名路径 = **注解不执行**（H1）：agentId 命中 aliases 时仍由调用方走
 //     registry 原条目（行为零变化），解析器只返回身份注记 {laneId, roleId,
-//     resolvedFrom:"alias"}；别名侧车道轴与注册表不一致 → 降级 legacy-agent
-//     注解缺席（H2，零破坏；validate 出 WARN 不拒派发）。
-//   - explicit 路径：lane+role 均必须在册在库；车道公开轴（backend/model.id/
-//     model.providerID/reasoning.effort，null 归一）与 wiringAgent 注册表值
-//     严格比对——**注册表赢，不一致即拒**（车道字段只断言不生效，G4）。
+//     resolvedFrom:"alias"}；b158a 起别名解析不再比对注册表轴（私有残留四轴
+//     不生效），降级条件只剩接线缺席/角色未声明。
+//   - explicit 路径：lane+role 均必须在册在库且注册表有接线条目。b158a 起
+//     四轴（backend/model.id/model.providerID/reasoning.effort）以车道表为
+//     唯一出处（registry.js 的 effectiveRegistryView 合并），注册表残留轴
+//     不再比对、不再拒绝（G4"注册表赢"退役；"接线缺席"的拒绝保留）。
 //   - 错误形状三原则（auditor R3 文案基准）：闭集码 unknown_lane / unknown_role /
 //     dispatch_selector_invalid / unknown_agent；received 只回显过 canonical
 //     字母表的值；choices 给完整合法全集（不截断冒充全集）。
@@ -325,16 +326,19 @@ export function loadLanesConfig(explicitPath) {
 }
 
 /**
- * 结构校验 + 跨文件绑定校验（registry validate / doctor 消费；alias 侧 WARN、
- * 结构错误硬 issue）。wiringAgent 必须在注册表；公开轴严格比对（null 归一）。
+ * 结构校验 + 跨文件绑定校验（测试与诊断面消费；alias 侧 WARN、结构错误硬
+ * issue）。wiringAgent 必须在注册表；公开轴比对（null 归一）。
+ * b158a：四轴不一致不再拒绝派发（车道表是唯一出处，私有残留四轴不生效）——
+ * warn 文案改为事实观察"私有残留（已不生效，可删）"。
  * @returns {{issues:string[], warns:string[]}}
  */
 export function validateLanesAgainstRegistry(lanesDoc, registryAgents) {
   const issues = [...(lanesDoc.issues ?? [])];
   const warns = [];
   const agents = registryAgents && typeof registryAgents === "object" ? registryAgents : {};
-  // W4d 终局：接线=注册表车道键条目。校验=每车道有接线条目 + 公开轴一致（断言，
-  // 注册表赢）；别名不再对注册表（角色一致性由别名表结构自证——role 键白名单）。
+  // W4d 终局：接线=注册表车道键条目。校验=每车道有接线条目；公开轴比对降为
+  // 事实观察（b158a：注册表赢→车道表赢）；别名不再对注册表（角色一致性由别名表
+  // 结构自证——role 键白名单）。
   for (const lane of lanesDoc.lanes ?? []) {
     const wiring = agents[lane.id];
     if (!wiring) {
@@ -345,7 +349,7 @@ export function validateLanesAgainstRegistry(lanesDoc, registryAgents) {
     const aa = agentAxes(wiring);
     if (!axesEqual(la, aa)) {
       warns.push(
-        `lane "${lane.id}" 公开轴(${la.backend}/${la.modelId}/${la.effort}) 与注册表接线条目(${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——explicit 派发将拒绝，请对齐`,
+        `lane "${lane.id}" 公开轴(${la.backend}/${la.modelId}/${la.effort}) 与私有注册表残留(${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——私有残留四轴已不生效（实际生效值以车道表为准），可删`,
       );
     }
   }
@@ -410,10 +414,12 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
     const aliasLane = aliasMap.get(name);
     if (aliasLane && !lanesStructurallyInvalid) {
       // W4d（R5 裁定：别名=执行）：别名→车道→注册表车道键直取接线，角色=别名表
-      // 声明的角色。注册表轴与车道轴断言不一致（H2）→ 降级 legacy-agent。
+      // 声明的角色。b158a：注册表轴与车道轴不一致（H2）不再降级 legacy-agent——
+      // 四轴以车道表为唯一出处，私有残留不影响解析；降级条件只剩"接线缺席/角色
+      // 未声明"。
       const wiring = registryAgents?.[aliasLane.id];
       const declaredRole = aliasLane.aliases[name]?.role;
-      if (wiring && axesEqual(agentAxes(wiring), laneAxes(aliasLane)) && declaredRole !== undefined) {
+      if (wiring && declaredRole !== undefined) {
         return {
           kind: "resolved", source: "alias", agentId: aliasLane.id,
           laneId: aliasLane.id, roleId: declaredRole,
@@ -465,21 +471,10 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
         message: `lane_wiring_mismatch: lane "${escapeControlChars(laneName)}" 的接线条目（注册表车道键 ${escapeControlChars(targetLane.id)}）不在注册表——要用这条车道，照 config/agents.example.json 的同名条目把它加进私有注册表（registry align 只对齐已有条目，不添加）。`,
       };
     }
-    if (!axesEqual(laneAxes(targetLane), agentAxes(wiring))) {
-      // G4：注册表赢——车道字段只断言不生效，不一致即拒（防"改 lanes.json 换模型"）。
-      // TD-318 复核：两侧轴值都是配置来源的自由值（model.id 只要求非空字符串）
-      //——拼进拒绝消息前逐值过控制字符转义，固定文案不动。
-      // 决定 0108：指路改两条路——升级后私有副本落后 → registry align 逐车道
-      // 显式采用；有意改车道 → 按 runbook「lane 变更同步面」同改。不再写
-      // "请对齐 lanes.json"（那个方向反了：要修的是私有副本，不是车道表）。
-      const la = laneAxes(targetLane); const aa = agentAxes(wiring);
-      return {
-        kind: "error", code: "lane_wiring_mismatch",
-        received: { lane: safe(laneName), role: safe(roleName) },
-        choices: { lanes: laneIds, roles },
-        message: `lane_wiring_mismatch: lane "${escapeControlChars(laneName)}" 声明 (${escapeControlChars(la.backend)}/${escapeControlChars(la.modelId)}/${escapeControlChars(la.effort)}) 与注册表 ${escapeControlChars(targetLane.id)} (${escapeControlChars(aa.backend)}/${escapeControlChars(aa.modelId)}/${escapeControlChars(aa.effort)}) 不一致——注册表为准。升级后私有副本落后：跑 npm run cli -- registry align --lane ${escapeControlChars(targetLane.id)}（先预览再 --apply）；有意改车道：按 docs/certification-runbook.md「lane 变更同步面」同改。`,
-      };
-    }
+    // b158a（Owner 2026-11-27 决定，退役决定 0045 G4 的"注册表赢"拒绝）：车道表
+    // 是四轴唯一出处——接线条目在场即可解析，私有残留四轴与车道表不一致不再
+    // 拒绝（doctor / lead_preflight / wao lanes 给事实观察，读取原始视图）。
+    // "注册表里没有这条车道的接线条目"的拒绝保留（下方 lane_wiring_mismatch）。
     return {
       kind: "resolved", source: "explicit", agentId: targetLane.id,
       laneId: targetLane.id, roleId: roleName,

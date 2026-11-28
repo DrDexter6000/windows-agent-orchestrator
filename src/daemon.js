@@ -26,7 +26,8 @@ import { dirname } from "node:path";
 import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { resolveTranscriptPath, listTranscriptsDeep } from "./projectBuckets.js";
 import { RunManager } from "./runManager.js";
-import { readRegistry, normalizeAgent } from "./registry.js";
+import { readRegistry, normalizeAgent, isPairedDefaultRegistry } from "./registry.js";
+import { loadLanesConfig } from "./dispatchResolution.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS, isFreshHeartbeat } from "./application/ownerLiveness.js";
 import { validateBoundedWaitTimeout } from "./application/timeoutPolicy.js";
 
@@ -296,6 +297,7 @@ export function connectDaemon(pipe, request, opts = {}) {
 // ============================================================
 
 // 测试用：registry 以对象注入时，构造内存 readRegistry。
+// b158a：补 rawEntries（effectiveRegistryView 的同形状要求）。
 function makeObjectRegistry(registryObj) {
   const agents = registryObj.agents ?? {};
   return async () => ({
@@ -306,6 +308,9 @@ function makeObjectRegistry(registryObj) {
       if (!agents[id]) throw new Error(`Unknown agent: ${id}`);
       const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
       return normalizeAgent(id, { ...agents[id], ...defined });
+    },
+    rawEntries() {
+      return Object.entries(agents);
     },
   });
 }
@@ -347,6 +352,11 @@ export async function startDaemon(opts = {}) {
     ? makeObjectRegistry(opts.registry)
     : readRegistry;
   const registryPath = typeof opts.registry === "string" ? opts.registry : undefined;
+  // b158a：daemon 的生效车道表（与 backgroundRunner 同一配对判定：对象注入缝
+  // 停用；字符串路径=车道表所配对的默认注册表才启用）。
+  const lanesMerge = typeof opts.registry === "object" && opts.registry !== null
+    ? null
+    : (isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null);
   // M10-pre3C: the daemon must NOT inject an implicit 120000 execution deadline.
   // Omitted/null means disabled — RunManager.waitForCompletion resolves the
   // policy via the timeout-policy SSOT and creates no total-duration timer.
@@ -477,7 +487,7 @@ export async function startDaemon(opts = {}) {
     const resumable = scanResumableRuns(runDir);
     for (const runId of resumable) {
       try {
-        const run = await manager.resume(runId, { runDir, registry: registryPath });
+        const run = await manager.resume(runId, { runDir, registry: registryPath, lanesMerge });
         if (!run) continue;
         const controller = new AbortController();
         runControllers.set(runId, controller);

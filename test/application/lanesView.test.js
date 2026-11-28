@@ -91,13 +91,18 @@ test("buildLanesView：四接线态 + 行序钉（lanes.json 声明序，不按 
   assert.equal(view.lanes[0].wiring, "wired");
   assert.equal(view.lanes[2].wiring, "invalid", "键在+条目无效=invalid（≠unwired）");
 
-  // drift：registry effort 与声明不一致（G4 同判定）。
+  // drift（b158a 语义）：**私有残留**四轴与车道表不一致——读取原始视图
+  //（rawRegistryAgents）；生效条目（registryAgents）恒与车道表一致 → wired。
   const driftInput = baseInputs();
-  driftInput.registryAgents.l1 = agent({ reasoning: { effort: "low" } });
+  driftInput.rawRegistryAgents = { ...driftInput.registryAgents };
+  driftInput.rawRegistryAgents.l1 = agent({ reasoning: { effort: "low" } });
   const driftView = buildLanesView(driftInput);
-  assert.equal(driftView.lanes[0].wiring, "drift");
+  assert.equal(driftView.lanes[0].wiring, "drift", "私有残留不一致=drift 观察");
   assert.equal(driftView.lanes[0].wiringDetail.declared.effort, "max");
   assert.equal(driftView.lanes[0].wiringDetail.registry.effort, "low");
+  // 无 raw 差异（或未给 raw 视图）即 wired——drift 只看原始残留。
+  const sameView = buildLanesView(baseInputs());
+  assert.equal(sameView.lanes[0].wiring, "wired");
 
   // unwired：registry 无 l3 键。
   const unwiredInput = baseInputs();

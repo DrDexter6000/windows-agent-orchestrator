@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { JsonlTranscript, STATE_CHANGE_REASON, transcriptPathFor, isPersistableOwnerTaskType } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn, releaseLineageFirstTurn, deriveLineageOpaqueUuid } from "./sessionReuse.js";
@@ -580,6 +580,12 @@ export async function dispatchRun({
   // TD-341（第 89 批 A）：runner stderr 文件打开器注入缝（缺省 openRunnerStderrFd；
   // 测试注入"打开失败"形状）。返回值作为 spawn stdio[2] 的 fd。
   openRunnerStderrFn,
+  // b158a：车道四轴合并的启用车道表（null/undefined = 停用）。由调用方按
+  // lanesDocForCall / isPairedDefaultRegistry 的同一配对规则显式传入；启用时
+  // 本函数解析的 agent（凭据预检/复用身份/谱系材料/runner argv 的来源）走
+  // effectiveRegistryView 的生效条目，车道表不可用即以 lanes_merge_unavailable
+  // 拒绝（不回退私有旧四轴）。
+  lanesMerge = null,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -701,7 +707,7 @@ export async function dispatchRun({
   // preflight runs) so the sessionReuse policy can be read for reuse resolution
   // below. The credential check reuses the same agent instance.
   let finalCredentials = resolvedCredentials ?? {};
-  const registry = await readRegistry(resolvedRegistry);
+  const registry = effectiveRegistryView(await readRegistry(resolvedRegistry), lanesMerge);
   const agent = registry.getAgent(agentId);
   // TD-198 (2026-10-03): the ABSOLUTE ownership cwd for the background
   // ownership record + the detached runner argv, derived through the SAME

@@ -30,7 +30,7 @@ import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHAN
 import { resolveTranscriptPath } from "../projectBuckets.js";
 import { serverStopTargetFor, serverStopBackendOf, serverStopSessionLabel, SERVER_STOP_ROUTE_TEXT } from "../backends/factory.js";
 import { executeStopWithVerification } from "../backends/serveStopVerify.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
@@ -406,7 +406,12 @@ export async function stopRun(input) {
         loadAgent: async () => {
           if (typeof input.registryPath !== "string" || input.registryPath.length === 0) return null;
           if (typeof startedAgentId !== "string" || startedAgentId.length === 0) return null;
-          const registry = await readRegistry(input.registryPath);
+          // b158a：停止目标的后端身份取生效条目（lanesMergeDoc 由 MCP 面按配对
+          // 规则传入；私有去四轴后 raw 无 backend）。
+          const registry = effectiveRegistryView(
+            await readRegistry(input.registryPath),
+            input.lanesMergeDoc ?? null,
+          );
           return registry.getAgent(startedAgentId);
         },
         // 凭据按派发时的同一条路解析（process env → Windows 用户环境），值只交给停止目标。

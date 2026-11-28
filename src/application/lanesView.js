@@ -11,9 +11,10 @@
 //   - certification=null 不等于"无记录"——无记录/身份不匹配/台账缺失或不可读
 //     三种原因未区分，展示层如实标注（sol P1-3）；状态值原样透传（不止
 //     certified/conditional 两态）。
-//   - 接线轴复用 dispatchResolution 的 axesEqual 判定（同 explicit 派发的
-//     G4 语义：漂移=explicit 派发将拒绝）；"键不存在"（unwired）与"键存在但
-//     条目无效"（invalid）严格分开（sol P1-1）。
+//   - 接线轴复用 dispatchResolution 的 axesEqual 判定（b158a 修订：生效四轴来自
+//     车道表，wired/invalid 按合并后条目判定；drift=私有残留四轴与车道表不同——
+//     已不生效可删，只给事实，不再断言"派发将拒绝"）；"键不存在"（unwired）与
+//     "键存在但条目无效"（invalid）严格分开（sol P1-1）。
 //   - 画像降级三态分开：absent（无该车道键）/ invalid（形状错误）/ unreadable
 //     （整文件不可读）——不用默认值冒充观察事实（sol P1-4）。
 //   - 本模块纯函数：所有 IO（读文件/探测/registry）由调用方注入；零 env 读取。
@@ -53,12 +54,15 @@ const DERIVED_ISSUE_CAP = 16;
  * @param {object} input.traitsResult   readLaneTraits() 结果
  * @param {object} input.inventory      getRegistryInventoryWithIssues() 结果
  * @param {Object<string, object>} input.registryAgents 同一次 readRegistry 的
- *   listAgents() 归一映射（接线轴来源——0065 起归一化不含 seatRole）
+ *   listAgents() 归一映射（b158a 起为**生效条目**映射——接线有效性与认证/就绪
+ *   门槛都以合并后的条目判定；0065 起归一化不含 seatRole）
+ * @param {Object<string, object>} [input.rawRegistryAgents] 同一次读取的**原始**
+ *   条目映射（b158a：诊断私有残留四轴用——读取原始视图，逐轴列差值）
  * @param {object[]} input.readyRows    buildRecommendations(...).rows（就绪轴；
  *   未接线/无效车道无行=readyState null）
  * @returns {object} 视图对象（--json 白名单投影的同源单对象）
  */
-export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgents, readyRows }) {
+export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgents, rawRegistryAgents, readyRows }) {
   const issues = [];
   const pushIssue = (detail) => {
     if (issues.length < DERIVED_ISSUE_CAP) issues.push(detail);
@@ -95,17 +99,22 @@ export function buildLanesView({ lanesDoc, traitsResult, inventory, registryAgen
     const declared = laneAxes(lane);
     const agent = registryAgents?.[id] ?? null;
 
-    // 接线轴（sol P1-1）：unwired（键不存在）/ invalid（键在、条目无法解析）/
-    // wired（axesEqual 一致）/ drift（explicit 派发将拒绝——同 G4 判定）。
+    // 接线轴（sol P1-1；b158a 语义修订）：unwired（键不存在）/ invalid（键在、
+    // 生效条目无法解析）/ wired（生效条目过校验——四轴来自车道表，恒一致）/
+    // drift（私有**残留**四轴与车道表不同——已不生效、可删；读取原始视图，
+    // 逐轴列差值，只给事实不再断言"派发将拒绝"）。
     let wiring = "unwired";
     let wiringDetail = null;
     if (invalidIds.has(id)) wiring = "invalid";
     else if (agent) {
-      const regAxes = agentAxes(agent);
-      if (axesEqual(declared, regAxes)) wiring = "wired";
-      else {
-        wiring = "drift";
-        wiringDetail = { declared, registry: regAxes };
+      wiring = "wired";
+      const raw = rawRegistryAgents?.[id];
+      if (raw !== undefined && raw !== null) {
+        const rawAxes = agentAxes(raw);
+        if (!axesEqual(declared, rawAxes)) {
+          wiring = "drift";
+          wiringDetail = { declared, registry: rawAxes };
+        }
       }
     }
 

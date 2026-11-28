@@ -70,7 +70,8 @@ test("wao lanes：成对面渲染——drift 判定/cert null 语义/readyState 
     assert.ok(text.includes("显式拼接面"), "成对放行有横幅注记");
     assert.ok(text.includes("lane l1"), "l1 在场");
     assert.match(text, /^lane l1 — .+ · 推断族系 \S+$/m, "车道行带推断族系（决定 0090）");
-    assert.ok(/接线: 漂移——explicit 派发将拒绝/.test(text), "l2 drift 判定与拒绝语义");
+    assert.ok(/私有残留四轴（已不生效，可删/.test(text), "l2 drift 判定（b158a：残留观察，非拒绝语义；长行可折行）");
+    assert.ok(!text.includes("explicit 派发将拒绝"), "不再断言拒绝语义");
     assert.ok(!text.includes("seatRole:"), "seatRole 列已退役（0065）");
     // 153 批：认证与就绪合一行；null 语义收成「无匹配记录」（原因未区分的解释
     // 移到表头 sourceNotes.certification）——原断言测旧的逐行英文标签与解释句。

@@ -1,8 +1,12 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 import { isValidSessionReuseMode } from "./application/sessionReuse.js";
 import { isValidKimiHome, isValidServeWorkspaceDir } from "./envPolicy.js";
+// b158a：按轴覆盖需要车道表四轴的 null 归一读法——复用 dispatchResolution 的
+// laneAxes（core 同层；不另写第二份轴读取规则）。
+import { laneAxes } from "./dispatchResolution.js";
 // TD-318: JSON.parse 的 V8 报错自带源文本片段——registry 原文会随报错进
 // CLI/MCP 输出。安全解析只抛固定文案 + 行列号（validate/doctor 同一实现）；
 // unknownBackendGuidance 回显的 backend 值过控制字符转义（换行不能伪造一行）。
@@ -325,6 +329,224 @@ export function normalizeAgent(id, agent) {
     // 是合法键名、无需转义"的前提直接打印的文本行也随之可被伪造。
     id,
   };
+}
+
+// ===== b158a：车道四轴唯一出处（config/lanes.json）——生效视图与原始视图 =====
+//
+// 语义（Owner 2026-11-27 决定，取代决定 0045 G4 的"注册表赢"）：
+//   - 车道表里有的车道，四轴（backend / model.id / model.providerID /
+//     reasoning.effort）只从车道表取；私有注册表同名条目只承载本机接线
+//     （cwd/env/binary/args/serveUrl/tokenEnv/credentialEnv/kimiHome/
+//     serveWorkspaceDir/sessionReuse 等）。
+//   - 不在车道表里的自定义条目，以及车道表停用时的注册表（非默认配对），
+//     照旧必须自带四轴——合并只作用于"启用车道表 × 表内车道"。
+//   - 私有条目里残留的四轴不再生效：不一致只给事实（doctor / lead_preflight /
+//     wao lanes 的观察面读原始视图），不拒绝派发。
+//
+// 本节全部是纯函数（除读路径常量外零 I/O）；启用条件由调用方显式传入
+// （effectiveRegistryView 的 lanesDoc 参数；缺席 = 停用），不按文件路径或
+// 参数是否出现去猜。默认配对判定见下方 isPairedDefaultRegistry。
+
+/**
+ * 车道表四轴本身的结构校验（纯函数）。启用合并的表必须能让四轴安全生效：
+ * backend 在 KNOWN_BACKENDS 闭集、model.id 是非空字符串、effort 在
+ * REASONING_EFFORTS 闭集或为 null。返回 issue 数组（空 = 通过）；条目级
+ * 结构问题（lane 不是对象等）仍归 validateLanesStructure，此处跳过。
+ * @param {object} lanesDoc loadLanesConfig 的产物（或同形状注入）
+ * @returns {string[]}
+ */
+export function validateLaneAxesIssues(lanesDoc) {
+  const issues = [];
+  const lanes = Array.isArray(lanesDoc?.lanes) ? lanesDoc.lanes : [];
+  for (const lane of lanes) {
+    if (!lane || typeof lane !== "object") continue;
+    const id = typeof lane.id === "string" ? lane.id : "?";
+    if (!KNOWN_BACKENDS.includes(lane.backend)) {
+      issues.push(`lane "${id}" 的 backend 不在已知集合（${KNOWN_BACKENDS.join("/")}）`);
+    }
+    if (typeof lane.model?.id !== "string" || lane.model.id.length === 0) {
+      issues.push(`lane "${id}" 的 model.id 必须是非空字符串`);
+    }
+    const effort = lane.reasoning?.effort ?? null;
+    if (effort !== null && !REASONING_EFFORTS.includes(effort)) {
+      issues.push(`lane "${id}" 的 reasoning.effort 必须是 ${REASONING_EFFORTS.join("/")} 之一或 null`);
+    }
+  }
+  return issues;
+}
+
+function isPlainObjectValue(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * 按轴合并（纯函数，不改输入）：车道表四轴覆盖私有条目的对应键。
+ *   - 车道侧某一轴为 null 或缺席 → 合并结果不带该键（kimi 的 effort 即此形）；
+ * 仅为 null 占位的容器键（model/reasoning）删空后整键移除。
+ *   - 其余字段原样保留——包括 model.contextWindow 这类与四轴同级的兄弟字段。
+ *   - 键序：按私有条目原序浅拷贝后赋值（既有键位不动、新键按固定序追加），
+ * 同一输入的合并结果逐字节相同（JSON.stringify 稳定）。私有四轴与车道表
+ * 一致时，合并结果与私有原文 JSON 相同（兼容性测试的前提）。
+ * @param {object} agent 私有条目原文
+ * @param {object} lane 车道表条目（已过 validateLaneAxesIssues）
+ * @returns {object} 合并后的条目原文（未过 normalizeAgent）
+ */
+export function mergeLaneAxes(agent, lane) {
+  const merged = { ...agent };
+  merged.backend = lane.backend;
+  const modelId = lane.model?.id ?? null;
+  const providerID = lane.model?.providerID ?? null;
+  if (modelId === null && providerID === null) {
+    if (isPlainObjectValue(merged.model)) {
+      const m = { ...merged.model };
+      delete m.id;
+      delete m.providerID;
+      if (Object.keys(m).length === 0) delete merged.model;
+      else merged.model = m;
+    }
+  } else {
+    const m = isPlainObjectValue(agent.model) ? { ...agent.model } : {};
+    if (modelId !== null) m.id = modelId;
+    if (providerID !== null) m.providerID = providerID;
+    else delete m.providerID;
+    merged.model = m;
+  }
+  const effort = lane.reasoning?.effort ?? null;
+  if (effort === null) {
+    if (isPlainObjectValue(merged.reasoning)) {
+      const r = { ...merged.reasoning };
+      delete r.effort;
+      if (Object.keys(r).length === 0) delete merged.reasoning;
+      else merged.reasoning = r;
+    }
+  } else {
+    const r = isPlainObjectValue(agent.reasoning) ? { ...agent.reasoning } : {};
+    r.effort = effort;
+    merged.reasoning = r;
+  }
+  return merged;
+}
+
+/**
+ * 注册表 × 车道表配对判定（b158a，语义同 src/commands/shared.js 的
+ * lanesDocForCall）：显式注册表路径未给出（undefined/null）= 默认注册表 =
+ * 启用；显式给出且解析后等于配对默认注册表（车道表所在仓库的
+ * config/agents.json）= 启用；其它显式路径 = 停用（外来注册表自包含）。
+ * 供不带 CLI config 的表面（后台 runner / MCP / 脚本）复用同一规则。
+ * @param {string|undefined|null} explicitRegistryPath
+ * @param {string} [pairedDefault] 配对默认注册表路径（缺省 = 本仓库锚定值）
+ * @returns {boolean}
+ */
+export function isPairedDefaultRegistry(explicitRegistryPath, pairedDefault = pairedDefaultRegistryPath()) {
+  if (explicitRegistryPath === undefined || explicitRegistryPath === null || explicitRegistryPath === "") return true;
+  return resolve(explicitRegistryPath) === resolve(pairedDefault);
+}
+
+// 车道表（loadLanesConfig 的 config/lanes.json）所配对的默认注册表——锚定在
+// 代码安装根（src/registry.js → 上一级），与车道表同根。CLI 的 config.registry
+// 在全部生产形态（npm run cli 于仓库根、全局 bin 的 install-root 重定基）下
+// 解析到同一路径；mcp bind 片段里的 --registry 也指向它。
+const PAIRED_DEFAULT_REGISTRY = join(dirname(fileURLToPath(import.meta.url)), "..", "config", "agents.json");
+export function pairedDefaultRegistryPath() {
+  return PAIRED_DEFAULT_REGISTRY;
+}
+
+/**
+ * 生效视图（b158a 单一合并点）：把一个 readRegistry 形状的注册表句柄包装成
+ * "实际生效条目"视图——listAgents/getAgent 走合并后条目，rawEntries 保持原始
+ * 诊断视图（找私有残留四轴），mergedRawEntries 给"自行逐条 normalize、单条坏
+ * 不拖垮整表"的部分投影面（registryInventory / doctor / onboarding / 脚本）。
+ *
+ * 启用条件由调用方显式传入：lanesDoc 为 undefined/null = 停用（原样返回，零
+ * 行为变化）。启用时车道表必须可用——结构校验未过（ok !== true）、文件缺失或
+ * 不可读（sha256 为 null）、四轴本身不合法（validateLaneAxesIssues），都抛
+ * 具名错误 lanes_merge_unavailable，指向 config/lanes.json；绝不悄悄回退到
+ * 私有文件里的旧四轴。
+ *
+ * @param {object} registry readRegistry 形状句柄（或对象注入缝的同形状）
+ * @param {object|null|undefined} lanesDoc 启用车道表时传入 loadLanesConfig 产物
+ * @returns {object} 同形状句柄（listAgents/getAgent/rawEntries/mergedRawEntries）
+ * @throws {Error} lanes_merge_unavailable（启用但表不可用时）
+ */
+export function effectiveRegistryView(registry, lanesDoc) {
+  if (lanesDoc === undefined || lanesDoc === null) return registry;
+  // 注入缝纪律（对象 registry / 测试 fake 只提供 listAgents/getAgent）：无原始
+  // 视图即自包含注册表，不合并（与 backgroundRunner/daemon 的对象缝同一语义）；
+  // 生产 readRegistry 恒有 rawEntries。
+  if (typeof registry?.rawEntries !== "function") return registry;
+  const problems = [];
+  if (lanesDoc.ok !== true) {
+    const structural = Array.isArray(lanesDoc.issues) ? lanesDoc.issues : [];
+    problems.push(`结构校验未过（${structural.length} 项 issue）`);
+  }
+  if (lanesDoc.sha256 === null || lanesDoc.sha256 === undefined) {
+    problems.push("文件缺失或不可读");
+  }
+  const axesIssues = validateLaneAxesIssues(lanesDoc);
+  if (axesIssues.length > 0) problems.push(`四轴不合法（${axesIssues.length} 项 issue）`);
+  if (problems.length > 0) {
+    const detail = [
+      ...(Array.isArray(lanesDoc.issues) ? lanesDoc.issues.slice(0, 3) : []),
+      ...axesIssues.slice(0, 3),
+    ].map(escapeControlChars).join("；");
+    throw new Error(
+      `lanes_merge_unavailable: 车道表 config/lanes.json 不可用（${problems.join("；")}）`
+      + `${detail ? `——${detail}` : ""}。车道条目的四轴（backend/model.id/`
+      + `model.providerID/reasoning.effort）只从车道表取，不能回退私有注册表里的`
+      + `旧值；修复 config/lanes.json 后重试`,
+    );
+  }
+  const lanesById = new Map();
+  for (const lane of lanesDoc.lanes) {
+    if (lane && typeof lane.id === "string") lanesById.set(lane.id, lane);
+  }
+  const mergedFor = (id, agent) => (lanesById.has(id) ? mergeLaneAxes(agent, lanesById.get(id)) : agent);
+  const rawMap = new Map(registry.rawEntries());
+  return {
+    listAgents() {
+      return [...rawMap.entries()].map(([id, agent]) => normalizeAgent(id, mergedFor(id, agent)));
+    },
+    getAgent(id, overrides = {}) {
+      const raw = rawMap.get(id);
+      if (!raw) {
+        throw new Error(`Unknown agent: ${id}`);
+      }
+      const definedOverrides = Object.fromEntries(
+        Object.entries(overrides).filter(([, value]) => value !== undefined),
+      );
+      return normalizeAgent(id, { ...mergedFor(id, raw), ...definedOverrides });
+    },
+    rawEntries() {
+      return registry.rawEntries();
+    },
+    mergedRawEntries() {
+      return [...rawMap.entries()].map(([id, agent]) => [id, mergedFor(id, agent)]);
+    },
+  };
+}
+
+/**
+ * model 政策的字段级相等（b158a 续修修订）：键序无关；缺键与 null 按同一规则
+ * 归一（null ≡ 缺席）；逐字段比值。取代 runContinue 对整个 model 的
+ * JSON.stringify 整串比较——同一 {id, providerID, contextWindow} 集合以不同
+ * 键序写出的两份 model 不再误判 worker_configuration_changed。
+ * @param {object|null|undefined} a
+ * @param {object|null|undefined} b
+ * @returns {boolean}
+ */
+export function modelPolicyEqual(a, b) {
+  const left = isPlainObjectValue(a) ? a : null;
+  const right = isPlainObjectValue(b) ? b : null;
+  if (left === null || right === null) return left === right;
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    const lv = left[key] ?? null;
+    const rv = right[key] ?? null;
+    if (typeof lv === "object" || typeof rv === "object") {
+      if (JSON.stringify(lv ?? null) !== JSON.stringify(rv ?? null)) return false;
+    } else if (lv !== rv) return false;
+  }
+  return true;
 }
 
 /**

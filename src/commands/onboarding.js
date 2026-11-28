@@ -22,7 +22,7 @@ import { existsSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseOptions, lanesDocForCall } from "./shared.js";
+import { parseOptions, lanesDocForCall, lanesMergeDocForCall } from "./shared.js";
 import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // R6-C3（P1-2）：displayWidth（东亚宽字符计 2）与引擎共用同一份实现——渲染层
 // 不再持第二份宽度表（分层方向 commands → application 合法）。
@@ -150,6 +150,8 @@ export async function onboardingCommand(args, config) {
     // 决定 0090：会审就绪块不把车道表里暂停派发的车道算作候选。非默认 --registry
     // 时车道表停用（防跨绑，lanesDocForCall），没有暂停说明。
     dispatchHolds: dispatchHoldsByLane(lanesDocForCall(options, config, config?.loadLanesConfigFn)),
+    // b158a：已配置面校验/候选的生效车道表（同一配对判定；停用时 null）。
+    lanesMergeDoc: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
   });
 
   if (json) {

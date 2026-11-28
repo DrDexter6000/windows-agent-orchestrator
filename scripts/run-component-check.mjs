@@ -59,6 +59,10 @@ import { checkStateOf } from "./reliability/checkStates.mjs";
 // TD-318（二）：registry 读取的解析失败只报固定文案 + 行列号——V8 报错自带
 // 源文本片段，stderr 原样转出会把 registry 原文带进终端（src/safeText.js）。
 import { safeJsonParse } from "../src/safeText.js";
+// b158a：默认注册表时组件层消费生效条目（四轴来自 config/lanes.json）；临时/
+// 非默认注册表照旧自包含。表不可用即抛 lanes_merge_unavailable（不回退旧值）。
+import { effectiveRegistryView, isPairedDefaultRegistry } from "../src/registry.js";
+import { loadLanesConfig } from "../src/dispatchResolution.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -121,7 +125,22 @@ try {
   // 运行产生的数据，仍走 JSON.parse（语义不同，不在此列）。
   registry = safeJsonParse(readFileSync(REGISTRY_PATH, "utf8"), "registry 文件");
 } catch (error) {
-  console.error(`[component-check] registry unparseable (${REGISTRY_PATH}): ${error?.message ?? error}`);
+  console.error(`[component-check] registry unparseable (${REGISTRY_PATH}): ${error.message ?? error}`);
+  process.exit(2);
+}
+// b158a：默认注册表 → 生效条目（lane 合并后的 agents + 原样其余配置）。
+try {
+  const lanesMergeDoc = isPairedDefaultRegistry(getArg("registry")) ? loadLanesConfig() : null;
+  if (lanesMergeDoc !== null) {
+    const agents = registry?.agents && typeof registry.agents === "object" ? registry.agents : {};
+    const mergedAgents = Object.fromEntries(
+      effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
+        .mergedRawEntries(),
+    );
+    registry = { ...registry, agents: mergedAgents };
+  }
+} catch (error) {
+  console.error(`[component-check] ${error.message ?? error}`);
   process.exit(2);
 }
 

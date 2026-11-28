@@ -37,6 +37,12 @@ import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
 // TD-318（二）：registry 读取的解析失败只报固定文案 + 行列号（V8 报错自带
 // 源文本片段；顶层抛出走 Node 的未捕获输出也不带原文）——src/safeText.js。
 import { safeJsonParse } from "../src/safeText.js";
+// b158a：默认注册表（未显式 --registry，或给的正是车道表所配对的默认注册表）
+// 时，认证身份/执行画像消费**生效条目**（四轴来自 config/lanes.json，合并用
+// src/registry.js 的单一实现）；临时/非默认注册表照旧自包含。表不可用即抛
+// lanes_merge_unavailable（不回退私有旧四轴——认证身份不能建立在回退值上）。
+import { effectiveRegistryView, isPairedDefaultRegistry } from "../src/registry.js";
+import { loadLanesConfig } from "../src/dispatchResolution.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 // reportsCommandExitCode 条件化的判定源（backendCapabilitySnapshot SSOT）。
 import { backendCapabilitySnapshot, backendFor } from "../src/backends/factory.js";
@@ -132,8 +138,20 @@ function loadRegistry() {
 }
 
 const registry = loadRegistry();
+// b158a：默认注册表 → 生效条目（lane 合并后的 agents + 原 certification 配置）；
+// 非默认 → 原样自包含。
+const effectiveRegistry = (() => {
+  const lanesMergeDoc = isPairedDefaultRegistry(getArg("registry")) ? loadLanesConfig() : null;
+  if (lanesMergeDoc === null) return registry;
+  const agents = registry?.agents && typeof registry.agents === "object" ? registry.agents : {};
+  const mergedAgents = Object.fromEntries(
+    effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
+      .mergedRawEntries(),
+  );
+  return { ...registry, agents: mergedAgents };
+})();
 const MATRIX = buildCertificationMatrix({
-  registry,
+  registry: effectiveRegistry,
   onlyAgent: ONLY_AGENT,
   profileOverride: PROFILE_OVERRIDE,
 });
@@ -186,7 +204,8 @@ function countAssistantText(result) {
 }
 
 function agentInfo(agentId) {
-  const agent = registry.agents?.[agentId] ?? {};
+  // b158a：生效条目（默认注册表时四轴来自车道表）。
+  const agent = effectiveRegistry.agents?.[agentId] ?? {};
   return {
     backend: agent.backend ?? null,
     providerID: agent.model?.providerID ?? null,
@@ -376,7 +395,7 @@ for (const tc of MATRIX) {
       providerID: tc.providerID ?? info.providerID,
       providerKey: tc.providerKey ?? info.providerKey,
       effort: info.effort,
-      runtime: await runtimeIdentityFor(registry.agents?.[tc.agentId]),
+      runtime: await runtimeIdentityFor(effectiveRegistry.agents?.[tc.agentId]),
       codeRef: GIT_HEAD,
       capturedAt: new Date().toISOString(),
       drillRunIds: {},
@@ -453,7 +472,7 @@ for (const tc of MATRIX) {
     // backend 静态属性，不是组合质量；声明上报的 lane 断言不变（parser 回归
     // 金丝雀：流格式变化致 metrics 投影断裂时第一时间红）。
     checks.push(metricsNonZeroCheck({
-      agent: registry.agents?.[tc.agentId],
+      agent: effectiveRegistry.agents?.[tc.agentId],
       metricsInput: caseResult.metricsInput,
     }));
   }
@@ -467,7 +486,7 @@ for (const tc of MATRIX) {
     caseResult.scorecardFile = drill.fileName;
     // reportsCommandExitCode 条件化（ADR-0032 §8 + 诚实声明）：声明 false 的
     // backend，commandsPassed 记 N/A——判定源是 backendCapabilitySnapshot SSOT。
-    const capabilitySnapshot = backendCapabilitySnapshot(registry.agents?.[tc.agentId]);
+    const capabilitySnapshot = backendCapabilitySnapshot(effectiveRegistry.agents?.[tc.agentId]);
     checks.push(...scorecardChecksFromResult(drill.result, {
       reportsCommandExitCode: capabilitySnapshot?.reportsCommandExitCode ?? null,
     }));

@@ -33,7 +33,7 @@ import { renderRunSummary } from "../cliRunSummary.js";
 // R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
 // （boundReportScope；commands → core 下向边，与 runs.js 既有 metrics import 同款）。
 import { boundReportScope } from "../metrics.js";
-import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall, cliWaitOptions } from "./shared.js";
+import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag, lanesDocForCall, lanesMergeDocForCall, cliWaitOptions } from "./shared.js";
 import { resolveDispatchTarget, listRoleLibrary, laneDispatchHold, dispatchHoldAdvisoryLine } from "../dispatchResolution.js";
 // 0097 §4：派发时回显所选车道一行事实（只陈列非推荐；fail-open——null 不打印）。
 import { laneFactsLine } from "../application/laneFactsLine.js";
@@ -205,6 +205,9 @@ async function spawnBackgroundRunner(agentId, options, config, delivery, resolve
       agentId,
       prompt: options.prompt ?? "",
       registryPath: resolve(options.registry ?? config.registry),
+      // b158a：后台派发的生效车道表（配对规则同 run 解析块——非默认 --registry
+      // 时为 null，外来注册表自包含）。
+      lanesMerge: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
       runDir: resolve(options.runDir ?? config.runDir),
       runId: options.runId,
       cwd: options.cwd,
@@ -640,6 +643,9 @@ export async function runCommand(args, config) {
   const run = await manager.start(agentId, {
     prompt: promptText,
     registry: options.registry,
+    // b158a：前台派发的生效车道表（与解析块同一配对判定；表读不出/不合法由
+    // effectiveRegistryView 以 lanes_merge_unavailable 具名拒绝）。
+    lanesMerge: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
     runDir: options.runDir,
     tags: options.tag,
     ...(options.cwd ? { cwd: options.cwd } : {}),

@@ -61,7 +61,7 @@ import { dispatchHoldsByLane } from "../dispatchResolution.js";
 // 0065：panel 行归一化门（与 onboarding 已配置面同口径——sol P1）。
 // 会审修复批（2026-10-28）：registry 条目校验复用 KNOWN_BACKENDS + normalizeAgent
 //（与派发 readRegistry().getAgent 同一实现——doctor 不得把派发会拒的条目判 HEALTHY）。
-import { normalizeAgent, KNOWN_BACKENDS } from "../registry.js";
+import { normalizeAgent, KNOWN_BACKENDS, effectiveRegistryView } from "../registry.js";
 // 复核席第三轮（2026-10-28）：registry 键名合法性判定复用 canonicalAgentId SSOT
 //（与 normalizeAgent 的 id 校验同源——doctor 不写第二份字母表）。
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
@@ -255,9 +255,37 @@ export async function waoDoctorCommand(args, config) {
     pushCheck(checks, {
       name: "registry_entry_invalid_id",
       pass: false,
-      detail: `registry 里有 ${invalidIdEntryCount} 个 worker 的键名不是合法的 agent id（只允许 A-Z a-z 0-9 . _ -，1..128 个字符；键名不回显），派发这些 worker 会被拒；run: npm run cli -- registry validate --registry ${registryPath}`,
+      detail: `registry 里有 ${invalidIdEntryCount} 个 worker 的键名不是合法 agent id（只允许 A-Z a-z 0-9 . _ -，1..128 个字符；键名不回显），派发这些 worker 会被拒；run: npm run cli -- registry validate --registry ${registryPath}`,
       fix: `npm run cli -- registry validate --registry ${registryPath}`,
     });
+  }
+
+  // 2a′. b158a：生效条目视图——车道键条目的四轴按车道表（config/lanes.json）合并，
+  //      下方的条目校验、CLI/key 探测、cwd/binary/env、panel 行全部消费它；私有
+  //      残留四轴不生效（drift 观察见 2c，读原始视图）。表读不出/不合法时按 WARN
+  //      如实报告并回退私有原文做**体检**（doctor 是诊断面，不是派发面——派发路径
+  //      的 lanes_merge_unavailable 拒绝不受影响）。
+  const lanesMergeEnabled = options.registry === undefined
+    || (typeof options.registry === "string"
+      && resolve(options.registry) === resolve(config?.registry ?? "config/agents.json"));
+  let effectiveRegistryEntries = validRegistryEntries;
+  if (registryOk && lanesMergeEnabled) {
+    try {
+      const merged = effectiveRegistryView(
+        { rawEntries: () => registryEntries },
+        lanesMergeEnabled ? lanesDocForCall(options, config, config?.loadLanesConfigFn) : null,
+      ).mergedRawEntries();
+      const mergedMap = new Map(merged);
+      effectiveRegistryEntries = validRegistryEntries.map(([id]) => [id, mergedMap.get(id)]);
+    } catch (e) {
+      pushCheck(checks, {
+        name: "lane_wiring",
+        pass: true,
+        level: "warn",
+        detail: `${e.message}——本轮 doctor 按私有注册表原文体检（私有残留四轴不生效；派发/认证路径会以上述原因拒绝）`,
+        fix: "修复 config/lanes.json（结构、四轴形状）后重跑 doctor",
+      });
+    }
   }
 
   // 2b. registry 条目校验（会审修复批 2026-10-28）：backend 属于 KNOWN_BACKENDS 的
@@ -267,7 +295,7 @@ export async function waoDoctorCommand(args, config) {
   //     registry validate。未知 backend 不做这项校验（照旧只出 backend_map_<id>
   //     WARN——向前兼容的刻意设计）；其余检查照常进行。
   if (registryOk) {
-    for (const [id, agent] of validRegistryEntries) {
+    for (const [id, agent] of effectiveRegistryEntries) {
       if (!KNOWN_BACKENDS.includes(agent?.backend)) continue;
       try {
         normalizeAgent(id, agent);
@@ -282,11 +310,11 @@ export async function waoDoctorCommand(args, config) {
     }
   }
 
-  // 2c. 决定 0108：车道表 × 私有注册表接线一致性（advisory）。有"接线不一致"
-  //     时 WARN——--lane 派发会以 lane_wiring_mismatch 拒绝——给出 registry
-  //     align 的逐车道预览命令；只有合法差异（表有私无 / 私有有表无 / 矩阵行
-  //     modelId 滞后）时 INFO。诊断单一实现 application/registryAlign.js；
-  //     非法条目已由 2b 的 registry_entry_<id> FAIL 覆盖，这里不重复报；全部
+  // 2c. b158a（取代决定 0108 的 WARN 语义）：车道表 × 私有注册表——私有文件里
+  //     **残留**的四轴已不生效（实际生效值以车道表为准），不一致只给 INFO 事实
+  //     （逐轴明细见 registry align 预览，读取原始视图），不拦派发、不进
+  //     --warn-as-error 门。车道表本身不可用的 WARN 由 2a′ 承载（不在此重复）。
+  //     合法差异（表有私无 / 私有有表无 / 矩阵行 modelId 滞后）照旧 INFO。全部
   //     一致时不产生条目（零 OK 噪音惯例）。非默认 --registry 时车道表停用
   //    （防跨绑，规则同 run / registry list）——本检查随之跳过。
   if (registryOk
@@ -294,14 +322,7 @@ export async function waoDoctorCommand(args, config) {
     try {
       const lanesDoc = lanesDocForCall(options, config, config?.loadLanesConfigFn);
       const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc });
-      if (diag.ok && !diag.lanesTableOk) {
-        pushCheck(checks, {
-          name: "lane_wiring",
-          pass: true,
-          level: "warn",
-          detail: `车道表 config/lanes.json 结构校验未过（${diag.lanesDocIssues.length} 项）——--lane 派发会以 lanes_config_invalid 拒绝；修好车道表后再看 npm run cli -- registry align 预览`,
-        });
-      } else if (diag.ok) {
+      if (diag.ok) {
         const mismatches = diag.entries.filter((e) => e.state === "wiring-mismatch");
         const legalOnly = diag.onlyInTable.length + diag.onlyInRegistry.length
           + diag.entries.filter((e) => e.state === "aligned" && e.matrixMismatch).length;
@@ -311,8 +332,8 @@ export async function waoDoctorCommand(args, config) {
           pushCheck(checks, {
             name: "lane_wiring",
             pass: true,
-            level: "warn",
-            detail: `车道 ${idList} 的接线与私有注册表不一致——--lane 派发会以 lane_wiring_mismatch 拒绝（逐轴明细与认证影响见 registry align 预览）；run: npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>）`,
+            level: "info",
+            detail: `车道 ${idList} 的私有注册表残留四轴与车道表不同（已不生效，可删；实际生效值以车道表为准，逐轴明细见 registry align 预览）；run: npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>）`,
             fix: `npm run cli -- registry align --lane ${previewLane}（先预览；确认后加 --apply --expect-sha256 <预览输出的 SHA-256>；逐车道采用，没有一键全修）`,
           });
         } else if (legalOnly > 0) {
@@ -338,7 +359,7 @@ export async function waoDoctorCommand(args, config) {
   const cliFound = new Map();
   const keySource = new Map();
   if (registryOk) {
-    for (const [id, agent] of validRegistryEntries) {
+    for (const [id, agent] of effectiveRegistryEntries) {
       const backend = agent?.backend;
       // 会审修复批：hasOwn 守卫——裸 [backend] 取值会让 constructor/__proto__ 这类
       // 名字取到原型链上的值而静默漏检（该 worker 既不进 CLI 面也不进 WARN 面）。
@@ -441,7 +462,7 @@ export async function waoDoctorCommand(args, config) {
   //     文件路径与生成方式，值不回显。探测事实存 Map 供 panel 行复用（不二次读盘）。
   const kimiTokenState = new Map();
   if (registryOk) {
-    for (const [id, agent] of validRegistryEntries) {
+    for (const [id, agent] of effectiveRegistryEntries) {
       const tokenFile = kimiServerTokenFile(agent);
       if (tokenFile === null) continue;
       const state = await kimiHomeTokenFileState(tokenFile);
@@ -466,7 +487,7 @@ export async function waoDoctorCommand(args, config) {
   //     运行目录，doctor 无从确认文件是否在——改出 WARN（pass: true，不计 FAIL 面），
   //     不查文件（查了就是按 doctor 自己的盘误报）。
   if (registryOk) {
-    for (const [id, agent] of validRegistryEntries) {
+    for (const [id, agent] of effectiveRegistryEntries) {
       if (agent?.backend !== "zcode") continue;
       const binary = agent?.binary;
       const binaryRoot = typeof binary === "string" ? parse(binary).root : null;
@@ -514,7 +535,7 @@ export async function waoDoctorCommand(args, config) {
     // 测试不起 powershell），同步 reader 只查 Map。
     const userEnvReaderAsync = config.userEnvReader ?? readWindowsUserEnvValue;
     const userEnvValues = new Map();
-    for (const [, agent] of validRegistryEntries) {
+    for (const [, agent] of effectiveRegistryEntries) {
       const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
       const envBlockNames = Object.keys(agent?.env ?? {});
       for (const n of new Set([...declaredList.map((d) => d.name), ...envBlockNames])) {
@@ -522,7 +543,7 @@ export async function waoDoctorCommand(args, config) {
         try { userEnvValues.set(n, await userEnvReaderAsync(n)); } catch { userEnvValues.set(n, undefined); }
       }
     }
-    for (const [id, agent] of validRegistryEntries) {
+    for (const [id, agent] of effectiveRegistryEntries) {
       const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
       // 注册表 env 块声明的变量同样承重（无论 backend 是否声明表在册）。
       const envBlockNames = Object.keys(agent?.env ?? {});
@@ -593,7 +614,7 @@ export async function waoDoctorCommand(args, config) {
   //     缺陷（副本内续期会作废 ~/.claude 原件登录），fix 指路迁移。名字在场、值不
   //     回显（envPolicy 纪律）。
   if (registryOk) {
-    const nativeClaudeWorkers = validRegistryEntries
+    const nativeClaudeWorkers = effectiveRegistryEntries
       .filter(([, agent]) => agent?.backend === "claude-code")
       .map(([id]) => id);
     if (nativeClaudeWorkers.length > 0) {
@@ -649,7 +670,7 @@ export async function waoDoctorCommand(args, config) {
 
   // 6. registry 完整性：backend 映射与 cwd 检查。
   if (registryOk) {
-    const agents = validRegistryEntries;
+    const agents = effectiveRegistryEntries;
     for (const { id, backend } of unmappableBackends) {
       pushCheck(checks, {
         name: `backend_map_${id}`,
@@ -727,7 +748,7 @@ export async function waoDoctorCommand(args, config) {
     // 进计数）；仅当探测候选 ≤1 或已知族系不足两族时打印 INFO；INFO 不计
     // DEGRADED/退出码——advisory。
     const panelRows = [];
-    for (const [id, agent] of validRegistryEntries) {
+    for (const [id, agent] of effectiveRegistryEntries) {
       // 归一化门（口径一致）：无效条目不进行（其修复出口是既有 per-agent 检查）。
       let normalized = null;
       try {

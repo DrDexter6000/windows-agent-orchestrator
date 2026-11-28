@@ -39,7 +39,10 @@ import { homedir } from "node:os";
 import { probeRuntimeIdentity, HARNESS_VERSION_PROBES } from "./runtimeIdentity.mjs";
 import { backendFor } from "../../src/backends/factory.js";
 import { buildChildEnv } from "../../src/backends/processBackend.js";
-import { KNOWN_BACKENDS, readRegistry } from "../../src/registry.js";
+import { KNOWN_BACKENDS, readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../../src/registry.js";
+// b158a：默认注册表（车道表所配对）时盘点消费生效条目——私有去四轴后按合并
+// 形状找 backend 席位/锚点；外来 registry 照旧自包含。
+import { loadLanesConfig } from "../../src/dispatchResolution.js";
 
 // npm 发行的四个 backend 的官方包名（kimi 系官方包名以官方 docs 记载为准，
 // repo 名 ≠ npm 包名——runbook「证据纪律·未发现≠未安装」条在册教训）。
@@ -467,8 +470,14 @@ export async function collectRows({
   resolveInvocationFn,
   resolveBareFn,
 }) {
-  const handle = await readRegistryFn(registryPath);
-  const entries = handle.rawEntries();
+  const handle = effectiveRegistryView(
+    await readRegistryFn(registryPath),
+    isPairedDefaultRegistry(registryPath) ? loadLanesConfig() : null,
+  );
+  // 生效条目枚举（合并视图提供；未包装的注入缝回退 rawEntries——停用时相同）。
+  const entries = typeof handle.mergedRawEntries === "function"
+    ? handle.mergedRawEntries()
+    : handle.rawEntries();
 
   const rows = [];
   const seenBackends = new Set();

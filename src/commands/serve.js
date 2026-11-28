@@ -23,7 +23,8 @@
 import { resolve } from "node:path";
 import { parseOptions } from "./shared.js";
 import { readFileSync } from "node:fs";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
+import { loadLanesConfig } from "../dispatchResolution.js";
 import { kimiServerTokenFile } from "../envPolicy.js";
 import {
   serveStatusReport,
@@ -39,7 +40,12 @@ import {
  * （旧静默回落 kimiAgents[0] 会把 58630 的回收打到 58628——opus/sol 同发现）。 */
 async function resolveServeTarget(config, urlOverride, kimiHomeOverride) {
   const registryPath = resolve(config.registry ?? "config/agents.json");
-  const registry = await readRegistry(registryPath);
+  // b158a：席位解析走生效视图（默认注册表配对启用合并；私有去四轴后 kimi 席位
+  // 的 backend 仍可判）。
+  const registry = effectiveRegistryView(
+    await readRegistry(registryPath),
+    isPairedDefaultRegistry(config.registry ?? undefined) ? loadLanesConfig() : null,
+  );
   const kimiAgents = registry.listAgents().filter((a) => a.backend === "kimi-web");
   if (kimiAgents.length === 0) {
     throw new Error("no kimi-web agent in registry — wao serve requires a kimi-web lane entry (serveUrl/tokenEnv)");

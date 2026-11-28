@@ -211,7 +211,7 @@ test("0108 预览：零写入、给出 SHA-256、三类事实各就各位", asyn
     assert.deepEqual(backupFiles(env.dir), [], "预览不产生备份");
     assert.ok(out.includes(`SHA-256: ${shaOfFile(env.registryPath)}`), "输出当前文件 SHA-256");
     // 类 2：接线不一致（含逐轴差值与两类认证影响）
-    assert.ok(out.includes("[接线不一致"), "接线不一致块在场");
+    assert.ok(out.includes("[私有残留四轴与车道表不同"), "私有残留块在场（b158a：已不生效语义）");
     assert.ok(out.includes("lane flash"), "flash 在场");
     assert.ok(out.includes("model.id=bigmodel-api/GLM-F-NEW"), "车道表目标型号在场");
     assert.ok(out.includes("model.id=bigmodel-api/GLM-F-OLD"), "注册表旧型号在场");
@@ -630,10 +630,10 @@ test("0108 doctor：接线不一致 → WARN + registry align 预览命令；合
       });
       const check = parsed.checks.find((c) => c.name === "lane_wiring");
       assert.ok(check, "lane_wiring 检查项在场");
-      assert.equal(check.level, "warn", "接线不一致=WARN");
+      assert.equal(check.level, "info", "b158a：私有残留不一致=INFO（不再进 --warn-as-error 门）");
       assert.equal(check.pass, true, "WARN 不改 pass（advisory）");
-      assert.ok(check.detail.includes(`车道 flash、sole、dsh-lane 的接线与私有注册表不一致`), "WARN detail 列出车道");
-      assert.ok(check.detail.includes("--lane 派发会以 lane_wiring_mismatch 拒绝"), "WARN detail 写明派发后果");
+      assert.ok(check.detail.includes(`车道 flash、sole、dsh-lane 的私有注册表残留四轴与车道表不同`), "INFO detail 列出车道（残留语义）");
+      assert.ok(check.detail.includes("已不生效，可删"), "INFO detail 写明残留已不生效");
       assert.ok(check.detail.includes("registry align --lane flash"), "WARN detail 给预览命令");
       assert.ok((check.fix ?? "").includes("--expect-sha256 <预览输出的 SHA-256>"), "fix 带 apply 用法");
       assert.ok((check.fix ?? "").includes("没有一键全修"), "fix 写明无一键全修");
@@ -788,7 +788,7 @@ test("0108 preflight：默认事实函数——不一致时一行（≤512）、
     assert.ok(typeof line === "string" && line.length > 0, "有不一致 → 一行");
     assert.ok(line.length <= 512, `行长在 MCP observations 上限内（${line.length}）`);
     assert.ok(line.includes("flash、sole、dsh-lane"), "列出差异车道（前 3 条）");
-    assert.ok(line.includes("lane_wiring_mismatch"), "点名拒绝码");
+    assert.ok(line.includes("已不生效"), "b158a：事实行写明残留已不生效（不再点名派发拒绝码）");
     assert.ok(line.includes("registry align --lane <id>"), "给预览命令");
     // 无不一致 → null
     const clean = mkdtempSync(join(tmpdir(), "wao-align-pf-clean-"));
@@ -884,8 +884,8 @@ test("0108 车道表结构未过：doctor 报 WARN、preflight 事实行点名 l
       });
       const check = parsed.checks.find((c) => c.name === "lane_wiring");
       assert.ok(check, "车道表结构未过也出检查项");
-      assert.equal(check.level, "warn", "车道表结构未过=WARN");
-      assert.ok(check.detail.includes("lanes_config_invalid"), "WARN 点名派发实际的拒绝码");
+      assert.equal(check.level, "warn", "车道表结构未过=WARN（b158a：由 2a′ 的生效视图检查承载）");
+      assert.ok(check.detail.includes("lanes_merge_unavailable"), "WARN 点名派发实际的拒绝码");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

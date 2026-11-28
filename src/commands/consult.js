@@ -21,7 +21,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { parseOptions, resolveTargetCwd, lanesDocForCall } from "./shared.js";
+import { parseOptions, resolveTargetCwd, lanesDocForCall, lanesMergeDocForCall } from "./shared.js";
 import { getWaoStateDir } from "../waoDir.js";
 // 决定 0095：`consult wait --until-settled` 逐席调用与 `runs wait
 // --until-settled` 共用的收口等待器（轮询循环原样上移到家模块，不复制算法）；
@@ -351,6 +351,9 @@ async function consultRunCommand(args, config, deps = {}) {
     // 车道表：非默认 --registry 时停用（防跨绑，规则同 run 命令），席位解析与
     // 暂停提示都不读它；config.lanesDocFn 是测试缝。
     lanesDocFn: () => lanesDocForCall(options, config, config?.lanesDocFn),
+    // b158a：席位身份事实与派发的生效车道表（与 lanesDocFn 同一配对判定；
+    // 停用时为 null——外来注册表自包含）。
+    lanesMergeDoc: lanesMergeDocForCall(options, config, config?.lanesDocFn),
     // 扇出一完成就在 stderr 报出 consultId（stdout 留给最终结果）：等待预算到期
     // 之前就能另起命令 `consult show` / `consult wait`。
     onFanOut: ({ consultId, seats }) => {

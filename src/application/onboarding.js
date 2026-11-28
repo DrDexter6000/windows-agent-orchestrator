@@ -33,7 +33,7 @@
 
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeAgent } from "../registry.js";
+import { normalizeAgent, effectiveRegistryView } from "../registry.js";
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一来源——doctor
 // 的 scoped 检查与本模块的推荐矩阵共用同一份表（此前两处逐字重复且各自漂移）。
 import { BACKEND_CLI } from "./backendCliMap.js";
@@ -706,19 +706,33 @@ async function loadPrivateRegistry(privateRegistryPath, fs) {
  *   过 normalizeAgent 的有效行总数（R11-2 矩阵头句的 N 口径，同样不受帽——
  *   rows 经 buildCandidateList 枚举有帽，二者可不同）。
  */
-async function buildConfiguredFace(registry, probeEnv) {
+async function buildConfiguredFace(registry, probeEnv, lanesMergeDoc = null) {
   const agents = isPlainObject(registry?.agents) ? registry.agents : {};
+  // b158a：车道键条目按合并后的生效形状校验/生产（私有缺四轴合法）。表不可用
+  // （合并抛错）按私有原文降级——onboarding 是诊断面。
+  let mergeFor = (id, agent) => agent;
+  if (lanesMergeDoc !== null) {
+    try {
+      const mergedMap = new Map(
+        effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
+          .mergedRawEntries(),
+      );
+      mergeFor = (id, agent) => mergedMap.get(id) ?? agent;
+    } catch {
+      mergeFor = (id, agent) => agent;
+    }
+  }
   let invalidCount = 0;
   const valid = {};
   for (const [id, agent] of Object.entries(agents)) {
     try {
-      normalizeAgent(id, agent);
+      normalizeAgent(id, mergeFor(id, agent));
       valid[id] = agent;
     } catch {
       invalidCount += 1;
     }
   }
-  const validRegistry = { ...registry, agents: valid };
+  const validRegistry = { ...registry, agents: Object.fromEntries(Object.entries(valid).map(([id, a]) => [id, mergeFor(id, a)])) };
   // R11-2（决策 0024）：已配置面行按私有 registry 顺序稳定展示（矩阵"已配置行
   // 在前、私有顺序稳定"契约）——不做 ready-first 重排；就绪块分级对行序不敏感。
   const { rows } = await buildRecommendations(
@@ -877,6 +891,11 @@ export async function runOnboarding({
   privateRegistryPath,
   probeEnv,
   dispatchHolds = {},
+  // b158a：已配置面校验/候选的生效车道表（null = 停用；命令层按配对规则显式
+  // 传入）。启用时车道键条目按合并后的生效形状过 normalizeAgent——私有条目缺
+  // 四轴合法（轴来自 config/lanes.json）。表不可用（合并抛错）按私有原文降级
+  // （onboarding 是诊断面，不放大成崩溃）。
+  lanesMergeDoc = null,
   fs,
 } = {}) {
   const _fs = fs;
@@ -927,7 +946,7 @@ export async function runOnboarding({
   // 矩阵自带模板候选组），总探测界不变（≤8 CLI + ≤2N key，仍是常数界）。
   const privateLoad = await loadPrivateRegistry(privateRegistryPath, _fs);
   if (privateLoad.status === "readable") {
-    const cfg = await buildConfiguredFace(privateLoad.registry, probeEnv);
+    const cfg = await buildConfiguredFace(privateLoad.registry, probeEnv, lanesMergeDoc);
     panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, invalidCount: cfg.invalidCount, sourceUnreadable: false };
     recommendations = await buildDualSourceMatrix({ template, privateRegistry: privateLoad.registry, cfg, probeEnv });
   } else {

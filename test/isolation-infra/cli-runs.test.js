@@ -3042,7 +3042,7 @@ test("CLI 全链: 两个 --tag 都进后台 run.started.tags，形状与前台�
       runDir,
       readRegistry: async () => readRegistryFile(registryPath),
       backendFor: () => fakeBackend,
-      loadLanesConfigFn: () => ({ lanes: [], sha256: null, issues: [], rolesHint: [] }),
+      loadLanesConfigFn: () => ({ ok: true, lanes: [], sha256: "e".repeat(64), issues: [], rolesHint: [] }), // b158a：合法空表（有 sha）——停用形状（sha256:null）会被生效合并判为表缺失而拒绝
     };
     const origLog = console.log;
     console.log = () => {};

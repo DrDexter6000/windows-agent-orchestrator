@@ -26,6 +26,9 @@ import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
+// b158a：runner 的注册表读取接到生效视图——配对判定与派发侧同一规则
+//（isPairedDefaultRegistry；对象 registry 注入缝缺省停用，测试可显式给 doc）。
+import { effectiveRegistryView, isPairedDefaultRegistry } from "./registry.js";
 import { resolveTranscriptPath } from "./projectBuckets.js";
 import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, transcriptPathFor, parseTags, persistedOwnerTaskType } from "./transcript.js";
 
@@ -94,6 +97,8 @@ export function armRunnerStderrCleanup(targetProcess, runDir, runId) {
 }
 
 // 测试用：registry 以对象形式注入时，构造一个内存 readRegistry（与 registry.js 同结构）。
+// b158a：补 rawEntries（effectiveRegistryView 的生效视图包装要求同形状——对象
+// 注入缝经 runnerLanesMergeDoc 显式给表时同样可合并）。
 function makeObjectRegistry(registryObj) {
   const agents = registryObj.agents ?? {};
   return async () => ({
@@ -105,12 +110,35 @@ function makeObjectRegistry(registryObj) {
       const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
       return normalizeAgent(id, { ...agents[id], ...defined });
     },
+    rawEntries() {
+      return Object.entries(agents);
+    },
   });
 }
 
 // backend 构造收敛于共享工厂 src/backends/factory.js（daemon / runner / shared 共用）。
 // 不复用 cli.js：它拉入整棵命令树；本模块是被 CLI 按路径 fork 的 detached 独立进程
 // 入口，从工厂 import 构造器。
+
+/**
+ * b158a：runner 侧的车道合并启用车道表（单一判定，供 runBackground 与
+ * runResumeBackground 共用）。
+ *   - 字符串/缺席的 registry：与派发侧同一配对规则（isPairedDefaultRegistry
+ *     ——runner 即使跑默认注册表也会收到 --registry，判定看路径是否等于车道表
+ *     所配对的默认注册表，不看 flag 是否出现）。派发进程从仓库根
+ *     （npm run cli）或 install-root 重定基（全局 bin）发起时，传来的
+ *     resolvedRegistry 与本规则锚定到同一路径。
+ *   - 对象 registry（测试/嵌入注入缝）：缺省停用（注入的是自包含形状）；测试
+ *     要验生效形状时用 opts.lanesMergeDoc 显式给表。
+ * 启用而表读不出/不合法时原样传出——effectiveRegistryView 以
+ * lanes_merge_unavailable 具名拒绝（不回退私有旧四轴）。
+ */
+export function runnerLanesMergeDoc(opts, loadLanesConfigFn = loadLanesConfig) {
+  if (opts.lanesMergeDoc !== undefined) return opts.lanesMergeDoc ?? null;
+  if (typeof opts.registry === "object" && opts.registry !== null) return null;
+  const path = typeof opts.registry === "string" ? opts.registry : undefined;
+  return isPairedDefaultRegistry(path) ? loadLanesConfigFn() : null;
+}
 
 /**
  * 进程内核心：驱动一个 run 到终态。可单测，也可被 detached 进程入口调用。
@@ -204,6 +232,10 @@ export async function runBackground(opts = {}) {
     ? makeObjectRegistry(opts.registry)
     : readRegistry;
   const registryPath = typeof opts.registry === "string" ? opts.registry : (opts.registry ? undefined : "config/agents.json");
+  // b158a：本 runner 的生效车道表（配对判定见 runnerLanesMergeDoc）。下方全部
+  // 注册表读取（材料复核 / 显式解析 / RunManager.start）共用同一份——复核过的
+  // 就是随后启动用的那份，中间不重读出另一版。
+  const lanesMerge = runnerLanesMergeDoc(opts);
 
   const manager = new RunManager({
     config: {
@@ -238,7 +270,7 @@ export async function runBackground(opts = {}) {
     if (frozenMaterialRaw) {
       let frozenMaterial = null;
       try { frozenMaterial = JSON.parse(frozenMaterialRaw); } catch { frozenMaterial = null; }
-      const regM = await registryResolver(registryPath ?? "config/agents.json");
+      const regM = effectiveRegistryView(await registryResolver(registryPath ?? "config/agents.json"), lanesMerge);
       const agentEntry = typeof regM.getAgent === "function" && agentId ? regM.getAgent(agentId) : null;
       if (!frozenMaterial || !agentEntry) {
         return await failClosedBeforeStart(
@@ -287,7 +319,7 @@ export async function runBackground(opts = {}) {
     let resolvedTarget = null;
     if (opts.lane !== undefined || opts.role !== undefined) {
       const lanesDoc = loadLanesConfig();
-      const reg = await registryResolver(registryPath ?? "config/agents.json");
+      const reg = effectiveRegistryView(await registryResolver(registryPath ?? "config/agents.json"), lanesMerge);
       const registryAgents = Object.fromEntries(
         (typeof reg.listAgents === "function" ? reg.listAgents() : []).map((a) => [a.id, a]),
       );
@@ -325,6 +357,8 @@ export async function runBackground(opts = {}) {
       prompt,
       registry: registryPath,
       runDir,
+      // b158a：runner 的生效车道表（与材料复核/显式解析同一份）。
+      lanesMerge,
       // D2-②b：显式传入已决定桶目录（decide-once；RunManager 不重推）。
       ...(transcriptDir
         ? { transcriptDir }
@@ -464,6 +498,9 @@ export async function runResumeBackground(opts = {}) {
     ? makeObjectRegistry(opts.registry)
     : readRegistry;
   const registryPath = typeof opts.registry === "string" ? opts.registry : (opts.registry ? undefined : "config/agents.json");
+  // b158a：与 runBackground 同一配对判定（daemon --resume-on-start 传的也是
+  // resolvedRegistry 路径；对象注入缝缺省停用）。
+  const lanesMerge = runnerLanesMergeDoc(opts);
 
   const manager = new RunManager({
     config: {
@@ -488,7 +525,7 @@ export async function runResumeBackground(opts = {}) {
   // runner std 流（父进程曾误报 resumed:true 后无从发现）。
   let run;
   try {
-    run = await manager.resume(runId, {});
+    run = await manager.resume(runId, { lanesMerge });
   } catch (e) {
     clearInterval(heartbeatTimer);
     clearOwner(runDir, runId);

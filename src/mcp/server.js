@@ -233,7 +233,7 @@ import {
   // 第 155 批：follows 指向读不出的会审——识别后原样回具名拒绝文案（零派发）。
   ConsultFollowsRefusalError,
 } from "../application/consultService.js";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary, DISPATCH_HOLD_MAX_CHARS } from "../dispatchResolution.js";
 import { readFile } from "node:fs/promises";
 import { getWaoStateDir } from "../waoDir.js";
@@ -4175,7 +4175,7 @@ export function createWaoMcpServer({
     if (ledgerState !== "ok") return [...laneIds]; // fail-closed：全部按不在清单拒
     let registryForGate = null;
     try {
-      registryForGate = await readRegistry(registryPath);
+      registryForGate = effectiveRegistryView(await readRegistry(registryPath), serverLanesMergeDoc());
     } catch {
       registryForGate = null;
     }
@@ -4231,6 +4231,12 @@ export function createWaoMcpServer({
     : randomUUID();
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const readLanesDoc = typeof loadLanesConfigFn === "function" ? loadLanesConfigFn : loadLanesConfig;
+  // b158a：本服务实例的生效车道表——配对规则与 CLI 的 lanesDocForCall 同义
+  //（registryPath 是车道表所配对的默认注册表才启用；外来 --registry 停用，注册表
+  // 自包含）。启用而表读不出/不合法时原样传出，由 effectiveRegistryView 以
+  // lanes_merge_unavailable 具名拒绝（不回退私有旧四轴）。每次调用重读——与
+  // 派发侧 lanesDoc 同一新鲜度纪律。
+  const serverLanesMergeDoc = () => (isPairedDefaultRegistry(registryPath) ? readLanesDoc() : null);
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
@@ -4476,7 +4482,7 @@ export function createWaoMcpServer({
       if (detail === "certificationEvidence") {
         try {
           certEvidence = projectCertEvidenceRows(
-            await certEvidenceService({ registryPath, runDir }),
+            await certEvidenceService({ registryPath, runDir, lanesMergeDoc: serverLanesMergeDoc() }),
           );
         } catch {
           return {
@@ -4493,7 +4499,7 @@ export function createWaoMcpServer({
       let inventorySnapshot = null;
       let inventoryFailed = false;
       try {
-        const rawSnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
+        const rawSnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv, lanesMergeDoc: serverLanesMergeDoc() });
         // M12-25B: normalize through the SINGLE shared shape. Accepts the legacy
         // bare-array AND the partial {agents, issues, issuesTruncated} shapes;
         // THROWS on null/malformed → inventoryFailed (the aggregator then reports
@@ -4648,7 +4654,8 @@ export function createWaoMcpServer({
         let resolution = null;
         try {
           const lanesDoc = readLanesDoc();
-          const registry = await readRegistry(registryPath);
+          // b158a：解析输入用生效条目（与随后 dispatchRun/runner 同一份配置）。
+          const registry = effectiveRegistryView(await readRegistry(registryPath), serverLanesMergeDoc());
           const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
           resolution = resolveDispatchTarget({
             agentId, lane, role,
@@ -4847,6 +4854,8 @@ export function createWaoMcpServer({
             // 派发上下文里工作区恒为已证明的调用目标（上方 proveCallWorkspaceRoot）。
             workspaceBinding: { bound: true, source: "call_target", ...workspaceProofBinding },
             registryPath,
+            // b158a：与派发同一份生效注册表（presence 校验同源）。
+            lanesMergeDoc: serverLanesMergeDoc(),
           });
         } catch {
           precheck = null; // advisory 缺席，不拦派发
@@ -4961,6 +4970,8 @@ export function createWaoMcpServer({
           agentId: agentIdInput,
           prompt,
           registryPath,
+          // b158a：生效车道表（server 配对判定；与上方解析输入同一份）。
+          lanesMerge: serverLanesMergeDoc(),
           runDir,
           ...(resolvedLane !== undefined ? { resolvedLane } : {}),
           ...(resolvedRole !== undefined ? { resolvedRole } : {}),
@@ -5322,6 +5333,8 @@ export function createWaoMcpServer({
           executionProfileId,
           workspaceBinding,
           registryPath,
+          // b158a：与派发同一份生效注册表（presence 校验同源）。
+          lanesMergeDoc: serverLanesMergeDoc(),
         });
         // Output boundary: project EXACTLY the published fields and parse them
         // through RUN_DISPATCH_CONTRACT_CHECK_OUTPUT, so the service's internal
@@ -5576,7 +5589,7 @@ export function createWaoMcpServer({
       // so nothing is dispatched.
       let registry;
       try {
-        registry = await readRegistry(registryPath);
+        registry = effectiveRegistryView(await readRegistry(registryPath), serverLanesMergeDoc());
       } catch {
         return { isError: true, content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }] };
       }
@@ -5661,6 +5674,8 @@ export function createWaoMcpServer({
           // floor here.
           budgetFloorMs: RUN_CONSULT_WAIT_MIN_MS,
           registryPath,
+          // b158a：席位身份事实与派发的生效车道表（server 配对判定）。
+          lanesMergeDoc: serverLanesMergeDoc(),
           runDir,
           consultsDir: recordsDir,
           cwd: consultTarget.root,
@@ -5787,6 +5802,8 @@ export function createWaoMcpServer({
           delivery,
           runDir,
           registryPath,
+          // b158a：续修读取的生效车道表（与派发同一 server 配对判定）。
+          lanesMergeDoc: serverLanesMergeDoc(),
           authorizedWorkspaceRoot: workspaceCwd,
           userEnvReader: resolveUserEnv,
           // Certification advisory (same contract as run_dispatch): registry
@@ -6482,7 +6499,7 @@ export function createWaoMcpServer({
           decision,
           reason,
           authorizedWorkspaceRoot: target.proof.root,
-          sessionRelease: makeAcceptedSessionRelease({ registryPath }),
+          sessionRelease: makeAcceptedSessionRelease({ registryPath, lanesMergeDoc: serverLanesMergeDoc() }),
         });
         // Strict validation: every scalar must pass closed-set checks.
         // Malformed service result → throw → fixed safe error.
@@ -6608,6 +6625,8 @@ export function createWaoMcpServer({
           runId,
           runDir,
           registryPath,
+          // b158a：停止目标的后端身份取生效条目（私有去四轴后 raw 无 backend）。
+          lanesMergeDoc: serverLanesMergeDoc(),
           authorizedWorkspaceRoot: target.proof.root,
           justification: { reason, observedSeq },
           // 停止目标的 token 与派发走同一个 user-env 读取器。

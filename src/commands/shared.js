@@ -44,6 +44,25 @@ export function lanesDocForCall(options, config, loadFn = loadLanesConfig) {
   return enabled ? loadFn() : { lanes: [], sha256: null, issues: [], rolesHint: [] };
 }
 
+/**
+ * b158a：本次 CLI 调用是否启用"车道四轴合并"及启用时的车道表——与
+ * lanesDocForCall 同一配对规则（没给 --registry，或给的就是 config.registry），
+ * 但停用时返回 null（而非停用的空表）：effectiveRegistryView 把 null 读作
+ * "停用"、把任何传入的 doc 读作"启用"，停用空表绝不能当启用传入（否则
+ * 车道条目的四轴会被清空）。启用而表读不出/不合法时原样传出——由
+ * effectiveRegistryView 以 lanes_merge_unavailable 具名拒绝，不回退私有旧值。
+ * @param {object} options 解析后的 CLI 选项（读 options.registry）
+ * @param {object} config CLI 配置（config.registry 是默认注册表）
+ * @param {Function} [loadFn] 车道表读取（测试缝；缺省 loadLanesConfig）
+ * @returns {object|null}
+ */
+export function lanesMergeDocForCall(options, config, loadFn = loadLanesConfig) {
+  const enabled = options.registry === undefined
+    || (typeof options.registry === "string"
+      && resolve(options.registry) === resolve(config?.registry ?? "config/agents.json"));
+  return enabled ? loadFn() : null;
+}
+
 export function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index += 1) {

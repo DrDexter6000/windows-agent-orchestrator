@@ -35,6 +35,11 @@ const { dispatchRun } = await import(srcUrl("src/application/runDispatch.js"));
 const { readTranscript, findState, TERMINAL_STATES } = await import(srcUrl("src/transcript.js"));
 const { mainCheckoutRegistry, transcriptPathOf, transcriptSnapshot, addedSince } = await import(srcUrl("scripts/reliability/drillRuns.mjs"));
 const { probeRuntimeIdentity } = await import(srcUrl("scripts/reliability/runtimeIdentity.mjs"));
+// b158a：源注册表是车道表所配对的默认注册表时，源车道取**生效条目**（四轴来自
+// config/lanes.json）——scratch 注册表是非默认路径（自包含），写进去的必须是
+// 合并后的完整条目，drill 派发才不依赖合并。
+const { effectiveRegistryView, isPairedDefaultRegistry } = await import(srcUrl("src/registry.js"));
+const { loadLanesConfig } = await import(srcUrl("src/dispatchResolution.js"));
 
 const AGENT_ID = "deepseek_acp_reuse_probe";
 const SOURCE_LANE = "deepseek-flash";
@@ -56,7 +61,18 @@ const drillRegistry = join(scratchDir, "drill-agents-deepseek_acp.json");
 const runDir = join(scratchDir, "phase6-reuse-runs-deepseek_acp");
 mkdirSync(scratchDir, { recursive: true });
 const registryJson = JSON.parse(readFileSync(registrySource, "utf8"));
-const sourceLane = registryJson.agents?.[SOURCE_LANE];
+// b158a：默认配对的源注册表 → 源车道先按车道表合并出生效条目（私有条目缺四轴
+// 也可用；scratch 注册表自包含所以必须写完整形状）。
+const sourceLane = (() => {
+  const raw = registryJson.agents?.[SOURCE_LANE];
+  if (!raw) return raw;
+  if (!isPairedDefaultRegistry(registrySource)) return raw;
+  const handle = effectiveRegistryView(
+    { rawEntries: () => Object.entries(registryJson.agents ?? {}) },
+    loadLanesConfig(),
+  );
+  return new Map(handle.mergedRawEntries()).get(SOURCE_LANE) ?? raw;
+})();
 if (!sourceLane || sourceLane.backend !== "deepseek-acp") {
   console.error(`registry source has no ${SOURCE_LANE} deepseek-acp lane: ${JSON.stringify(sourceLane)}`);
   process.exit(2);

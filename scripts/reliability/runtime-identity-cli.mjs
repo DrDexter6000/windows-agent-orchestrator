@@ -19,7 +19,11 @@
 
 import { probeRuntimeIdentity } from "./runtimeIdentity.mjs";
 import { backendFor } from "../../src/backends/factory.js";
-import { readRegistry } from "../../src/registry.js";
+// b158a：--registry 给的是车道表所配对的默认注册表时，anchor 取**生效条目**
+//（四轴来自 config/lanes.json——私有去四轴后按合并形状找该 backend 的席位）；
+// 别的显式注册表照旧自包含。
+import { readRegistry, effectiveRegistryView, isPairedDefaultRegistry } from "../../src/registry.js";
+import { loadLanesConfig } from "../../src/dispatchResolution.js";
 
 function usage(stream) {
   stream.write(
@@ -64,9 +68,16 @@ export async function probeFor({ backend, registry }) {
   let resolvedInvocation = null;
   if (registry) {
     // readRegistry 返回句柄（listAgents/getAgent/rawEntries）——rawEntries 容忍
-    // 单条坏配置（M12-25）：探别的 backend 不该被无关坏条目打死。
-    const handle = await readRegistry(registry);
-    const entry = handle.rawEntries().find(([, config]) => config?.backend === backend);
+    // 单条坏配置（M12-25）：探别的 backend 不该被无关坏条目打死。b158a：默认
+    // 配对注册表用生效条目找 anchor。
+    const handle = effectiveRegistryView(
+      await readRegistry(registry),
+      isPairedDefaultRegistry(registry) ? loadLanesConfig() : null,
+    );
+    const entries = typeof handle.mergedRawEntries === "function"
+      ? handle.mergedRawEntries()
+      : handle.rawEntries();
+    const entry = entries.find(([, config]) => config?.backend === backend);
     agent = entry ? { id: entry[0], ...entry[1] } : null;
     if (agent) {
       try {

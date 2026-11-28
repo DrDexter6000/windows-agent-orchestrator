@@ -54,6 +54,9 @@ function writeRegistry(dir, ids) {
 function fakeBackendFactory(capture) {
   return {
     supportsRoleContract: true, sessionOutlivesProcess: false,
+    // b158a：生效车道表给条目补上 model（夹具车道带 model.id）→ 派发会走
+    // validateAgentPolicy 门，假 backend 补声明。
+    validateAgentPolicy() {},
     async spawn(agent) {
       capture.spawned += 1;
       return {

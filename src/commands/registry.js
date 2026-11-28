@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
+import { normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance, effectiveRegistryView } from "../registry.js";
 import { loadLanesConfig } from "../dispatchResolution.js";
 // 决定 0108：registry align 的诊断与写侧单一实现在 application/registryAlign.js
 //（commands 只做 I/O：选项收集、路径解析、文本渲染）。
@@ -25,7 +25,7 @@ import { safeJsonParse, escapeControlChars } from "../safeText.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
-import { parseOptions, lanesDocForCall } from "./shared.js";
+import { parseOptions, lanesDocForCall, lanesMergeDocForCall } from "./shared.js";
 // M9-0: registry list data logic delegated to shared application service.
 import { getRegistryInventory, getCertificationEvidenceInventory } from "../application/registryInventory.js";
 import { loadRoleContract } from "../application/roleContract.js";
@@ -83,14 +83,20 @@ async function registryCommand(args, config) {
   const runDir = resolve(options.runDir ?? config.runDir);
   // 车道表：非默认 --registry 时停用（防跨绑，规则同 run 命令；dispatchHold 全为
   // null）。config.lanesDocFn 是测试缝（夹具车道表注入），生产缺省真实表。
+  // b158a：lanesMergeDoc 同一配对——启用时清单走生效条目（四轴按车道表合并）。
   const agents = await getRegistryInventory({
     registryPath,
     runDir,
     lanesDocFn: () => lanesDocForCall(options, config, config?.lanesDocFn),
+    lanesMergeDoc: lanesMergeDocForCall(options, config, config?.lanesDocFn),
   });
   // TD-186: opt-in 只读证据详情（默认路径零改动——简表/JSON 契约保持不变）。
   const certEvidence = options.certEvidence === true
-    ? await getCertificationEvidenceInventory({ registryPath, runDir })
+    ? await getCertificationEvidenceInventory({
+      registryPath,
+      runDir,
+      lanesMergeDoc: lanesMergeDocForCall(options, config, config?.lanesDocFn),
+    })
     : null;
   // F17: --format json 输出机器可读 JSON（dogfood round 4 实证：原接受参数但静默忽略）。
   if (options.format === "json") {
@@ -191,6 +197,30 @@ async function registryValidateCommand(args, config) {
   }
 
   const agents = parsed.agents ?? {};
+  // b158a：生效车道表（配对规则同 registry list）。启用时车道键条目按合并后的
+  // 生效形状校验/展示（私有条目缺四轴合法——轴来自 config/lanes.json）；表不可
+  // 用即以 lanes_merge_unavailable 拒绝（不回退私有旧四轴——经
+  // effectiveRegistryView 的单一判定，不复制第二份）。非车道键条目与停用时的
+  // 全部条目照旧自包含校验。
+  const lanesMergeDoc = lanesMergeDocForCall(options, config, config?.lanesDocFn);
+  let effectiveAgents;
+  try {
+    effectiveAgents = lanesMergeDoc === null
+      ? new Map() // 停用：逐条回退私有原文（effectiveAgents.get(id) ?? agent）
+      : new Map(
+        effectiveRegistryView({ rawEntries: () => Object.entries(agents) }, lanesMergeDoc)
+          .mergedRawEntries(),
+      );
+  } catch (e) {
+    // lanes_merge_unavailable：与 JSON 解析失败同一早失败面（文本/JSON 各自既有形状）。
+    if (asJson) {
+      console.log(JSON.stringify({ checked: 0, valid: false, agents: [], issues: [e.message] }, null, 2));
+    } else {
+      console.log(`✖ ${e.message}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
   const ids = Object.keys(agents);
   if (ids.length === 0) {
     if (asJson) {
@@ -223,6 +253,10 @@ async function registryValidateCommand(args, config) {
 
   for (const id of ids) {
     const agent = agents[id];
+    // b158a：字段校验与展示用生效条目（车道键 + 合并启用时四轴来自车道表）。
+    const effective = agent !== null && typeof agent === "object" && !Array.isArray(agent)
+      ? (effectiveAgents.get(id) ?? agent)
+      : agent;
     const issues = [];
 
     // 0. 条目内容必须是普通对象（磁盘上的不可信数据）。null 会让下面的
@@ -235,24 +269,24 @@ async function registryValidateCommand(args, config) {
       issues.push("条目内容不是对象");
     } else {
       // 1. backend 必填且合法
-      if (!agent.backend) {
+      if (!effective.backend) {
         issues.push("missing backend");
-      } else if (!KNOWN_BACKENDS.includes(agent.backend)) {
+      } else if (!KNOWN_BACKENDS.includes(effective.backend)) {
         // TD-161（auditor F3 修复）：issue 携带完整指路（与 normalizeAgent 的
         // throw 同源 unknownBackendGuidance）——组合错误路径（坏 backend +
         // 缺 cwd 等）下 normalizeAgent 先抛别的错，issue 若只报坏值会让支持集
         // 提示彻底消失。纯坏 backend 时第 6 步 catch 会去重，闭集仍只出现一次。
-        issues.push(unknownBackendGuidance(agent.backend));
+        issues.push(unknownBackendGuidance(effective.backend));
       }
 
       // 2. cwd 必填
-      if (!agent.cwd) {
+      if (!effective.cwd) {
         issues.push("missing cwd");
       }
 
       // 3. scorecard rules 形状（如有）
-      if (agent.scorecard) {
-        const rules = agent.scorecard.rules ?? {};
+      if (effective.scorecard) {
+        const rules = effective.scorecard.rules ?? {};
         if (rules.requireCommands !== undefined && !Array.isArray(rules.requireCommands)) {
           issues.push("scorecard.rules.requireCommands must be an array");
         }
@@ -265,21 +299,21 @@ async function registryValidateCommand(args, config) {
       }
 
       // 4. args 形状（如有）
-      if (agent.args !== undefined && !Array.isArray(agent.args)) {
+      if (effective.args !== undefined && !Array.isArray(effective.args)) {
         issues.push("args must be an array");
       }
 
-      if (agent.prependArgs !== undefined && !Array.isArray(agent.prependArgs)) {
+      if (effective.prependArgs !== undefined && !Array.isArray(effective.prependArgs)) {
         issues.push("prependArgs must be an array");
       }
 
       // TD-79：env 字段形状校验（worker 声明的子进程 env 注入，如 PIP_REQUIRE_VIRTUALENV）。
       // 必须是 {string:string} 对象——key/value 都得是 string（spawn env 契约）。
-      if (agent.env !== undefined) {
-        if (typeof agent.env !== "object" || agent.env === null || Array.isArray(agent.env)) {
+      if (effective.env !== undefined) {
+        if (typeof effective.env !== "object" || effective.env === null || Array.isArray(effective.env)) {
           issues.push("env must be an object");
         } else {
-          for (const [k, v] of Object.entries(agent.env)) {
+          for (const [k, v] of Object.entries(effective.env)) {
             if (isSecretEnvName(k)) {
               issues.push(`env.${k} is secret-like; configure an inherited provider credential channel instead`);
             }
@@ -292,13 +326,13 @@ async function registryValidateCommand(args, config) {
 
       // 5. 跑一遍 normalizeAgent 做最终校验（它会 throw 如果有硬错误）
       try {
-        normalizeAgent(id, agent);
+        normalizeAgent(id, effective);
       } catch (e) {
         // TD-161 双打印消解 + auditor N1 修复：精确等值比对（重建预期消息）
         //——不用子串匹配：错误原文会回显用户值（如 waitTimeout 坏值恰含
         // "has unknown backend" 时子串去重会吞掉真实错误，实测假通过
         // valid:true）。其余硬错误照常透传。
-        if (e.message !== `Agent ${id} has ${unknownBackendGuidance(agent.backend)}`) {
+        if (e.message !== `Agent ${id} has ${unknownBackendGuidance(effective.backend)}`) {
           issues.push(e.message);
         }
       }
@@ -306,13 +340,13 @@ async function registryValidateCommand(args, config) {
 
     checked += 1;
     if (issues.length === 0) {
-      const model = agent.model ? `${agent.model.id}` : (agent.backend === "claude-code" ? "claude" : "default");
+      const model = effective.model ? `${effective.model.id}` : (effective.backend === "claude-code" ? "claude" : "default");
       // TD-87（tokenBudget 静默无效陷阱）等能力 × 配置交叉提示：
       // ADR-0025 批次 2 起泛化：不硬编码 backend 名分支，读 backend 类闭集能力
       // 声明交叉校验。backendCapabilitySnapshot 构造 backend 实例本身零副作用（不
       // spawn、不联网），validate 保持纯静态。
       // TD-86：warning 文本（不含 `  ⚠ ${id}: ` 前缀，id 已是独立字段）进 JSON 的 warnings[]。
-      const warnings = capabilityCrossCheckWarnings(agent, backendCapabilitySnapshot(agent));
+      const warnings = capabilityCrossCheckWarnings(effective, backendCapabilitySnapshot(effective));
       // 0065（0045 §1.2 终局）：seatRole 弃用 advisory——raw 在场即提示（不回显值，
       // 固定安全形状；不拒载不改变 valid/退出码）。归一化已 strip 该字段。
       if (agent && typeof agent === "object" && Object.prototype.hasOwnProperty.call(agent, "seatRole")) {
@@ -344,12 +378,12 @@ async function registryValidateCommand(args, config) {
       // 等）消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
       // 验证角色文件——缺失/目录/空/超限/非法 UTF-8/NUL 都 fail closed（不再是
       // warning，而是 ✖ 阻止派发）。
-      if (agent.systemPrompt) {
+      if (effective.systemPrompt) {
         try {
           // Package C1: loadRoleContract resolves the path relative to the WAO
           // install root (not cwd), so `registry validate` works from any
           // target-project directory. Pass the registry-declared path as-is.
-          loadRoleContract(agent.systemPrompt);
+          loadRoleContract(effective.systemPrompt);
         } catch (e) {
           const issue = `角色合同无效: ${e.message}`;
           if (asJson) {
@@ -367,7 +401,7 @@ async function registryValidateCommand(args, config) {
       } else {
         // TD-318: backend/model 与 warning 文案都携带配置来源值——转义防伪造行
         //（✔ 分支的 backend 虽必属闭集、model.id 仍是自由配置值）。
-        console.log(`✔ ${id}\t${escapeControlChars(agent.backend)}\t${escapeControlChars(model)}`);
+        console.log(`✔ ${id}\t${escapeControlChars(effective.backend)}\t${escapeControlChars(model)}`);
         for (const w of warnings) {
           console.log(`  ⚠ ${id}: ${escapeControlChars(w)}`);
         }
@@ -511,7 +545,7 @@ async function registryAlignCommand(args, config) {
     console.log("私有注册表与车道表一致（无接线不一致、无配置不合法、无新增/退役车道差异）");
   }
   if (mismatches.length > 0) {
-    console.log("[接线不一致 —— --lane 派发会被拒]");
+    console.log("[私有残留四轴与车道表不同 —— 已不生效，可删（实际生效值以车道表为准）]");
     for (const e of mismatches) {
       console.log(`  lane ${alignDisplayId(e.id, e.position)}:`);
       console.log(`    车道表 ${alignAxesLine(e.laneAxes)}`);

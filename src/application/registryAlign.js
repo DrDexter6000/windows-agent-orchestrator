@@ -32,7 +32,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { normalizeAgent } from "../registry.js";
+import { normalizeAgent, mergeLaneAxes } from "../registry.js";
 import { laneAxes, agentAxes, axesEqual, loadLanesConfig } from "../dispatchResolution.js";
 import { escapeControlChars, safeJsonParse } from "../safeText.js";
 import { atomicWriteFileSync } from "../atomicWriteSync.js";
@@ -52,15 +52,16 @@ export function sha256OfRaw(raw) {
 
 /**
  * 逐条目单独校验（不抛出——单条坏条目不拖垮整份诊断；readRegistry().rawEntries()
- * 部分投影同纪律）。返回 null = 过校验；否则返回 normalizeAgent 的固定安全文案
- * （含已退役 provider 块的拒绝文案）。
+ * 部分投影同纪律）。b158a：车道键条目按**合并后**的生效形状校验（私有条目缺四轴
+ * 合法——轴来自车道表；合并后仍过不了才报 invalid，不再误报）。返回 null = 过
+ * 校验；否则返回 normalizeAgent 的固定安全文案（含已退役 provider 块的拒绝文案）。
  */
-function entryInvalidReason(id, entry) {
+function entryInvalidReason(id, entry, lane) {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
     return "条目内容不是对象";
   }
   try {
-    normalizeAgent(id, entry);
+    normalizeAgent(id, lane ? mergeLaneAxes(entry, lane) : entry);
     return null;
   } catch (e) {
     return e?.message ?? "条目校验失败";
@@ -122,7 +123,7 @@ export function diagnoseRegistryAlignment({ registryPath, lanesDoc }) {
     // 1 起序号（agents 对象内的位置）——非法键名条目在渲染层以序号指代不回显。
     const position = agentKeys.indexOf(id) + 1;
     const lane = lanesById.get(id);
-    const invalidReason = entryInvalidReason(id, entry);
+    const invalidReason = entryInvalidReason(id, entry, lane);
     if (!lane) {
       // 私有有、车道表没有：车道表已不再提供，默认保留；条目本身照样单独校验。
       if (invalidReason !== null) entries.push({ id, position, state: "invalid", invalidReason, inLaneTable: false });
@@ -392,10 +393,12 @@ export function applyRegistryAlignment({
 }
 
 /**
- * lead_preflight 的一行事实（决定 0108）：车道表与私有注册表的接线不一致会让
- * --lane 派发被拒——把这件事压缩成一行观察（facts only）。车道表结构未过时
- * 派发先以 lanes_config_invalid 拒绝，这一行就说它。无接线不一致（或注册表
- * 读不了/语法坏了——那类事实归 registryIssues 面）→ null，不加行。
+ * lead_preflight 的一行事实（决定 0108；b158a 修订为纯事实）：私有注册表里
+ * **残留**的四轴与车道表不一致——已不生效（实际生效值以车道表为准），不拦
+ * 派发，只压缩成一行观察（facts only）。车道表结构未过时派发会以
+ * lanes_merge_unavailable / lanes_config_invalid 拒绝，这一行就说它。无残留
+ * 差异（或注册表读不了/语法坏了——那类事实归 registryIssues 面）→ null，
+ * 不加行。
  *
  * @param {object} input
  * @param {string} input.registryPath
@@ -408,12 +411,12 @@ export function laneWiringMismatchFactLine({ registryPath, lanesDoc } = {}) {
   const diag = diagnoseRegistryAlignment({ registryPath, lanesDoc: doc });
   if (!diag.ok) return null;
   if (!diag.lanesTableOk) {
-    return `lane wiring: 车道表 config/lanes.json 结构校验未过（${diag.lanesDocIssues.length} 项）——--lane 派发会以 lanes_config_invalid 拒绝；修好车道表后看 npm run cli -- registry align 预览`;
+    return `lane wiring: 车道表 config/lanes.json 结构校验未过（${diag.lanesDocIssues.length} 项）——车道条目派发会以 lanes_merge_unavailable/lanes_config_invalid 拒绝；修好车道表后看 npm run cli -- registry align 预览`;
   }
   const mismatches = diag.entries.filter((e) => e.state === "wiring-mismatch");
   if (mismatches.length === 0) return null;
   const ids = mismatches.map((e) => e.id);
   const shown = ids.slice(0, 3).join("、");
   const more = ids.length > 3 ? ` 等 ${ids.length} 条` : "";
-  return `lane wiring: 车道 ${shown}${more} 的接线与私有注册表不一致——--lane 派发会以 lane_wiring_mismatch 拒绝；预览: npm run cli -- registry align --lane <id>`;
+  return `lane wiring: 车道 ${shown}${more} 的私有注册表残留四轴与车道表不同——已不生效（实际生效值以车道表为准），可删；预览: npm run cli -- registry align --lane <id>`;
 }

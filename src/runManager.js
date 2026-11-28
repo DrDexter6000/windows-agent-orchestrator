@@ -18,7 +18,7 @@ import { classifyDeliveryError } from "./deliveryErrorClass.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryRoleContract, composeReadOnlyExecutionContract, composeTaskPromptWithDeliveryVerification, roleContractSha256, declaredScopeExpansion, WORKER_DECLARED_SCOPE_EXPANSION } from "./application/roleContract.js";
 import { assertNotNestedDispatchContext } from "./nestedDispatchGuard.js";
-import { ID_RE } from "./dispatchResolution.js";
+import { ID_RE, agentAxes, axesEqual } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
@@ -33,7 +33,7 @@ export { ISOLATION_DISPLAY_PATH_MAX_CHARS };
 // Re-exported so the downward channel (runDispatch.js) hands the CLI/MCP
 // boundaries ONE import surface for the whole override SSOT — same hosting
 // discipline as MODEL_OVERRIDE_MAX/_WIRE_PATTERN below.
-import { REASONING_EFFORTS } from "./registry.js";
+import { REASONING_EFFORTS, effectiveRegistryView } from "./registry.js";
 export { REASONING_EFFORTS };
 import { holdAwake } from "./keepAwake.js";
 import { normalizeUsageScope, normalizeFirstRequest } from "./metrics.js";
@@ -1183,6 +1183,12 @@ export class RunManager {
     taskType = null,
     // CLI retry 的新运行记原 runId（run.started.retryOf）。只接受合法 runId。
     retryOf = null,
+    // b158a：车道四轴合并的启用车道表（null/undefined = 停用）。调用方按
+    // lanesDocForCall / isPairedDefaultRegistry 的同一配对规则显式传入；启用时
+    // 本方法读取的注册表走 effectiveRegistryView 的生效条目（车道表不可用即以
+    // lanes_merge_unavailable 具名拒绝），单次 --model/--reasoning 覆盖仍在合并
+    // 之后生效。
+    lanesMerge = null,
     } = options;
 
     // R10-A/R11-1 mutual exclusions (flag presence, value-insensitive — a
@@ -1253,7 +1259,7 @@ export class RunManager {
     }
 
     const registryPath = resolve(registry ?? this.config.registry);
-    const loaded = await this._readRegistryWithGuidance(registryPath);
+    const loaded = effectiveRegistryView(await this._readRegistryWithGuidance(registryPath), lanesMerge);
     let agent = loaded.getAgent(agentId, { cwd });
     // TD-198 (2026-10-03): the merged agent cwd may be RELATIVE (registry
     // entries commonly declare "."; an explicit --cwd may also be relative).
@@ -2232,6 +2238,9 @@ export class RunManager {
 
   async resume(runId, options = {}) {
     const { runDir } = options;
+    // b158a：车道四轴合并的启用车道表（null/undefined = 停用；同 start 的
+    // lanesMerge 契约——调用方按配对规则显式传入）。
+    const lanesMerge = options.lanesMerge ?? null;
     const dir = resolve(runDir ?? this.config.runDir);
     // D2-②b：读侧解析链（桶/平铺/全桶扫描）；未命中回落平铺形状（readTranscript
     // 空 → 上方既有 null 语义）。
@@ -2283,7 +2292,7 @@ export class RunManager {
     const resumeReadOnlyDeclared = findFirstBound(events, "run.read_only_declared", runId) !== undefined;
 
     const registryPath = resolve(options.registry ?? this.config.registry);
-    const loaded = await this._readRegistryWithGuidance(registryPath);
+    const loaded = effectiveRegistryView(await this._readRegistryWithGuidance(registryPath), lanesMerge);
 
     // TD-103 Phase 3A audit: reconstruct delivery context from run.started for resume.
     // Must validate BEFORE spawn/attach: use SSOT prepareDeliveryRequest + prove worktree state.
@@ -2428,6 +2437,29 @@ export class RunManager {
     if (resumeReasoningOverride !== null && resumeReasoningOverride !== undefined) {
       if (!isValidReasoningOverride(resumeReasoningOverride)) return null;
       agent = { ...agent, reasoning: { ...(agent.reasoning ?? {}), effort: resumeReasoningOverride } };
+    }
+
+    // b158a（续修与恢复条款）：恢复一个**没有显式 override** 的旧运行时，当前
+    // 生效配置（车道表合并后）的四轴必须与该运行 run.started 记下的一致——
+    // 不一致按具名原因拒绝恢复，不用新配置跑后半程（daemon 接管换模型/换
+    // backend 的静默漂移面）。带 override 的运行不在此列：override 重建已把
+    // 记录的轴盖回当前 agent，其余轴仍在此比对（backend/providerID 变了同样
+    // 拒绝）。比对用 dispatchResolution 的 axesEqual（null 归一，与派发解析
+    // 同一判定）；固定文案不回显轴值（值是配置来源的自由文本）。
+    {
+      const recordedAxes = agentAxes({
+        backend: runStarted.backend,
+        model: runStarted.model,
+        reasoning: runStarted.reasoning,
+      });
+      if (!axesEqual(recordedAxes, agentAxes(agent))) {
+        throw new Error(
+          "resume_refused: the current effective lane axes (backend/model.id/model.providerID/"
+          + "reasoning.effort, merged from config/lanes.json) differ from what run.started recorded "
+          + "for this run (worker_configuration_changed) — the back half must not run on a new "
+          + "configuration; restore the lane table to the recorded axes or start a new run instead",
+        );
+      }
     }
 
     // M11-5 Package A2：获取 backend 一次，前置到角色合同决策前——决策由

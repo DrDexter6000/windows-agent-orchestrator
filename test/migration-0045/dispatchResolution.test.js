@@ -192,27 +192,25 @@ test("W1 错误：unknown_lane/unknown_role/unknown_agent——码+received 回�
   assert.equal(evil.received.lane, "<未回显：非规范字符>");
 });
 
-test("W1 错误：lane_wiring_mismatch——改 lanes.json 模型/力度（G4 注册表赢即拒）", () => {
-  // 改写值由在库接线变形而来，保证与实际接线不同（不写当前型号或档位字面值）。
+test("W1 b158a：私有残留四轴与车道表不一致 → 照常解析（G4 注册表赢即拒已退役）", () => {
+  // Owner 2026-11-27 决定：车道表是四轴唯一出处（registry.js effectiveRegistryView
+  // 合并），私有残留不一致只给事实（doctor/lead_preflight/wao lanes 观察面），
+  // 不再拒绝派发。旧用例的 lane_wiring_mismatch 轴拒绝随 G4 退役（"接线缺席"
+  // 的拒绝保留，见 W1 错误闭集用例）。
   const flash = LIVE.lanes.find((l) => l.id === "glm-flash");
   const doctored = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
-  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: `${flash.model.id}-swapped` }; // 降智攻击形：换成别的型号
+  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: `${flash.model.id}-swapped` };
   const doc = { ...LIVE, lanes: doctored.lanes };
   const r = R({ lanesDoc: doc, lane: "glm-flash", role: "researcher" });
-  assert.equal(r.kind, "error");
-  assert.equal(r.code, "lane_wiring_mismatch");
-  // 决定 0108：拒绝文案两条路——升级后私有副本落后 → registry align（逐车道
-  // 显式采用）；有意改车道 → runbook「lane 变更同步面」。不再写"请对齐
-  // lanes.json"（方向反了：车道表是权威断言面，要修的是私有副本）。
-  assert.match(r.message, /注册表为准/);
-  assert.match(r.message, /registry align --lane glm-flash/);
-  assert.match(r.message, /docs\/certification-runbook\.md「lane 变更同步面」/);
-  assert.ok(!r.message.includes("请对齐"), `不再指"请对齐 lanes.json"（实际：${JSON.stringify(r.message)}）`);
-  // effort 维同拒（auditor R3：不许展示一值执行另一值）
+  assert.equal(r.kind, "resolved");
+  assert.equal(r.source, "explicit");
+  assert.equal(r.agentId, "glm-flash");
+  // effort 维同样只给事实（auditor R3 的"不许展示一值执行另一值"由合并解决：
+  // 执行值=车道表值，私有残留不参与）
   const doctored2 = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
   doctored2.lanes.find((l) => l.id === "glm-flash").reasoning = { effort: flash.reasoning?.effort === "xhigh" ? "high" : "xhigh" };
   const r2 = R({ lanesDoc: { ...LIVE, lanes: doctored2.lanes }, lane: "glm-flash", role: "researcher" });
-  assert.equal(r2.code, "lane_wiring_mismatch");
+  assert.equal(r2.kind, "resolved");
 });
 
 // ── 结构守卫（G1/G2 负例，直接打真校验器 validateLanesStructure） ────────────
@@ -332,16 +330,15 @@ test("TD-318 复核: lanes_config_invalid 明细含配置值（未知键名带�
   assert.ok(r.message.includes("evil\\n[FAIL] forged"), "配置值以可见转义在场");
 });
 
-test("TD-318 复核: lane_wiring_mismatch 轴值含换行（model）——拒绝消息单行、可见转义", () => {
+test("TD-318 b158a：换 model 后不再有拒绝消息面（G4 退役）；转义面由 lanes_config_invalid 承担", () => {
   const doctored = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
-  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: "evil\n[FAIL] forged" };
+  doctored.lanes.find((l) => l.id === "glm-flash").model = { id: "evil\\n[FAIL] forged" };
   const r = R({ lanesDoc: { ...LIVE, lanes: doctored.lanes }, lane: "glm-flash", role: "researcher" });
-  assert.equal(r.kind, "error");
-  assert.equal(r.code, "lane_wiring_mismatch");
-  assert.ok(!r.message.includes("\n"), `拒绝消息不含真实换行（实际：${JSON.stringify(r.message)}）`);
-  assert.ok(r.message.includes("evil\\n[FAIL] forged"), "model 值以可见转义在场");
+  // b158a：私有残留四轴不再进拒绝面——解析照常；含控制字符的配置值唯一
+  // 进消息的路径是 lanes_config_invalid（结构 issue 明细），该转义面由
+  // lanes_config_invalid 用例钉住（本文件在册）。
+  assert.equal(r.kind, "resolved");
 });
-
 test("W1 绊线（W4d 结构化版）：lanes.json 永不含 wiringAgent（含即结构红，14 号钉）；包版本前置观察", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.ok(!LIVE.lanes.some((l) => typeof l.wiringAgent === "string"),

@@ -34,7 +34,7 @@
 
 import { existsSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { readRegistry } from "../registry.js";
+import { readRegistry, effectiveRegistryView } from "../registry.js";
 import { backendFor } from "../backends/factory.js";
 import { gitChildEnv } from "../delivery.js";
 import { removeWorktree } from "../isolation.js";
@@ -172,9 +172,12 @@ export function worktreeReleaseVerdict({
  * @param {Function} [p.backendForFn]
  * @param {Function} [p.removeWorktreeFn] - 测试注入（默认 isolation.removeWorktree）
  * @param {Function} [p.gitRev] - 透传 worktreeReleaseVerdict
+ * @param {object|null} [p.lanesMergeDoc] - b158a：生效车道表（null = 停用；
+ *   会话释放的后端身份取生效条目——私有去四轴后 raw 无 backend）
  */
 export function makeAcceptedSessionRelease({
   registryPath, readRegistryFn, backendForFn, removeWorktreeFn = removeWorktree, gitRev,
+  lanesMergeDoc = null,
 }) {
   const _readRegistry = readRegistryFn ?? readRegistry;
   const _backendFor = backendForFn ?? backendFor;
@@ -189,7 +192,7 @@ export function makeAcceptedSessionRelease({
       if (sessionId && typeof agentId === "string" && agentId.length > 0 && agentId !== "unknown") {
         let registry = null;
         try {
-          registry = await _readRegistry(registryPath);
+          registry = effectiveRegistryView(await _readRegistry(registryPath), lanesMergeDoc);
         } catch {
           registry = null;
         }

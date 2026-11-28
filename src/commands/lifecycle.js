@@ -28,7 +28,7 @@ import { openRunnerStderrFd, runnerStderrPath } from "../application/runnerStder
 // TD-347（第 93 批）：runner 的唯一启动口——Windows 缺省经 WMI 启动桥（adapters
 // → application 下向）。
 import { launchRunner, runnerLaunchFailureText } from "../application/runnerLaunch.js";
-import { parseOptions, loadRun, newRunManager, resolveIsolateFlag, cliWaitOptions } from "./shared.js";
+import { parseOptions, loadRun, newRunManager, resolveIsolateFlag, cliWaitOptions, lanesMergeDocForCall } from "./shared.js";
 // ADR-0030（TD-151）：前台等待的到期通知行（单一定义处，run/resume/retry 共用）。
 import { printObservationDeadlineNotice } from "./run.js";
 // R12: the per-dispatch override shape SSOT (hosted in runManager.js with the
@@ -348,7 +348,12 @@ export async function resumeCommand(args, config) {
   }
 
   const manager = newRunManager(config);
-  const run = await manager.resume(runId, { runDir: options.runDir, registry: options.registry });
+  const run = await manager.resume(runId, {
+    runDir: options.runDir,
+    registry: options.registry,
+    // b158a：前台 resume 的生效车道表（配对规则同 run 命令）。
+    lanesMerge: lanesMergeDocForCall(options, config, config?.loadLanesConfigFn),
+  });
   if (!run) {
     console.log(JSON.stringify({ runId, resumed: false, reason: "terminal or not found" }));
     return;
