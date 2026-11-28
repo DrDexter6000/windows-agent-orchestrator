@@ -20,7 +20,7 @@ WAO 是"装一次，开发多个项目"的工具：
 
 ## Lane：角色多通道（决策 0025）
 
-**lane = registry 里的一个具体执行通道**（固定 backend × provider × model × effort 组合）。车道表是 `config/lanes.json`，通道的实际组合以 registry 为准。
+**lane = 一个具体执行通道**（固定 backend × provider × model × effort 组合）。这四项写在车道表 `config/lanes.json`，registry 条目放本机接线（合并规则见[架构](02-architecture.md) §2.3）。
 
 1. 角色与车道解绑：车道键=模型家族短名（清单见 `config/lanes.json`），角色是派发时按任务显式选择的帽子（`--lane <车道> --role <角色>`，角色库=`config/roles/*.md`）。
 2. 新旧 harness 用独立 agentId 并存，禁止原位换。原因：认证历史要隔离、可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness。适用面：禁令针对新旧 harness 双活的切换；旧通道已死（订阅取消/停服）时 Owner 可裁定原位迁移（会话复用机制随迁移重估、认证历史作废重跑）。换 harness 驱动同一模型 = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。模型面 vs runtime 面分叉：接入新模型 = lane 内操作（改既有 backend 的 model 字段）；接入新 runtime（另一 CLI/runtime 驱动）= 新 backend = Owner 裁定（先例 ADR-0028）。操作食谱见 `docs/certification-runbook.md`「接入新模型 / 新运行时」。

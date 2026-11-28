@@ -159,13 +159,14 @@ compact 输出在 full 全部安全 base 字段之外，仅 compact 额外返回
 - `provider_auth` → `subscription_access_disabled` / `organization_policy_denied` / `api_key_missing` / `unauthorized` / `invalid_credential`
 - `provider_capacity` → `rate_limited` / `quota_exhausted` / `overloaded`
 - `no_effect` → `completed_empty`
+- `unknown` → `lanes_merge_spec_missing` / `lanes_changed_since_dispatch` / `lanes_merge_unavailable`（运行起跑前被拒，处理见排障手册 §4.7）
 - 其余类别恒为 `null`；非法、越集或错配的（类别, 码）组合折叠为 `null`。
 
 `overloaded` 是上游模型满载的瞬时容量事实（如 codex 的 "Selected model is at capacity."）：等一会儿按原任务重派，或换一条车道；WAO 不自动重试、不自动换车道。
 
 `provider_capacity` 只从 failed 终态的持久 `run.error` 分类；非终态 runtime 的 `rate_limit_event` 不会被升级为失败。所有 code 都是安全事实标签，永不回显原始错误文本/path/command/key/payload。WAO 不根据这些事实自动重试、换 worker 或停止其他 run——处置归 Lead。CLI `runs diagnose` 显示同一 category 与 code。
 
-空转完成（`category=no_effect`，线路 `code=completed_empty`）：进程 exit 0 / parser `done(completed)` 只是传输完成，不是 worker 产出可用结果的证据——收口与判类合同见[架构](../02-architecture.md) §2.5「完成收口兜底」，排障判读见[排障手册](../troubleshooting.md) §6.3。`run_diagnose` 与 `run_await_result` 都把 `category=no_effect` 与 `code=completed_empty` 同时透出到 wire——`completed_empty` 是可机读的"空转完成"事实，只命名这条机器真相，永不回显 provider 原文/argv/path/prompt/secret。
+空转完成（`category=no_effect`，线路 `code=completed_empty`）：进程 exit 0 / parser `done(completed)` 只是传输完成，不是 worker 产出可用结果的证据——收口与判类合同见[架构](../02-architecture.md) §2.5「完成收口兜底」，排障判读见[排障手册](../troubleshooting.md) §6.3。`run_diagnose` 与 `run_await_result` 都把 `category=no_effect` 与 `code=completed_empty` 同时透出到 wire——`completed_empty` 是可机读的"空转完成"事实。
 
 配套的 parser 行为（message 去重签名、命令工具闭集、result 事件补发最终 assistant 消息）见[排障手册](../troubleshooting.md) §7.7。
 

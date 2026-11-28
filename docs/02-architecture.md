@@ -290,6 +290,12 @@ backend 闭集成员与各 backend 必填字段；错误固定安全形状，不
 一条坏条目会让它们整体失败；CLI `registry validate` 逐条 normalize、汇总每条的问题，有问题即
 exit 1；MCP `lead_preflight` workers 走部分投影（`docs/usage/host.md`）。
 
+**生效条目**（决定 0136）：所用注册表与本安装默认注册表（`pairedDefaultRegistryPath()`）是同一文件时，
+`effectiveRegistryView` 用 `config/lanes.json` 覆盖同名条目的四轴（backend、model.id、model.providerID、
+reasoning.effort），私有文件里的同名字段不生效；表不可用即抛 `lanes_merge_unavailable`，不回退旧值。外来
+注册表自包含。一次请求只读一次车道表；后台 runner 只认派发方传的 `--lanes-merge off|sha256:<hex>`，缺参或
+表已变就在起跑前拒绝。
+
 部分投影：`getRegistryInventoryWithIssues({registryPath, runDir, ...})` 逐条
 normalize——有效条目经共享 `projectInventoryEntry` 与严格路径**逐字同形**投影
 （CLI/MCP parity）；失败条目投影为一条有界安全 issue（闭集

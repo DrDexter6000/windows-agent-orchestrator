@@ -113,3 +113,4 @@
 | TD-381 | `run_diagnose` 的顶层 `state` 原样回显转录里的 `run.state_change.to`：畸形值（如带控制字符的 5,006 字符串）整段通过（第 141 批 sol 会审发现，与新字段无关的旧问题） | 开放 | 下次改诊断或 MCP 状态面时：`state` 只认 `RUN_STATES` 闭集，其余写 `unknown` | src/mcp/server.js src/transcript.js |
 | TD-382 | Owner 看板不显示"言行不符"（worker 自述与转录事实对不上）：正则识别自述误报不可控，Owner 定本期不做 | 开放 | 等 worker 回报有结构化自述字段时再做 | 0131 |
 | TD-383 | 可续谱系根在 `.lineage-reuse` 各留一条槽记录、从不清扫（决定 0133 后每次交付派发都留一条），close/reclaim 每次全量读；派发后 5 分钟内关闭该谱系判忙；另有第 154 批复核余下的槽存储边缘情形（同 runId 并发撤槽、撤槽失败留记录、首次建目录竞态，见决定 0133 已知边界） | 开放 | 槽记录量明显拖慢 close/reclaim，或忙判误挡时再加按终态清扫 | 0133 |
+| TD-387 | 合并停用（外来 `--registry`）时选车道用的表不一致：CLI `run`/`consult` 用空表，只能按 agent id 派；MCP `run_dispatch`/`run_consult` 用真实车道表；CLI 外来 `runs continue` 的谱系重解析也读真实表。行为与第 158a 批之前相同 | 开放 | 择机：定下外来注册表的车道语义时一起统一 | 0136 |

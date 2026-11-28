@@ -87,19 +87,19 @@ src/application/backendCliMap.js 的 BACKEND_OWN_READINESS，进了就要在 doc
 certification.md ⑤ 上游原语对照表加行（这一轮的刷新记录写进提交说明） ⑥ 有 tokenEnv/credentialEnv 者：
 credentialReadiness 探针面 + envPolicy 允许清单。
 
-**操作食谱（只换模型时）**：改 model 字段（`model.id`；有 tokenEnv/credentialEnv 的
-backend 设对应 env——Windows User 环境变量）→ smoke 首跑 → 承重前 delta 认证。档位规则：
+**操作食谱（只换模型时）**：改车道表 `config/lanes.json` 该车道的 `model.id` 并同步模板同名条目（有
+tokenEnv/credentialEnv 的 backend 设对应 env——Windows User 环境变量）→ smoke 首跑 → 承重前 delta 认证。档位规则：
 同 backend 换 model → `--profile delta`；换 backend / 升主力 lane → 全量重跑（delta 规程见下文「delta 认证规程」节）。
 
 **lane 变更同步面（两段式）**：
 
 **第一段 · lane 变更（模型/effort/通道调整）**：
-① live `config/agents.json` 席位块（model/reasoning/通道字段）；改 live 注册表可用 `npm run cli -- registry align --lane <id>` 先预览，再加 `--apply --expect-sha256 <预览给出的 SHA-256>`——逐车道显式采用车道表接线（先不带 --apply 预览，写前自动备份；决定 0108）；
-② 同文件 `certification.matrix` 行（modelId/label 仍是手写；label 兼任认证 caseId，改名即改
+① **改 `config/lanes.json` 该车道的四轴**（backend、model.id、model.providerID、reasoning.effort）：用本安装默认
+注册表的派发从下一次请求起按新值走。私有 `config/agents.json` 里的同名字段不生效，不用改；doctor 把残留列为 INFO，
+可删（决定 0136）；
+② 同步模板 `config/agents.example.json` 的同名条目：模板与车道表的四轴一致由 docs-consistency 的关系检查守住；
+②′ 私有注册表的 `certification.matrix` 行（modelId/label 仍是手写；label 兼任认证 caseId，改名即改
 历史证据关联，慎动）；
-②′ **lanes.json 断言面同步**：effort/model 任何变更，live registry、`config/lanes.json`、
-`config/agents.example.json` **三处原子同步**——G4"注册表赢、不一致即拒"会让该车道全部
-explicit 派发 `lane_wiring_mismatch` 整拒；模板与车道表的四轴一致由 docs-consistency 的关系检查守住；
 ③ 改完**裸跑 `npm run cli -- onboarding` 看 ·drift 明细**（闭集 =
 backend + model.id + reasoning.effort + 认证矩阵行 modelId）：接线轴的 drift 应当清零；认证矩阵行
 可以滞后，看一眼确认"我知道它滞后"即可；

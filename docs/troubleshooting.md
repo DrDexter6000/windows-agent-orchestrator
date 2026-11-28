@@ -16,6 +16,7 @@
 | `runs wait` / `consult wait --until-settled` 以 5 退出（`runner_unproven`） | `wao manual supervise "等待到收口"` |
 | run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态) |
 | `run_diagnose` 报 `git_index_locked`：打包时工作树索引锁在场，没有重打包候选 | [§4.6](#46-打包以-git_index_locked-失败工作树索引锁在场) |
+| 派发受理后运行随即 failed，诊断码 `lanes_merge_spec_missing` 等 | [§4.7](#47-运行起跑前被拒lanes_merge_spec_missing-等) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死) |
 | zcode（glm）运行很久不结束，或被判 `turn stalled`——控制面什么时候会自动收口 | [§6.9](#69-zcode-运行什么时候会被控制面自动收口生命体征口径决定-0067) |
 | 进程起来不久就退出，worker 一件事都没做（启动期退出） | [§7.14](#714-启动期退出进程起来不久就退出worker-一件事都没做td-180) |
@@ -245,6 +246,13 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **分辨**：锁路径用 `git -C <run 工作树> rev-parse --git-path index.lock` 取。机器上一个 git 进程都没有（`Get-CimInstance Win32_Process -Filter "Name='git.exe'"` 为空）时，锁没有持有者，是残锁，git 不会自己清。还有 git 进程时判不了：git 可以继承当前目录操作这棵树，命令行里未必带路径；锁是 0 字节、修改时间早于打包也只是线索，活进程持锁时同样如此。等这些进程全部退出后锁仍在，才算残锁；开着 fsmonitor 或 IDE 一直轮询 git 时这一条可能始终不成立，那就按判不清处理。
 - **出口**：判定为残锁后由 Lead 手工删锁；判不清就不删（WAO 不替你删：删错了，删掉的是活进程正在写的索引）。锁处理完再按 §4.4 抢救仍在 run 工作树里、没有提交的改动（配方里的 `git add -N` 要写索引；补丁要对 HEAD 导，打包可能已暂存了一部分），核对补丁完整后再用 `wao runs lineage-close --run-id <runId> --reason-file <FILE> --apply` 释放工作树；不值得抢救就直接关闭或重新派发。
 
+### 4.7 运行起跑前被拒（`lanes_merge_spec_missing` 等）
+
+- **症状**：派发已受理，运行随即 failed，诊断给 `unknown` 加下面一个码
+- **`lanes_merge_spec_missing`**：派发它的 WAO 进程比现在的代码旧，多半是宿主会话里没重启的 WAO MCP 服务。重启该宿主的 WAO MCP 服务后重派
+- **`lanes_changed_since_dispatch`**：派发之后 `config/lanes.json` 改过。直接重派
+- **`lanes_merge_unavailable`**：车道表缺失、读不出或不合法。修好 `config/lanes.json` 再派
+
 ---
 
 ## 6. 完成判定
@@ -335,12 +343,12 @@ git -C <worktreeRoot> diff HEAD > "%TEMP%\\<runId>-wip.patch"
 - **第一反应（纪律）**：**别接受异常结果**。当前主流 LLM 都会跑命令+写文件。draft-only 多半是证据没捕获（见 §7.7），不是能力缺失
 - **验证**：抓认证 drill 的原始 stream-json，确认模型是否真的发了 tool_use（Bash/PowerShell），以及对应的 tool_result 是否成功。`commandsPassed` 怎么判见 `src/scorecard.js`：命令失败要判失败，证据不全（例如拿不到退出码）也判不通过——这是规则本身；对照规则仍对不上，再把原始 stream-json 附上报给 WAO
 
-### 7.9 agents.json vs agents.example.json 混淆（配置真相源）
+### 7.9 改了配置但 worker 行为没变（配置真相源）
 
-- **症状**：改了 `agents.example.json` 但 worker 行为没变；或认证报 worker 不存在
-- **根因**：runtime/reliability 套件读的是 `config/agents.json`（**gitignored，本机实际生效**），不是 `agents.example.json`（提交的模板）。两者可能不同步——example 是权威模板，agents.json 是落地实例
-- **验证**：`node -e "console.log(Object.keys(require('./config/agents.json').agents))"` 看实际 worker 名
-- **修复**：以 `docs/team-roles.md` 为权威，**两个文件都同步**。改 example 后复制到 agents.json（反之亦然）
+- **症状**：改了 `config/agents.json` 里的 model 或 effort，或改了 `config/agents.example.json`，worker 行为没变；或认证报 worker 不存在
+- **根因**：四轴（backend、model.id、model.providerID、reasoning.effort）取车道表 `config/lanes.json`，私有 `config/agents.json` 里的同名字段不生效（决定 0136）；其余接线取 `config/agents.json`；`agents.example.json` 是入库模板，运行时不读
+- **验证**：`npm run cli -- wao lanes` 看每条车道的四轴；`wao doctor` 的 `lane_wiring` 列出私有文件里不生效的残留
+- **修复**：改四轴就改车道表并同步模板（runbook「lane 变更同步面」）；改本机接线就改 `config/agents.json`
 
 ### 7.10 backend 最后失败，但 retained worktree 里已有候选改动
 
